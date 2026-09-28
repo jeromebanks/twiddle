@@ -1,0 +1,6 @@
+name  = "cliqhop idm"
+url   = "http://ice1.somafm.com/cliqhop-128-mp3"
+blurb = "SomaFM, San Francisco -- IDM: blips'n'bleeps backed with beats"
+tags  = ["electronic", "somafm"]
+fetch = "somafm"
+logo  = "https://api.somafm.com/logos/512/cliqhop512.png"

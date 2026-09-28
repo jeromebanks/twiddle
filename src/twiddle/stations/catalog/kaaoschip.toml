@@ -1,0 +1,7 @@
+# Titles are "Kaaosradio 24h - Artist - Song": splitting would make
+# the station the artist.
+name  = "Kaaos Chiptune"
+url   = "http://stream.kaaosradio.fi:8000/chip"
+blurb = "Finland -- chiptune"
+tags  = ["games", "electronic", "international"]
+fetch_args = { music = false }

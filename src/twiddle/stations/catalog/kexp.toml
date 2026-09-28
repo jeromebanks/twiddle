@@ -1,0 +1,9 @@
+# AAC 160k: the "kexp128.mp3" stream is really 96k MP3. AAC over
+# x-rincon-mp3radio was confirmed audible on the Roams 2026-09-25 (KDVS).
+name  = "KEXP"
+url   = "http://kexp.streamguys1.com/kexp160.aac"
+blurb = "Seattle -- indie/alt, well-curated"
+tags  = ["public", "indie"]
+fetch = "kexp"
+logo  = "https://www.kexp.org/static/assets/img/KEXP_ios_safari_152px.png"
+order = 40

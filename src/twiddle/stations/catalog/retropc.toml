@@ -1,0 +1,8 @@
+# Its ICY title is Shift-JIS (cp932), not UTF-8, and is a soundtrack
+# line ("Game for PC98 [MIDI MT-32]  38. Track (C)1993 Maker"), not
+# "Artist - Song".
+name  = "Retro PC Game Music"
+url   = "http://gyusyabu.ddo.jp:8000/"
+blurb = "Japan -- 80s-90s Japanese PC game soundtracks (PC-98, X68000), 256k"
+tags  = ["games", "japanese", "international"]
+fetch_args = { music = false, encoding = "cp932" }

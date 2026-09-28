@@ -1,0 +1,6 @@
+name  = "Sonic Universe"
+url   = "http://ice1.somafm.com/sonicuniverse-128-mp3"
+blurb = "SomaFM, San Francisco -- nu jazz and avant-garde European jazz"
+tags  = ["jazz", "somafm"]
+fetch = "somafm"
+logo  = "https://api.somafm.com/logos/512/sonicuniverse512.png"

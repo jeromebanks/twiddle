@@ -1,0 +1,7 @@
+name  = "KXLU"
+url   = "https://kxlu.streamguys1.com/kxlu-hi"
+blurb = "Loyola Marymount -- punk/underground/noise"
+tags  = ["college", "freeform", "indie"]
+fetch = "spinitron"
+logo  = "https://kxlu.com/content/uploads/2019/02/kxlusplatblack.png"
+order = 80

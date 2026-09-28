@@ -1,0 +1,7 @@
+# Rainwave's API gives the song, composer and game; ICY is blank.
+# api4/stations lists allrelays.rainwave.cc, which 404s (2026-09-27).
+name  = "Rainwave Game"
+url   = "http://relay.rainwave.cc/game.mp3"
+blurb = "Rainwave -- video game soundtracks, voted on by listeners"
+tags  = ["games"]
+fetch = "rainwave"

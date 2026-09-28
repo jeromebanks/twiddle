@@ -1,0 +1,6 @@
+# Titles are "Artist · Song (year)", not "Artist - Song".
+name  = "Korean City Pop"
+url   = "http://65.21.61.215:8000/citypoptwo"
+blurb = "Korea -- 80s-90s Korean city pop and ballads"
+tags  = ["korean", "international"]
+fetch_args = { music = false }

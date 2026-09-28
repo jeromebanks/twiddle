@@ -1,0 +1,5 @@
+# WSM's second stream (icy-name "WSM2"). No logo, as for wsm.toml.
+name  = "Route 650"
+url   = "http://stream01050.westreamradio.com/wsm2-mp3"
+blurb = "Nashville -- WSM's Americana and bluegrass channel, 64k"
+tags  = ["country"]

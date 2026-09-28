@@ -1,0 +1,10 @@
+# One of 80s80s's channels; see nineties.toml / eighties.toml for the redirect
+# and why the song comes from streamabc. Channel key checked 2026-09-27: the
+# API's "channel" equals this stream's icy-name.
+name  = "80s80s Wave"
+url   = "http://streams.80s80s.de/wave/mp3-192/streams.80s80s.de/"
+blurb = "Germany -- new wave and synthpop, 192k"
+tags  = ["80s", "international"]
+fetch = "streamabc"
+fetch_args = { channel = "regc_17zizlvy5x_hs2s" }
+logo  = "https://upload.80s80s.de/production/static/1787843227149/icons/icon_512.ewwAEi8A30w.png"

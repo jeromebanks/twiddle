@@ -1,0 +1,5 @@
+# newwaveradio.org, "The Wave". Listed as https on radio-browser; plain http works on the same port.
+name  = "New Wave Radio"
+url   = "http://puma.streemlion.com:2910/stream"
+blurb = "Canada -- 80s new wave, synthpop and alternative, 192k"
+tags  = ["80s", "indie"]

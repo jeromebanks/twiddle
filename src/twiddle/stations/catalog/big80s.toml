@@ -1,0 +1,6 @@
+# A bare IP with a Shoutcast v1 ";" path: that is the station's own listed stream.
+name  = "The Big 80s Station"
+url   = "http://158.69.114.190:8065/;"
+blurb = "Internet -- 80s pop, rock and new wave hits"
+tags  = ["80s"]
+logo  = "https://thebig80sstation.com/wp-content/uploads/2018/06/cropped-The-Big-80s-Station-wide-ne-180x180.jpg"

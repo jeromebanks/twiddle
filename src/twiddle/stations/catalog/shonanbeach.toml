@@ -1,0 +1,9 @@
+# Airtime Pro hosts it, but it feeds a live source and publishes no
+# schedule, so the dial shows no title (measured 2026-09-27). ICY says
+# "Shonan Beach FM - offline" around the clock -- never use it: the
+# station's own name would become an artist.
+name  = "Shonan Beach FM"
+url   = "http://shonanbeachfm.out.airtime.pro:8000/shonanbeachfm_a"
+blurb = "Shonan, Japan -- seaside community FM: jazz, Hawaiian, lounge; publishes no titles"
+tags  = ["community", "jazz", "japanese", "international"]
+fetch = "airtime"

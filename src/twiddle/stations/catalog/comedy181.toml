@@ -1,0 +1,5 @@
+name  = "181.FM Comedy Club"
+url   = "http://listen.181fm.com/181-comedy_128k.mp3"
+blurb = "181.FM, Virginia -- stand-up (sends no titles)"
+tags  = ["comedy", "talk"]
+order = 280

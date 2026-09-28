@@ -1,0 +1,7 @@
+name  = "Beat Blender"
+url   = "http://ice1.somafm.com/beatblender-128-mp3"
+blurb = "SomaFM, San Francisco -- late-night deep house and downtempo"
+tags  = ["electronic", "somafm"]
+fetch = "somafm"
+logo  = "https://api.somafm.com/logos/512/beatblender512.png"
+order = 150

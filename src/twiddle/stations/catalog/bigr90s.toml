@@ -1,0 +1,6 @@
+# Big R Radio's 90s alternative channel. Ad breaks show up as the title
+# "Big R Radio - We'll Be Right Back...", which reads as an artist for a minute.
+name  = "Big R 90s Alternative"
+url   = "http://bigrradio.cdnstream1.com/5187_128"
+blurb = "Big R Radio -- 90s alternative rock"
+tags  = ["90s", "indie"]

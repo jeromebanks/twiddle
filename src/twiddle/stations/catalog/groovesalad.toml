@@ -1,0 +1,7 @@
+name  = "Groove Salad"
+url   = "http://ice1.somafm.com/groovesalad-128-mp3"
+blurb = "SomaFM, San Francisco -- ambient/downtempo electronic"
+tags  = ["electronic", "ambient", "somafm"]
+fetch = "somafm"
+logo  = "https://api.somafm.com/logos/512/groovesalad512.png"
+order = 140

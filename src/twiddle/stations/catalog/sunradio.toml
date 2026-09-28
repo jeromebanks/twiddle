@@ -1,0 +1,6 @@
+# No logo: sunradio.com's certificate doesn't match its hostname, and the
+# only image radio-browser has is a 150px favicon.
+name  = "Sun Radio"
+url   = "http://ice10.securenetsystems.net/SUNRADIO"
+blurb = "Austin -- KDRP, independent Americana and roots, 48k AAC"
+tags  = ["country", "community"]

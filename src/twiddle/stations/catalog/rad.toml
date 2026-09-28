@@ -1,0 +1,6 @@
+# R/a/dio, r-a-d.io. Not "radio": too generic a shell word.
+name  = "R/a/dio"
+url   = "http://relay0.r-a-d.io/main.mp3"
+blurb = "r-a-d.io -- anime and J-pop, with DJ hours"
+tags  = ["anime", "japanese", "international"]
+logo  = "https://r-a-d.io/assets/images/apple_touch_icon.png"

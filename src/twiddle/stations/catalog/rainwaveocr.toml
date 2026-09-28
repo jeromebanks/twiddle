@@ -1,0 +1,6 @@
+# As rainwavegame.
+name  = "Rainwave OC ReMix"
+url   = "http://relay.rainwave.cc/ocremix.mp3"
+blurb = "Rainwave -- OverClocked ReMix: fan arrangements of game music"
+tags  = ["games"]
+fetch = "rainwave"

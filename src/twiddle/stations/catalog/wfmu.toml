@@ -1,0 +1,7 @@
+name  = "WFMU"
+url   = "http://stream0.wfmu.org/freeform-128k"
+blurb = "Jersey City -- freeform/underground"
+tags  = ["community", "freeform"]
+fetch = "wfmu"
+logo  = "https://wfmu.org/apple-touch-icon.png"
+order = 30

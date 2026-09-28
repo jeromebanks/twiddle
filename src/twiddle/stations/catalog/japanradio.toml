@@ -1,0 +1,5 @@
+name  = "Japanradio.de"
+url   = "http://stream.japanradio.de/live"
+blurb = "Germany -- J-rock, anime, Vocaloid, eurobeat"
+tags  = ["anime", "japanese", "international"]
+logo  = "https://japanradio.de/wp-content/uploads/2020/05/cropped-logomini-180x180.png"

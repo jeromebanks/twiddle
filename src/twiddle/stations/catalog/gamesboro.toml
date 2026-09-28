@@ -1,0 +1,7 @@
+# Titles are "Game (Platform) - Track": the game is where an artist
+# would be.
+name  = "Gamesboro"
+url   = "http://radio.gamesboro.org/listen/gamesboro_radio/radio.mp3"
+blurb = "Austria -- retro arcade and console soundtracks"
+tags  = ["games", "international"]
+fetch_args = { music = false }

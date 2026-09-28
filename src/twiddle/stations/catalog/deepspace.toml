@@ -1,0 +1,7 @@
+name  = "Deep Space One"
+url   = "http://ice1.somafm.com/deepspaceone-128-mp3"
+blurb = "SomaFM, San Francisco -- deep ambient and space music: for sleep"
+tags  = ["ambient", "sleep", "somafm"]
+fetch = "somafm"
+logo  = "https://api.somafm.com/logos/512/deepspaceone512.png"
+order = 180

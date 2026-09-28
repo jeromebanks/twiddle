@@ -1,0 +1,7 @@
+name  = "BBC World Service"
+url   = "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service"
+blurb = "London -- international news"
+tags  = ["public", "news", "talk", "international"]
+fetch = "talk"
+logo  = "https://sounds.files.bbci.co.uk/3.12.0/networks/bbc_world_service/blocks-colour_600x600.png"
+order = 290

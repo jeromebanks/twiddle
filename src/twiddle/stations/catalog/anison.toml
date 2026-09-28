@@ -1,0 +1,8 @@
+# Titles are "Anime (Singer) - Song": the anime is where an artist
+# would be, so it is never looked up as one.
+name  = "Anison.FM"
+url   = "http://pool.anison.fm:9000/AniSonFM(320)"
+blurb = "Russia -- anime theme songs, 320k"
+tags  = ["anime", "japanese", "international"]
+fetch_args = { music = false }
+logo  = "https://anison.fm/apple-touch-icon.png"

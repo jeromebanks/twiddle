@@ -1,0 +1,8 @@
+# For sleeping to. Carries "Artist - Title", with no beats to speak of.
+name  = "Drone Zone"
+url   = "http://ice1.somafm.com/dronezone-128-mp3"
+blurb = "SomaFM, San Francisco -- atmospheric drones, minimal beats: for sleep"
+tags  = ["ambient", "sleep", "somafm"]
+fetch = "somafm"
+logo  = "https://api.somafm.com/logos/512/dronezone512.png"
+order = 170

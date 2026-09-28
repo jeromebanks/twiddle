@@ -1,0 +1,6 @@
+# Redirects to a token-signed zeno.fm edge (plain http); the catalog
+# keeps this URL so each play gets a fresh token.
+name  = "AnimeNfo Radio"
+url   = "http://stream.zenolive.com/xwa8ckz7mzzuv"
+blurb = "US -- anime songs"
+tags  = ["anime", "japanese", "international"]

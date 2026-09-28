@@ -1,0 +1,6 @@
+name  = "Underground 80s"
+url   = "http://ice1.somafm.com/u80s-128-mp3"
+blurb = "SomaFM, San Francisco -- early 80s UK synthpop and a bit of new wave"
+tags  = ["80s", "electronic", "somafm"]
+fetch = "somafm"
+logo  = "https://api.somafm.com/logos/512/u80s512.png"

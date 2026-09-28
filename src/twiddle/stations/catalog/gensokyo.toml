@@ -1,0 +1,6 @@
+# https only (http redirects to https): plays on the Mac, not yet
+# confirmed on a Sonos.
+name  = "Gensokyo Radio"
+url   = "https://stream.gensokyoradio.net/3"
+blurb = "Gensokyo Radio -- Touhou arrangements, 256k; https only, may not play on the Sonos"
+tags  = ["anime", "games", "japanese", "international"]

@@ -1,0 +1,7 @@
+# https only (http redirects to https): plays on the Mac, not yet
+# confirmed on a Sonos.
+name  = "LISTEN.moe K-Pop"
+url   = "https://listen.moe/kpop/fallback"
+blurb = "LISTEN.moe -- K-pop; https only, may not play on the Sonos"
+tags  = ["kpop", "korean", "international"]
+logo  = "https://listen.moe/images/apple-touch-icon.png"

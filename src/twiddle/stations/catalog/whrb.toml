@@ -1,0 +1,7 @@
+name  = "WHRB"
+url   = "http://stream.whrb.org:8000/whrb-mp3"
+blurb = "Cambridge, MA -- Harvard: jazz, classical, underground rock"
+tags  = ["college", "jazz", "classical", "indie"]
+fetch = "spinitron"
+logo  = "https://spinitron.com/images/Station/13/1386-img_logo.225x225.png"
+order = 120

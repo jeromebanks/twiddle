@@ -1,0 +1,7 @@
+name  = "WMBR"
+url   = "http://wmbr.org:8000/hi"
+blurb = "Cambridge, MA -- MIT freeform college radio (names the show, not the song)"
+tags  = ["college", "freeform"]
+fetch = "wmbr"
+logo  = "https://wmbr.org/images/wmbr_webicon128.png"
+order = 130

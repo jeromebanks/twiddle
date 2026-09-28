@@ -1,0 +1,6 @@
+name  = "Comedy 104"
+url   = "https://ais-sa5.cdnstream1.com/b42761_64mp3"
+blurb = "Radiostorm, Canada -- stand-up, classic and current (96k mono: talk)"
+tags  = ["comedy", "talk", "international"]
+logo  = "https://radiostorm.com/wp-content/uploads/2018/01/cropped-imgpsh_fullsize2-180x180.png"
+order = 270

@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Generated test audio: large and reproducible from tone.py + afconvert
+media/
+
+# Every log: the daemon's, the relay's, interventions, observations, soak
+# and stream runs. Local to the machine that writes them, not in git (they
+# were tracked until 2026-09-28; the old versions are in history).
+logs/
+
+# Serena tool cache, not project content
+.serena/
+
+# Playwright MCP browser scratch (page snapshots, console logs)
+.playwright-mcp/

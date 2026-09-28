@@ -1,0 +1,10 @@
+# There is no ASMR radio worth the name (radio-browser has one music
+# channel tagged it); steady rain is the nearest real thing. Its titles
+# name the loop, never an artist, so it is not looked up.
+name  = "Nature Radio Rain"
+url   = "https://maggie.torontocast.com:2020/stream/natureradiorain"
+blurb = "Toronto -- rain and white noise, no music: for sleep"
+tags  = ["ambient", "sleep", "international"]
+fetch = "icy"
+fetch_args = { note = "(rain sounds: no artist here)", music = false }
+order = 220

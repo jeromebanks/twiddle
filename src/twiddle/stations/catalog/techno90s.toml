@@ -1,0 +1,10 @@
+# One of 90s90s's channels; see nineties.toml / eighties.toml for the redirect
+# and why the song comes from streamabc. Channel key checked 2026-09-27: the
+# API's "channel" equals this stream's icy-name.
+name  = "90s90s Techno"
+url   = "http://streams.90s90s.de/techno/mp3-192/streams.90s90s.de/"
+blurb = "Germany -- 90s techno and rave, 192k"
+tags  = ["90s", "electronic", "international"]
+fetch = "streamabc"
+fetch_args = { channel = "regc_rclolejwzs_uqw8" }
+logo  = "https://upload.90s90s.de/production/static/1787843294588/icons/icon_512.cno7CdHz6$i.png"

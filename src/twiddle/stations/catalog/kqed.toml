@@ -1,0 +1,7 @@
+name  = "KQED"
+url   = "https://streams.kqed.org/kqedradio"
+blurb = "San Francisco -- Bay Area NPR news and talk"
+tags  = ["public", "news", "talk"]
+fetch = "kqed"
+logo  = "https://ww2.kqed.org/app/uploads/2020/02/KQED-OG-Image@1x.png"
+order = 20

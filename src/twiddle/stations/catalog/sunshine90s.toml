@@ -1,0 +1,9 @@
+# Sunshine Live's "Die 90er" channel. The URL redirects to a sunsl.streamabc.net
+# edge: keep the station's own. ICY is only "SUNSHINE LIVE - 90s".
+name  = "Sunshine Live 90s"
+url   = "http://stream.sunshine-live.de/90er/mp3-192/stream.sunshine-live.de"
+blurb = "Mannheim -- 90s rave, trance and eurodance, 192k"
+tags  = ["90s", "electronic", "international"]
+fetch = "streamabc"
+fetch_args = { channel = "sunsl_90er" }
+logo  = "https://upload.sunshine-live.de/production/static/1787844117408/icons/icon_512.fmRwc30M41g.png"

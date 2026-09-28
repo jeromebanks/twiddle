@@ -1,0 +1,7 @@
+name  = "KSPC"
+url   = "https://kspc.radioca.st/stream"
+blurb = "Claremont Colleges -- eclectic freeform (closest to KALX)"
+tags  = ["college", "freeform"]
+fetch = "spinitron"
+logo  = "https://kspc.org/wp-content/uploads/2019/10/cropped-kspc-icon.png"
+order = 70

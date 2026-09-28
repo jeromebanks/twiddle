@@ -1,0 +1,6 @@
+name  = "Ambient Sleeping Pill"
+url   = "http://radio.stereoscenic.com/asp-h"
+blurb = "Internet -- ambient made for sleep, beatless; 256k"
+tags  = ["ambient", "sleep"]
+logo  = "https://ambientsleepingpill.com/wp-content/uploads/cropped-asp-small-logo-512-trans-192x192.png"
+order = 190

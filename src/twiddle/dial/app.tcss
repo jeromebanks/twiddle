@@ -1,0 +1,181 @@
+/* dial — stations on the left, the highlighted one in full on the right. */
+
+Screen {
+    layout: vertical;
+}
+
+#main {
+    height: 1fr;
+}
+
+#stations {
+    width: 46;
+    border: round $panel-lighten-2;
+    border-title-color: $text-muted;
+    background: $surface;
+    scrollbar-size-vertical: 1;
+}
+
+#stations:focus {
+    border: round $accent;
+    border-title-color: $accent;
+    border-title-style: bold;
+}
+
+StationCard {
+    height: 4;
+    padding: 0 0 1 0;
+}
+
+StationCard .logo {
+    width: 6;
+    height: 3;
+    margin: 0 1 0 1;
+}
+
+StationCard .text {
+    width: 1fr;
+    height: 3;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+StationCard.-highlight {
+    background: $accent 18%;
+}
+
+StationCard.-tuned {
+    border-left: thick $success;
+}
+
+#right {
+    width: 1fr;
+}
+
+#hero {
+    height: auto;
+    max-height: 20;
+    border: round $panel-lighten-2;
+    border-title-style: bold;
+    border-subtitle-color: $text-muted;
+    background: $surface;
+    padding: 1 2 0 2;
+}
+
+#cover {
+    width: 30;
+    height: auto;
+    margin-right: 3;
+}
+
+#hero-text {
+    width: 1fr;
+    height: auto;
+}
+
+#about {
+    height: auto;
+    max-height: 14;
+    border: round $panel-lighten-2;
+    border-title-color: $text-muted;
+    background: $surface;
+    padding: 0 1;
+}
+
+#about.-expanded {
+    max-height: 100%;
+    height: 1fr;
+}
+
+#photo {
+    width: 16;
+    height: auto;
+    margin: 1 2 1 0;
+}
+
+#bio-scroll {
+    width: 1fr;
+    height: auto;
+    max-height: 100%;
+    scrollbar-size-vertical: 1;
+}
+
+#bio {
+    width: 1fr;
+    height: auto;
+}
+
+#recent-scroll {
+    height: 1fr;
+    min-height: 4;
+    border: round $panel-lighten-2;
+    border-title-color: $text-muted;
+    background: $surface;
+    padding: 0 1;
+    scrollbar-size-vertical: 1;
+}
+
+#nowbar {
+    height: auto;
+    min-height: 1;
+    max-height: 3;
+    padding: 0 1;
+    background: $boost;
+    /* the volume gauge is clickable; don't underline it like a link */
+    link-style: none;
+    link-background-hover: $accent 30%;
+    link-style-hover: none;
+}
+
+/* dialogs (ChoiceScreen from scene) */
+
+ChoiceScreen, DialHelp {
+    align: center middle;
+    background: $background 60%;
+}
+
+#dialog {
+    width: 72;
+    max-width: 95%;
+    height: auto;
+    max-height: 80%;
+    border: thick $accent;
+    background: $panel;
+    padding: 1 2;
+}
+
+#dialog-title {
+    text-style: bold;
+    color: $accent;
+    margin-bottom: 1;
+}
+
+#dialog-note {
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+#dialog-list {
+    height: auto;
+    max-height: 20;
+    border: none;
+    background: $panel;
+}
+
+/* a narrow tmux pane: stations on top, compact; the rest below */
+Screen.-narrow #main {
+    layout: vertical;
+}
+Screen.-narrow #stations {
+    width: 1fr;
+    height: 40%;
+}
+Screen.-narrow #right {
+    height: 60%;
+}
+Screen.-narrow #cover {
+    width: 20;
+}
+Screen.-narrow #photo {
+    display: none;
+}

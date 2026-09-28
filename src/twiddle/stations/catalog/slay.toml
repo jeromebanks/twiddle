@@ -1,0 +1,7 @@
+# relay4 (Icecast), not relay1: relay1 is SHOUTcast v1, which answers
+# "ICY 200 OK" and urllib can't read its titles.
+name  = "SLAY Radio"
+url   = "http://relay4.slayradio.org:8000/"
+blurb = "Sweden -- C64 remixes, live DJs"
+tags  = ["games", "international"]
+logo  = "https://www.slayradio.org/images/fb_icon_220_new.jpeg"

@@ -1,0 +1,7 @@
+name  = "Fluid"
+url   = "http://ice1.somafm.com/fluid-128-mp3"
+blurb = "SomaFM, San Francisco -- instrumental hip-hop, future soul and liquid trap"
+tags  = ["electronic", "somafm"]
+fetch = "somafm"
+# SomaFM's 512px logo for this channel is a .jpg, not the .png the probe tried
+logo  = "https://api.somafm.com/logos/512/fluid512.jpg"

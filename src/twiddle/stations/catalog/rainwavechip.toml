@@ -1,0 +1,6 @@
+# As rainwavegame.
+name  = "Rainwave Chiptune"
+url   = "http://relay.rainwave.cc/chiptune.mp3"
+blurb = "Rainwave -- chiptune, from game soundtracks"
+tags  = ["games"]
+fetch = "rainwave"

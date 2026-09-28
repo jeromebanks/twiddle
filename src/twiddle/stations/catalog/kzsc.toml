@@ -1,0 +1,7 @@
+name  = "KZSC"
+url   = "http://kzscfms1-geckohost.radioca.st/kzschigh"
+blurb = "Santa Cruz -- UCSC freeform college radio"
+tags  = ["college", "freeform"]
+fetch = "spinitron"
+logo  = "https://spinitron.com/images/Station/04/487-img_logo.225x225.png"
+order = 110

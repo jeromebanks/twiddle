@@ -1,0 +1,10 @@
+# Always redirects to an https edge (there is no plain-http NTS stream);
+# fine for ffplay, not yet confirmed on a Sonos.
+name  = "NTS 1"
+url   = "http://stream-relay-geo.ntslive.net/stream"
+blurb = "London -- DJ radio, much of it electronic (names the show, not the song)"
+tags  = ["electronic", "dj", "international"]
+fetch = "nts"
+fetch_args = { channel = "1" }
+logo  = "https://www.nts.live/android-chrome-512x512.png"
+order = 250

@@ -1,0 +1,8 @@
+# SecureNet's Cirrus edge is WSUM's only stream (icy-br 32, AAC+), checked
+# 2026-09-27. WSUMFM2/WSUMHD don't exist. Plain http, so the Roam plays it.
+name  = "WSUM"
+url   = "http://ice23.securenetsystems.net/WSUMFM"
+blurb = "Madison -- UW-Madison student radio, freeform (32k AAC)"
+tags  = ["college", "freeform"]
+fetch = "spinitron"
+logo  = "https://wsum.org/wp-content/frontity/build/static/images/favicon-black-5299cd9d07d43f0a757ba757d05e2f9c.png"

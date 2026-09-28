@@ -1,0 +1,7 @@
+# ICY says "Airtime - offline"; Airtime Pro's feed names the show.
+name  = "Ottava"
+url   = "http://ottava2.out.airtime.pro:8000/ottava2_a"
+blurb = "Japan -- classical internet radio; names the show, not the piece"
+tags  = ["classical", "japanese", "international"]
+fetch = "airtime"
+logo  = "https://ottava.jp/img/common/touch_icon.png"

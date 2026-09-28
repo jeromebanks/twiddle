@@ -1,0 +1,8 @@
+# radio-browser lists the https mount; the same Airtime host serves
+# plain http on :8000, which a Sonos needs (checked 2026-09-27).
+name  = "FM Setagaya"
+url   = "http://fmsetagaya834.out.airtime.pro:8000/fmsetagaya834_a"
+blurb = "Setagaya, Tokyo -- neighbourhood community FM; names the show"
+tags  = ["community", "japanese", "international"]
+fetch = "airtime"
+logo  = "https://fmsetagaya.com/wp/wp-content/uploads/2019/01/cropped-icon512-180x180.gif"

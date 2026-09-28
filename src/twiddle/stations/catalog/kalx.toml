@@ -1,0 +1,7 @@
+name  = "KALX"
+url   = "http://stream.kalx.berkeley.edu:8000/kalx-128.mp3"
+blurb = "Berkeley -- freeform/eclectic college radio"
+tags  = ["college", "freeform"]
+fetch = "spinitron"
+logo  = "https://kalx.berkeley.edu/wp-content/uploads/2023/11/cropped-favicon-1-180x180.gif"
+order = 10

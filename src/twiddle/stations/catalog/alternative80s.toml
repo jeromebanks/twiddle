@@ -1,0 +1,10 @@
+# One of 80s80s's channels; see nineties.toml / eighties.toml for the redirect
+# and why the song comes from streamabc. Channel key checked 2026-09-27: the
+# API's "channel" equals this stream's icy-name.
+name  = "80s80s Alternative"
+url   = "http://streams.80s80s.de/alternative/mp3-192/streams.80s80s.de/"
+blurb = "Germany -- 80s alternative and college rock, 192k"
+tags  = ["80s", "indie", "international"]
+fetch = "streamabc"
+fetch_args = { channel = "regc_vvopejosnr_rv4r" }
+logo  = "https://upload.80s80s.de/production/static/1787843227149/icons/icon_512.ewwAEi8A30w.png"

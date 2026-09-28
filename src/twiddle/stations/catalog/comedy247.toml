@@ -1,0 +1,8 @@
+# HE-AAC 48k. Titles are iHeart's title="…",artist="…" (icy.tidy_title
+# turns them into "Comedian - Track"), so the comedian is looked up like
+# any artist.
+name  = "24/7 Comedy"
+url   = "https://stream.revma.ihrhls.com/zc4902"
+blurb = "iHeart -- stand-up: current names, clips from specials"
+tags  = ["comedy", "talk"]
+order = 260

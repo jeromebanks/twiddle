@@ -1,0 +1,6 @@
+# No logo: kcrw.com answers scripts with 429.
+name  = "KCRW"
+url   = "https://streams.kcrw.com/kcrw_mp3"
+blurb = "Santa Monica -- NPR/eclectic"
+tags  = ["public", "freeform"]
+order = 50

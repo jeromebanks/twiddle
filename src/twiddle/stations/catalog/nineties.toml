@@ -1,0 +1,10 @@
+# streams.90s90s.de redirects to a regiocast.streamabc.net edge with a session
+# token: keep the station's own URL. ICY is only "90s90s - DIGITAL WEB"; the
+# song comes from streamabc's API, keyed by the channel below.
+name  = "90s90s"
+url   = "http://streams.90s90s.de/pop/mp3-192/streams.90s90s.de/"
+blurb = "Germany -- 90s pop and dance hits, 192k"
+tags  = ["90s", "international"]
+fetch = "streamabc"
+fetch_args = { channel = "regc_6pfgz6x60q_lb5c" }
+logo  = "https://upload.90s90s.de/production/static/1787843294588/icons/icon_512.cno7CdHz6$i.png"

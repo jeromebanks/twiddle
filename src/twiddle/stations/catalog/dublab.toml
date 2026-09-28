@@ -1,0 +1,5 @@
+name  = "dublab"
+url   = "http://dublab.out.airtime.pro:8000/dublab_a"
+blurb = "Los Angeles -- listener-supported: electronic, experimental, eclectic"
+tags  = ["community", "freeform", "electronic"]
+order = 240

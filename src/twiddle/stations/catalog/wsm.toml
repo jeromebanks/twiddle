@@ -1,0 +1,7 @@
+# No logo: wsmradio.com's only square image is a photo collage (mic, tower,
+# Opry stage), shared with route650. During Opry broadcasts the ICY title
+# may name the show rather than the song.
+name  = "WSM"
+url   = "http://stream01048.westreamradio.com/wsm-am-mp3"
+blurb = "Nashville -- 650 AM, home of the Grand Ole Opry; classic and new country, 64k"
+tags  = ["country"]

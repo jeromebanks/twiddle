@@ -1,0 +1,7 @@
+# https only (http redirects to https): plays on the Mac, not yet
+# confirmed on a Sonos.
+name  = "LISTEN.moe"
+url   = "https://listen.moe/fallback"
+blurb = "LISTEN.moe -- anime and J-pop; https only, may not play on the Sonos"
+tags  = ["anime", "japanese", "international"]
+logo  = "https://listen.moe/images/apple-touch-icon.png"

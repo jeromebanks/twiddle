@@ -1,0 +1,10 @@
+# One of 90s90s's channels; see nineties.toml / eighties.toml for the redirect
+# and why the song comes from streamabc. Channel key checked 2026-09-27: the
+# API's "channel" equals this stream's icy-name.
+name  = "90s90s Hip Hop"
+url   = "http://streams.90s90s.de/hiphop/mp3-192/streams.90s90s.de/"
+blurb = "Germany -- 90s hip hop and rap, 192k"
+tags  = ["90s", "international"]
+fetch = "streamabc"
+fetch_args = { channel = "regc_95hdku6zke_madj" }
+logo  = "https://upload.90s90s.de/production/static/1787843294588/icons/icon_512.cno7CdHz6$i.png"

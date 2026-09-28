@@ -1,0 +1,6 @@
+# https only (play.streamafrica.net redirects to an https edge): plays
+# on the Mac, not yet confirmed on a Sonos.
+name  = "BOX Japan City Pop"
+url   = "https://play.streamafrica.net/japancitypop"
+blurb = "BOX Radio -- 70s-80s Japanese city pop; https only, may not play on the Sonos"
+tags  = ["japanese", "international"]

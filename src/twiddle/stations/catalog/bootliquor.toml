@@ -1,0 +1,6 @@
+name  = "Boot Liquor"
+url   = "http://ice1.somafm.com/bootliquor-128-mp3"
+blurb = "SomaFM, San Francisco -- Americana roots for cowhands, cowpokes and cowtippers"
+tags  = ["country", "somafm"]
+fetch = "somafm"
+logo  = "https://api.somafm.com/logos/512/bootliquor512.png"

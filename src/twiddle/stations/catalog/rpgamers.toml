@@ -1,0 +1,7 @@
+# Titles are "Game - Track": the game is where an artist would be.
+name  = "RPGamers Network"
+url   = "http://stream.rpgamers.net:8000/rpgn"
+blurb = "Canada -- RPG soundtracks"
+tags  = ["games", "international"]
+fetch_args = { music = false }
+logo  = "https://www.rpgamers.net/apple-touch-icon-precomposed.png"

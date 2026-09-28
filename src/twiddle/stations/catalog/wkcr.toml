@@ -1,0 +1,7 @@
+name  = "WKCR"
+url   = "https://wkcr.streamguys1.com/live"
+blurb = "Columbia -- jazz/classical, deep-catalog freeform"
+tags  = ["college", "jazz", "classical"]
+fetch = "spinitron"
+logo  = "https://spinitron.com/images/Station/11/1176-img_logo.225x225.png"
+order = 60

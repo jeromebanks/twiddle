@@ -1,0 +1,9 @@
+# AAC 192k.
+name  = "FIP Electro"
+url   = "http://icecast.radiofrance.fr/fipelectro-hifi.aac"
+blurb = "Paris -- Radio France's hand-curated electronic channel"
+tags  = ["electronic", "international"]
+fetch = "radiofrance"
+fetch_args = { rf_id = 74 }
+logo  = "https://www.radiofrance.fr/external/favicons/fip/favicon.png"
+order = 230

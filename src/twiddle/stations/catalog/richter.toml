@@ -1,0 +1,6 @@
+name  = "Max Richter Sleep"
+url   = "https://streaming.positivity.radio/pr/maxrichter/icecast.audio"
+blurb = "Positively Radio -- Max Richter's 'Sleep' and neighbours, around the clock"
+tags  = ["ambient", "sleep", "classical"]
+logo  = "https://manager.uber.radio/static/uploads/station/cea14a8d-e13f-4370-9feb-77df48b3b3cc.png"
+order = 210

@@ -1,0 +1,177 @@
+/* scene — three panes over a now-playing bar. Colours come from the theme. */
+
+Screen {
+    layout: vertical;
+}
+
+#main {
+    height: 1fr;
+}
+
+#left {
+    width: 26;
+}
+
+#middle {
+    width: 1fr;
+    min-width: 50;
+}
+
+#right {
+    width: 40%;
+    min-width: 40;
+}
+
+#venues, #shows, #lineup, #band, #tracks {
+    border: round $panel-lighten-2;
+    border-title-color: $text-muted;
+    border-subtitle-color: $text-muted;
+    background: $surface;
+}
+
+#venues:focus, #shows:focus, #lineup:focus, #tracks:focus, #band:focus-within {
+    border: round $accent;
+    border-title-color: $accent;
+    border-title-style: bold;
+}
+
+#venues {
+    height: 1fr;
+}
+
+/* the highlighted show's venue: its logo, or a tile in its colour */
+#venue-card {
+    height: auto;
+    padding: 1 1 0 1;
+}
+
+#venue-icon {
+    width: 16;
+    height: auto;
+}
+
+/* a show's flyer takes the icon's place; the pane is 26 wide */
+#flyer {
+    width: 24;
+    height: auto;
+    display: none;
+}
+
+#venue-name {
+    height: auto;
+}
+
+#window {
+    height: 2;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+#shows {
+    height: 1fr;
+    overflow-x: hidden;   /* long lineups clip at the edge; the Lineup pane has them whole */
+}
+
+#search {
+    height: 3;
+    border: round $accent;
+}
+
+#lineup {
+    height: auto;
+    max-height: 9;
+}
+
+#band {
+    height: 1fr;
+}
+
+/* outside the scroller: a kitty-protocol image inside one smears */
+#photo-col {
+    width: 20;
+    height: auto;
+    margin: 0 0 0 1;
+}
+
+#photo {
+    width: 20;
+    height: auto;
+}
+
+#photo-credit {
+    height: auto;
+}
+
+#profile-scroll {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+}
+
+#tracks {
+    height: 12;
+}
+
+#nowbar {
+    height: auto;
+    min-height: 1;
+    max-height: 3;
+    padding: 0 1;
+    background: $boost;
+}
+
+/* dialogs */
+
+ChoiceScreen, HelpScreen, VenueScreen {
+    align: center middle;
+    background: $background 60%;
+}
+
+#dialog {
+    width: 72;
+    max-width: 95%;
+    height: auto;
+    max-height: 80%;
+    border: thick $accent;
+    background: $panel;
+    padding: 1 2;
+}
+
+#dialog-title {
+    text-style: bold;
+    color: $accent;
+    margin-bottom: 1;
+}
+
+#dialog-note {
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+#dialog-list {
+    height: auto;
+    max-height: 20;
+    border: none;
+    background: $panel;
+}
+
+/* tmux panes are often narrow: stack the right pane under the rest */
+Screen.-narrow #main {
+    layout: vertical;
+}
+Screen.-narrow #left {
+    display: none;
+}
+Screen.-narrow #middle {
+    height: 40%;
+}
+Screen.-narrow #right {
+    width: 1fr;
+    height: 60%;
+}
+Screen.-narrow #tracks {
+    height: 8;
+}
+Screen.-narrow #photo-col, Screen.-narrow #photo {
+    width: 12;
+}

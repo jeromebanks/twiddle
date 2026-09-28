@@ -1,0 +1,10 @@
+# streams.80s80s.de redirects to a regiocast.streamabc.net edge with a session
+# token: keep the station's own URL. ICY is only "80s80s Digital Web"; the
+# song comes from streamabc's API, keyed by the channel below.
+name  = "80s80s"
+url   = "http://streams.80s80s.de/web/mp3-192/streams.80s80s.de/"
+blurb = "Germany -- 80s hits, 192k"
+tags  = ["80s", "international"]
+fetch = "streamabc"
+fetch_args = { channel = "regc_ndyeua5x2j_jtbd" }
+logo  = "https://upload.80s80s.de/production/static/1787843227149/icons/icon_512.ewwAEi8A30w.png"

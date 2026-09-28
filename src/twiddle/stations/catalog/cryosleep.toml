@@ -1,0 +1,5 @@
+name  = "Cryosleep"
+url   = "http://streams.echoesofbluemars.org:8000/cryosleep"
+blurb = "Echoes of Bluemars -- calm, no-beat space ambient: for sleep"
+tags  = ["ambient", "sleep"]
+order = 200

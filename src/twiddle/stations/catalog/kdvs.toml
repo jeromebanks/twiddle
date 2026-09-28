@@ -1,0 +1,7 @@
+name  = "KDVS"
+url   = "https://listen.kdvs.org/stream"
+blurb = "UC Davis -- freeform (AAC stream)"
+tags  = ["college", "freeform"]
+fetch = "spinitron"
+logo  = "https://images.prismic.io/kdvs/Z65EEpbqstJ9-mBp_logo.png?auto=format,compress"
+order = 90

@@ -1,0 +1,7 @@
+# TuneIn's URL for KFWR with its tracking query stripped; the edge serves
+# plain http as well as https.
+name  = "The Ranch"
+url   = "http://lkcm-live-a.edge.audiocdn.com/10357.mp3"
+blurb = "Fort Worth -- KFWR 95.9, Texas country and red dirt, 64k"
+tags  = ["country"]
+logo  = "https://dehayf5mhw1h7.cloudfront.net/wp-content/uploads/sites/2740/2025/11/17114522/959theranch-favicon-240x240.png"

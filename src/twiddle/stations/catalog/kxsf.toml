@@ -1,0 +1,13 @@
+# Raw IP, not a hostname: kxsf.fm's own "Listen" page links a radio.co
+# widget that's actually a stale demo channel (icy-name "Qantum Themes
+# Test Channel"), and the SHOUTcast box's own hostname
+# (stream.sfcommunityradio.org) no longer resolves. This IP is what
+# TuneIn's own tuner resolves the station to, confirmed by icy-name
+# "San Francisco Community Radio".
+name  = "KXSF"
+url   = "http://107.161.208.3:8000/sfcr"
+blurb = "San Francisco -- low-power community radio, eclectic freeform"
+tags  = ["community", "freeform"]
+fetch = "spinitron"
+logo  = "https://kxsf.fm/wp-content/uploads/2025/09/cropped-KXSF_Logo_square-192x192.jpeg"
+order = 100

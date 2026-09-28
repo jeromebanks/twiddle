@@ -1,0 +1,12 @@
+# KSDT's site (ksdtradio.com -> Music -> "RADIO.CO STREAM") links this
+# radio.co channel. Checked 2026-09-27: it's an automated rebroadcast
+# loop. The status API (public.radio.co/stations/s2c33c7adb/status) and
+# ICY both give archive labels ("KSDT - 17:00-13.04.2023"), not songs,
+# and there is no Spinitron page. So titles are shown but never looked up.
+name  = "KSDT"
+url   = "http://s4.radio.co/s2c33c7adb/listen"
+blurb = "UC San Diego -- student radio, online only; automated rebroadcasts, no song titles"
+tags  = ["college", "freeform"]
+fetch = "icy"
+fetch_args = { note = "(archive rebroadcast: no song titles)", music = false }
+logo  = "https://images.radio.co/station_logos/s2c33c7adb.20220928023402.png"
