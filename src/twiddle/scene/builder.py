@@ -167,6 +167,30 @@ def _default_enrichers(use_spotify: bool, notes: dict[str, str]) -> list:
     return enrichers
 
 
+def _keep_prior_answers(p: BandProfile, old: dict | None) -> None:
+    """An enricher that did not answer this run (skipped, signed out, errored)
+    must not erase what the last build learned from it."""
+    if not old or not any(v == "done" for v in (old.get("status") or {}).values()):
+        return
+    before = profiles.from_record(old, names=profiles.ENRICHERS)
+    fields = {"lookup": ("info", "lookup_candidates", "alias"),
+              "spotify": ("spotify_artist", "spotify_candidates", "tracks"),
+              "bandcamp": ("bandcamp", "bc_tracks")}
+    kept = False
+    for name, attrs in fields.items():
+        if name in p.status and p.status[name] == "done":
+            continue
+        if before.status.get(name) != "done":
+            continue
+        for a in attrs:
+            setattr(p, a, getattr(before, a))
+        p.searched.update({k: v for k, v in before.searched.items() if k == name})
+        p.status[name] = "done"
+        kept = True
+    if kept:
+        assess(p, use_pins=False)
+
+
 def enrich_one(band: str, enrichers: list, skip: set[str]) -> BandProfile:
     """One band through every enricher, lookup first, as `BandBook` does but in
     order and to completion. `skip` names enrichers switched off for the run."""
@@ -219,9 +243,12 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
            genre_search, wiki, watched, today, spotify_gap, pace, log, now) -> Result:
     try:
         prev = dataset.load(path)
-    except dataset.DatasetError as exc:
+    except dataset.DatasetCorrupt as exc:
         log(f"ignoring the old dataset: {exc}")
         prev = None
+    except dataset.DatasetError as exc:
+        # A newer version's file, or someone else's: never overwrite what we cannot read.
+        raise BuildError(f"not replacing {path}: {exc}") from exc
     watched = watched if watched is not None else venues_mod.watched()
     started = now()
     result = Result(path=path)
@@ -294,6 +321,7 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
             todo.append((key, name))
     for i, (key, name) in enumerate(todo, 1):
         p = enrich_one(name, active, skip)
+        _keep_prior_answers(p, bands.get(key))
         hits = None if "bandcamp" in skip else _safe(genre_search, name, offline=True)
         guess = p.genre() or guess_from(hits)
         bands[key] = profiles.to_record(p, updated_at=now(), guess=guess)

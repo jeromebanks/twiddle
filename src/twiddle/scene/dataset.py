@@ -60,6 +60,12 @@ class DatasetError(RuntimeError):
     """The file exists but cannot be used (unreadable, or a newer version)."""
 
 
+class DatasetCorrupt(DatasetError):
+    """Not valid JSON: a torn or damaged file, safe for a build to replace.
+    Any other DatasetError (a newer version, another schema) is not: replacing
+    it would destroy data this code cannot read."""
+
+
 def default_path() -> Path:
     return DATASET_PATH
 
@@ -188,8 +194,8 @@ def load(path: Path | None = None) -> Snapshot | None:
     try:
         doc = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise DatasetError(f"{path} is not valid JSON ({exc}); "
-                           "`twiddle scene build` will replace it") from exc
+        raise DatasetCorrupt(f"{path} is not valid JSON ({exc}); "
+                             "`twiddle scene build` will replace it") from exc
     if not isinstance(doc, dict) or doc.get("schema") != SCHEMA:
         raise DatasetError(f"{path} is not a {SCHEMA} file")
     version = doc.get("version")

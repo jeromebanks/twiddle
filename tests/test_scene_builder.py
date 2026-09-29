@@ -325,3 +325,37 @@ def test_listings_are_published_before_the_slow_wikipedia_requests(tmp_path, mon
     assert first["wikipedia_summary"] is None                # not yet
     last = next(v for v in docs[-1]["venues"] if v["name"] == "Fox Theater")
     assert last["wikipedia_summary"]["extract"] == "A hall."
+
+
+def test_a_skipped_or_failed_enricher_does_not_erase_what_the_last_build_learned(tmp_path):
+    """Codex: a signed-out rebuild must keep last time's Spotify artist."""
+    run(tmp_path, [Src("thelist", [COUP])], [Enr("lookup"), Enr("spotify", spotify_fill),
+                                             Enr("bandcamp")])
+    assert read(tmp_path).band("Coup Dville")["identifiers"]["spotify_id"] == "sp-Coup Dville"
+    later = 1_790_000_000.0 + builder.PROFILE_TTL_S * 2          # the record has expired
+    run(tmp_path, [Src("thelist", [COUP])], [Enr("lookup"), Enr("bandcamp")], now=lambda: later)
+    rec = read(tmp_path).band("Coup Dville")
+    assert rec["identifiers"]["spotify_id"] == "sp-Coup Dville"
+    assert rec["status"]["spotify"] == "done" and rec["tracks"]
+    assert rec["updated_at"] == dataset.iso(later)               # the rest was refreshed
+    # a failing one keeps its old answer too
+    run(tmp_path, [Src("thelist", [COUP])],
+        [Enr("lookup"), Enr("spotify", raises=RuntimeError("503")), Enr("bandcamp")],
+        now=lambda: later + builder.PROFILE_TTL_S * 2)
+    assert read(tmp_path).band("Coup Dville")["identifiers"]["spotify_id"] == "sp-Coup Dville"
+
+
+def test_a_build_will_not_overwrite_a_dataset_it_cannot_read(tmp_path):
+    import json
+    path = tmp_path / "d.json"
+    newer = {"schema": dataset.SCHEMA, "version": dataset.VERSION + 1, "shows": []}
+    path.write_text(json.dumps(newer))
+    with pytest.raises(builder.BuildError, match="not replacing"):
+        run(tmp_path, [Src("thelist", [GIRL])])
+    assert json.loads(path.read_text()) == newer
+    path.write_text(json.dumps({"schema": "something.else"}))
+    with pytest.raises(builder.BuildError, match="not replacing"):
+        run(tmp_path, [Src("thelist", [GIRL])])
+    path.write_text("{torn")                                     # damage, on the other hand, is replaced
+    run(tmp_path, [Src("thelist", [GIRL])])
+    assert dataset.load(path).shows
