@@ -4,7 +4,7 @@
 for real, and `lookup` caches to disk and reads a saved Discogs token. Without this, a test run would quietly
 change what your next `np` asks about.
 
-The intervention journal and `scene`'s cache are redirected too: a test that
+The intervention journal, `scene`'s cache and its published dataset are redirected too: a test that
 plays through a fake must never leave a line in the real
 `logs/interventions.jsonl`, where `analyse` would discount a real fault.
 """
@@ -13,6 +13,7 @@ import pytest
 from twiddle import comedy, lookup, play, spotify_ops, stations, streaminfo
 from twiddle.dial import state as dial_state
 from twiddle.scene import cache as scene_cache
+from twiddle.scene import dataset as scene_dataset
 
 
 @pytest.fixture(autouse=True)
@@ -24,6 +25,7 @@ def _isolated_state_files(tmp_path, monkeypatch):
     monkeypatch.delenv("DISCOGS_TOKEN", raising=False)
     monkeypatch.setattr(play, "INTERVENTION_LOG", tmp_path / "interventions.jsonl")
     monkeypatch.setattr(scene_cache, "CACHE_DIR", tmp_path / "scene")
+    monkeypatch.setattr(scene_dataset, "DATASET_PATH", tmp_path / "scene-dataset" / "dataset.json")
     monkeypatch.setattr(dial_state, "CACHE_DIR", tmp_path / "dial")
     monkeypatch.setattr(comedy, "CACHE_FILE", tmp_path / "comedy_artists.json")
     monkeypatch.setattr(comedy, "ALBUMS_CACHE_FILE", tmp_path / "comedy_albums.json")

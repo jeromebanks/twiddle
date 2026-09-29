@@ -187,9 +187,18 @@ def local(info: lookup.ArtistInfo | None) -> bool:
     return near(info.origin if info else None)
 
 
-def assess(p: BandProfile) -> None:
-    """Grade the Spotify identity from everything gathered so far."""
-    pin = cache.pinned(p.band)
+def assess(p: BandProfile, use_pins: bool = True) -> None:
+    """Grade the Spotify identity from everything gathered so far.
+
+    `use_pins=False` grades on evidence alone: the dataset builder publishes
+    that, so one person's hand-made pins never travel with the data.
+    """
+    if p.status.get("spotify") == "idle":
+        # Seeded from the dataset with no (usable) Spotify answer: the band on
+        # screen is looked up when it is selected.
+        p.confidence, p.why = PENDING, "not looked up on Spotify yet"
+        return
+    pin = cache.pinned(p.band) if use_pins else None
     if pin is not None:
         if pin.get("spotify_id"):
             p.confidence, p.why = CORROBORATED, "chosen by you"
@@ -297,10 +306,14 @@ class SpotifyEnricher:
     name = "spotify"
     serial = False
 
-    def __init__(self, session_factory: Callable[[], object]):
+    def __init__(self, session_factory: Callable[[], object], use_pins: bool = True):
         self._session_factory = session_factory
+        self._use_pins = use_pins       # the builder's are off: see `assess`
         self._sess = None
         self._lock = threading.Lock()
+
+    def _pin(self, band: str) -> dict | None:
+        return cache.pinned(band) if self._use_pins else None
 
     def session(self):
         with self._lock:
@@ -319,7 +332,7 @@ class SpotifyEnricher:
     def _enrich(self, p: BandProfile) -> None:
         from ..discover_cli import _artist_tracks
         sess = self.session()
-        pin = cache.pinned(p.band)
+        pin = self._pin(p.band)
         if pin is not None:
             p.spotify_candidates = []
             if not pin.get("spotify_id"):
@@ -350,7 +363,7 @@ class SpotifyEnricher:
     def wants_rerun(self, p: BandProfile) -> bool:
         """After the lookup lands: does MusicBrainz name a different artist,
         or did it find the band under a trimmed name we haven't searched?"""
-        if cache.pinned(p.band) is not None:
+        if self._pin(p.band) is not None:
             return False
         linked = linked_spotify_id(p)
         current = (p.spotify_artist or {}).get("id", "")
@@ -416,6 +429,8 @@ class BandBook:
                  spotify_workers: int = 3):
         self.enrichers = enrichers
         self.on_update = on_update
+        # band -> its profile as the dataset has it (`refresh` uses this)
+        self.reseed: Callable[[str], BandProfile | None] | None = None
         self.profiles: dict[str, BandProfile] = {}
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=spotify_workers,
@@ -426,11 +441,20 @@ class BandBook:
                                              name="scene-lookup")
         self._lane_thread.start()
 
+    def seed(self, profiles: list[BandProfile]) -> None:
+        """Register profiles already known (the dataset's) without scheduling
+        anything. An enricher marked `idle` on one runs only when that band is
+        fetched `urgent`ly -- the one on screen -- never for the lot."""
+        with self._lock:
+            for p in profiles:
+                self.profiles[lookup.norm(p.band)] = p
+
     def get(self, band: str, urgent: bool = True) -> BandProfile:
         """The profile as known now; missing enrichments are scheduled.
 
         `urgent` is for the band on screen: it jumps the lookup lane ahead of
-        prefetched lineup members.
+        prefetched lineup members, and wakes any `idle` enricher on a seeded
+        profile.
         """
         key = lookup.norm(band)
         with self._lock:
@@ -446,14 +470,33 @@ class BandBook:
             for e in self.enrichers:
                 self._schedule(e, p, urgent)
         elif urgent:
+            self._wake(p)
             self._bump(p)
         return p
 
     def refresh(self, band: str) -> BandProfile:
-        """Forget and re-enrich -- after a pin changes, say."""
+        """Forget and re-enrich -- after a pin changes, say.
+
+        A seeded band is re-seeded (its Spotify answer went stale with the
+        pin, the rest is still the dataset's) rather than looked up afresh.
+        """
+        key = lookup.norm(band)
         with self._lock:
-            self.profiles.pop(lookup.norm(band), None)
+            old = self.profiles.pop(key, None)
+            if old is not None and self.reseed is not None:
+                fresh = self.reseed(old.band)
+                if fresh is not None:
+                    self.profiles[key] = fresh
         return self.get(band)
+
+    def _wake(self, p: BandProfile) -> None:
+        for e in self.enrichers:
+            with self._lock:
+                if p.status.get(e.name) != "idle":
+                    continue
+                p.status[e.name] = "pending"
+            assess(p)
+            self._schedule(e, p, urgent=True)
 
     def _schedule(self, e: Enricher, p: BandProfile, urgent: bool) -> None:
         if e.serial:
