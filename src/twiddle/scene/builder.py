@@ -121,7 +121,8 @@ def _source_status(names: list[str], shows: list[Show], errors: list[str],
 
 
 def _venue_records(watched, prev: dataset.Snapshot | None,
-                   wiki: Callable[[str], dict | None]) -> list[dict]:
+                   wiki: Callable[[str], dict | None] | None) -> list[dict]:
+    """`wiki=None`: carry last time's summaries, fetch nothing (the fast first publish)."""
     old = {v["id"]: v for v in (prev.venues if prev else []) if "id" in v}
     out = []
     for v in watched:
@@ -129,7 +130,7 @@ def _venue_records(watched, prev: dataset.Snapshot | None,
         summary = None
         if v.info.wikipedia:
             try:
-                summary = wiki(v.info.wikipedia)
+                summary = wiki(v.info.wikipedia) if wiki else None
             except Exception:
                 summary = None
             summary = summary or (old.get(vid) or {}).get("wikipedia_summary")
@@ -237,7 +238,7 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
         raise BuildError("no listings from any source" + (": " + "; ".join(errors) if errors else ""))
     result.shows = len(shows)
     source_status = _source_status([s.name for s in chosen], shows, errors, prev, started)
-    venue_records = _venue_records(watched, prev, wiki)
+    venue_records = _venue_records(watched, prev, None)   # summaries come after listings
     rows = _show_rows(shows, watched)
 
     # 2. every billed band gets a record; last time's enrichment carries over
@@ -267,7 +268,9 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
             builder=_builder_name(), generated_at=started), path)
 
     publish(complete=False)
-    log(f"{len(shows)} shows, {len(bands)} bands; enriching…")
+    log(f"{len(shows)} shows, {len(bands)} bands; venue summaries, then enriching…")
+    # Wikipedia can take seconds a venue when cold: after the listings are out.
+    venue_records[:] = _venue_records(watched, prev, wiki)
 
     # 3. enrich the bands that matter now
     horizon = today + timedelta(days=days)

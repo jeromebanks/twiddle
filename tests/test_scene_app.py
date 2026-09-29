@@ -1154,13 +1154,46 @@ def test_reloading_never_replaces_a_profile_whose_lookup_is_running():
     fresh.status = {"spotify": "idle"}
     book.seed([fresh])
     assert book.profiles["girl chow"] is running
-    richer = BandProfile(band="Wiseacre")
-    richer.status = {"spotify": "done", "bandcamp": "done"}
-    book.seed([richer])
+    looked_up = BandProfile(band="Wiseacre")
+    looked_up.status = {"spotify": "done", "bandcamp": "done"}
+    book.seed([looked_up])
     thinner = BandProfile(band="Wiseacre")
     thinner.status = {"spotify": "done", "bandcamp": "idle"}
     book.seed([thinner])
-    assert book.profiles["wiseacre"] is richer         # what was looked up here is kept
+    assert book.profiles["wiseacre"] is looked_up       # an identity found here beats a record without it
+    book.close()
+
+
+def _viewed(spotify_id, tracks=True):
+    from twiddle.scene.bands import BandProfile
+    p = BandProfile(band="Girl Chow")
+    p.status = {"lookup": "done", "spotify": "done", "bandcamp": "done",
+                "tracks": "done" if tracks else "idle"}
+    p.spotify_artist = {"id": spotify_id}
+    p.bandcamp = {"item_url_root": "https://x.bandcamp.com"}
+    if tracks:
+        p.tracks, p.bc_tracks = [{"uri": "u"}], [{"title": "t"}]
+    return p
+
+
+def test_a_viewed_band_takes_a_corrected_record_and_drops_lists_of_the_old_artist():
+    """Codex: four done enrichers (with tracks) must not veto a three-done record."""
+    book = BandBook([])
+    book.seed([_viewed("old", tracks=True)])
+    book.seed([_viewed("corrected", tracks=False)])
+    p = book.profiles["girl chow"]
+    assert p.spotify_artist == {"id": "corrected"}
+    assert p.tracks == [] and p.status["tracks"] == "idle"     # the old artist's lists are gone
+    assert p.bc_tracks == [{"title": "t"}]                     # same Bandcamp page: kept
+    book.close()
+
+
+def test_a_viewed_band_keeps_its_lists_when_the_record_agrees_on_who_it_is():
+    book = BandBook([])
+    book.seed([_viewed("same", tracks=True)])
+    book.seed([_viewed("same", tracks=False)])
+    p = book.profiles["girl chow"]
+    assert p.tracks == [{"uri": "u"}] and p.bc_tracks and p.status["tracks"] == "done"
     book.close()
 
 

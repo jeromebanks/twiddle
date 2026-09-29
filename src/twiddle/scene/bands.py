@@ -498,17 +498,34 @@ class BandBook:
         """Register profiles already known (the dataset's) without scheduling
         anything. An enricher marked `idle` on one runs only when that band is
         fetched `urgent`ly -- the one on screen -- never for the lot."""
-        def done(p):
-            return sum(1 for v in p.status.values() if v == "done")
+        identity = ("lookup", "spotify", "bandcamp")
         with self._lock:
             for p in profiles:
                 key = lookup.norm(p.band)
                 old = self.profiles.get(key)
-                # A lookup in flight finishes on its own object; one done here
-                # already knows more than the dataset does. Leave both alone.
-                if old is not None and (old.busy() or done(old) > done(p)):
-                    continue
+                if old is not None:
+                    # A lookup in flight finishes on its own object. And an
+                    # identity answered here that the record lacks (or that a
+                    # pin overrode) is worth more than the record.
+                    if old.busy() or any(old.status.get(n) == "done"
+                                         and p.status.get(n) != "done" for n in identity):
+                        continue
+                    self._carry_tracks(old, p)
                 self.profiles[key] = p
+
+    @staticmethod
+    def _carry_tracks(old: BandProfile, new: BandProfile) -> None:
+        """Song lists fetched here stay, but only for the identity they were
+        fetched for: a corrected artist in the new record drops the old lists."""
+        same_spotify = (old.spotify_artist or {}).get("id") == (new.spotify_artist or {}).get("id")
+        same_bandcamp = (old.bandcamp or {}).get("item_url_root") == \
+            (new.bandcamp or {}).get("item_url_root")
+        if old.tracks and same_spotify and new.spotify_artist:
+            new.tracks = old.tracks
+        if old.bc_tracks and same_bandcamp and new.bandcamp:
+            new.bc_tracks = old.bc_tracks
+        if old.status.get("tracks") == "done" and same_spotify and same_bandcamp:
+            new.status["tracks"] = "done"
 
     def get(self, band: str, urgent: bool = True) -> BandProfile:
         """The profile as known now; missing enrichments are scheduled.

@@ -309,3 +309,19 @@ def test_the_builder_records_identity_but_not_song_lists(tmp_path, monkeypatch):
     assert rec["identifiers"]["bandcamp"] == "https://c.bandcamp.com"
     assert rec["tracks"] == [] and rec["bc_tracks"] == [] and seen == [] and bc_pages == []
     assert "tracks" not in rec["status"]
+
+
+def test_listings_are_published_before_the_slow_wikipedia_requests(tmp_path, monkeypatch):
+    """Codex: a cold Wikipedia (up to 10 s a venue) must not delay first paint."""
+    docs, order = [], []
+    real = dataset.publish
+    monkeypatch.setattr(dataset, "publish", lambda d, path=None: (
+        order.append("publish"), docs.append(copy.deepcopy(d)), real(d, path))[2])
+    fox = Show(date(2026, 10, 5), "Fox Theater, Oakland", ["Somebody"], source="thelist")
+    run(tmp_path, [Src("thelist", [fox])],
+        wiki=lambda t: order.append("wiki") or {"extract": "A hall.", "url": "u"})
+    assert order[:2] == ["publish", "wiki"]
+    first = next(v for v in docs[0]["venues"] if v["name"] == "Fox Theater")
+    assert first["wikipedia_summary"] is None                # not yet
+    last = next(v for v in docs[-1]["venues"] if v["name"] == "Fox Theater")
+    assert last["wikipedia_summary"]["extract"] == "A hall."
