@@ -1319,3 +1319,22 @@ def test_a_checkpoint_that_enriches_the_band_on_screen_brings_its_song_lists(mon
             assert app._profile().bc_tracks == BC_TRACKS
             assert app.query_one("#tracks").option_count > 0
     run(go())
+
+
+def test_a_rebuild_that_changes_only_the_bands_details_redraws_the_open_card():
+    """Codex: same status and identity, new bio/genre/links -- the card must follow."""
+    import os
+    from twiddle import lookup as lk
+    base = _identity_only("Girl Chow")
+    base["info"] = lk.ArtistInfo(name="Girl Chow", summary="The old bio.").to_dict()
+
+    async def go():
+        app = make_app(bands={"Girl Chow": base})
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: "The old bio." in str(app.query_one("#profile").render()))
+            newer = dict(base, info=lk.ArtistInfo(name="Girl Chow", summary="A corrected bio.").to_dict())
+            publish_dataset(bands={"Girl Chow": newer})
+            os.utime(dataset.default_path(), (1, 1_900_000_003))
+            app._watch_dataset()
+            await settle(pilot, app, lambda: "A corrected bio." in str(app.query_one("#profile").render()))
+    run(go())

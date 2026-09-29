@@ -422,3 +422,76 @@ def test_track_enricher_waits_out_an_identity_that_lands_later(monkeypatch):
         time.sleep(0.01)
     book.close()
     assert p.tracks == [{"uri": "u"}]
+
+
+def test_track_enricher_checks_again_when_identity_lands_while_it_runs(monkeypatch):
+    """Codex: Spotify's tracks begin before Bandcamp identifies the band; the
+    Bandcamp completion sees `tracks` running and schedules nothing."""
+    from twiddle import discover_cli
+    from twiddle.scene.bands import TrackEnricher
+    monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, a: [{"uri": "u"}])
+    started, release = threading.Event(), threading.Event()
+
+    def bc_tracks(url):
+        return [{"title": "t"}]
+
+    class SlowSpotifySide:
+        name, serial = "spotify", False
+
+        def session(self):
+            started.set()
+            release.wait(2)          # the Spotify track request is in flight ...
+            return object()
+
+        def enrich(self, p):
+            p.spotify_artist = {"id": "s1"}
+
+    class Bandcamp:
+        name, serial = "bandcamp", False
+
+        def enrich(self, p):
+            started.wait(2)          # ... when Bandcamp identifies the band
+            p.bandcamp = {"item_url_root": "https://x.bandcamp.com"}
+            release.set()
+    spot = SlowSpotifySide()
+    book = BandBook([spot, Bandcamp(), TrackEnricher(spot, bc_tracks=bc_tracks)])
+    p = BandProfile("X")
+    p.status = {"spotify": "done", "bandcamp": "idle", "tracks": "idle"}
+    p.spotify_artist = {"id": "s1"}
+    book.seed([p])
+    book.get("X", urgent=True)
+    deadline = time.time() + 3
+    while (not (p.tracks and p.bc_tracks) or p.busy()) and time.time() < deadline:
+        time.sleep(0.01)
+    book.close()
+    assert p.tracks and p.bc_tracks == [{"title": "t"}]
+
+
+def test_a_record_that_arrives_mid_lookup_is_applied_when_the_lookup_ends():
+    """Codex: the last publish must not be lost because a worker was running."""
+    gate = threading.Event()
+
+    class Slow:
+        name, serial = "spotify", False
+
+        def enrich(self, p):
+            gate.wait(2)
+            p.spotify_artist = {"id": "local"}
+    updates = []
+    book = BandBook([Slow()], on_update=updates.append)
+    p = BandProfile("X")
+    p.status = {"spotify": "idle"}
+    book.seed([p])
+    book.get("X", urgent=True)                             # spotify now running
+    published = BandProfile("X")
+    published.status = {"spotify": "done"}
+    published.spotify_artist = {"id": "from-dataset"}
+    book.seed([published])                                 # arrives mid-lookup: deferred
+    assert book.profiles["x"] is p
+    gate.set()
+    deadline = time.time() + 3
+    while book.profiles["x"] is p and time.time() < deadline:
+        time.sleep(0.01)
+    book.close()
+    assert book.profiles["x"].spotify_artist == {"id": "from-dataset"}
+    assert updates and updates[-1] is book.profiles["x"]

@@ -434,6 +434,7 @@ class TrackEnricher:
     """
     name = "tracks"
     serial = False
+    self_rerun = True   # identity can land while this runs: check again when done
 
     def __init__(self, spotify: SpotifyEnricher, bc_tracks=bandcamp.tracks):
         self._spotify = spotify
@@ -484,6 +485,7 @@ class BandBook:
         self.on_update = on_update
         # band -> its profile as the dataset has it (`refresh` uses this)
         self.reseed: Callable[[str], BandProfile | None] | None = None
+        self._deferred: dict[str, BandProfile] = {}
         self.profiles: dict[str, BandProfile] = {}
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=spotify_workers,
@@ -507,8 +509,11 @@ class BandBook:
                     # A lookup in flight finishes on its own object. And an
                     # identity answered here that the record lacks (or that a
                     # pin overrode) is worth more than the record.
-                    if old.busy() or any(old.status.get(n) == "done"
-                                         and p.status.get(n) != "done" for n in identity):
+                    if old.busy():
+                        self._deferred[key] = p          # applied when its lookup ends
+                        continue
+                    if any(old.status.get(n) == "done" and p.status.get(n) != "done"
+                           for n in identity):
                         continue
                     self._carry_tracks(old, p)
                 self.profiles[key] = p
@@ -610,16 +615,30 @@ class BandBook:
         for other in self.enrichers:
             rerun = getattr(other, "wants_rerun", None)
             with self._lock:
-                if other is e or p.status.get(other.name) != "done" \
-                        or not (rerun and rerun(p)):
+                if (other is e and not getattr(e, "self_rerun", False)) \
+                        or p.status.get(other.name) != "done" or not (rerun and rerun(p)):
                     continue
                 p.status[other.name] = "pending"
             self._schedule(other, p, urgent=True)
         assess(p)
+        newer = self._take_deferred(p)
         try:
-            self.on_update(p)
+            self.on_update(newer or p)
         except Exception:
             pass
+
+    def _take_deferred(self, p: BandProfile) -> BandProfile | None:
+        """A dataset record that arrived while `p` was being looked up waits
+        for the lookup to finish, then goes through `seed` like any other."""
+        key = lookup.norm(p.band)
+        with self._lock:
+            if p.busy() or self.profiles.get(key) is not p:
+                return None
+            waiting = self._deferred.pop(key, None)
+        if waiting is None:
+            return None
+        self.seed([waiting])
+        return self.profiles.get(key)
 
     def close(self) -> None:
         self._lane.put((-1, -1, None, None))

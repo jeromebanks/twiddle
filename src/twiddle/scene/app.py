@@ -470,15 +470,19 @@ class SceneApp(App):
         else:
             self._set_shows(snap.shows, snap.generated_at)
 
-    def _profile_sig(self) -> tuple | None:
+    def _profile_sig(self) -> str | None:
+        """Everything the band card and track list show, so a rebuild that
+        changes any of it re-renders them (and one that changes none does not)."""
         p = self._profile()
         if p is None:
             return None
-        return (tuple(sorted(p.status.items())), p.confidence, len(p.tracks), len(p.bc_tracks),
-                (p.spotify_artist or {}).get("id"), (p.bandcamp or {}).get("item_url_root"),
-                p.info.mbid if p.info else None, p.info.name if p.info else None)
+        return repr((sorted(p.status.items()), p.confidence, p.why,
+                     p.info.to_dict() if p.info else None, p.lookup_candidates,
+                     p.spotify_artist, p.spotify_candidates, p.tracks,
+                     p.bandcamp, p.bc_tracks, p.alias,
+                     profiles.guess_to_dict(self._scan_guesses.get(self._key(p.band)))))
 
-    def _refresh_bands_in_place(self, before: tuple | None) -> None:
+    def _refresh_bands_in_place(self, before: str | None) -> None:
         self._refresh_genre_cells()
         s = self.current_show
         if s is not None:
