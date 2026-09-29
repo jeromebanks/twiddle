@@ -96,6 +96,20 @@ class BandProfile:
     alias: str | None = None                # a trimmed name the catalog knows
     searched: dict[str, str] = field(default_factory=dict)   # enricher -> name it used
 
+    # Which fields each enricher fills: one answer can be carried to another
+    # profile of the same band without dragging the others' along.
+    FIELDS = {"lookup": ("info", "lookup_candidates", "alias"),
+              "spotify": ("spotify_artist", "spotify_candidates", "tracks"),
+              "bandcamp": ("bandcamp", "bc_tracks")}
+
+    def adopt(self, name: str, other: "BandProfile") -> None:
+        """Take `other`'s answer from enricher `name`, and count it as done."""
+        for attr in self.FIELDS[name]:
+            setattr(self, attr, getattr(other, attr))
+        if name in other.searched:
+            self.searched[name] = other.searched[name]
+        self.status[name] = "done"
+
     @property
     def search_name(self) -> str:
         return self.alias or self.band
@@ -512,9 +526,13 @@ class BandBook:
                     if old.busy():
                         self._deferred[key] = p          # applied when its lookup ends
                         continue
-                    if any(old.status.get(n) == "done" and p.status.get(n) != "done"
-                           for n in identity):
-                        continue
+                    # Keep what was looked up here that the record lacks, but
+                    # take the record's other answers: a partial checkpoint
+                    # with a corrected Spotify artist still corrects it.
+                    for n in identity:
+                        if old.status.get(n) == "done" and p.status.get(n) != "done":
+                            p.adopt(n, old)
+                    assess(p)
                     self._carry_tracks(old, p)
                 self.profiles[key] = p
 

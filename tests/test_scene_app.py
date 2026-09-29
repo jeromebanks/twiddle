@@ -1156,11 +1156,14 @@ def test_reloading_never_replaces_a_profile_whose_lookup_is_running():
     assert book.profiles["girl chow"] is running
     looked_up = BandProfile(band="Wiseacre")
     looked_up.status = {"spotify": "done", "bandcamp": "done"}
+    looked_up.bandcamp = {"item_url_root": "https://w.bandcamp.com"}
     book.seed([looked_up])
     thinner = BandProfile(band="Wiseacre")
     thinner.status = {"spotify": "done", "bandcamp": "idle"}
     book.seed([thinner])
-    assert book.profiles["wiseacre"] is looked_up       # an identity found here beats a record without it
+    merged = book.profiles["wiseacre"]                   # an identity found here is kept ...
+    assert merged.bandcamp == {"item_url_root": "https://w.bandcamp.com"}
+    assert merged.status["bandcamp"] == "done" and merged.status["spotify"] == "done"
     book.close()
 
 
@@ -1338,3 +1341,24 @@ def test_a_rebuild_that_changes_only_the_bands_details_redraws_the_open_card():
             app._watch_dataset()
             await settle(pilot, app, lambda: "A corrected bio." in str(app.query_one("#profile").render()))
     run(go())
+
+
+def test_a_partial_checkpoint_still_corrects_the_artist_it_does_have():
+    """Codex: Bandcamp done locally must not veto a record's corrected Spotify
+    artist just because the record has not finished Bandcamp yet."""
+    from twiddle.scene.bands import BandProfile
+    book = BandBook([])
+    viewed = BandProfile(band="Girl Chow")
+    viewed.status = {"lookup": "done", "spotify": "done", "bandcamp": "done", "tracks": "done"}
+    viewed.spotify_artist, viewed.tracks = {"id": "old"}, [{"uri": "u"}]
+    viewed.bandcamp, viewed.bc_tracks = {"item_url_root": "https://x.bandcamp.com"}, [{"title": "t"}]
+    book.seed([viewed])
+    partial = BandProfile(band="Girl Chow")
+    partial.status = {"lookup": "done", "spotify": "done", "bandcamp": "idle", "tracks": "idle"}
+    partial.spotify_artist = {"id": "corrected"}
+    book.seed([partial])
+    p = book.profiles["girl chow"]
+    assert p.spotify_artist == {"id": "corrected"} and p.tracks == []      # corrected, old lists gone
+    assert p.bandcamp == {"item_url_root": "https://x.bandcamp.com"}       # what only we knew stays
+    assert p.bc_tracks == [{"title": "t"}] and p.status["bandcamp"] == "done"
+    book.close()

@@ -173,20 +173,11 @@ def _keep_prior_answers(p: BandProfile, old: dict | None) -> None:
     if not old or not any(v == "done" for v in (old.get("status") or {}).values()):
         return
     before = profiles.from_record(old, names=profiles.ENRICHERS)
-    fields = {"lookup": ("info", "lookup_candidates", "alias"),
-              "spotify": ("spotify_artist", "spotify_candidates", "tracks"),
-              "bandcamp": ("bandcamp", "bc_tracks")}
     kept = False
-    for name, attrs in fields.items():
-        if name in p.status and p.status[name] == "done":
-            continue
-        if before.status.get(name) != "done":
-            continue
-        for a in attrs:
-            setattr(p, a, getattr(before, a))
-        p.searched.update({k: v for k, v in before.searched.items() if k == name})
-        p.status[name] = "done"
-        kept = True
+    for name in BandProfile.FIELDS:
+        if p.status.get(name) != "done" and before.status.get(name) == "done":
+            p.adopt(name, before)
+            kept = True
     if kept:
         assess(p, use_pins=False)
 
