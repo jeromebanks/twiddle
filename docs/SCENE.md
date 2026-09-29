@@ -207,12 +207,13 @@ families:
 
 `/` filters by it: type `metal` or `reggae`.
 
-**Coverage, measured 2026-09-25:** 64 of 83 shows in the next 30 days at
-your venues got a genre, 48 of them without a `?` (158 of 272 bands).
+**Coverage, measured 2026-09-25** (before the venue list grew): 64 of 83
+shows in the next 30 days at your venues got a genre, 48 of them without a
+`?` (158 of 272 bands).
 
 **How it gets there.** The *builder* asks Bandcamp about every band at your
-venues in the next 31 days, one request a second (the first run over a
-month of listings took **4½ minutes** for this step alone), and stores each
+venues in the next 31 days, one request a second (2026-09-25, 272 bands:
+**4½ minutes**; the window is ~1,100 bands now, see *What a build does*), and stores each
 band's guess in the dataset; the table just reads it. Answers are cached for
 two weeks (misses for three days) in `bandcamp.json`, so later builds are
 instant. A 429, or three failures in a row, pauses Bandcamp requests for 15
@@ -516,9 +517,9 @@ details for any field you leave out. An unwatched venue has no details, but
 `g` still searches the map for The List's "Name, City".
 
 Watching a venue means its next 30 days of bands are looked up by the
-build. The 2026-09-25 additions brought in ~550 bands, about 9 minutes
-of Bandcamp searches at its 1 request/second the first time, then cached
-for 14 days. Trim the list in `scene.toml` if that's more than you want.
+build. Measured 2026-09-29 the default month is ~1,100 bands, ~2 s each
+the first time (MusicBrainz's 1 request/second is the limit), then cached
+for 14-30 days. Trim the list in `scene.toml` if that's more than you want.
 
 Not yet covered: **SFJAZZ** is on no source (its site refuses scripts), and
 **Freight & Salvage** is only partly on The List (its own calendar is drawn

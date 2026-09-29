@@ -902,28 +902,52 @@ def _compiled(name, **kw):
     return profiles.to_record(p, updated_at=1.0, guess=None)
 
 
-def test_with_the_network_dead_scene_browses_a_compiled_dataset(monkeypatch):
-    """Acceptance: launch offline and browse events, venues and lineup data."""
-    _no_collection(monkeypatch)
-    bands = {"Girl Chow": _compiled("Girl Chow"), "Wiseacre": _compiled("Wiseacre")}
+def _identity_only(name):
+    """What the builder writes now: who the band is, no song lists."""
+    return dict(_compiled(name), tracks=[], bc_tracks=[],
+                status={"lookup": "done", "spotify": "done", "bandcamp": "done"})
 
-    def book_factory(on_update):
-        return BandBook([Tripwire("lookup"), Tripwire("spotify"), Tripwire("bandcamp")],
-                        on_update=on_update)
+
+def _production_book(on_update):
+    """cli.cmd_scene's book, with the network dead: every fetch explodes."""
+    from twiddle.scene.bands import SpotifyEnricher, TrackEnricher
+
+    def dead_session():
+        raise ConnectionError("network is down")
+    spot = SpotifyEnricher(dead_session)
+
+    def dead(url):
+        raise ConnectionError("network is down")
+    return BandBook([Tripwire("lookup"), spot, Tripwire("bandcamp"),
+                     TrackEnricher(spot, bc_tracks=dead)], on_update=on_update)
+
+
+def test_with_the_network_dead_scene_browses_a_compiled_dataset(monkeypatch):
+    """Acceptance: launch offline and browse events, venues and lineup data --
+    with the production-shaped book, over records shaped as the builder writes
+    them (identity, genre, no song lists)."""
+    _no_collection(monkeypatch)
+    guess = profiles.guess_to_dict(genre_mod.for_band(GIRL_CHOW_BC[0], sure=True))
+    bands = {"Girl Chow": dict(_identity_only("Girl Chow"), genre=guess),
+             "Wiseacre": _identity_only("Wiseacre")}
 
     async def go():
         app = make_app(bands=bands)
-        app.book = book_factory(app._from_worker_band)
+        app.book = _production_book(app._from_worker_band)
         async with app.run_test(size=(160, 45)) as pilot:
             await settle(pilot, app, lambda: len(app._rows) == 2)
-            await settle(pilot, app, lambda: app._profile() and app._profile().tracks)
+            assert "reggae" in str(app.query_one("#shows").get_row_at(0)[2]).lower()
+            await settle(pilot, app, lambda: app._profile() is not None
+                         and app._profile().status.get("tracks", "").startswith("error"))
             p = app._profile()
-            assert p.confidence == "name_only" and p.bc_tracks and p.status["spotify"] == "done"
-            await pilot.press("enter", "j")              # second band of the lineup
+            assert p.confidence == "name_only" and not p.busy()        # not stuck "looking"
+            assert "Girl Chow" in str(app.query_one("#profile").render())
+            assert "searching" not in (app.query_one("#tracks").border_subtitle or "")
+            await pilot.press("enter", "j")                            # the other band
             assert app.current_band == "Wiseacre"
-            await settle(pilot, app, lambda: app._profile().tracks)
-            await pilot.pause(0.2)
-            assert "not looked up" not in str(app.query_one("#profile").render())
+            await settle(pilot, app, lambda: app._profile().status.get("tracks", "")
+                         .startswith("error"))
+            assert app.is_running
     run(go())
 
 
@@ -1236,4 +1260,29 @@ def test_the_band_on_screen_gets_its_song_lists_and_the_rest_of_the_lineup_does_
             assert asked == ["Girl Chow"]                    # Wiseacre: not until selected
             await pilot.press("enter", "j")
             await settle(pilot, app, lambda: "Wiseacre" in asked)
+    run(go())
+
+
+def test_a_checkpoint_that_enriches_the_band_on_screen_brings_its_song_lists(monkeypatch):
+    """The swapped-in record has no song lists; nothing waits for you to move
+    away and back to fetch them."""
+    import os
+    from twiddle import discover_cli
+    from twiddle.scene.bands import SpotifyEnricher, TrackEnricher
+    monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, a: TRACKS)
+
+    async def go():
+        app = make_app()                      # every band starts unenriched
+        spot = SpotifyEnricher(lambda: object(), tracks=False)
+        app.book = BandBook([TrackEnricher(spot, bc_tracks=lambda url: BC_TRACKS)],
+                            on_update=app._from_worker_band)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app.current_band == "Girl Chow")
+            assert app._profile().tracks == []
+            publish_dataset(bands={"Girl Chow": _identity_only("Girl Chow")}, complete=False)
+            os.utime(dataset.default_path(), (1, 1_900_000_002))
+            app._watch_dataset()
+            await settle(pilot, app, lambda: app._profile().tracks)
+            assert app._profile().bc_tracks == BC_TRACKS
+            assert app.query_one("#tracks").option_count > 0
     run(go())

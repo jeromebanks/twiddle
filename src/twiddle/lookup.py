@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -481,7 +482,15 @@ def _cache_save(cache: dict) -> None:
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         now = time.time()
         fresh = {k: v for k, v in cache.items() if now - v.get("at", 0) < CACHE_TTL_S}
-        CACHE_FILE.write_text(json.dumps(fresh))
+        # Whole-file rename, private temp name: `scene build`, the app and dial
+        # share this file, and a reader that met a half-written one would get
+        # {} and save just that -- wiping the 30-day cache.
+        tmp = CACHE_FILE.with_name(f".{CACHE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            tmp.write_text(json.dumps(fresh))
+            os.replace(tmp, CACHE_FILE)
+        finally:
+            tmp.unlink(missing_ok=True)
     except OSError:
         pass
 

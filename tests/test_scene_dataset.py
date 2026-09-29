@@ -217,3 +217,52 @@ def test_cache_writes_use_a_private_temp_name_and_leave_nothing_behind(tmp_path,
     cache._write("x.json", {"a": 1})
     cache._write("x.json", {"a": 2})
     assert [p.name for p in tmp_path.iterdir()] == ["x.json"] and cache._read("x.json") == {"a": 2}
+
+
+def test_a_mismatched_pin_forgets_the_datasets_artist_and_its_tracks():
+    """Otherwise the song-list fetch, woken beside the pinned lookup, could put
+    the wrong artist's tracks back -- or a "not on Spotify" band's."""
+    from twiddle.scene.bands import SpotifyEnricher, TrackEnricher
+    rec = profiles.to_record(_profile(), updated_at=1.0, guess=None)
+    rec["tracks"] = [{"uri": "spotify:track:1"}]
+    for pin in ("other", None):
+        p = profiles.from_record(rec, pinned=lambda b, pin=pin: {"spotify_id": pin})
+        assert p.spotify_artist is None and p.tracks == [] and p.spotify_candidates == []
+        assert p.status["spotify"] == "idle"
+        asked = []
+
+        class Spy(SpotifyEnricher):
+            def session(self):
+                asked.append(1)
+                return object()
+        p.bandcamp = None                       # only the Spotify side is under test
+        enr = TrackEnricher(Spy(lambda: object(), tracks=False))
+        enr.enrich(p)
+        assert asked == [] and p.tracks == [] and not enr.wants_rerun(p)
+    kept = profiles.from_record(rec, pinned=lambda b: {"spotify_id": "sp1"})
+    assert kept.spotify_artist == {"id": "sp1", "name": "Girl Chow"} and kept.tracks
+
+
+def test_the_lookup_cache_is_saved_by_atomic_rename_so_a_reader_never_sees_half(tmp_path, monkeypatch):
+    import threading
+    from twiddle import lookup
+    monkeypatch.setattr(lookup, "CACHE_FILE", tmp_path / "lookup.json")
+    big = {f"k{i}": {"at": 9e12, "artist": None, "candidates": []} for i in range(2000)}
+    lookup._cache_save(big)
+    stop, torn = threading.Event(), []
+
+    def reader():
+        while not stop.is_set():
+            got = lookup._cache_load()
+            if len(got) < 2000:
+                torn.append(len(got))
+    t = threading.Thread(target=reader)
+    t.start()
+    try:
+        for i in range(60):
+            lookup._cache_save(dict(big, extra={"at": 9e12 + i}))
+    finally:
+        stop.set()
+        t.join()
+    assert torn == [] and len(lookup._cache_load()) == 2001
+    assert [p.name for p in tmp_path.iterdir()] == ["lookup.json"]

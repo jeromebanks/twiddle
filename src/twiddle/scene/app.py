@@ -486,6 +486,10 @@ class SceneApp(App):
             for idx, b in enumerate(s.bands):
                 if idx < lineup.option_count:
                     lineup.replace_option_prompt_at_index(idx, self._lineup_label(b))
+        if self.current_band:
+            # The checkpoint may have swapped in a record for the band on
+            # screen; wake whatever it lacks (song lists) as selecting it would.
+            self.book.get(self.current_band, urgent=True)
         p = self._profile()
         if p is not None and self._profile_sig() != before:
             self._render_profile(p)

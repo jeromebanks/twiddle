@@ -120,6 +120,10 @@ def from_record(rec: dict, *, pinned: Callable[[str], dict | None] | None = None
     pin = pinned(p.band) if pinned else None
     if pin is not None and "spotify" in p.status:
         if (pin.get("spotify_id") or "") != (p.spotify_artist or {}).get("id", ""):
+            # The dataset's pick is not who this person chose: forget it, so
+            # nothing (TrackEnricher, the badge) works from the wrong artist
+            # while the pinned one is looked up.
             p.status["spotify"] = "idle"
+            p.spotify_artist, p.spotify_candidates, p.tracks = None, [], []
     assess(p)
     return p
