@@ -238,3 +238,10 @@ def test_wikipedia_summaries_are_stored_and_survive_a_failed_fetch(tmp_path):
 def test_dry_run_publishes_nothing(tmp_path):
     r = run(tmp_path, [Src("thelist", [GIRL])], dry_run=True)
     assert r.shows == 1 and not (tmp_path / "d.json").exists()
+
+
+def test_a_build_without_spotify_does_not_claim_a_band_is_not_on_spotify(tmp_path):
+    run(tmp_path, [Src("thelist", [COUP])], [Enr("lookup"), Enr("bandcamp")])
+    rec = read(tmp_path).band("Coup Dville")
+    assert rec["confidence"] == "pending" and "not checked" in rec["why"]
+    assert "spotify" not in rec["status"]

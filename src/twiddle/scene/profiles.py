@@ -48,7 +48,13 @@ def info_from_dict(d: dict | None) -> lookup.ArtistInfo | None:
 
 
 def to_record(p: BandProfile, *, updated_at: float | None, guess: genre.Guess | None) -> dict:
-    """The record for an enriched profile. `updated_at` is when the enrichers ran."""
+    """The record for an enriched profile. `updated_at` is when the enrichers ran.
+
+    Spotify identity is only *graded* when Spotify answered: a build that had
+    no Spotify (signed out, `--no-spotify`, an error) must not publish "not on
+    Spotify" for a band it never asked about.
+    """
+    checked = p.status.get("spotify") == "done"
     return {
         "name": p.band,
         "updated_at": iso(updated_at),
@@ -67,8 +73,8 @@ def to_record(p: BandProfile, *, updated_at: float | None, guess: genre.Guess | 
         "bc_tracks": p.bc_tracks,
         "alias": p.alias,
         "searched": dict(p.searched),
-        "confidence": p.confidence,
-        "why": p.why,
+        "confidence": p.confidence if checked else "pending",
+        "why": p.why if checked else "Spotify was not checked in this build",
         "genre": guess_to_dict(guess),
     }
 
