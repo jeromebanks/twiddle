@@ -16,7 +16,8 @@ from . import genre
 from .bands import BandProfile, assess
 from .dataset import iso
 
-ENRICHERS = ("lookup", "spotify", "bandcamp")
+ENRICHERS = ("lookup", "spotify", "bandcamp")     # what a build runs
+SEEDED = ENRICHERS + ("tracks",)                   # what the app may still run per band
 
 
 def guess_to_dict(g: genre.Guess | None) -> dict | None:
@@ -94,10 +95,11 @@ def enriched(rec: dict | None, names: tuple[str, ...] = ENRICHERS) -> bool:
 
 
 def from_record(rec: dict, *, pinned: Callable[[str], dict | None] | None = None,
-                names: tuple[str, ...] = ENRICHERS) -> BandProfile:
+                names: tuple[str, ...] = SEEDED) -> BandProfile:
     """The profile as the dataset knows it, ready to seed a `BandBook`.
 
-    Every enricher that did not finish `done` is `idle`: the app runs it, for
+    Every enricher that did not finish `done` is `idle` (the dataset never has
+    `tracks` done: song lists are fetched for the band on screen): the app runs it, for
     that one band, when the band is put on screen. So is Spotify whenever this
     person pinned a different artist than the dataset's name-search picked
     (or pinned "not on Spotify" where it found one) -- the dataset is graded

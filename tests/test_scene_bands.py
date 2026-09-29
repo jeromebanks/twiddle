@@ -354,3 +354,71 @@ def test_a_failed_spotify_search_is_not_reported_as_no_such_artist():
     p.status["spotify"] = "error: 429: API rate limit exceeded"
     assess(p)
     assert p.confidence == NONE and p.why == "Spotify: 429: API rate limit exceeded"
+
+
+# ---- song lists for the band on screen --------------------------------------------------
+
+
+def test_track_enricher_fetches_only_the_lists_that_are_missing(monkeypatch):
+    from twiddle import discover_cli
+    from twiddle.scene.bands import TrackEnricher
+    asked = []
+    monkeypatch.setattr(discover_cli, "_artist_tracks",
+                        lambda sess, a: asked.append(("spotify", a["id"])) or [{"uri": "u"}])
+    spot = SpotifyEnricher(lambda: object(), tracks=False)
+    enr = TrackEnricher(spot, bc_tracks=lambda url: asked.append(("bandcamp", url)) or [{"title": "t"}])
+    p = BandProfile("X")
+    p.spotify_artist = {"id": "s1"}
+    p.bandcamp = {"item_url_root": "https://x.bandcamp.com"}
+    assert enr.wants_rerun(p)
+    enr.enrich(p)
+    assert p.tracks == [{"uri": "u"}] and p.bc_tracks == [{"title": "t"}]
+    assert not enr.wants_rerun(p)
+    enr.enrich(p)                                        # nothing missing: nothing asked
+    assert len(asked) == 2
+
+
+def test_track_enricher_does_not_retry_an_artist_with_no_tracks_forever(monkeypatch):
+    from twiddle import discover_cli
+    from twiddle.scene.bands import TrackEnricher
+    monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, a: [])
+    enr = TrackEnricher(SpotifyEnricher(lambda: object(), tracks=False))
+    p = BandProfile("X")
+    p.spotify_artist = {"id": "s1"}
+    enr.enrich(p)
+    assert not enr.wants_rerun(p)                        # tried this identity already
+    p.spotify_artist = {"id": "s2"}
+    assert enr.wants_rerun(p)                            # a different one is worth a look
+
+
+def test_track_enricher_waits_out_an_identity_that_lands_later(monkeypatch):
+    """Woken together with Spotify identity, it may run first and find nothing;
+    it runs again once the artist is known."""
+    from twiddle import discover_cli
+    from twiddle.scene.bands import TrackEnricher
+    monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, a: [{"uri": "u"}])
+    gate = threading.Event()
+
+    class SlowIdentity:
+        name, serial = "spotify", False
+
+        def session(self):
+            return object()
+
+        def enrich(self, p):
+            gate.wait(2)
+            p.spotify_artist = {"id": "s1"}
+    ident = SlowIdentity()
+    book = BandBook([ident, TrackEnricher(ident)])
+    p = BandProfile("X")
+    p.status = {"spotify": "idle", "tracks": "idle"}
+    book.seed([p])
+    book.get("X", urgent=True)
+    time.sleep(0.2)
+    assert p.status["tracks"] == "done" and not p.tracks    # ran first, found no identity
+    gate.set()
+    deadline = time.time() + 3
+    while (not p.tracks or p.busy()) and time.time() < deadline:
+        time.sleep(0.01)
+    book.close()
+    assert p.tracks == [{"uri": "u"}]

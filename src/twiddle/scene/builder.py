@@ -13,8 +13,11 @@ A run, in order:
   3. **publish** shows + venues (band records carried over) -- seconds, so
      `r` and a first run show listings before the slow part;
   4. enrich the bands playing watched venues in the next `days`: MusicBrainz,
-     Bandcamp and (only if this Mac is signed in) Spotify, one band at a time,
-     in the same lookup-first order the app used. A band enriched within
+     Bandcamp and (only if this Mac is signed in) Spotify *identity*, one band
+     at a time, in the same lookup-first order the app used. Song lists are
+     left out (`TrackEnricher`): measured 2026-09-29, a default build is ~1,100
+     bands at ~2 s each cold (MusicBrainz's 1 req/s), and song lists
+     would add 2-4 requests a band that only matter on play. A band enriched within
      `PROFILE_TTL_S` is reused, so a re-run costs almost nothing. Publishes
      every `CHECKPOINT` bands, so a killed run keeps its work;
   5. publish the finished dataset (`complete: true`).
@@ -28,13 +31,14 @@ from __future__ import annotations
 
 import fcntl
 import time
+import zlib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 
-from .. import spotify_ops
+from .. import spotify, spotify_ops
 from . import bandcamp, dataset, genre, profiles
 from . import venue_info
 from . import venues as venues_mod
@@ -44,8 +48,9 @@ from .model import Show
 from .sources import fetch_all
 
 DEFAULT_DAYS = 31           # how far ahead bands are enriched (and asked of Bandcamp)
-PROFILE_TTL_S = 3 * 86400   # an enriched band is reused this long
+PROFILE_TTL_S = 3 * 86400   # an enriched band is reused this long (plus up to half again, see `_ttl`)
 CHECKPOINT = 25             # bands between intermediate publishes
+SPOTIFY_GAP_S = 0.5         # between bands' Spotify lookups: they share the user's quota
 
 
 class BuildError(RuntimeError):
@@ -79,6 +84,19 @@ def _locked(path: Path) -> Iterator[None]:
             yield
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _ttl(key: str) -> float:
+    """How long a band's record is trusted: 3 to 4½ days, by band, so a first
+    build's few hundred bands do not all expire -- and re-enrich -- together.
+    Deterministic, so the same inputs still publish the same file."""
+    return PROFILE_TTL_S * (1 + (zlib.crc32(key.encode()) % 1000) / 2000)
+
+
+def _rate_limited(exc: Exception) -> bool:
+    """Bandcamp's own back-off, or a Spotify 429: stop asking for the run."""
+    return isinstance(exc, bandcamp.BlockedError) or \
+        (isinstance(exc, spotify.ApiError) and exc.status == 429)
 
 
 def guess_from(hits: list[dict] | None) -> genre.Guess | None:
@@ -141,10 +159,10 @@ def _default_enrichers(use_spotify: bool, notes: dict[str, str]) -> list:
             notes["spotify"] = "skipped: " + ("not signed in -- run `twiddle spotify auth`"
                                               if spotify_ops.not_signed_in(exc) else str(exc))
         else:
-            enrichers.append(SpotifyEnricher(spotify_ops.session, use_pins=False))
+            enrichers.append(SpotifyEnricher(spotify_ops.session, use_pins=False, tracks=False))
     else:
         notes["spotify"] = "skipped: --no-spotify"
-    enrichers.append(BandcampEnricher())
+    enrichers.append(BandcampEnricher(fetch_tracks=False))
     return enrichers
 
 
@@ -162,10 +180,9 @@ def enrich_one(band: str, enrichers: list, skip: set[str]) -> BandProfile:
         try:
             e.enrich(p)
             p.status[e.name] = "done"
-        except bandcamp.BlockedError as exc:
-            skip.add(e.name)
-            p.status[e.name] = f"error: {exc}"
         except Exception as exc:
+            if _rate_limited(exc):
+                skip.add(e.name)
             p.status[e.name] = f"error: {getattr(exc, 'message', None) or exc}"
     for e in order:     # one answer can change another's (MusicBrainz names the Spotify artist)
         rerun = getattr(e, "wants_rerun", None)
@@ -173,10 +190,9 @@ def enrich_one(band: str, enrichers: list, skip: set[str]) -> BandProfile:
             continue
         try:
             e.enrich(p)
-        except bandcamp.BlockedError as exc:
-            skip.add(e.name)
-            p.status[e.name] = f"error: {exc}"
         except Exception as exc:
+            if _rate_limited(exc):
+                skip.add(e.name)
             p.status[e.name] = f"error: {getattr(exc, 'message', None) or exc}"
     assess(p, use_pins=False)
     return p
@@ -188,17 +204,18 @@ def build(*, path: Path | None = None, days: int = DEFAULT_DAYS, all_venues: boo
           genre_search: Callable = bandcamp.search,
           wiki: Callable[[str], dict | None] = venue_info.wiki_summary,
           watched=None, today: date | None = None,
+          spotify_gap: float = SPOTIFY_GAP_S, pace: Callable[[float], None] = time.sleep,
           log: Callable[[str], None] = lambda _m: None,
           now: Callable[[], float] = time.time) -> Result:
     path = path or dataset.default_path()
     today = today or date.today()
     with _locked(path):
         return _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
-                      genre_search, wiki, watched, today, log, now)
+                      genre_search, wiki, watched, today, spotify_gap, pace, log, now)
 
 
 def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
-           genre_search, wiki, watched, today, log, now) -> Result:
+           genre_search, wiki, watched, today, spotify_gap, pace, log, now) -> Result:
     try:
         prev = dataset.load(path)
     except dataset.DatasetError as exc:
@@ -267,7 +284,7 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
     for key, name in wanted.items():
         rec = bands.get(key)
         fresh = rec and rec.get("updated_at") and \
-            now() - (dataset._epoch(rec["updated_at"]) or 0) < PROFILE_TTL_S
+            now() - (dataset._epoch(rec["updated_at"]) or 0) < _ttl(key)
         if fresh and profiles.enriched(rec, names):
             result.reused += 1
         else:
@@ -278,11 +295,13 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
         guess = p.genre() or guess_from(hits)
         bands[key] = profiles.to_record(p, updated_at=now(), guess=guess)
         result.enriched += 1
+        if "spotify" in names and "spotify" not in skip and spotify_gap:
+            pace(spotify_gap)
         if i % CHECKPOINT == 0:
             publish(complete=False)
             log(f"  {i}/{len(todo)} bands")
     for n in skip:
-        enricher_status[n] = "paused: rate-limited" if n == "bandcamp" else f"paused: {n}"
+        enricher_status[n] = "paused: rate-limited"
     result.enrichers = enricher_status
     publish(complete=True)
     log(f"published {path}" if not dry_run else "dry run: nothing written")

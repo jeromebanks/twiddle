@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -38,9 +39,15 @@ def _read(name: str) -> dict:
 def _write(name: str, data: dict) -> None:
     p = _path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=1))
-    tmp.replace(p)
+    # Unique per process and thread: `scene build` and the app are two
+    # processes writing the same files, and a shared temp name could be
+    # renamed into place half-written by the other.
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=1))
+        tmp.replace(p)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 # ---- aliases ----------------------------------------------------------------

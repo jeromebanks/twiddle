@@ -111,7 +111,7 @@ def make_app(player=None, bandcamp=None, **kw):
     kw.setdefault("instagram_picture", lambda handle: None)   # nor for venues
     kw.setdefault("bandcamp_stream", lambda t: f"https://t4.bcbits.com/stream/{t['title']}")
     kw.setdefault("bootstrap", False)
-    kw.setdefault("run_build", lambda: (0, ""))
+    kw.setdefault("run_build", lambda cancelled: (0, ""))
     return SceneApp(book_factory=book_factory, player=player or FakePlayer(),
                     today=TODAY, **kw)
 
@@ -988,7 +988,7 @@ def test_not_on_spotify_pin_clears_the_datasets_tracks(monkeypatch):
 def test_r_runs_the_builder_then_shows_what_it_published():
     runs = []
 
-    def builder_run():
+    def builder_run(cancelled):
         runs.append(1)
         publish_dataset(SHOWS + [Show(date(2026, 9, 26), "Ivy Room, Albany", ["Fresh Blood"])])
         return 0, ""
@@ -1019,7 +1019,7 @@ def test_a_build_published_by_someone_else_appears_without_a_keypress():
 def test_no_dataset_yet_bootstraps_one_build_and_says_so_meanwhile():
     calls = []
 
-    def first_build():
+    def first_build(cancelled):
         calls.append(1)
         publish_dataset()
         return 0, ""
@@ -1048,7 +1048,7 @@ def test_a_stale_dataset_is_flagged_not_rebuilt_behind_your_back():
 
     async def go():
         publish_dataset(generated_at=time.time() - 3 * 86400)
-        app = make_app(publish=False, run_build=lambda: (builds.append(1), (0, ""))[1])
+        app = make_app(publish=False, run_build=lambda cancelled: (builds.append(1), (0, ""))[1])
         async with app.run_test(size=(160, 45)) as pilot:
             await settle(pilot, app, lambda: len(app._rows) == 2)
             assert "stale" in app.sub_title and builds == []
@@ -1068,7 +1068,7 @@ def test_freshness_shows_and_an_unfinished_build_says_it_is_still_enriching():
 
 def test_a_build_already_running_is_not_an_error():
     async def go():
-        app = make_app(run_build=lambda: (75, "another `scene build` is running"))
+        app = make_app(run_build=lambda cancelled: (75, "another `scene build` is running"))
         async with app.run_test(size=(160, 45)) as pilot:
             await settle(pilot, app, lambda: len(app._rows) == 2)
             await pilot.press("r")
@@ -1086,4 +1086,154 @@ def test_an_unreadable_dataset_reports_and_keeps_what_is_on_screen():
             app._reload()
             await pilot.pause(0.1)
             assert len(app._rows) == 2
+    run(go())
+
+
+def test_a_checkpoint_of_a_running_build_does_not_move_your_cursor_or_focus():
+    """The builder republishes every 25 bands. Only band records change; the
+    app must not throw the user back to band 0 of the lineup."""
+    import os
+    guess = profiles.guess_to_dict(genre_mod.for_band(GIRL_CHOW_BC[0], sure=True))
+
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().tracks)
+            await pilot.press("enter", "j")                # lineup -> Wiseacre
+            await settle(pilot, app, lambda: app.current_band == "Wiseacre"
+                         and app._profile().tracks)
+            await pilot.press("enter")                     # focus the tracks
+            await pilot.press("j")
+            assert app.focused.id == "tracks"
+            shown = app.query_one("#tracks").highlighted
+            picked = app.query_one("#tracks").get_option_at_index(shown).id
+            publish_dataset(bands={"Girl Chow": dict(profiles.minimal_record("Girl Chow", None),
+                                                     genre=guess)}, complete=False)
+            os.utime(dataset.default_path(), (1, 1_900_000_001))
+            app._watch_dataset()
+            await pilot.pause(0.2)
+            assert app.current_band == "Wiseacre" and app.focused.id == "tracks"
+            tracks = app.query_one("#tracks")
+            assert tracks.get_option_at_index(tracks.highlighted).id == picked
+            assert "reggae" in str(app.query_one("#shows").get_row_at(0)[2]).lower()
+            assert "enriching" in app.sub_title
+    run(go())
+
+
+def test_reloading_never_replaces_a_profile_whose_lookup_is_running():
+    from twiddle.scene.bands import BandProfile
+    book = BandBook([])
+    running = BandProfile(band="Girl Chow")
+    running.status = {"spotify": "running"}
+    book.seed([running])
+    fresh = BandProfile(band="Girl Chow")
+    fresh.status = {"spotify": "idle"}
+    book.seed([fresh])
+    assert book.profiles["girl chow"] is running
+    richer = BandProfile(band="Wiseacre")
+    richer.status = {"spotify": "done", "bandcamp": "done"}
+    book.seed([richer])
+    thinner = BandProfile(band="Wiseacre")
+    thinner.status = {"spotify": "done", "bandcamp": "idle"}
+    book.seed([thinner])
+    assert book.profiles["wiseacre"] is richer         # what was looked up here is kept
+    book.close()
+
+
+def test_a_band_nobody_has_looked_up_is_badged_as_such_not_as_looking():
+    from twiddle.scene.app import BADGE
+    from twiddle.scene.bands import UNLOOKED
+    p = profiles.from_record(profiles.minimal_record("Nobody", None))
+    assert p.confidence == UNLOOKED and BADGE[UNLOOKED][2] == "not looked up yet"
+
+
+def test_quitting_during_a_long_build_does_not_wait_for_it():
+    import time
+    started = []
+
+    def long_build(cancelled):
+        started.append(1)
+        end = time.time() + 20
+        while time.time() < end and not cancelled():
+            time.sleep(0.05)
+        return (-1 if cancelled() else 0), ""
+
+    async def go():
+        app = make_app(run_build=long_build)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: len(app._rows) == 2)
+            await pilot.press("r")
+            await settle(pilot, app, lambda: started)
+            t0 = time.time()
+            await pilot.press("q")
+            await pilot.pause(0.1)
+        return time.time() - t0
+    t0 = time.time()
+    asyncio.run(go())
+    assert time.time() - t0 < 10
+
+
+def test_run_builder_leaves_a_build_running_when_cancelled_and_reports_a_failure(tmp_path):
+    import os
+    import signal
+    import sys
+    from twiddle.scene.app import BUILD_CANCELLED, run_builder
+    pidfile = tmp_path / "pid"
+    code = f"import os, time; open({str(pidfile)!r}, 'w').write(str(os.getpid())); time.sleep(30)"
+    calls = []
+
+    def cancelled():
+        calls.append(1)
+        return pidfile.exists()
+    try:
+        assert run_builder(cancelled, [sys.executable, "-c", code]) == (BUILD_CANCELLED, "")
+        pid = int(pidfile.read_text())
+        os.kill(pid, 0)                               # still alive: detached, keeps building
+        assert os.getpgid(pid) != os.getpgid(0)       # in its own session
+    finally:
+        os.kill(int(pidfile.read_text()), signal.SIGKILL)
+    bad = "import sys; print('progress'); print('error: no listings', file=sys.stderr); " \
+          "print('hint: x', file=sys.stderr); sys.exit(1)"
+    assert run_builder(lambda: False, [sys.executable, "-c", bad]) == (1, "error: no listings")
+    assert run_builder(lambda: False, [sys.executable, "-c", "print('ok')"]) == (0, "ok")
+
+
+def test_a_broken_dataset_is_reported_once_not_every_check():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: len(app._rows) == 2)
+            told = []
+            app.notify = lambda *a, **k: told.append(a)
+            dataset.default_path().write_text("{broken")
+            for _ in range(3):
+                app._watch_dataset()
+            assert len(told) == 1
+    run(go())
+
+
+def test_the_band_on_screen_gets_its_song_lists_and_the_rest_of_the_lineup_does_not(monkeypatch):
+    """The dataset knows who each band is but carries no song lists: only the
+    band you are looking at pays for them."""
+    from twiddle import discover_cli
+    from twiddle.scene.bands import SpotifyEnricher, TrackEnricher
+    asked = []
+    monkeypatch.setattr(discover_cli, "_artist_tracks",
+                        lambda sess, artist: asked.append(artist["name"]) or TRACKS)
+    identity_only = {n: dict(_compiled(n), tracks=[], bc_tracks=[],
+                             status={"lookup": "done", "spotify": "done", "bandcamp": "done"})
+                     for n in ("Girl Chow", "Wiseacre")}
+
+    async def go():
+        app = make_app(bands=identity_only)
+        spot = SpotifyEnricher(lambda: object(), tracks=False)
+        app.book = BandBook([TrackEnricher(spot, bc_tracks=lambda url: BC_TRACKS)],
+                            on_update=app._from_worker_band)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().tracks)
+            assert app._profile().bc_tracks == BC_TRACKS and asked == ["Girl Chow"]
+            await pilot.pause(0.5)
+            assert asked == ["Girl Chow"]                    # Wiseacre: not until selected
+            await pilot.press("enter", "j")
+            await settle(pilot, app, lambda: "Wiseacre" in asked)
     run(go())

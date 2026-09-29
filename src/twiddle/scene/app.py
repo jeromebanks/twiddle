@@ -50,6 +50,7 @@ from .bands import (
     NONE,
     PENDING,
     UNCERTAIN,
+    UNLOOKED,
     BandBook,
     BandProfile,
 )
@@ -58,6 +59,7 @@ from .venue_info import VenueInfo
 from .players import Device, NeedsConfirmation, Player
 
 BUILD_BUSY = 75             # `scene build`'s exit status when another build holds the lock
+BUILD_CANCELLED = -1        # the app quit while a build ran: it was left to finish on its own
 
 # `t` cycles in this order. The List runs ~5 months ahead, so the default
 # is a month: a week hid most of what's there (the first complaint).
@@ -86,6 +88,7 @@ BADGE = {
     UNCERTAIN: ("?", "bold dark_orange", "which one?"),
     NONE: ("✗", "bold red", "not on Spotify"),
     PENDING: ("…", "dim", "looking"),
+    UNLOOKED: ("·", "dim", "not looked up yet"),
 }
 
 
@@ -94,16 +97,30 @@ def badge(p: BandProfile | None) -> Text:
     return Text(sym, style=style)
 
 
-def run_builder() -> tuple[int, str]:
-    """`twiddle scene build` in a subprocess: (exit status, last line of its output).
+def run_builder(cancelled: Callable[[], bool] = lambda: False,
+                argv: list[str] | None = None) -> tuple[int, str]:
+    """`twiddle scene build` in a subprocess: (exit status, what to tell the user).
 
     A subprocess, not a call: the UI then holds no collection code, and a
-    build cannot stall or crash the event loop.
+    build cannot stall or crash the event loop. It runs in its own session,
+    so quitting the app (or Ctrl-C in its terminal) does not kill it: when
+    `cancelled()` turns true this returns `BUILD_CANCELLED` and the build
+    finishes and publishes on its own. A first build takes minutes; `q` must
+    not wait for it.
     """
-    r = subprocess.run([sys.executable, "-m", "twiddle", "scene", "build"],
-                       capture_output=True, text=True)
-    lines = (r.stderr.strip() or r.stdout.strip()).splitlines()
-    return r.returncode, lines[-1] if lines else ""
+    import tempfile
+    argv = argv or [sys.executable, "-m", "twiddle", "scene", "build"]
+    with tempfile.TemporaryFile("w+") as out:
+        proc = subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT, text=True,
+                                start_new_session=True)
+        while proc.poll() is None:
+            if cancelled():
+                return BUILD_CANCELLED, ""
+            time.sleep(0.25)
+        out.seek(0)
+        lines = out.read().strip().splitlines()
+    errors = [ln for ln in lines if ln.startswith("error:")]
+    return proc.returncode, (errors[-1] if errors else lines[-1] if lines else "")
 
 
 class ChoiceScreen(ModalScreen):
@@ -323,6 +340,7 @@ class SceneApp(App):
         self.bootstrap = bootstrap      # build once, unasked, when there is no dataset at all
         self.snapshot: dataset.Snapshot | None = None
         self._snap_mtime: float | None = None
+        self._told_failures_at: float | None = None
         self._building = False
         self.player = player
         self.book = book_factory(self._from_worker_band)
@@ -425,20 +443,53 @@ class SceneApp(App):
         except dataset.DatasetError as exc:
             self.notify(str(exc), title="dataset", severity="error", timeout=10)
             snap = None
+            self._snap_mtime = self.dataset_mtime()     # say it once, not every 20s
         else:
-            self._snap_mtime = self.dataset_mtime()
+            # The mtime of what was read, so a publish landing meanwhile is
+            # noticed by the next check instead of being mistaken for this one.
+            self._snap_mtime = snap.mtime if snap else self.dataset_mtime()
         if snap is None:
             self._update_subtitle()
             if first and self.bootstrap and not self.shows:
                 self.build_dataset()
             return
+        same_shows = self.snapshot is not None and snap.shows == self.shows
+        before = self._profile_sig()
         self.snapshot = snap
         self._seed_bands(snap)
         failed = [f"{n}: {v.get('error')}" for n, v in snap.sources.items() if not v.get("ok", True)]
-        if failed and snap.complete:
+        if failed and snap.complete and snap.generated_at != self._told_failures_at:
+            self._told_failures_at = snap.generated_at
             self.notify("\n".join(failed), title="last build: sources failed",
                         severity="warning", timeout=10)
-        self._set_shows(snap.shows, snap.generated_at)
+        if same_shows:
+            # A checkpoint of a running build: only band records changed. Leave
+            # the cursor, focus and lineup where they are.
+            self.fetched_at = snap.generated_at
+            self._refresh_bands_in_place(before)
+        else:
+            self._set_shows(snap.shows, snap.generated_at)
+
+    def _profile_sig(self) -> tuple | None:
+        p = self._profile()
+        if p is None:
+            return None
+        return (tuple(sorted(p.status.items())), p.confidence, len(p.tracks), len(p.bc_tracks),
+                (p.spotify_artist or {}).get("id"), (p.bandcamp or {}).get("item_url_root"),
+                p.info.mbid if p.info else None, p.info.name if p.info else None)
+
+    def _refresh_bands_in_place(self, before: tuple | None) -> None:
+        self._refresh_genre_cells()
+        s = self.current_show
+        if s is not None:
+            lineup = self.query_one("#lineup", OptionList)
+            for idx, b in enumerate(s.bands):
+                if idx < lineup.option_count:
+                    lineup.replace_option_prompt_at_index(idx, self._lineup_label(b))
+        p = self._profile()
+        if p is not None and self._profile_sig() != before:
+            self._render_profile(p)
+        self._update_subtitle()
 
     def _seed_bands(self, snap: dataset.Snapshot) -> None:
         """Hand the dataset's band records to the book, and remember the genre
@@ -469,10 +520,14 @@ class SceneApp(App):
 
     @work(thread=True, exclusive=True, group="build")
     def _run_build(self) -> None:
+        from textual.worker import get_current_worker
+        worker = get_current_worker()
         try:
-            code, tail = self.run_build()
+            code, tail = self.run_build(lambda: worker.is_cancelled)
         except Exception as exc:        # the runner itself failed: say so, don't die
             code, tail = 1, str(exc)
+        if code == BUILD_CANCELLED:
+            return                      # quitting: nothing left to show it to
         self.call_from_thread(self._build_done, code, tail)
 
     def _build_done(self, code: int, tail: str) -> None:
@@ -898,7 +953,8 @@ class SceneApp(App):
             tracks.highlighted = tracks.get_option_index(keep if keep in ids else ids[0])
         parts = [f"{len(p.bc_tracks)} on Bandcamp" if p.bc_tracks else "",
                  f"{len(p.tracks)} on Spotify" if p.tracks else ""]
-        busy = p.status.get("bandcamp") in ("pending", "running") or p.confidence == PENDING
+        busy = p.status.get("bandcamp") in ("pending", "running") or p.confidence == PENDING \
+            or p.status.get("tracks") in ("pending", "running")
         tracks.border_subtitle = " · ".join(x for x in parts if x) or \
             ("searching…" if busy else "")
 

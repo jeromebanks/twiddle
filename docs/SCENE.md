@@ -390,9 +390,24 @@ looks up the band on screen itself.
 3. **Publishes shows and venues at once**, so `r` and a first run show
    listings in seconds.
 4. Enriches the bands playing your venues in the next 31 days, one at a
-   time. A band enriched in the last 3 days is reused, and the underlying
-   MusicBrainz (30 d) and Bandcamp (14 d) caches still apply, so a re-run is
-   cheap. It republishes every 25 bands (a killed build keeps its work).
+   time: who they are (MusicBrainz, the Bandcamp page, the Spotify artist if
+   this Mac is signed in) and what they sound like. **Not their song lists**:
+   those are 2-4 more requests a band and only matter when you press play, so
+   the app fetches them for the band on screen. A band enriched in the last
+   3-4½ days (spread by band, so they don't all expire together) is reused,
+   and the underlying MusicBrainz (30 d) and Bandcamp (14 d) caches still
+   apply. It republishes every 25 bands (a killed build keeps its work).
+   Spotify lookups are paced (0.5 s), and a Spotify or Bandcamp rate limit
+   pauses that source for the rest of the run (`enrichers.spotify: paused:
+   rate-limited`) while the build still publishes.
+
+   **How long:** measured 2026-09-29, the default month at the default venues
+   is ~1,100 bands, and cold bands (nothing cached) cost about 2 s each,
+   bound by MusicBrainz's 1 request/second. So the *first* build is ~35-40
+   minutes (it publishes listings first, so the app is usable meanwhile).
+   After that, a band's record is rebuilt every 3-4½ days from warm
+   MusicBrainz (30 d) and Bandcamp (14 d) caches, which is quick; only bands
+   new to the lineup are cold.
 5. Publishes the finished dataset (`complete: true`).
 
 Every billed band gets a record, enriched or not. Publishing is atomic
@@ -408,10 +423,15 @@ the new one, never half of one.
   subprocess and reloads when it ends.
 - **No dataset yet:** the app builds one, once, and says so. **A stale one:**
   the app only says so; it never starts a build you did not ask for.
-- The only lookups the app still makes itself are for the one band on screen
-  when the dataset has no answer for it (a band outside the build's window,
-  or Spotify on a Mac that was signed out at build time), and playback. No
+- The only lookups the app still makes itself are for the one band on screen:
+  its song lists (Bandcamp and Spotify), and any identity the dataset lacks (a
+  band outside the build's window, or Spotify on a Mac that was signed out at
+  build time). A band not yet looked up shows a dim `·` badge, not `…`. No
   lineup prefetch, no venue scraping, no genre scan.
+- A build that finishes (or checkpoints) while you are browsing updates the
+  genre column and badges in place; it does not move your cursor or focus.
+- Quitting during a build does not wait for it: the build runs in its own
+  session and finishes and publishes on its own.
 - Still fetched for display only, fine to fail offline: flyers, band photos
   and venue icons.
 
@@ -427,7 +447,7 @@ the new one, never half of one.
              "flyer": "...", ...}],
  "bands":  {"girl chow": {"name": "Girl Chow", "updated_at": "...", "status": {...},
              "identifiers": {"mbid": "...", "spotify_id": "...", "bandcamp": "..."},
-             "info": {...}, "tracks": [...], "bc_tracks": [...], "genre": {...},
+             "info": {...}, "genre": {...},   # song lists ("tracks", "bc_tracks") are the app's
              "confidence": "name_only", "why": "..."}}}
 ```
 

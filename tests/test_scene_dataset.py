@@ -172,7 +172,8 @@ def test_a_profile_survives_the_json_round_trip_including_album_and_guess():
     assert back.spotify_artist == {"id": "sp1", "name": "Girl Chow"}
     assert back.tracks == _profile().tracks and back.bc_tracks == [{"title": "t"}]
     assert back.alias == "Girl" and back.searched == {"spotify": "Girl"}
-    assert set(back.status.values()) == {"done"}
+    assert back.status == {"lookup": "done", "spotify": "done", "bandcamp": "done",
+                           "tracks": "idle"}          # song lists are the app's, per band
     g = profiles.guess_from_dict(rec["genre"])
     assert g.scores == guess.scores and g.sources == guess.sources and g.sure is False
     assert isinstance(g.scores, Counter) and isinstance(g.sources, set)
@@ -180,7 +181,8 @@ def test_a_profile_survives_the_json_round_trip_including_album_and_guess():
 
 def test_an_unenriched_band_comes_back_idle_for_every_enricher():
     p = profiles.from_record(profiles.minimal_record("Nobody", None))
-    assert p.status == {"lookup": "idle", "spotify": "idle", "bandcamp": "idle"}
+    assert p.status == {"lookup": "idle", "spotify": "idle", "bandcamp": "idle",
+                        "tracks": "idle"}
     assert not p.busy()
 
 
@@ -200,3 +202,18 @@ def test_a_pin_that_disagrees_with_the_dataset_sends_spotify_back_to_idle():
     assert profiles.from_record(rec, pinned=pins("other")).status["spotify"] == "idle"
     assert profiles.from_record(rec, pinned=pins(None)).status["spotify"] == "idle"
     assert profiles.from_record(rec, pinned=lambda b: None).status["spotify"] == "done"
+
+
+def test_the_snapshot_carries_the_mtime_of_what_was_read(tmp_path):
+    path = tmp_path / "d.json"
+    dataset.publish(doc(), path)
+    os.utime(path, (1, 1_700_000_000))
+    assert dataset.load(path).mtime == 1_700_000_000
+
+
+def test_cache_writes_use_a_private_temp_name_and_leave_nothing_behind(tmp_path, monkeypatch):
+    from twiddle.scene import cache
+    monkeypatch.setattr(cache, "CACHE_DIR", tmp_path)
+    cache._write("x.json", {"a": 1})
+    cache._write("x.json", {"a": 2})
+    assert [p.name for p in tmp_path.iterdir()] == ["x.json"] and cache._read("x.json") == {"a": 2}

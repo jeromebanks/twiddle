@@ -137,7 +137,8 @@ def cmd_scene(args) -> int:
     from .. import spotify_ops
     from .app import SceneApp
     from ..dial.output import Outputs
-    from .bands import BandBook, BandcampEnricher, LookupEnricher, SpotifyEnricher
+    from .bands import (BandBook, BandcampEnricher, LookupEnricher, SpotifyEnricher,
+                        TrackEnricher)
     from .local import LocalSpeaker
     from .players import SpotifyConnectPlayer
 
@@ -147,8 +148,9 @@ def cmd_scene(args) -> int:
         return fail(args, f"bad venue config: {exc}")
 
     def book_factory(on_update):
-        return BandBook([LookupEnricher(), SpotifyEnricher(spotify_ops.session),
-                         BandcampEnricher()], on_update=on_update)
+        spotify = SpotifyEnricher(spotify_ops.session)
+        return BandBook([LookupEnricher(), spotify, BandcampEnricher(),
+                         TrackEnricher(spotify)], on_update=on_update)
 
     app = SceneApp(book_factory=book_factory,
                    player=SpotifyConnectPlayer(room=args.room, dry_run=args.dry_run,

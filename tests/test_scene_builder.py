@@ -63,6 +63,7 @@ def run(tmp_path, sources, enrichers=None, **kw):
     kw.setdefault("genre_search", lambda name, offline=False: None)
     kw.setdefault("wiki", lambda title: None)
     kw.setdefault("today", TODAY)
+    kw.setdefault("spotify_gap", 0)
     kw.setdefault("now", lambda: 1_790_000_000.0)
     enrichers = [Enr("lookup"), Enr("spotify", spotify_fill), Enr("bandcamp")] \
         if enrichers is None else enrichers
@@ -149,7 +150,7 @@ def test_a_second_build_reuses_bands_enriched_recently_and_redoes_stale_ones(tmp
     r = run(tmp_path, [Src("thelist", [GIRL, COUP])], [look], now=lambda: 1_790_000_000.0 + 3600)
     assert len(look.asked) == 3 and r.reused == 3 and r.enriched == 0
     r = run(tmp_path, [Src("thelist", [GIRL, COUP])], [look],
-            now=lambda: 1_790_000_000.0 + builder.PROFILE_TTL_S + 60)
+            now=lambda: 1_790_000_000.0 + builder.PROFILE_TTL_S * 1.5 + 60)
     assert len(look.asked) == 6 and r.enriched == 3
 
 
@@ -192,7 +193,7 @@ def test_spotify_is_skipped_not_prompted_when_this_mac_is_not_signed_in(tmp_path
         raise spotify_ops.PlaybackError("run auth") from spotify.AuthError("no token")
     monkeypatch.setattr(spotify_ops, "session", no_session)
     monkeypatch.setattr(builder, "LookupEnricher", lambda: Enr("lookup"))
-    monkeypatch.setattr(builder, "BandcampEnricher", lambda: Enr("bandcamp"))
+    monkeypatch.setattr(builder, "BandcampEnricher", lambda **kw: Enr("bandcamp"))
     builder.build(path=tmp_path / "d.json", sources=[Src("thelist", [COUP])],
                   genre_search=lambda n, offline=False: None, wiki=lambda t: None, today=TODAY)
     snap = read(tmp_path)
@@ -213,7 +214,7 @@ def test_one_persons_pins_are_not_published_with_the_data(tmp_path, monkeypatch)
     monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, artist: [])
     monkeypatch.setattr(spotify_ops, "session", lambda: Sess())
     monkeypatch.setattr(builder, "LookupEnricher", lambda: Enr("lookup"))
-    monkeypatch.setattr(builder, "BandcampEnricher", lambda: Enr("bandcamp"))
+    monkeypatch.setattr(builder, "BandcampEnricher", lambda **kw: Enr("bandcamp"))
     cache.pin("Coup Dville", "hand-picked", "Coup")
     builder.build(path=tmp_path / "d.json", sources=[Src("thelist", [COUP])],
                   genre_search=lambda n, offline=False: None, wiki=lambda t: None, today=TODAY)
@@ -245,3 +246,66 @@ def test_a_build_without_spotify_does_not_claim_a_band_is_not_on_spotify(tmp_pat
     rec = read(tmp_path).band("Coup Dville")
     assert rec["confidence"] == "pending" and "not checked" in rec["why"]
     assert "spotify" not in rec["status"]
+
+
+def test_a_spotify_429_pauses_spotify_for_the_run_and_the_build_still_publishes(tmp_path):
+    limited = Enr("spotify", raises=spotify.ApiError(429, "rate limited", retry_after=30))
+    other = Enr("bandcamp")
+    r = run(tmp_path, [Src("thelist", [GIRL, COUP])], [limited, other])
+    snap = read(tmp_path)
+    assert limited.asked == ["Girl Chow"]                     # not asked again after the 429
+    assert snap.enrichers["spotify"] == "paused: rate-limited"
+    assert other.asked and snap.complete and r.enriched == 3
+
+
+def test_other_spotify_errors_do_not_pause_it(tmp_path):
+    flaky = Enr("spotify", raises=spotify.ApiError(500, "oops"))
+    run(tmp_path, [Src("thelist", [GIRL, COUP])], [flaky])
+    assert len(flaky.asked) == 3
+
+
+def test_bands_expire_spread_over_time_not_all_at_once():
+    ttls = {builder._ttl(f"band {i}") for i in range(200)}
+    assert min(ttls) >= builder.PROFILE_TTL_S and max(ttls) <= builder.PROFILE_TTL_S * 1.5
+    assert len({round(t / 3600) for t in ttls}) > 10           # spread over many hours
+    assert builder._ttl("girl chow") == builder._ttl("girl chow")
+
+
+def test_spotify_lookups_are_paced_and_only_when_spotify_runs(tmp_path):
+    naps = []
+    run(tmp_path, [Src("thelist", [GIRL, COUP])], spotify_gap=0.5, pace=naps.append)
+    assert naps == [0.5, 0.5, 0.5]
+    naps.clear()
+    other = tmp_path / "e.json"
+    builder.build(path=other, sources=[Src("thelist", [GIRL])], enrichers=[Enr("lookup")],
+                  genre_search=lambda n, offline=False: None, wiki=lambda t: None, today=TODAY,
+                  pace=naps.append)
+    assert naps == []
+
+
+def test_the_builder_records_identity_but_not_song_lists(tmp_path, monkeypatch):
+    """Track lists were most of a band's requests (2-4 pages each) and are only
+    used on play: the app fetches them for the band on screen."""
+    from twiddle import discover_cli
+
+    class Sess:
+        def search(self, term, kind, limit=10):
+            return [{"id": "found", "name": term}]
+    seen = []
+    monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, a: seen.append(a) or ["t"])
+    monkeypatch.setattr(spotify_ops, "session", lambda: Sess())
+    monkeypatch.setattr(builder, "LookupEnricher", lambda: Enr("lookup"))
+    bc_pages = []
+    real = builder.BandcampEnricher       # its defaults bind the real network functions
+    monkeypatch.setattr(builder, "BandcampEnricher", lambda **kw: real(
+        search=lambda name: [{"name": name, "item_url_root": "https://c.bandcamp.com",
+                              "location": "Oakland, California"}],
+        tracks=lambda url: bc_pages.append(url) or ["t"], **kw))
+    builder.build(path=tmp_path / "d.json", sources=[Src("thelist", [COUP])],
+                  genre_search=lambda n, offline=False: None, wiki=lambda t: None, today=TODAY,
+                  spotify_gap=0)
+    rec = read(tmp_path).band("Coup Dville")
+    assert rec["identifiers"]["spotify_id"] == "found"
+    assert rec["identifiers"]["bandcamp"] == "https://c.bandcamp.com"
+    assert rec["tracks"] == [] and rec["bc_tracks"] == [] and seen == [] and bc_pages == []
+    assert "tracks" not in rec["status"]

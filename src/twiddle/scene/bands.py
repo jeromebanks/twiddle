@@ -6,6 +6,10 @@ knows. Three ship today:
   LookupEnricher     MusicBrainz -> Wikipedia / Discogs / Bandcamp (lookup.py)
   SpotifyEnricher    the Spotify artist, and a list of their tracks
   BandcampEnricher   their Bandcamp page: photo, tags (-> `genre`), songs
+  TrackEnricher      song lists only, for a band known by identity alone: the
+                     dataset builder skips tracks (2-4 more requests a band,
+                     and only useful when you press play), so the app fetches
+                     them for the band on screen
 
 `BandBook` runs them off the UI thread and calls back as each finishes.
 
@@ -67,8 +71,8 @@ REGION = ("california", "bay area", "oakland", "berkeley", "san francisco",
           "albany", "emeryville", "alameda", "richmond", "san jose", "santa cruz",
           "vallejo", "san leandro", "hayward", "fremont", "sacramento", ", ca")
 
-CORROBORATED, NAME_ONLY, UNCERTAIN, NONE, PENDING = (
-    "corroborated", "name_only", "uncertain", "none", "pending")
+CORROBORATED, NAME_ONLY, UNCERTAIN, NONE, PENDING, UNLOOKED = (
+    "corroborated", "name_only", "uncertain", "none", "pending", "unlooked")
 
 NOT_SIGNED_IN = ("not signed in -- run `twiddle spotify auth`; "
                  "Bandcamp tracks still play")
@@ -196,7 +200,7 @@ def assess(p: BandProfile, use_pins: bool = True) -> None:
     if p.status.get("spotify") == "idle":
         # Seeded from the dataset with no (usable) Spotify answer: the band on
         # screen is looked up when it is selected.
-        p.confidence, p.why = PENDING, "not looked up on Spotify yet"
+        p.confidence, p.why = UNLOOKED, "not looked up on Spotify yet"
         return
     pin = cache.pinned(p.band) if use_pins else None
     if pin is not None:
@@ -306,9 +310,11 @@ class SpotifyEnricher:
     name = "spotify"
     serial = False
 
-    def __init__(self, session_factory: Callable[[], object], use_pins: bool = True):
+    def __init__(self, session_factory: Callable[[], object], use_pins: bool = True,
+                 tracks: bool = True):
         self._session_factory = session_factory
         self._use_pins = use_pins       # the builder's are off: see `assess`
+        self._tracks = tracks           # the builder's are off: see `TrackEnricher`
         self._sess = None
         self._lock = threading.Lock()
 
@@ -358,7 +364,8 @@ class SpotifyEnricher:
             # Spotify doesn't have are noise (measured: "Girl Chow" returns
             # Girlschool and a Maori girls' choir); `m` searches by hand.
             p.spotify_candidates = exact if (chosen is None and len(exact) > 1) else []
-        p.tracks = _artist_tracks(sess, p.spotify_artist) if p.spotify_artist else []
+        p.tracks = _artist_tracks(sess, p.spotify_artist) \
+            if p.spotify_artist and self._tracks else []
 
     def wants_rerun(self, p: BandProfile) -> bool:
         """After the lookup lands: does MusicBrainz name a different artist,
@@ -384,9 +391,11 @@ class BandcampEnricher:
     name = "bandcamp"
     serial = False
 
-    def __init__(self, search=bandcamp.search, tracks=bandcamp.tracks):
+    def __init__(self, search=bandcamp.search, tracks=bandcamp.tracks,
+                 fetch_tracks: bool = True):
         self._search = search
         self._tracks = tracks
+        self._fetch_tracks = fetch_tracks       # the builder's is off: see `TrackEnricher`
 
     @staticmethod
     def _linked(p: BandProfile) -> str | None:
@@ -405,13 +414,57 @@ class BandcampEnricher:
         if band is None and linked:
             band = {"name": p.band, "item_url_root": linked}     # linked, but named otherwise
         p.bandcamp = band
-        p.bc_tracks = self._tracks(band["item_url_root"]) if band else []
+        p.bc_tracks = self._tracks(band["item_url_root"]) if band and self._fetch_tracks else []
 
     def wants_rerun(self, p: BandProfile) -> bool:
         linked = self._linked(p)
         have = (p.bandcamp or {}).get("item_url_root")
         return (bool(linked) and bandcamp._host(linked) != bandcamp._host(have)) or \
             bool(p.alias and p.searched.get("bandcamp") != p.alias)
+
+
+class TrackEnricher:
+    """Song lists for a band whose identity is already known.
+
+    `scene build` records who a band is on Spotify and Bandcamp but not their
+    songs: a list costs 2-4 more requests a band, across some 1,100 bands a
+    build, and is only used when someone presses play -- which needs the
+    network anyway. So the band on screen gets its lists here, as it did
+    before the dataset existed. Reruns when identity lands later.
+    """
+    name = "tracks"
+    serial = False
+
+    def __init__(self, spotify: SpotifyEnricher, bc_tracks=bandcamp.tracks):
+        self._spotify = spotify
+        self._bc_tracks = bc_tracks
+
+    @staticmethod
+    def _key(p: BandProfile) -> str:
+        return f"{(p.spotify_artist or {}).get('id', '')}|{(p.bandcamp or {}).get('item_url_root', '')}"
+
+    def enrich(self, p: BandProfile) -> None:
+        from ..discover_cli import _artist_tracks
+        p.searched["tracks"] = self._key(p)
+        failure: Exception | None = None
+        if p.bandcamp and p.bandcamp.get("item_url_root") and not p.bc_tracks:
+            try:
+                p.bc_tracks = self._bc_tracks(p.bandcamp["item_url_root"])
+            except Exception as exc:
+                failure = exc
+        if p.spotify_artist and not p.tracks:
+            try:
+                p.tracks = _artist_tracks(self._spotify.session(), p.spotify_artist)
+            except Exception as exc:
+                failure = failure or (RuntimeError(NOT_SIGNED_IN)
+                                      if spotify_ops.not_signed_in(exc) else exc)
+        if failure is not None:
+            raise failure
+
+    def wants_rerun(self, p: BandProfile) -> bool:
+        missing = (bool(p.spotify_artist) and not p.tracks) or \
+            (bool(p.bandcamp) and not p.bc_tracks)
+        return missing and self._key(p) != p.searched.get("tracks")
 
 
 # ---- the book -------------------------------------------------------------------
@@ -445,9 +498,17 @@ class BandBook:
         """Register profiles already known (the dataset's) without scheduling
         anything. An enricher marked `idle` on one runs only when that band is
         fetched `urgent`ly -- the one on screen -- never for the lot."""
+        def done(p):
+            return sum(1 for v in p.status.values() if v == "done")
         with self._lock:
             for p in profiles:
-                self.profiles[lookup.norm(p.band)] = p
+                key = lookup.norm(p.band)
+                old = self.profiles.get(key)
+                # A lookup in flight finishes on its own object; one done here
+                # already knows more than the dataset does. Leave both alone.
+                if old is not None and (old.busy() or done(old) > done(p)):
+                    continue
+                self.profiles[key] = p
 
     def get(self, band: str, urgent: bool = True) -> BandProfile:
         """The profile as known now; missing enrichments are scheduled.

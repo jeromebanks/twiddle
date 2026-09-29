@@ -178,8 +178,9 @@ def load(path: Path | None = None) -> Snapshot | None:
     """
     path = path or default_path()
     try:
-        raw = path.read_text()
-        mtime = path.stat().st_mtime
+        with open(path) as f:
+            raw = f.read()
+            mtime = os.fstat(f.fileno()).st_mtime   # of what was read, not of a later rename
     except FileNotFoundError:
         return None
     except OSError as exc:
