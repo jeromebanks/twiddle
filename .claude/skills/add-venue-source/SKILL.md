@@ -127,7 +127,7 @@ Rules the existing sources learned the hard way:
   (`seetickets._day`). Never assume the current year.
 - **Raise `SourceError`** for network failures, non-200 responses, zero
   shows, or a failed page partway through pagination. Don't return partial
-  results, or the stale cache won't cover the gap. `fetch_all` also catches
+  results, or the last dataset's rows won't cover the gap. `fetch_all` also catches
   any other exception, but a clear `SourceError` message is better.
 - **Cap pagination** (`MAX_PAGES`), and stop if the site serves page 1 again.
 - **Keep bands out of lookups when there are none.** Band-less nights are
@@ -154,6 +154,9 @@ print(errors, len(rows), "merged", sum(1 for s in rows if s.also),
 for s in rows: print(s.day, s.source, "+" if s.also else " ", "F" if s.flyer else "-", s.billing[:60], s.price)
 EOF
 ```
+
+The app reads a dataset, not the sources: after registering a source, run
+`uv run twiddle scene build` to see it in `scene` / `scene list`.
 
 Look for **duplicate rows on the same night**. Most are real: karaoke,
 open mic or comedy beside the gig, or a pre-show. Some are missed merges,

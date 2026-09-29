@@ -37,7 +37,8 @@ git clone https://github.com/jeromebanks/twiddle.git
 cd twiddle
 uv sync
 uv run twiddle dial                  # radio
-uv run twiddle scene                 # local shows
+uv run twiddle scene build           # compile the local shows dataset (then: scene schedule)
+uv run twiddle scene                 # local shows (reads it; works offline)
 ```
 
 [docs/QUICKSTART.md](docs/QUICKSTART.md) walks through everything in about

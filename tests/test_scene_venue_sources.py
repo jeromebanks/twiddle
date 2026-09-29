@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from twiddle.scene import cache
 from twiddle.scene.model import Show, dedupe
 from twiddle.scene.sources import SourceError, fetch_all
 from twiddle.scene.sources import seetickets
@@ -244,19 +243,8 @@ def test_share_text_carries_the_tickets_and_flyer():
         "Freakyoke", "Mon Oct 5, 8pm", STORK, "free", "https://tix/5", "https://img/5"]
 
 
-def test_new_fields_round_trip_and_an_old_cache_still_loads(tmp_path, monkeypatch):
-    monkeypatch.setattr(cache, "CACHE_DIR", tmp_path)
-    s = Show(date(2026, 10, 5), STORK, ["X"], flyer="f", tickets="t", also=["storkclub"])
-    cache.save_listings([s])
-    assert cache.load_listings()[0] == [s]
-    (tmp_path / "listings.json").write_text(
-        '{"at": 1, "shows": [{"day": "2026-10-05", "venue": "V", "bands": ["X"]}]}')
-    [old] = cache.load_listings()[0]
-    assert old.flyer == "" and old.also == []
-
-
 def test_a_parser_crash_is_that_sources_error_not_everyones():
-    """The app's listings worker quits the app on an uncaught exception."""
+    """The builder would quit on an uncaught exception."""
     d = date(2026, 10, 23)
 
     class Broken:
@@ -335,15 +323,6 @@ def test_ivy_pages_until_total_pages_and_a_refused_query_is_an_error(monkeypatch
     monkeypatch.setattr(venuepilot.requests, "post", lambda *a, **k: Resp())
     with pytest.raises(SourceError):
         venuepilot.VenuePilot(today=TODAY).fetch()
-
-
-def test_a_source_added_since_the_last_fetch_makes_the_cache_stale(tmp_path, monkeypatch):
-    monkeypatch.setattr(cache, "CACHE_DIR", tmp_path)
-    cache.save_listings([Show(date(2026, 10, 5), STORK, ["X"])], ["thelist", "yoshis"])
-    _, at = cache.load_listings()
-    assert cache.listings_fresh(at, ["thelist", "yoshis"])
-    assert not cache.listings_fresh(at, ["thelist", "yoshis", "ivyroom"])
-    assert cache.listings_fresh(at)                     # callers that don't say
 
 
 def test_see_tickets_serves_several_venues_with_the_same_parser():

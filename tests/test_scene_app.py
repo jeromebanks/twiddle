@@ -9,7 +9,7 @@ from datetime import date
 
 from twiddle import lookup, spotify, spotify_ops
 from twiddle.dial.output import Outputs
-from twiddle.scene import cache
+from twiddle.scene import cache, dataset, genre as genre_mod, profiles
 from twiddle.scene.app import SceneApp
 from twiddle.scene.bands import BandBook, BandcampEnricher, LookupEnricher
 from twiddle.scene.model import Show
@@ -30,11 +30,22 @@ TRACKS = [{"uri": f"spotify:track:{i}", "name": f"Song {i}", "album": {"name": "
           for i in range(3)]
 
 
-class FakeSource:
-    name = "fake"
+def publish_dataset(shows=None, bands=None, venues=None, complete=True, generated_at=None):
+    """Put a dataset where the app looks (conftest redirects it to tmp_path).
 
-    def fetch(self):
-        return SHOWS
+    `bands`: {name: record} -- what the builder would have compiled. Bands
+    billed but absent get a minimal record, as the builder writes.
+    """
+    shows = SHOWS if shows is None else shows
+    recs = {}
+    for s in shows:
+        for b in s.bands:
+            recs[dataset.band_id(b)] = profiles.minimal_record(b, None)
+    for name, rec in (bands or {}).items():
+        recs[dataset.band_id(name)] = rec
+    dataset.publish(dataset.document(shows=shows, venues=venues or [], bands=recs, sources={},
+                                     enrichers={}, complete=complete, builder="test",
+                                     generated_at=generated_at))
 
 
 class FakeSpotify:
@@ -88,6 +99,8 @@ def make_app(player=None, bandcamp=None, **kw):
     def search(name, offline=False):
         return known.get(name, [])
 
+    if kw.pop("publish", True):
+        publish_dataset(kw.pop("shows", None), kw.pop("bands", None), kw.pop("venues", None))
     def book_factory(on_update):
         enrichers = [LookupEnricher(lambda n: lookup.Result()), FakeSpotify()]
         if bandcamp is not None:
@@ -96,10 +109,11 @@ def make_app(player=None, bandcamp=None, **kw):
     kw.setdefault("load_image", lambda url: None)      # no network for pictures
     kw.setdefault("band_photo", lambda p: (None, ""))
     kw.setdefault("instagram_picture", lambda handle: None)   # nor for venues
-    kw.setdefault("genre_search", search)
     kw.setdefault("bandcamp_stream", lambda t: f"https://t4.bcbits.com/stream/{t['title']}")
-    return SceneApp(sources=[FakeSource()], book_factory=book_factory,
-                    player=player or FakePlayer(), fetch_on_mount=True, today=TODAY, **kw)
+    kw.setdefault("bootstrap", False)
+    kw.setdefault("run_build", lambda: (0, ""))
+    return SceneApp(book_factory=book_factory, player=player or FakePlayer(),
+                    today=TODAY, **kw)
 
 
 async def settle(pilot, app, cond=lambda: True, timeout=3.0):
@@ -241,15 +255,8 @@ def test_one_venue_spelled_several_ways_is_one_row():
              Show(date(2026, 9, 24), "924 Gilman St., Berkeley", ["B"]),
              Show(date(2026, 9, 25), "924 Gilman, Berkeley", ["C"])]
 
-    class Src:
-        name = "src"
-
-        def fetch(self):
-            return shows
-
     async def go():
-        app = make_app()
-        app.sources = [Src()]
+        app = make_app(shows=shows)
         async with app.run_test(size=(160, 45)) as pilot:
             await settle(pilot, app, lambda: len(app._rows) == 3)
             venues = app.query_one("#venues")
@@ -268,15 +275,8 @@ def test_default_window_is_a_month_and_choices_are_remembered():
     later = [Show(date(2026, 10, 12), "Ivy Room, Albany", ["Twenty Days Out"]),
              Show(date(2026, 12, 1), "Ivy Room, Albany", ["Ten Weeks Out"])]
 
-    class Src:
-        name = "src"
-
-        def fetch(self):
-            return SHOWS + later
-
     async def go():
-        app = make_app()
-        app.sources = [Src()]
+        app = make_app(shows=SHOWS + later)
         async with app.run_test(size=(160, 45)) as pilot:
             await settle(pilot, app, lambda: len(app._rows) == 3)   # 2 this week + 20 days out
             await pilot.press("t")                                  # All upcoming
@@ -285,7 +285,7 @@ def test_default_window_is_a_month_and_choices_are_remembered():
             await settle(pilot, app, lambda: len(app._rows) == 5)
         assert cache.get_state("window") == "all"
         assert cache.get_state("all_venues") is True
-        again = make_app()
+        again = make_app(publish=False)
         assert again.window == "all" and again.all_venues
     run(go())
 
@@ -529,25 +529,22 @@ def test_bandcamp_wont_go_to_a_phone():
     run(go())
 
 
-def test_genre_scan_asks_the_network_only_about_your_venues_this_month():
-    """`v` shows ~150 rooms and `t` five months: thousands of requests to
-    an endpoint that isn't ours. Those come from the cache only."""
-    asked = []
-
-    def search(name, offline=False):
-        if offline:
-            return None
-        asked.append(name)
-        return []
+def test_the_genre_column_comes_from_the_dataset_and_browsing_asks_no_network(monkeypatch):
+    """The table's "Sounds like" was a Bandcamp scan run by the TUI. It is the
+    builder's now: the app reads each band's stored guess and asks nobody."""
+    from twiddle.scene import bandcamp
+    monkeypatch.setattr(bandcamp, "search", lambda *a, **k: 1 / 0)
+    guess = profiles.guess_to_dict(genre_mod.for_band(GIRL_CHOW_BC[0], sure=True))
+    known = {"Girl Chow": dict(profiles.minimal_record("Girl Chow", None), genre=guess)}
 
     async def go():
-        app = make_app(genre_search=search)
+        app = make_app(bands=known)
         async with app.run_test(size=(160, 45)) as pilot:
-            await settle(pilot, app, lambda: set(asked) >= {"Girl Chow", "Coup Dville"})
-            await pilot.press("a")                      # + "Somewhere Else"
+            await settle(pilot, app, lambda: len(app._rows) == 2)
+            cell = str(app.query_one("#shows").get_row_at(0)[2])
+            assert "reggae" in cell.lower()
+            await pilot.press("a")                      # every venue: still no network
             await settle(pilot, app, lambda: len(app._rows) == 3)
-            await pilot.pause(0.3)
-            assert "Nobody" not in asked
     run(go())
 
 
@@ -693,14 +690,16 @@ def test_an_unwatched_venue_still_gets_a_map_search(monkeypatch):
     run(go())
 
 
-def test_a_venue_with_an_article_shows_its_summary(monkeypatch):
-    monkeypatch.setattr("twiddle.scene.app.wiki_summary",
-                        lambda title: {"extract": f"About {title}.", "url": "u"})
+def test_a_venue_with_an_article_shows_its_stored_summary(monkeypatch):
+    """The summary comes out of the dataset: opening the card fetches nothing."""
+    import twiddle.scene.venue_info as vi
+    monkeypatch.setattr(vi, "wiki_summary", lambda *a, **k: 1 / 0)
     fox = [Show(date(2026, 9, 23), "Fox Theater, Oakland", ["Somebody"])]
-    monkeypatch.setattr(FakeSource, "fetch", lambda self: fox)
+    venue = {"id": "fox-theater", "name": "Fox Theater",
+             "wikipedia_summary": {"extract": "About Fox Oakland Theatre.", "url": "u"}}
 
     async def go():
-        app = make_app()
+        app = make_app(shows=fox, venues=[venue])
         async with app.run_test(size=(160, 45)) as pilot:
             await settle(pilot, app, lambda: app.current_show)
             await pilot.press("i")
@@ -717,10 +716,9 @@ def test_c_copies_the_show_to_send_and_l_opens_its_listing(monkeypatch):
     monkeypatch.setattr("twiddle.scene.app.webbrowser.open", opened.append)
     listed = [Show(date(2026, 9, 23), "Thee Stork Club, Oakland", ["Girl Chow"], times="8pm",
                    source_url="http://www.foopee.com/punk/the-list/by-club.2.html#Thee_Stork")]
-    monkeypatch.setattr(FakeSource, "fetch", lambda self: listed)
 
     async def go():
-        app = make_app()
+        app = make_app(shows=listed)
         async with app.run_test(size=(160, 45)) as pilot:
             await settle(pilot, app, lambda: app.current_show)
             await pilot.press("c", "l")
@@ -745,10 +743,10 @@ def test_a_shows_flyer_replaces_the_venue_icon_and_f_opens_it(monkeypatch):
     nights = [Show(date(2026, 9, 23), "Thee Stork Club, Oakland", ["X"], flyer="https://f/a"),
               Show(date(2026, 9, 24), "Thee Stork Club, Oakland", ["Y"], flyer="https://f/b"),
               Show(date(2026, 9, 25), "Thee Stork Club, Oakland", ["Z"])]
-    monkeypatch.setattr(FakeSource, "fetch", lambda self: nights)
 
     async def go():
-        app = make_app(load_image=lambda url: {"https://f/a": a, "https://f/b": b}.get(url))
+        app = make_app(shows=nights,
+                       load_image=lambda url: {"https://f/a": a, "https://f/b": b}.get(url))
         async with app.run_test(size=(160, 45)) as pilot:
             await settle(pilot, app, lambda: app._rows)
             flyer, icon = app.query_one("#flyer"), app.query_one("#venue-icon")
@@ -770,10 +768,9 @@ def test_a_shows_flyer_replaces_the_venue_icon_and_f_opens_it(monkeypatch):
 def test_a_night_with_no_bands_shows_its_name_and_looks_nothing_up(monkeypatch):
     night = [Show(date(2026, 9, 23), "Thee Stork Club, Oakland", [], title="Freakyoke",
                   notes=["Karaoke"])]
-    monkeypatch.setattr(FakeSource, "fetch", lambda self: night)
 
     async def go():
-        app = make_app()
+        app = make_app(shows=night)
         async with app.run_test(size=(160, 45)) as pilot:
             await settle(pilot, app, lambda: app.current_show)
             table = app.query_one("#shows")
@@ -860,4 +857,233 @@ def test_v_visualizes_and_says_why_when_spotify_has_no_stream_here():
             await pilot.press("v")
             await pilot.pause()
             assert not isinstance(app.screen, VizScreen)
+    run(go())
+
+
+# ---- the dataset boundary -----------------------------------------------------------------
+
+
+def _no_collection(monkeypatch):
+    """Anything that scrapes, searches or looks up now explodes."""
+    import twiddle.scene.sources as srcs
+    from twiddle.scene import bandcamp, venue_info
+    boom = lambda *a, **k: 1 / 0            # noqa: E731
+    monkeypatch.setattr(srcs, "fetch_all", boom)
+    monkeypatch.setattr(bandcamp, "search", boom)
+    monkeypatch.setattr(bandcamp, "_get", boom)
+    monkeypatch.setattr(lookup, "identify", boom)
+    monkeypatch.setattr(venue_info, "wiki_summary", boom)
+
+
+class Tripwire:
+    """An enricher that must never run."""
+    serial = False
+
+    def __init__(self, name):
+        self.name = name
+
+    def enrich(self, p):
+        raise AssertionError(f"{self.name} enrich ran for {p.band}")
+
+
+def _compiled(name, **kw):
+    """A band the builder fully enriched."""
+    from twiddle.scene.bands import BandProfile
+    p = BandProfile(band=name)
+    p.status = {"lookup": "done", "spotify": "done", "bandcamp": "done"}
+    p.spotify_artist = {"id": "a", "name": name}
+    p.tracks = TRACKS
+    p.bandcamp = {"name": name, "item_url_root": "https://x.bandcamp.com"}
+    p.bc_tracks = BC_TRACKS
+    for k, v in kw.items():
+        setattr(p, k, v)
+    from twiddle.scene.bands import assess
+    assess(p, use_pins=False)
+    return profiles.to_record(p, updated_at=1.0, guess=None)
+
+
+def test_with_the_network_dead_scene_browses_a_compiled_dataset(monkeypatch):
+    """Acceptance: launch offline and browse events, venues and lineup data."""
+    _no_collection(monkeypatch)
+    bands = {"Girl Chow": _compiled("Girl Chow"), "Wiseacre": _compiled("Wiseacre")}
+
+    def book_factory(on_update):
+        return BandBook([Tripwire("lookup"), Tripwire("spotify"), Tripwire("bandcamp")],
+                        on_update=on_update)
+
+    async def go():
+        app = make_app(bands=bands)
+        app.book = book_factory(app._from_worker_band)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: len(app._rows) == 2)
+            await settle(pilot, app, lambda: app._profile() and app._profile().tracks)
+            p = app._profile()
+            assert p.confidence == "name_only" and p.bc_tracks and p.status["spotify"] == "done"
+            await pilot.press("enter", "j")              # second band of the lineup
+            assert app.current_band == "Wiseacre"
+            await settle(pilot, app, lambda: app._profile().tracks)
+            await pilot.pause(0.2)
+            assert "not looked up" not in str(app.query_one("#profile").render())
+    run(go())
+
+
+def test_the_app_only_looks_up_the_band_on_screen_and_only_what_the_dataset_lacks():
+    """No prefetch of the lineup: Wiseacre is not asked about until selected."""
+    asked = []
+
+    class Spy(FakeSpotify):
+        def enrich(self, p):
+            asked.append(p.band)
+            super().enrich(p)
+
+    async def go():
+        app = make_app()
+        app.book = BandBook([Spy()], on_update=app._from_worker_band)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().tracks)
+            await pilot.pause(1.2)                       # the old prefetch fired at 0.8s
+            assert asked == ["Girl Chow"]
+            await pilot.press("enter", "j")
+            await settle(pilot, app, lambda: "Wiseacre" in asked)
+            assert asked == ["Girl Chow", "Wiseacre"]
+    run(go())
+
+
+def test_a_hand_pin_beats_the_datasets_name_search_pick(monkeypatch):
+    cache.pin("Girl Chow", "b", "Girl Chow (the other one)")
+    asked = []
+
+    class Spy(FakeSpotify):
+        def enrich(self, p):
+            asked.append(p.band)
+            p.spotify_artist = {"id": "b", "name": p.band}
+            p.tracks = TRACKS[:1]
+
+    async def go():
+        app = make_app(bands={"Girl Chow": _compiled("Girl Chow")})   # dataset picked "a"
+        app.book = BandBook([Spy()], on_update=app._from_worker_band)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: asked == ["Girl Chow"])
+            await settle(pilot, app, lambda: len(app._profile().tracks) == 1)
+            assert app._profile().spotify_artist["id"] == "b"
+    run(go())
+
+
+def test_not_on_spotify_pin_clears_the_datasets_tracks(monkeypatch):
+    cache.pin("Girl Chow", None)
+
+    class Spy(FakeSpotify):
+        def enrich(self, p):
+            p.spotify_artist, p.tracks = None, []
+
+    async def go():
+        app = make_app(bands={"Girl Chow": _compiled("Girl Chow")})
+        app.book = BandBook([Spy()], on_update=app._from_worker_band)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().status["spotify"] == "done")
+            assert app._profile().tracks == [] and app._profile().confidence == "none"
+    run(go())
+
+
+def test_r_runs_the_builder_then_shows_what_it_published():
+    runs = []
+
+    def builder_run():
+        runs.append(1)
+        publish_dataset(SHOWS + [Show(date(2026, 9, 26), "Ivy Room, Albany", ["Fresh Blood"])])
+        return 0, ""
+
+    async def go():
+        app = make_app(run_build=builder_run)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: len(app._rows) == 2)
+            await pilot.press("r")
+            await settle(pilot, app, lambda: len(app._rows) == 3)
+            assert runs == [1] and not app._building
+    run(go())
+
+
+def test_a_build_published_by_someone_else_appears_without_a_keypress():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: len(app._rows) == 2)
+            import os
+            publish_dataset(SHOWS + [Show(date(2026, 9, 26), "Ivy Room, Albany", ["Fresh"])])
+            os.utime(dataset.default_path(), (1, 1_900_000_000))   # a distinct mtime
+            app._watch_dataset()
+            await settle(pilot, app, lambda: len(app._rows) == 3)
+    run(go())
+
+
+def test_no_dataset_yet_bootstraps_one_build_and_says_so_meanwhile():
+    calls = []
+
+    def first_build():
+        calls.append(1)
+        publish_dataset()
+        return 0, ""
+
+    async def go():
+        app = make_app(publish=False, bootstrap=True, run_build=first_build)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: len(app._rows) == 2)
+            assert calls == [1]
+    run(go())
+
+
+def test_no_dataset_without_bootstrap_waits_and_tells_you_how_to_build_it():
+    async def go():
+        app = make_app(publish=False, bootstrap=False)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await pilot.pause(0.2)
+            assert app._rows == {} and "no dataset yet" in app.sub_title
+            assert app.snapshot is None
+    run(go())
+
+
+def test_a_stale_dataset_is_flagged_not_rebuilt_behind_your_back():
+    import time
+    builds = []
+
+    async def go():
+        publish_dataset(generated_at=time.time() - 3 * 86400)
+        app = make_app(publish=False, run_build=lambda: (builds.append(1), (0, ""))[1])
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: len(app._rows) == 2)
+            assert "stale" in app.sub_title and builds == []
+    run(go())
+
+
+def test_freshness_shows_and_an_unfinished_build_says_it_is_still_enriching():
+    import time
+    async def go():
+        publish_dataset(generated_at=time.time() - 3 * 3600, complete=False)
+        app = make_app(publish=False)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: len(app._rows) == 2)
+            assert "built 3h ago" in app.sub_title and "enriching" in app.sub_title
+    run(go())
+
+
+def test_a_build_already_running_is_not_an_error():
+    async def go():
+        app = make_app(run_build=lambda: (75, "another `scene build` is running"))
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: len(app._rows) == 2)
+            await pilot.press("r")
+            await settle(pilot, app, lambda: not app._building)
+            assert app.is_running
+    run(go())
+
+
+def test_an_unreadable_dataset_reports_and_keeps_what_is_on_screen():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: len(app._rows) == 2)
+            dataset.default_path().write_text("{broken")
+            app._reload()
+            await pilot.pause(0.1)
+            assert len(app._rows) == 2
     run(go())
