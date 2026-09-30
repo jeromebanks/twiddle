@@ -10,25 +10,27 @@ Spotify involved -- the Roam's switch journalled like any speaker write.
 from __future__ import annotations
 
 import json
+import sys
 from datetime import date, timedelta
 
 from ..control_cli import emit, fail
-from . import cache
+from . import dataset
 from . import venues as venues_mod
-from .model import Show
-from .sources import fetch_all, sources
+
+BUILD_BUSY = 75         # EX_TEMPFAIL: another build holds the lock; try again later
+LAUNCHD_LABEL = "com.twiddle.scene-build"
 
 
-def _load_shows(refresh: bool) -> tuple[list[Show], list[str]]:
-    shows, at = cache.load_listings()
-    names = list(sources())
-    if shows and cache.listings_fresh(at, names) and not refresh:
-        return shows, []
-    fresh, errors = fetch_all(stale=shows)
-    if fresh:
-        cache.save_listings(fresh, names)
-        return fresh, errors
-    return shows, errors        # stale beats nothing, and the error says why
+def _read_dataset(args):
+    """The published dataset, or (None, the failure to report). Never touches the network."""
+    try:
+        snap = dataset.load()
+    except dataset.DatasetError as exc:
+        return None, fail(args, str(exc))
+    if snap is None:
+        return None, fail(args, "no dataset yet", "run `twiddle scene build` once "
+                          "(then schedule it: `twiddle scene schedule`)")
+    return snap, 0
 
 
 def cmd_list(args) -> int:
@@ -36,7 +38,19 @@ def cmd_list(args) -> int:
         watched = venues_mod.watched()
     except ValueError as exc:
         return fail(args, f"bad venue config: {exc}")
-    shows, errors = _load_shows(args.refresh)
+    if args.refresh:        # an explicit request to run the builder first
+        from .builder import BuildBusy, BuildError, build
+        try:
+            build(log=lambda m: print(m, file=sys.stderr))
+        except BuildBusy as exc:
+            print(f"note: {exc}; showing the last dataset", file=sys.stderr)
+        except BuildError as exc:
+            print(f"warning: build failed ({exc}); showing the last dataset", file=sys.stderr)
+    snap, code = _read_dataset(args)
+    if snap is None:
+        return code
+    shows = snap.shows
+    errors = [f"{n}: {v.get('error')}" for n, v in snap.sources.items() if not v.get("ok", True)]
     if not shows:
         return fail(args, "no listings", "; ".join(errors))
     today = date.today()
@@ -55,8 +69,9 @@ def cmd_list(args) -> int:
             continue
         out.append(s)
     if getattr(args, "json", False):
-        print(json.dumps({"ok": True, "shows": [s.to_dict() for s in out],
-                          "errors": errors}, indent=2))
+        print(json.dumps({"ok": True, "shows": [s.to_dict() for s in out], "errors": errors,
+                          "generated_at": dataset.iso(snap.generated_at)
+                          if snap.generated_at else None}, indent=2))
         return 0
     lines = []
     for s in out:
@@ -70,13 +85,14 @@ def cmd_list(args) -> int:
                 (s.source_url, s.tickets, s.flyer)) if u]
     for e in errors:
         lines.append(f"warning: {e}")
+    if snap.stale():
+        lines.append("warning: the dataset is over a day old; `twiddle scene build` refreshes it")
     return emit(args, {}, "\n".join(lines) or "no shows match")
 
 
 def cmd_venue(args) -> int:
     """Where a venue is, what it is, its website. No speaker, no listings fetch."""
     import textwrap
-    from .venue_info import wiki_summary
     try:
         watched = venues_mod.watched()
     except ValueError as exc:
@@ -91,7 +107,13 @@ def cmd_venue(args) -> int:
     if v is None:
         return fail(args, f"no watched venue matches {args.name!r}",
                     "`twiddle scene venue` lists them")
-    wiki = wiki_summary(v.info.wikipedia) if v.info.wikipedia else None
+    snap = None
+    try:
+        snap = dataset.load()
+    except dataset.DatasetError:
+        pass                # the venue's own details need no dataset
+    rec = snap.venue(v.name) if snap else None
+    wiki = (rec or {}).get("wikipedia_summary")
     lines = [v.name]
     for label, value in (("address", v.info.address), ("website", v.info.url),
                          ("instagram", v.info.instagram_url), ("map", v.info.map_url)):
@@ -115,7 +137,8 @@ def cmd_scene(args) -> int:
     from .. import spotify_ops
     from .app import SceneApp
     from ..dial.output import Outputs
-    from .bands import BandBook, BandcampEnricher, LookupEnricher, SpotifyEnricher
+    from .bands import (BandBook, BandcampEnricher, LookupEnricher, SpotifyEnricher,
+                        TrackEnricher)
     from .local import LocalSpeaker
     from .players import SpotifyConnectPlayer
 
@@ -125,8 +148,11 @@ def cmd_scene(args) -> int:
         return fail(args, f"bad venue config: {exc}")
 
     def book_factory(on_update):
-        return BandBook([LookupEnricher(), SpotifyEnricher(spotify_ops.session),
-                         BandcampEnricher()], on_update=on_update)
+        # TrackEnricher alone fetches song lists; the identity enrichers must not
+        # too, or a band with no dataset record has its songs requested twice.
+        spotify = SpotifyEnricher(spotify_ops.session, tracks=False)
+        return BandBook([LookupEnricher(), spotify, BandcampEnricher(fetch_tracks=False),
+                         TrackEnricher(spotify)], on_update=on_update)
 
     app = SceneApp(book_factory=book_factory,
                    player=SpotifyConnectPlayer(room=args.room, dry_run=args.dry_run,
@@ -135,6 +161,57 @@ def cmd_scene(args) -> int:
                    dry_run=args.dry_run, outputs=Outputs(dry_run=args.dry_run))
     app.run()
     return 0
+
+
+def cmd_build(args) -> int:
+    """Collect, enrich and publish the dataset. Writes one file; no speaker."""
+    from .builder import BuildBusy, BuildError, build
+    try:
+        r = build(days=args.days, all_venues=args.all_venues, use_spotify=not args.no_spotify,
+                  dry_run=args.dry_run, log=lambda m: print(m, file=sys.stderr, flush=True))
+    except BuildBusy as exc:
+        fail(args, str(exc), "a scheduled build may be running; its data appears when it finishes")
+        return BUILD_BUSY
+    except BuildError as exc:
+        return fail(args, str(exc))
+    return emit(args, {"path": str(r.path), "shows": r.shows, "bands": r.bands,
+                       "enriched": r.enriched, "reused": r.reused, "errors": r.errors,
+                       "enrichers": r.enrichers},
+                f"{r.shows} shows, {r.bands} bands ({r.enriched} looked up, "
+                f"{r.reused} reused) -> {r.path}" + "".join(f"\nwarning: {e}" for e in r.errors))
+
+
+def schedule_plist(project, hours: float, log) -> dict:
+    """A launchd agent that runs the build every `hours` (and once at load)."""
+    from .. import daemon
+    return {
+        "Label": LAUNCHD_LABEL,
+        "ProgramArguments": [daemon._which("uv"), "run", "--project", str(project),
+                             "twiddle", "scene", "build"],
+        "WorkingDirectory": str(project),
+        "RunAtLoad": True,
+        "StartInterval": int(hours * 3600),
+        "StandardOutPath": str(log),
+        "StandardErrorPath": str(log),
+        "ProcessType": "Background",
+        "LowPriorityIO": True,
+        "Nice": 10,
+    }
+
+
+def cmd_schedule(args) -> int:
+    """Print the launchd agent that keeps the dataset fresh. Installs nothing."""
+    import plistlib
+    from pathlib import Path
+    project = Path(__file__).resolve().parents[3]
+    log = Path.home() / "Library" / "Logs" / "twiddle-scene-build.log"
+    xml = plistlib.dumps(schedule_plist(project, args.hours, log)).decode()
+    target = f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist"
+    text = (f"{xml}\nSave that as {target}, then:\n"
+            f"  launchctl bootstrap gui/$(id -u) {target}\n"
+            f"undo with:\n  launchctl bootout gui/$(id -u)/{LAUNCHD_LABEL}\n"
+            f"Every {args.hours:g}h it runs `twiddle scene build`; log: {log}")
+    return emit(args, {"label": LAUNCHD_LABEL, "interval_hours": args.hours}, text)
 
 
 def cmd_login(args) -> int:
@@ -163,10 +240,28 @@ def register(sub, parents=None):
     ls.add_argument("--venue", default=None, help="one venue (partial name)")
     ls.add_argument("--days", type=int, default=None, help="only the next N days")
     ls.add_argument("--all-venues", action="store_true")
-    ls.add_argument("--refresh", action="store_true", help="ignore the 6h cache")
+    ls.add_argument("--refresh", action="store_true",
+                    help="run `scene build` first (otherwise this only reads the dataset)")
     ls.add_argument("--links", action="store_true",
                     help="each show's listing link under it (The List's page, Yoshi's event)")
     ls.set_defaults(func=cmd_list)
+    bd = ssub.add_parser(**kw, name="build",
+                         help="collect and enrich the local event dataset that scene reads "
+                              "(network; writes only the dataset file)")
+    bd.add_argument("--days", type=int, default=31,
+                    help="enrich bands playing your venues this many days ahead (default 31)")
+    bd.add_argument("--all-venues", action="store_true",
+                    help="enrich bands at every venue listed, not just the watched ones")
+    bd.add_argument("--no-spotify", action="store_true",
+                    help="skip Spotify identity even if this Mac is signed in")
+    bd.add_argument("--dry-run", action="store_true",
+                    help="collect and enrich, but publish nothing")
+    bd.set_defaults(func=cmd_build)
+    sc = ssub.add_parser(**kw, name="schedule",
+                         help="print a launchd agent that runs `scene build` on a timer "
+                              "(read-only; installs nothing)")
+    sc.add_argument("--hours", type=float, default=6, help="how often (default 6)")
+    sc.set_defaults(func=cmd_schedule)
     vn = ssub.add_parser(**kw, name="venue",
                          help="a venue's address, website and description; "
                               "no name lists them all (read-only)")

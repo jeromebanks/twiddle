@@ -1,10 +1,10 @@
-"""What `scene` remembers between runs: listings, band matches, the device.
+"""What `scene` remembers between runs: band matches, aliases, the device.
+(The shows themselves are `dataset.py`'s, published by `scene build`.)
 
 Everything lives in `~/.cache/twiddle/scene/` as small JSON files, written
 atomically (temp file + rename) so a crash mid-write cannot leave a file the
 next launch refuses to read.
 
-  listings.json   the last fetch, shown instantly at launch, refreshed after
   band_pins.json  "this band is *that* Spotify artist" (or "not on Spotify"),
                   chosen by hand -- the only fully trustworthy identity
   aliases.json    billing -> the trimmed name the music databases knew it by
@@ -15,16 +15,14 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
-from datetime import date
 from pathlib import Path
 
 from ..lookup import norm
-from .model import Show
 
 CACHE_DIR = Path(os.environ.get("TWIDDLE_SCENE_CACHE",
                                 Path.home() / ".cache" / "twiddle" / "scene"))
-LISTINGS_TTL_S = 6 * 3600
 
 
 def _path(name: str) -> Path:
@@ -41,44 +39,15 @@ def _read(name: str) -> dict:
 def _write(name: str, data: dict) -> None:
     p = _path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=1))
-    tmp.replace(p)
-
-
-# ---- listings ---------------------------------------------------------------
-
-
-def save_listings(shows: list[Show], sources: list[str] | None = None) -> None:
-    """`sources`: the names of the sources this fetch asked, so a new one
-    (a venue's own calendar, added since) makes the cache stale at once."""
-    _write("listings.json", {"at": time.time(), "sources": sorted(sources or []),
-                             "shows": [s.to_dict() for s in shows]})
-
-
-def load_listings() -> tuple[list[Show], float | None]:
-    """(shows, fetched_at) from the last fetch; ([], None) if there is none."""
-    data = _read("listings.json")
-    shows = []
-    for d in data.get("shows", []):
-        try:
-            d = dict(d, day=date.fromisoformat(d["day"]))
-            shows.append(Show(**d))
-        except (KeyError, TypeError, ValueError):
-            continue            # an older cache shape: skip, the refresh fixes it
-    return shows, data.get("at")
-
-
-def listings_fresh(at: float | None, sources: list[str] | None = None) -> bool:
-    """Young enough, and fetched from every source in `sources`.
-
-    Without the second test a source added since the last fetch waited out
-    the rest of the 6h: Ivy Room's flyers (2026-09-26) didn't appear until
-    a manual refresh.
-    """
-    if at is None or time.time() - at >= LISTINGS_TTL_S:
-        return False
-    return not sources or set(sources) <= set(_read("listings.json").get("sources") or [])
+    # Unique per process and thread: `scene build` and the app are two
+    # processes writing the same files, and a shared temp name could be
+    # renamed into place half-written by the other.
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=1))
+        tmp.replace(p)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 # ---- aliases ----------------------------------------------------------------

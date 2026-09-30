@@ -25,6 +25,7 @@ the worked examples:
 | `scene/sources/simplecal.py` | WordPress "Simple Calendar" (a Google Calendar, server-rendered) | **yes: one line in `VENUES`** |
 | `scene/sources/makeoutroom.py` | CalendarWiz (cookie session, month grid) + Weebly blog flyers | the CalendarWiz half, with a new `crd` |
 | `scene/sources/grayarea.py` | venue's own WordPress cards | no, bespoke |
+| `scene/sources/kalx.py` | KALX 90.7's weekly events post (WordPress REST API): ~75 rooms, `Venue: acts` lines, no times or links | no, bespoke; a new room needs a `CITY` entry only if its watched-venue match has a city |
 | `scene/sources/yoshis.py` | venue's own HTML calendar + detail pages | no, bespoke |
 | `scene/sources/thelist.py` | The List | — |
 
@@ -127,7 +128,7 @@ Rules the existing sources learned the hard way:
   (`seetickets._day`). Never assume the current year.
 - **Raise `SourceError`** for network failures, non-200 responses, zero
   shows, or a failed page partway through pagination. Don't return partial
-  results, or the stale cache won't cover the gap. `fetch_all` also catches
+  results, or the last dataset's rows won't cover the gap. `fetch_all` also catches
   any other exception, but a clear `SourceError` message is better.
 - **Cap pagination** (`MAX_PAGES`), and stop if the site serves page 1 again.
 - **Keep bands out of lookups when there are none.** Band-less nights are
@@ -154,6 +155,9 @@ print(errors, len(rows), "merged", sum(1 for s in rows if s.also),
 for s in rows: print(s.day, s.source, "+" if s.also else " ", "F" if s.flyer else "-", s.billing[:60], s.price)
 EOF
 ```
+
+The app reads a dataset, not the sources: after registering a source, run
+`uv run twiddle scene build` to see it in `scene` / `scene list`.
 
 Look for **duplicate rows on the same night**. Most are real: karaoke,
 open mic or comedy beside the gig, or a pre-show. Some are missed merges,
