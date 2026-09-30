@@ -12,6 +12,7 @@ anything or anybody's speakers.
 | What twiddle is, and getting started | `README.md`, `docs/QUICKSTART.md` |
 | Every command; how the Sonos side measures things, and its traps | `docs/GUIDE.md` |
 | The `scene` TUI: keys, sources, extending it | `docs/SCENE.md` |
+| How `scene` works inside: builder, dataset, what it pulls from where | `docs/SCENE-ARCHITECTURE.md` |
 | Playing Spotify through a relay instead of Sonos's cloud | `docs/SPOTIFY.md` |
 | Twiddle and any other characters | `CHARACTERS.md` |
 | Adding a station / a venue / a visualizer | skills `add-radio-station`, `add-venue-source`, `add-visualizer` |

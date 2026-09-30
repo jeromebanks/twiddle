@@ -71,6 +71,7 @@ and troubleshooting.
 | [docs/QUICKSTART.md](docs/QUICKSTART.md) | setting up on your own Mac, step by step |
 | [docs/GUIDE.md](docs/GUIDE.md) | every command; the Sonos tools and how they measure (and the traps that fooled them first) |
 | [docs/SCENE.md](docs/SCENE.md) | the `scene` app: keys, band identity, venue sources, extending it |
+| [docs/SCENE-ARCHITECTURE.md](docs/SCENE-ARCHITECTURE.md) | how `scene` works inside: the builder, the published dataset, what it pulls from where |
 | [docs/SPOTIFY.md](docs/SPOTIFY.md) | playing Spotify on Sonos through a local relay, and what that took |
 | [CHARACTERS.md](CHARACTERS.md) | Twiddle, and the cast to come |
 | [CLAUDE.md](CLAUDE.md) | working in the code (written for Claude Code, useful for humans too) |

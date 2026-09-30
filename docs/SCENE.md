@@ -9,7 +9,9 @@ on the Roams through the relay. No Sonos is needed; see
 [Running it without the Roams](#running-it-without-the-roams).
 
 It is the first piece of a larger music discovery app, so it is built as
-three swappable layers. See [Extending it](#extending-it).
+three swappable layers. See [Extending it](#extending-it), and
+[SCENE-ARCHITECTURE.md](SCENE-ARCHITECTURE.md) for how the pieces fit: what
+is pulled from where, the builder, the dataset, and the app.
 
 ---
 
