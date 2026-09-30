@@ -25,6 +25,7 @@ the worked examples:
 | `scene/sources/simplecal.py` | WordPress "Simple Calendar" (a Google Calendar, server-rendered) | **yes: one line in `VENUES`** |
 | `scene/sources/makeoutroom.py` | CalendarWiz (cookie session, month grid) + Weebly blog flyers | the CalendarWiz half, with a new `crd` |
 | `scene/sources/grayarea.py` | venue's own WordPress cards | no, bespoke |
+| `scene/sources/kalx.py` | KALX 90.7's weekly events post (WordPress REST API): ~75 rooms, `Venue: acts` lines, no times or links | no, bespoke; a new room needs a `CITY` entry only if its watched-venue match has a city |
 | `scene/sources/yoshis.py` | venue's own HTML calendar + detail pages | no, bespoke |
 | `scene/sources/thelist.py` | The List | — |
 

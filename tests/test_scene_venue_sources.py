@@ -469,3 +469,102 @@ def test_make_out_room_month_and_blog_flyers():
              Show(date(2026, 9, 27), "Make-Out Room, S.F.", [], title="Unrelated Night")]
     makeoutroom.attach_flyers(night, flyers)
     assert "dad-co" in night[0].flyer and "dimensions" in night[1].flyer and not night[2].flyer
+
+
+# ---- KALX's weekly calendar --------------------------------------------------------------
+
+def _kalx_posts():
+    import json
+    return json.loads((FIX / "kalx_events.json").read_text())
+
+
+def test_kalx_reads_the_weekly_posts_into_shows():
+    from twiddle.scene.sources import kalx
+    shows = kalx.parse_posts(_kalx_posts(), date(2026, 9, 29))
+    assert shows and all(s.source == "kalx" and s.source_url.startswith("https://kalx.") for s in shows)
+    assert min(s.day for s in shows) == date(2026, 9, 29)         # nothing before today
+    fox = next(s for s in shows if s.day == date(2026, 9, 29) and s.venue.startswith("Fox"))
+    assert fox.venue == "Fox Theater, Oakland"
+    assert fox.bands == ["Social Distortion", "Descendents", "The Chats"]
+    assert fox.price is None and fox.flyer == "" and fox.tickets == ""   # KALX has none
+
+
+def test_kalx_rooms_resolve_to_watched_venues_including_the_two_new_ones():
+    from twiddle.scene import venues as v
+    from twiddle.scene.sources import kalx
+    watched = v.watched()
+    shows = kalx.parse_posts(_kalx_posts(), date(2026, 9, 22))
+    by = {s.venue: v.find(watched, s.venue) for s in shows}
+    for spelled, want in (("Thee Stork Club, East Bay", "Stork Club"),
+                          ("Cornerstone, Berkeley", "Cornerstone"),
+                          ("The Freight, Berkeley", "Freight"),
+                          ("Regency Ballroom, S.F.", "Regency"),
+                          ("Paramount Theatre, Oakland", "Paramount"),
+                          ("Hillside Club, Berkeley", "Hillside Club"),
+                          ("Sweetwater Music Hall, Mill Valley", "Sweetwater"),
+                          ("Bill Graham Civic Auditorium, S.F.", "Civic"),
+                          ("Eli’s Mile High Club, East Bay", "Eli's Mile High"),
+                          ("Yoshi’s, East Bay", "Yoshi's"), ("Cafe Du Nord, S.F.", "Cafe du Nord")):
+        assert spelled in by, spelled
+        assert by[spelled] is not None and by[spelled].name == want, spelled
+    assert "Hillside Club, Berkeley" in by and "Sweetwater Music Hall, Mill Valley" in by
+    assert v.resolve(watched, "sweetwater").info.address.startswith("19 Corte Madera")
+    assert v.resolve(watched, "hillside").info.url == "https://www.hillsideclub.org/"
+
+
+def test_kalx_tells_nights_from_lineups():
+    from twiddle.scene.sources.kalx import lineup
+    assert lineup("Thelma And The Sleaze, Hypnotic Pattern") == \
+        (["Thelma And The Sleaze", "Hypnotic Pattern"], "")
+    assert lineup("Open Mic") == ([], "Open Mic")
+    assert lineup("Karaokiki") == ([], "Karaokiki")
+    assert lineup("Irish Céili (“KAY-LEE”) Dance with live band")[0] == []
+    assert lineup("Monday Night Hubba: Damsels & Dragons") == \
+        ([], "Monday Night Hubba: Damsels & Dragons")
+    assert lineup("KALW’s 85th Birthday: Rozzi, DEATHX_XHEAD") == \
+        (["Rozzi", "DEATHX_XHEAD"], "KALW’s 85th Birthday")
+    assert lineup("Lukas Nelson & Friends, featuring Grahame Lesh, Holly Bowling") == \
+        (["Lukas Nelson & Friends", "Grahame Lesh", "Holly Bowling"], "")
+    assert lineup("Fred Wesley’s New JBs")[0] == ["Fred Wesley’s New JBs"]
+
+
+def test_kalx_merges_under_the_list_and_adds_what_it_lacks():
+    from twiddle.scene.sources import kalx
+    ivy = Show(date(2026, 9, 29), "Ivy Room, Albany", ["Thelma And The Sleaze", "Hypnotic Pattern"],
+               price="$15", source="thelist")
+    shows = [s for s in kalx.parse_posts(_kalx_posts(), date(2026, 9, 29))
+             if s.day == date(2026, 9, 29)]
+    merged = dedupe([ivy] + shows, room=lambda name: "Ivy Room" if "ivy room" in name.lower() else name)
+    [night] = [s for s in merged if "ivy" in s.venue.lower()]
+    assert night.source == "thelist" and night.price == "$15" and night.also == ["kalx"]
+    assert night.bands == ivy.bands                    # The List's lineup stands
+
+
+def test_kalx_says_so_when_the_page_changes_or_the_site_is_down(monkeypatch):
+    from twiddle.scene.sources import kalx
+    import pytest
+    with pytest.raises(SourceError, match="no day headings"):
+        kalx.parse_posts([{"date": "2026-09-24", "link": "u", "content": {"rendered": "<p>x</p>"}}],
+                         date(2026, 9, 29))
+
+    class Resp:
+        status_code = 503
+    monkeypatch.setattr(kalx.requests, "get", lambda *a, **k: Resp())
+    with pytest.raises(SourceError, match="HTTP 503"):
+        kalx.KALX().fetch()
+
+    def boom(*a, **k):
+        raise kalx.requests.ConnectionError("down")
+    monkeypatch.setattr(kalx.requests, "get", boom)
+    with pytest.raises(SourceError, match="could not reach"):
+        kalx.KALX().fetch()
+
+
+def test_kalx_past_weeks_only_is_not_an_error():
+    from twiddle.scene.sources import kalx
+    assert kalx.parse_posts(_kalx_posts(), date(2027, 3, 1)) == []
+
+
+def test_kalx_is_registered_last():
+    from twiddle.scene.sources import base
+    assert list(base._registry())[-1] == "kalx"

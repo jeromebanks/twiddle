@@ -565,6 +565,23 @@ A `[[venue]]` list replaces the defaults, so list every venue you want.
 | `deluxe` | The DeLuxe, S.F. | its Google Calendar as rendered by WordPress "Simple Calendar" (`sources/simplecal.py`); no flyers |
 | `grayarea` | Gray Area, S.F. | its events page; courses, workshops, talks and exhibitions dropped |
 | `makeoutroom` | Make-Out Room, S.F. | CalendarWiz (months ahead, needs a cookie session) plus flyers from its blog (next night or two) |
+| `kalx` | ~75 rooms, East Bay and S.F. (incl. Sweetwater Music Hall and Hillside Club, on no other source) | KALX 90.7's weekly "Events" post via the site's WordPress REST API (`sources/kalx.py`); see below. Last in the registry |
+
+**KALX** (kalx.berkeley.edu, measured 2026-09-29) posts one page a week,
+"Events: September 28 – October 4, 2026": a day heading with the year, a
+region (East Bay / San Francisco), then a line per room, `Venue: act, act`.
+The site's REST API (`/wp-json/wp/v2/event`) lists the recent posts with their
+HTML in one request, so nothing guesses next week's URL. It is the widest
+calendar here (about 75 rooms across two weeks) and the only one carrying
+Sweetwater Music Hall and the Hillside Club, but it has **no times, prices,
+flyers or links**, and only the current week or two. So it is registered last:
+where another source knows a night its facts win and KALX only confirms it.
+Two guesses are made and can be wrong: an entry that reads like a night
+("Open Mic", "Irish Céili Dance with live band", "Karaokiki") is kept by its
+name rather than split into bands; and a room's city comes from a small table
+(KALX drops it, and files Sweetwater, in Mill Valley, under "San Francisco").
+The `Name: a, b, c` form is read as a named night with a lineup. Not covered:
+anything beyond the posted weeks.
 
 The Stork Club, Gilman and Ivy Room are on The List already; their own pages add
 **flyers and ticket links**, plus nights The List skips. Measured
@@ -708,6 +725,7 @@ src/twiddle/scene/
     simplecal.py     WordPress Simple Calendar pages (The DeLuxe)
     grayarea.py      Gray Area's events page
     makeoutroom.py   Make-Out Room: CalendarWiz + blog flyers
+    kalx.py          KALX 90.7's weekly events post: ~75 rooms, no times/prices/links
   venues.py        watched venues + matching The List's spellings
   venue_info.py    each venue's address, website, description, Instagram; Wikipedia summaries
   instagram.py     a venue's Instagram profile picture, no login

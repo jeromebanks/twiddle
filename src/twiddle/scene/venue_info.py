@@ -145,6 +145,15 @@ INFO: dict[str, VenueInfo] = {
         "3225 22nd St, San Francisco, CA 94110", "https://www.makeoutroom.com/",
         "Mission bar and legacy business: early-evening bands, readings and "
         "comedy, then DJ dance nights until 2am, most of them free."),
+    "Hillside Club": I(
+        "2286 Cedar St, Berkeley, CA 94709", "https://www.hillsideclub.org/",
+        "A Northside neighbourhood clubhouse since 1898 (the 1924 building is by John "
+        "White): concerts, dances and talks in a small hall, mostly seated.",
+        "Hillside Club"),
+    "Sweetwater": I(
+        "19 Corte Madera Ave, Mill Valley, CA 94941", "https://sweetwatermusichall.org/",
+        "Marin's nonprofit music hall since 1972: rock, jam, folk and bluegrass, "
+        "often seated with a bar."),
     "Great American": I(
         "859 O'Farrell St, San Francisco, CA 94109", "https://gamh.com/",
         "Ornate concert hall in the Tenderloin, with a balcony.",

@@ -124,6 +124,10 @@ DEFAULT_VENUES = (
     Venue("The DeLuxe", ("deluxe, s.f.",)),
     Venue("Gray Area", ("gray area", "grey area")),
     Venue("Make-Out Room", ("make-out room", "make out room", "makeout room")),
+    # ---- added 2026-09-29 (issue #2). Neither is on The List; KALX's weekly
+    # calendar (sources/kalx.py) carries both. ---------------------------
+    Venue("Hillside Club", ("hillside club",)),
+    Venue("Sweetwater", ("sweetwater music hall",)),
 )
 DEFAULT_VENUES = tuple(replace(v, info=INFO.get(v.name, VenueInfo())) for v in DEFAULT_VENUES)
 
