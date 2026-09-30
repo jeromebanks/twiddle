@@ -172,7 +172,7 @@ Under `src/twiddle/`:
 | `cli.py` | command line |
 | `tools/observe.py` (repo root) | append-only observation log (**use this, not doc edits**) |
 
-| `scripts/radio.zsh` (repo root) | one-word shell names over the CLI: one per catalog file, `kalx`/`kexp`/... (`tune`), `dial`, `np`, `discover`, `artist` (`info`), `stations`, `shows` (`scene`) |
+| `scripts/radio.zsh` (repo root) | one-word shell names over the CLI: one per catalog file, `kalx`/`kexp`/... (`tune`), `dial`, `np`, `discover`, `artist` (`info`), `stations`, `scene` (and `shows`, the older name) |
 
 `uv sync` then `uv run pytest` (about 1000 tests). Tests encode the traps above —
 several exist specifically to stop a fixed bug from returning, so if one fails,
