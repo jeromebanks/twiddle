@@ -147,7 +147,9 @@ def _show_rows(shows: list[Show], watched) -> list[dict]:
         v = venues_mod.find(watched, s.venue)
         rooms.append((s, v.name if v else None))
     ids = dataset.unique_ids(rooms)
-    return [dict(s.to_dict(), id=i, venue_id=dataset.venue_id(room) if room else None)
+    # An unwatched room has no venue record, but its show still carries a usable
+    # id (the source's own spelling, slugged) so `Snapshot.shows_at` can find it.
+    return [dict(s.to_dict(), id=i, venue_id=dataset.venue_id(room or s.venue))
             for (s, room), i in zip(rooms, ids)]
 
 

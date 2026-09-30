@@ -917,6 +917,9 @@ class SceneApp(App):
         sp_state = p.status.get("spotify", "")
         if sp_state.startswith("error"):
             t.append(f"\nSpotify: {sp_state[7:]}\n", style="red")
+        tr_state = p.status.get("tracks", "")
+        if tr_state.startswith("error"):       # the identity is fine; the songs could not be fetched
+            t.append(f"\nsong lists: {tr_state[7:]}\n", style="red")
         self.query_one("#profile", Static).update(t)
         self.query_one("#profile-scroll").scroll_home(animate=False)
         sig = pictures.signature(p)
@@ -963,8 +966,9 @@ class SceneApp(App):
                  f"{len(p.tracks)} on Spotify" if p.tracks else ""]
         busy = p.status.get("bandcamp") in ("pending", "running") or p.confidence == PENDING \
             or p.status.get("tracks") in ("pending", "running")
+        failed = p.status.get("tracks", "").startswith("error")
         tracks.border_subtitle = " · ".join(x for x in parts if x) or \
-            ("searching…" if busy else "")
+            ("searching…" if busy else "song lists failed -- see the band card" if failed else "")
 
     # ---- pictures ------------------------------------------------------------
 

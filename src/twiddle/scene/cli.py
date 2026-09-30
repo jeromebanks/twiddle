@@ -148,8 +148,10 @@ def cmd_scene(args) -> int:
         return fail(args, f"bad venue config: {exc}")
 
     def book_factory(on_update):
-        spotify = SpotifyEnricher(spotify_ops.session)
-        return BandBook([LookupEnricher(), spotify, BandcampEnricher(),
+        # TrackEnricher alone fetches song lists; the identity enrichers must not
+        # too, or a band with no dataset record has its songs requested twice.
+        spotify = SpotifyEnricher(spotify_ops.session, tracks=False)
+        return BandBook([LookupEnricher(), spotify, BandcampEnricher(fetch_tracks=False),
                          TrackEnricher(spotify)], on_update=on_update)
 
     app = SceneApp(book_factory=book_factory,

@@ -164,7 +164,12 @@ class Snapshot:
         """Shows whose room is this venue (by name or id)."""
         v = self.venue(venue)
         vid = v["id"] if v else _slug(venue)
-        return [s for s, i in zip(self.shows, self.venue_ids) if i == vid]
+        want = _slug(venue)
+        out = []
+        for s, i in zip(self.shows, self.venue_ids):
+            if i == vid or (i is None and want and want in _slug(s.venue)):   # older files: no id
+                out.append(s)
+        return out
 
 
 def _show_from(row: dict) -> Show | None:

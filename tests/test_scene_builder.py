@@ -426,3 +426,10 @@ def test_kept_answers_survive_more_than_one_failed_build(tmp_path):
     rec = read(tmp_path).band("Coup Dville")
     assert rec["identifiers"]["spotify_id"] == "sp-Coup Dville"
     assert all(v.startswith("kept") for v in rec["status"].values())
+
+
+def test_unwatched_rooms_get_a_usable_venue_id_so_they_can_be_queried(tmp_path):
+    run(tmp_path, [Src("thelist", [NOBODY, GIRL])])
+    snap = read(tmp_path)
+    assert all(vid for vid in snap.venue_ids)
+    assert [s.billing for s in snap.shows_at("Somewhere Else, S.F.")] == ["Nobody"]

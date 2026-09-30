@@ -1362,3 +1362,33 @@ def test_a_partial_checkpoint_still_corrects_the_artist_it_does_have():
     assert p.bandcamp == {"item_url_root": "https://x.bandcamp.com"}       # what only we knew stays
     assert p.bc_tracks == [{"title": "t"}] and p.status["bandcamp"] == "done"
     book.close()
+
+
+def test_a_failed_song_list_fetch_is_shown_not_hidden(monkeypatch):
+    """Codex: identity from the dataset, an expired Spotify sign-in for the songs."""
+    from twiddle.scene.bands import SpotifyEnricher, TrackEnricher
+
+    def expired():
+        raise ConnectionError("network is down")
+    spot = SpotifyEnricher(expired, tracks=False)
+
+    async def go():
+        app = make_app(bands={"Girl Chow": _identity_only("Girl Chow")})
+        app.book = BandBook([TrackEnricher(spot, bc_tracks=lambda u: (_ for _ in ()).throw(
+            ConnectionError("network is down")))], on_update=app._from_worker_band)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and
+                         app._profile().status.get("tracks", "").startswith("error"))
+            await pilot.pause(0.1)
+            assert "song lists: network is down" in str(app.query_one("#profile").render())
+            assert "song lists failed" in app.query_one("#tracks").border_subtitle
+    run(go())
+
+
+def test_the_tuis_book_has_exactly_one_song_list_fetcher():
+    """Codex: identity enrichers with tracks on would duplicate TrackEnricher's requests."""
+    from twiddle.scene import bands, cli
+    import inspect
+    src = inspect.getsource(cli.cmd_scene)
+    assert "SpotifyEnricher(spotify_ops.session, tracks=False)" in src
+    assert "BandcampEnricher(fetch_tracks=False)" in src

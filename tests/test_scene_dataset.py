@@ -266,3 +266,17 @@ def test_the_lookup_cache_is_saved_by_atomic_rename_so_a_reader_never_sees_half(
         t.join()
     assert torn == [] and len(lookup._cache_load()) == 2001
     assert [p.name for p in tmp_path.iterdir()] == ["lookup.json"]
+
+
+def test_shows_at_finds_an_unwatched_room_with_or_without_an_id(tmp_path):
+    """Codex: venue_id=None made shows_at return nothing for rooms nobody watches."""
+    away = Show(date(2026, 10, 8), "Somewhere Else, S.F.", ["Nobody"], source="thelist")
+    path = tmp_path / "d.json"
+    old = doc(shows=[away], show_rows=[dict(away.to_dict(), id="x", venue_id=None)])   # an older file
+    dataset.publish(old, path)
+    assert dataset.load(path).shows_at("Somewhere Else, S.F.") == [away]
+    assert dataset.load(path).shows_at("somewhere else") == [away]
+    new = doc(shows=[away], show_rows=[dict(away.to_dict(), id="x",
+                                            venue_id=dataset.venue_id("Somewhere Else, S.F."))])
+    dataset.publish(new, path)
+    assert dataset.load(path).shows_at("Somewhere Else, S.F.") == [away]
