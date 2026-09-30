@@ -192,7 +192,7 @@ def test_spotify_is_skipped_not_prompted_when_this_mac_is_not_signed_in(tmp_path
     def no_session():
         raise spotify_ops.PlaybackError("run auth") from spotify.AuthError("no token")
     monkeypatch.setattr(spotify_ops, "session", no_session)
-    monkeypatch.setattr(builder, "LookupEnricher", lambda: Enr("lookup"))
+    monkeypatch.setattr(builder, "LookupEnricher", lambda **kw: Enr("lookup"))
     monkeypatch.setattr(builder, "BandcampEnricher", lambda **kw: Enr("bandcamp"))
     builder.build(path=tmp_path / "d.json", sources=[Src("thelist", [COUP])],
                   genre_search=lambda n, offline=False: None, wiki=lambda t: None, today=TODAY)
@@ -213,7 +213,7 @@ def test_one_persons_pins_are_not_published_with_the_data(tmp_path, monkeypatch)
             return {"id": path.rsplit("/", 1)[1], "name": "Pinned"}
     monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, artist: [])
     monkeypatch.setattr(spotify_ops, "session", lambda: Sess())
-    monkeypatch.setattr(builder, "LookupEnricher", lambda: Enr("lookup"))
+    monkeypatch.setattr(builder, "LookupEnricher", lambda **kw: Enr("lookup"))
     monkeypatch.setattr(builder, "BandcampEnricher", lambda **kw: Enr("bandcamp"))
     cache.pin("Coup Dville", "hand-picked", "Coup")
     builder.build(path=tmp_path / "d.json", sources=[Src("thelist", [COUP])],
@@ -294,7 +294,7 @@ def test_the_builder_records_identity_but_not_song_lists(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, a: seen.append(a) or ["t"])
     monkeypatch.setattr(spotify_ops, "session", lambda: Sess())
-    monkeypatch.setattr(builder, "LookupEnricher", lambda: Enr("lookup"))
+    monkeypatch.setattr(builder, "LookupEnricher", lambda **kw: Enr("lookup"))
     bc_pages = []
     real = builder.BandcampEnricher       # its defaults bind the real network functions
     monkeypatch.setattr(builder, "BandcampEnricher", lambda **kw: real(
@@ -336,7 +336,7 @@ def test_a_skipped_or_failed_enricher_does_not_erase_what_the_last_build_learned
     run(tmp_path, [Src("thelist", [COUP])], [Enr("lookup"), Enr("bandcamp")], now=lambda: later)
     rec = read(tmp_path).band("Coup Dville")
     assert rec["identifiers"]["spotify_id"] == "sp-Coup Dville"
-    assert rec["status"]["spotify"] == "done" and rec["tracks"]
+    assert rec["status"]["spotify"].startswith("kept") and rec["tracks"]
     assert rec["updated_at"] == dataset.iso(later)               # the rest was refreshed
     # a failing one keeps its old answer too
     run(tmp_path, [Src("thelist", [COUP])],
@@ -359,3 +359,55 @@ def test_a_build_will_not_overwrite_a_dataset_it_cannot_read(tmp_path):
     path.write_text("{torn")                                     # damage, on the other hand, is replaced
     run(tmp_path, [Src("thelist", [GIRL])])
     assert dataset.load(path).shows
+
+
+def test_a_bandcamp_pause_also_stops_the_lookups_last_resort_bandcamp_search(monkeypatch):
+    """Codex: MusicBrainz's fallback is a Bandcamp name search that ignored the pause."""
+    from twiddle import lookup
+    from twiddle.scene.bands import BandProfile
+    asked = []
+    monkeypatch.setattr(lookup, "_by_name", lambda a: (None, []))
+    monkeypatch.setattr(lookup, "_by_fuzzy", lambda *a: None)
+    monkeypatch.setattr(lookup, "_by_discogs", lambda a: (None, []))
+    monkeypatch.setattr(lookup, "_by_bandcamp", lambda a: asked.append(a) or None)
+    monkeypatch.setattr(lookup, "use_cache", True, raising=False)
+    skip: set[str] = set()
+    monkeypatch.setattr(spotify_ops, "session", lambda: 1 / 0)
+    lookup_enricher = builder._default_enrichers(False, {}, skip)[0]
+    lookup_enricher.enrich(BandProfile("Unknown One"))
+    assert asked == ["Unknown One"]                       # Bandcamp fine: last resort used
+    skip.add("bandcamp")
+    lookup_enricher.enrich(BandProfile("Unknown Two"))
+    assert asked == ["Unknown One"]                       # paused: not asked again
+    assert cache.alias("Unknown Two") is None             # and no false "nothing worked" recorded
+
+
+def test_a_carried_over_answer_is_retried_next_build_not_treated_as_fresh(tmp_path):
+    """Codex: a failed refresh must not reset the record's age."""
+    run(tmp_path, [Src("thelist", [COUP])], [Enr("lookup"), Enr("spotify", spotify_fill),
+                                             Enr("bandcamp")])
+    later = 1_790_000_000.0 + builder.PROFILE_TTL_S * 2
+    run(tmp_path, [Src("thelist", [COUP])],
+        [Enr("lookup"), Enr("spotify", raises=spotify.ApiError(429, "slow down")), Enr("bandcamp")],
+        now=lambda: later)
+    rec = read(tmp_path).band("Coup Dville")
+    assert rec["identifiers"]["spotify_id"] == "sp-Coup Dville"          # kept ...
+    assert rec["status"]["spotify"].startswith("kept") and "slow down" in rec["status"]["spotify"]
+    retry = Enr("spotify", spotify_fill)
+    r = run(tmp_path, [Src("thelist", [COUP])], [Enr("lookup"), retry, Enr("bandcamp")],
+            now=lambda: later + 60)                                       # well inside the TTL
+    assert retry.asked == ["Coup Dville"] and r.enriched == 1             # ... and retried
+    assert read(tmp_path).band("Coup Dville")["status"]["spotify"] == "done"
+
+
+def test_a_kept_answer_still_counts_as_known_to_the_app_and_the_badge():
+    from twiddle.scene import profiles
+    from twiddle.scene.bands import BandProfile
+    p = BandProfile("X")
+    p.status = {"lookup": "done", "spotify": "kept: error: 429", "bandcamp": "done"}
+    p.spotify_artist = {"id": "s1"}
+    rec = profiles.to_record(p, updated_at=1.0, guess=None)
+    assert rec["confidence"] != "pending" or "not checked" not in rec["why"]
+    back = profiles.from_record(rec)
+    assert back.status["spotify"] == "done" and back.spotify_artist == {"id": "s1"}
+    assert not profiles.enriched(rec)

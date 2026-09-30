@@ -102,13 +102,15 @@ class BandProfile:
               "spotify": ("spotify_artist", "spotify_candidates", "tracks"),
               "bandcamp": ("bandcamp", "bc_tracks")}
 
-    def adopt(self, name: str, other: "BandProfile") -> None:
-        """Take `other`'s answer from enricher `name`, and count it as done."""
+    def adopt(self, name: str, other: "BandProfile", status: str = "done") -> None:
+        """Take `other`'s answer from enricher `name`. `status` is what it now
+        counts as: "done", or the builder's "kept" -- an old answer carried over
+        that a later build should still try to refresh."""
         for attr in self.FIELDS[name]:
             setattr(self, attr, getattr(other, attr))
         if name in other.searched:
             self.searched[name] = other.searched[name]
-        self.status[name] = "done"
+        self.status[name] = status
 
     @property
     def search_name(self) -> str:
@@ -280,19 +282,22 @@ class LookupEnricher:
     name = "lookup"
     serial = True
 
-    def __init__(self, identify=None):
+    def __init__(self, identify=None, bandcamp_ok: Callable[[], bool] | None = None):
         self._identify = identify
+        self._bandcamp_ok = bandcamp_ok     # False: leave Bandcamp alone (rate-limited)
 
     def enrich(self, p: BandProfile) -> None:
-        identify = self._identify or lookup.identify
+        ok = self._bandcamp_ok() if self._bandcamp_ok else True
+        identify = self._identify or (
+            lambda name: lookup.identify(name, bandcamp_fallback=ok))
         r = identify(p.band)
         if not r.artist and not r.candidates:
-            r = self._trimmed(p, identify) or r
+            r = self._trimmed(p, identify, record_miss=ok) or r
         p.info = r.artist
         p.lookup_candidates = r.candidates
 
     @staticmethod
-    def _trimmed(p: BandProfile, identify) -> lookup.Result | None:
+    def _trimmed(p: BandProfile, identify, record_miss: bool = True) -> lookup.Result | None:
         """The first trimmed name the databases uniquely identify, if any.
 
         Only a single identified artist counts: "several candidates" for a
@@ -311,7 +316,8 @@ class LookupEnricher:
                 p.alias = name
                 cache.save_alias(p.band, name)
                 return r
-        cache.save_alias(p.band, "")    # a network failure raises before here
+        if record_miss:                 # not when we skipped a source: "none worked" would be false
+            cache.save_alias(p.band, "")    # a network failure raises before here
         return None
 
 
@@ -584,6 +590,7 @@ class BandBook:
         key = lookup.norm(band)
         with self._lock:
             old = self.profiles.pop(key, None)
+            self._deferred.pop(key, None)       # captured before the pin changed
             if old is not None and self.reseed is not None:
                 fresh = self.reseed(old.band)
                 if fresh is not None:
@@ -656,7 +663,10 @@ class BandBook:
         if waiting is None:
             return None
         self.seed([waiting])
-        return self.profiles.get(key)
+        fresh = self.profiles.get(key)
+        if fresh is not None and fresh is not p:
+            self._wake(fresh)       # what the new record lacks (song lists), as selecting it would
+        return fresh
 
     def close(self) -> None:
         self._lane.put((-1, -1, None, None))

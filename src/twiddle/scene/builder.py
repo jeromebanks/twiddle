@@ -151,8 +151,11 @@ def _show_rows(shows: list[Show], watched) -> list[dict]:
             for (s, room), i in zip(rooms, ids)]
 
 
-def _default_enrichers(use_spotify: bool, notes: dict[str, str]) -> list:
-    enrichers: list = [LookupEnricher()]
+def _default_enrichers(use_spotify: bool, notes: dict[str, str],
+                       skip: set[str] | None = None) -> list:
+    skip = skip if skip is not None else set()
+    # MusicBrainz's last resort is a Bandcamp name search: stop it too once Bandcamp is paused.
+    enrichers: list = [LookupEnricher(bandcamp_ok=lambda: "bandcamp" not in skip)]
     if use_spotify:
         try:
             spotify_ops.session()       # loads an existing sign-in; never opens a browser
@@ -176,7 +179,8 @@ def _keep_prior_answers(p: BandProfile, old: dict | None) -> None:
     kept = False
     for name in BandProfile.FIELDS:
         if p.status.get(name) != "done" and before.status.get(name) == "done":
-            p.adopt(name, before)
+            why = p.status.get(name)
+            p.adopt(name, before, "kept" + (f": {why}" if why else ""))
             kept = True
     if kept:
         assess(p, use_pins=False)
@@ -273,7 +277,8 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
     result.bands = len(bands)
 
     notes: dict[str, str] = {}
-    active = enrichers if enrichers is not None else _default_enrichers(use_spotify, notes)
+    skip: set[str] = set()          # enrichers rate-limited this run
+    active = enrichers if enrichers is not None else _default_enrichers(use_spotify, notes, skip)
     names = tuple(e.name for e in active)
     enricher_status = {n: "ok" for n in names} | notes
 
@@ -300,7 +305,6 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
             continue
         for b in s.bands:
             wanted.setdefault(dataset.band_id(b), b)
-    skip: set[str] = set()
     todo = []
     for key, name in wanted.items():
         rec = bands.get(key)

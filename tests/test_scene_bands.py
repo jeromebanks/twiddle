@@ -495,3 +495,74 @@ def test_a_record_that_arrives_mid_lookup_is_applied_when_the_lookup_ends():
     book.close()
     assert book.profiles["x"].spotify_artist == {"id": "from-dataset"}
     assert updates and updates[-1] is book.profiles["x"]
+
+
+def test_changing_a_pin_discards_a_record_that_was_waiting_for_the_old_lookup():
+    """Codex: a checkpoint deferred before the pin changed must not come back after it."""
+    gate = threading.Event()
+
+    class Slow:
+        name, serial = "spotify", False
+
+        def enrich(self, p):
+            gate.wait(2)
+            p.spotify_artist = {"id": "pinned"}
+    book = BandBook([Slow()])
+    p = BandProfile("X")
+    p.status = {"spotify": "idle"}
+    book.seed([p])
+    book.get("X", urgent=True)                             # running
+    stale = BandProfile("X")
+    stale.status = {"spotify": "done"}
+    stale.spotify_artist = {"id": "from-dataset"}
+    book.seed([stale])                                     # deferred
+    assert "x" in book._deferred
+    book.refresh("X")
+    assert "x" not in book._deferred
+    gate.set()
+    time.sleep(0.3)
+    book.close()
+    assert (book.profiles["x"].spotify_artist or {}).get("id") != "from-dataset"
+
+
+def test_a_deferred_record_that_corrects_the_artist_wakes_its_song_lists(monkeypatch):
+    """Codex: the corrected profile has no tracks; something must fetch them."""
+    from twiddle import discover_cli
+    from twiddle.scene.bands import TrackEnricher
+    gate, asked = threading.Event(), []
+
+    def artist_tracks(sess, artist):
+        asked.append(artist["id"])
+        if artist["id"] == "old":
+            gate.wait(2)                                    # this request is in flight ...
+        return [{"uri": artist["id"]}]
+    monkeypatch.setattr(discover_cli, "_artist_tracks", artist_tracks)
+
+    class Ident:
+        name, serial = "spotify", False
+
+        def session(self):
+            return object()
+
+        def enrich(self, p):
+            pass
+    ident = Ident()
+    book = BandBook([ident, TrackEnricher(ident)])
+    p = BandProfile("X")
+    p.status = {"spotify": "done", "tracks": "idle"}
+    p.spotify_artist = {"id": "old"}
+    book.seed([p])
+    book.get("X", urgent=True)
+    deadline = time.time() + 2
+    while "old" not in asked and time.time() < deadline:
+        time.sleep(0.01)
+    corrected = BandProfile("X")
+    corrected.status = {"spotify": "done", "tracks": "idle"}
+    corrected.spotify_artist = {"id": "new"}
+    book.seed([corrected])                                  # ... when the correction arrives
+    gate.set()
+    deadline = time.time() + 3
+    while book.profiles["x"].tracks != [{"uri": "new"}] and time.time() < deadline:
+        time.sleep(0.01)
+    book.close()
+    assert book.profiles["x"].tracks == [{"uri": "new"}] and "new" in asked

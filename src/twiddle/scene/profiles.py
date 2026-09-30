@@ -55,7 +55,7 @@ def to_record(p: BandProfile, *, updated_at: float | None, guess: genre.Guess | 
     no Spotify (signed out, `--no-spotify`, an error) must not publish "not on
     Spotify" for a band it never asked about.
     """
-    checked = p.status.get("spotify") == "done"
+    checked = str(p.status.get("spotify", "")).startswith(("done", "kept"))
     return {
         "name": p.band,
         "updated_at": iso(updated_at),
@@ -89,7 +89,9 @@ def minimal_record(name: str, guess: genre.Guess | None) -> dict:
 
 
 def enriched(rec: dict | None, names: tuple[str, ...] = ENRICHERS) -> bool:
-    """Has every enricher in `names` answered for this record?"""
+    """Has every enricher in `names` answered *this build*? A "kept" answer is
+    last build's, carried over when its enricher failed or was skipped, so it
+    does not count: the next build tries again."""
     st = (rec or {}).get("status") or {}
     return all(st.get(n) == "done" for n in names)
 
@@ -107,7 +109,8 @@ def from_record(rec: dict, *, pinned: Callable[[str], dict | None] | None = None
     """
     p = BandProfile(band=rec.get("name", ""))
     st = rec.get("status") or {}
-    p.status = {n: "done" if st.get(n) == "done" else "idle" for n in names}
+    answered = lambda v: isinstance(v, str) and v.startswith(("done", "kept"))     # noqa: E731
+    p.status = {n: "done" if answered(st.get(n)) else "idle" for n in names}
     p.info = info_from_dict(rec.get("info"))
     p.lookup_candidates = list(rec.get("lookup_candidates") or [])
     p.spotify_artist = rec.get("spotify_artist")
