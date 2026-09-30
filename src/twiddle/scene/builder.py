@@ -173,8 +173,9 @@ def _default_enrichers(use_spotify: bool, notes: dict[str, str],
 def _keep_prior_answers(p: BandProfile, old: dict | None) -> None:
     """An enricher that did not answer this run (skipped, signed out, errored)
     must not erase what the last build learned from it."""
-    if not old or not any(v == "done" for v in (old.get("status") or {}).values()):
-        return
+    if not old or not any(str(v).startswith(("done", "kept"))
+                          for v in (old.get("status") or {}).values()):
+        return             # (kept answers survive further failed builds, not just one)
     before = profiles.from_record(old, names=profiles.ENRICHERS)
     kept = False
     for name in BandProfile.FIELDS:

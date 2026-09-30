@@ -469,13 +469,19 @@ class TrackEnricher:
         p.searched["tracks"] = self._key(p)
         failure: Exception | None = None
         if p.bandcamp and p.bandcamp.get("item_url_root") and not p.bc_tracks:
+            root = p.bandcamp["item_url_root"]
             try:
-                p.bc_tracks = self._bc_tracks(p.bandcamp["item_url_root"])
+                got = self._bc_tracks(root)
+                if (p.bandcamp or {}).get("item_url_root") == root:   # not if it changed meanwhile
+                    p.bc_tracks = got
             except Exception as exc:
                 failure = exc
         if p.spotify_artist and not p.tracks:
+            artist = p.spotify_artist.get("id")
             try:
-                p.tracks = _artist_tracks(self._spotify.session(), p.spotify_artist)
+                got = _artist_tracks(self._spotify.session(), p.spotify_artist)
+                if (p.spotify_artist or {}).get("id") == artist:      # a corrected artist's stay
+                    p.tracks = got
             except Exception as exc:
                 failure = failure or (RuntimeError(NOT_SIGNED_IN)
                                       if spotify_ops.not_signed_in(exc) else exc)

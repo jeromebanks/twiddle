@@ -49,7 +49,10 @@ CITY = {"cornerstone": "Berkeley", "fox theater": "Oakland", "freight": "Berkele
         "sweetwater music hall": "Mill Valley"}
 SPELLED = {"regency": "Regency Ballroom, S.F.", "paramount": "Paramount Theatre, Oakland"}
 
-_TOKEN = re.compile(r"<h2>(.*?)</h2>|<h3>(.*?)</h3>|<p>(.*?)</p>", re.DOTALL)
+# A <p> may be left unclosed: the last one of each post ends at `</div>`
+# (measured 2026-09-29), and dropping it lost every Sunday's S.F. section.
+_TOKEN = re.compile(r"<h2>(.*?)</h2>|<h3>(.*?)</h3>|<p>(.*?)(?=</p>|<h2>|<h3>|<p>|</div>|\Z)",
+                    re.DOTALL)
 _LINE = re.compile(r"\s*<strong>(.*?)</strong>(.*)", re.DOTALL)
 _DAY = re.compile(r"([A-Za-z]+)\s+(\d{1,2})(?:,?\s+(\d{4}))?")
 _TAG = re.compile(r"<[^>]+>")

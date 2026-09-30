@@ -566,3 +566,32 @@ def test_a_deferred_record_that_corrects_the_artist_wakes_its_song_lists(monkeyp
         time.sleep(0.01)
     book.close()
     assert book.profiles["x"].tracks == [{"uri": "new"}] and "new" in asked
+
+
+def test_song_lists_fetched_for_an_artist_that_changed_meanwhile_are_dropped(monkeypatch):
+    """Codex: the old artist's slow reply must not overwrite the corrected artist's songs."""
+    from twiddle import discover_cli
+    from twiddle.scene.bands import TrackEnricher
+    gate = threading.Event()
+
+    def artist_tracks(sess, artist):
+        if artist["id"] == "old":
+            gate.wait(2)
+        return [{"uri": artist["id"]}]
+    monkeypatch.setattr(discover_cli, "_artist_tracks", artist_tracks)
+
+    class Ident:
+        name, serial = "spotify", False
+
+        def session(self):
+            return object()
+    enr = TrackEnricher(Ident())
+    p = BandProfile("X")
+    p.spotify_artist = {"id": "old"}
+    t = threading.Thread(target=enr.enrich, args=(p,))
+    t.start()
+    time.sleep(0.1)
+    p.spotify_artist, p.tracks = {"id": "new"}, [{"uri": "new"}]      # identity corrected meanwhile
+    gate.set()
+    t.join()
+    assert p.tracks == [{"uri": "new"}]

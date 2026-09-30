@@ -568,3 +568,17 @@ def test_kalx_past_weeks_only_is_not_an_error():
 def test_kalx_is_registered_last():
     from twiddle.scene.sources import base
     assert list(base._registry())[-1] == "kalx"
+
+
+def test_kalx_keeps_the_last_section_of_a_post_that_leaves_its_paragraph_unclosed():
+    """Codex: both posts end `...</strong> x</div>` with no </p>; the regex used to drop them."""
+    from twiddle.scene.sources import kalx
+    posts = _kalx_posts()
+    assert not posts[0]["content"]["rendered"].rstrip().endswith("</p>")     # the fixture is real
+    shows = kalx.parse_posts(posts, date(2026, 9, 29))
+    last = [s for s in shows if s.day == date(2026, 10, 4)]
+    venues = {s.venue for s in last}
+    assert {"The Chapel, S.F.", "The Independent, S.F.", "Rickshaw Stop, S.F.",
+            "SF Jazz Center, S.F."} <= venues                 # all in the unclosed paragraph
+    assert any("Rickshaw" in s.venue and s.bands == ["Ecca Vandal", "Speed of Light"] for s in shows)
+    assert any("SF Jazz" in s.venue for s in shows)

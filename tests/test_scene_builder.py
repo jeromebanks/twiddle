@@ -411,3 +411,18 @@ def test_a_kept_answer_still_counts_as_known_to_the_app_and_the_badge():
     back = profiles.from_record(rec)
     assert back.status["spotify"] == "done" and back.spotify_artist == {"id": "s1"}
     assert not profiles.enriched(rec)
+
+
+def test_kept_answers_survive_more_than_one_failed_build(tmp_path):
+    """Codex: a second failure must not erase what the first one kept."""
+    run(tmp_path, [Src("thelist", [COUP])], [Enr("lookup"), Enr("spotify", spotify_fill),
+                                             Enr("bandcamp")])
+    t = 1_790_000_000.0
+    for n in (2, 4, 6):                                   # three builds in which everything fails
+        run(tmp_path, [Src("thelist", [COUP])],
+            [Enr("lookup", raises=RuntimeError("503")), Enr("spotify", raises=RuntimeError("503")),
+             Enr("bandcamp", raises=RuntimeError("503"))],
+            now=lambda n=n: t + builder.PROFILE_TTL_S * n)
+    rec = read(tmp_path).band("Coup Dville")
+    assert rec["identifiers"]["spotify_id"] == "sp-Coup Dville"
+    assert all(v.startswith("kept") for v in rec["status"].values())
