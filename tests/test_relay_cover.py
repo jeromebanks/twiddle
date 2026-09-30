@@ -156,3 +156,88 @@ def test_probe_with_nothing_listening_is_no_cover():
     srv.shutdown()
     srv.server_close()
     assert REAL_PROBE(stream, timeout=0.5) is None
+
+
+# -- the room follows the track ------------------------------------------------
+
+URL = "http://192.168.1.6:8899/stream.mp3"
+RADIO = "x-rincon-mp3radio://192.168.1.6:8899/stream.mp3"
+
+
+class _Room:
+    ip = "192.168.1.4"
+
+    def __init__(self, uri=RADIO, state="PLAYING"):
+        self.uri, self.state, self.calls = uri, state, []
+
+    def now_playing(self):
+        return {"uri": self.uri, "state": self.state}
+
+    def play_radio(self, url, title, art=None):
+        self.calls.append((url, title, art))
+
+
+class _Relay:
+    def __init__(self, track):
+        self.covers = type("C", (), {"track": staticmethod(lambda: track)})()
+
+    def cover_url_for(self, peer, key=None):
+        return f"http://me/cover.jpg?t={key}" if key else "http://me/cover.jpg"
+
+
+TRACK = {"name": "Superstition", "artists": ["Stevie Wonder", "B & C"],
+         "uri": "spotify:track:4N0T"}
+
+
+def test_a_new_track_repoints_the_room_with_its_title_and_a_keyed_cover():
+    room, seen = _Room(), []
+    last = relay_cli.follow_track(room, _Relay(TRACK), URL, None,
+                                  lambda kind, **kw: seen.append(kind))
+    assert last == "4N0T"
+    assert room.calls == [(URL, "Superstition — Stevie Wonder, B & C",
+                           "http://me/cover.jpg?t=4N0T")]
+    assert seen == ["relay_retitle"]
+
+
+def test_the_same_track_is_not_sent_twice():
+    room = _Room()
+    assert relay_cli.follow_track(room, _Relay(TRACK), URL, "4N0T", print) == "4N0T"
+    assert room.calls == []
+
+
+def test_no_track_yet_sends_nothing():
+    room = _Room()
+    assert relay_cli.follow_track(room, _Relay({}), URL, None, print) is None
+    assert room.calls == []
+
+
+@pytest.mark.parametrize("room", [
+    _Room(uri="x-rincon-mp3radio://stream.kalx.berkeley.edu:8000/kalx-128.mp3"),
+    _Room(state="PAUSED_PLAYBACK"),
+    _Room(state="STOPPED"),
+])
+def test_a_room_moved_elsewhere_or_paused_is_left_alone_and_retried(room):
+    assert relay_cli.follow_track(room, _Relay(TRACK), URL, None, print) is None
+    assert room.calls == []
+
+
+def test_an_unreachable_room_is_retried_not_fatal():
+    class Down(_Room):
+        def now_playing(self):
+            raise OSError("timeout")
+    assert relay_cli.follow_track(Down(), _Relay(TRACK), URL, "old", print) == "old"
+
+
+def test_the_title_falls_back_to_the_name_alone():
+    assert relay_cli.track_title({"name": "X", "artists": []}) == "X"
+    assert relay_cli.track_title({}) == "Spotify (relay)"
+
+
+def test_cover_url_carries_the_track_key_and_the_server_ignores_it(server):
+    base, seen, _ = server
+    with urllib.request.urlopen(base + relay.COVER_PATH + "?t=abc", timeout=5) as resp:
+        assert resp.read() == b"\xff\xd8jpeg"
+    rly = relay.Relay(source_argv=["true"])
+    rly.covers = object()
+    assert rly.cover_url_for("127.0.0.1", "abc").endswith(f"{relay.COVER_PATH}?t=abc")
+    assert rly.cover_url_for("127.0.0.1").endswith(relay.COVER_PATH)
