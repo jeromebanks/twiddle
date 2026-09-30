@@ -1392,3 +1392,25 @@ def test_the_tuis_book_has_exactly_one_song_list_fetcher():
     src = inspect.getsource(cli.cmd_scene)
     assert "SpotifyEnricher(spotify_ops.session, tracks=False)" in src
     assert "BandcampEnricher(fetch_tracks=False)" in src
+
+
+def test_a_checkpoint_that_changes_genres_updates_which_shows_a_genre_filter_matches():
+    """Codex: same shows, new genre records -- the filtered rows must follow."""
+    import os
+    guess = profiles.guess_to_dict(genre_mod.for_band(GIRL_CHOW_BC[0], sure=True))
+    coup = profiles.guess_to_dict(genre_mod.for_band({"genre_name": "Metal", "tag_names": ["metal"],
+                                                      "location": "Oakland, California"}, sure=True))
+
+    async def go():
+        app = make_app(bands={"Girl Chow": dict(profiles.minimal_record("Girl Chow", None), genre=coup)})
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: len(app._rows) == 2)
+            app.filter_text = "reggae"
+            app._refresh_shows()
+            await settle(pilot, app, lambda: len(app._rows) == 0)
+            publish_dataset(bands={"Girl Chow": dict(profiles.minimal_record("Girl Chow", None),
+                                                     genre=guess)}, complete=False)
+            os.utime(dataset.default_path(), (1, 1_900_000_004))
+            app._watch_dataset()
+            await settle(pilot, app, lambda: len(app._rows) == 1)     # Girl Chow is reggae now
+    run(go())

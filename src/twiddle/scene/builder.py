@@ -189,9 +189,13 @@ def _keep_prior_answers(p: BandProfile, old: dict | None) -> None:
         assess(p, use_pins=False)
 
 
-def enrich_one(band: str, enrichers: list, skip: set[str]) -> BandProfile:
+def enrich_one(band: str, enrichers: list, skip: set[str],
+               prior: BandProfile | None = None) -> BandProfile:
     """One band through every enricher, lookup first, as `BandBook` does but in
-    order and to completion. `skip` names enrichers switched off for the run."""
+    order and to completion. `skip` names enrichers switched off for the run.
+    `prior` is last build's profile: if the lookup fails, its answer stands in
+    *before* Spotify and Bandcamp run, so they search by the alias and links
+    it found rather than by a bare name that may belong to someone else."""
     p = BandProfile(band=band)
     for e in enrichers:
         p.status[e.name] = "pending"
@@ -199,14 +203,17 @@ def enrich_one(band: str, enrichers: list, skip: set[str]) -> BandProfile:
     for e in order:
         if e.name in skip:
             p.status[e.name] = "error: paused"
-            continue
-        try:
-            e.enrich(p)
-            p.status[e.name] = "done"
-        except Exception as exc:
-            if _rate_limited(exc):
-                skip.add(e.name)
-            p.status[e.name] = f"error: {getattr(exc, 'message', None) or exc}"
+        else:
+            try:
+                e.enrich(p)
+                p.status[e.name] = "done"
+            except Exception as exc:
+                if _rate_limited(exc):
+                    skip.add(e.name)
+                p.status[e.name] = f"error: {getattr(exc, 'message', None) or exc}"
+        if e.name == "lookup" and p.status["lookup"] != "done" and prior is not None \
+                and prior.status.get("lookup") == "done":
+            p.adopt("lookup", prior, "kept: " + p.status["lookup"])
     for e in order:     # one answer can change another's (MusicBrainz names the Spotify artist)
         rerun = getattr(e, "wants_rerun", None)
         if e.name in skip or p.status.get(e.name) != "done" or not (rerun and rerun(p)):
@@ -318,8 +325,10 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
         else:
             todo.append((key, name))
     for i, (key, name) in enumerate(todo, 1):
-        p = enrich_one(name, active, skip)
-        _keep_prior_answers(p, bands.get(key))
+        old = bands.get(key)
+        prior = profiles.from_record(old, names=profiles.ENRICHERS) if old else None
+        p = enrich_one(name, active, skip, prior)
+        _keep_prior_answers(p, old)
         hits = None if "bandcamp" in skip else _safe(genre_search, name, offline=True)
         guess = p.genre() or guess_from(hits)
         bands[key] = profiles.to_record(p, updated_at=now(), guess=guess)

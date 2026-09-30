@@ -483,6 +483,10 @@ class SceneApp(App):
                      profiles.guess_to_dict(self._scan_guesses.get(self._key(p.band)))))
 
     def _refresh_bands_in_place(self, before: str | None) -> None:
+        # A genre filter is a filter on band records: a checkpoint can change
+        # which shows match. Rebuild the rows only if the membership did.
+        if [s.key for s in self._visible_shows()] != [s.key for s in self._rows.values()]:
+            self._refresh_shows()
         self._refresh_genre_cells()
         s = self.current_show
         if s is not None:

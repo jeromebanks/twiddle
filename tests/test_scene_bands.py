@@ -595,3 +595,49 @@ def test_song_lists_fetched_for_an_artist_that_changed_meanwhile_are_dropped(mon
     gate.set()
     t.join()
     assert p.tracks == [{"uri": "new"}]
+
+
+def test_a_failed_song_list_fetch_is_retried_when_a_new_identity_arrives(monkeypatch):
+    """Codex: Spotify's auth failure must not suppress Bandcamp tracks whose identity
+    lands later -- and an unchanged identity is not retried forever."""
+    from twiddle import discover_cli
+    from twiddle.scene.bands import TrackEnricher
+    spotify_calls = []
+
+    def artist_tracks(sess, artist):
+        spotify_calls.append(artist["id"])
+        raise ConnectionError("auth expired")
+    monkeypatch.setattr(discover_cli, "_artist_tracks", artist_tracks)
+    gate = threading.Event()
+
+    class Ident:
+        name, serial = "spotify", False
+
+        def session(self):
+            return object()
+
+    class SlowBandcamp:
+        name, serial = "bandcamp", False
+
+        def enrich(self, p):
+            gate.wait(2)                                  # tracks runs (and fails) first
+            p.bandcamp = {"item_url_root": "https://x.bandcamp.com"}
+    ident = Ident()
+    book = BandBook([SlowBandcamp(), TrackEnricher(ident, bc_tracks=lambda u: [{"title": "t"}])])
+    p = BandProfile("X")
+    p.status = {"bandcamp": "idle", "tracks": "idle"}
+    p.spotify_artist = {"id": "s1"}
+    book.seed([p])
+    book.get("X", urgent=True)
+    deadline = time.time() + 2
+    while not p.status.get("tracks", "").startswith("error") and time.time() < deadline:
+        time.sleep(0.01)
+    assert p.status["tracks"].startswith("error") and p.bc_tracks == []
+    gate.set()
+    deadline = time.time() + 3
+    while not p.bc_tracks and time.time() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.2)
+    book.close()
+    assert p.bc_tracks == [{"title": "t"}]                # Bandcamp songs arrived despite the failure
+    assert len(spotify_calls) <= 2                         # one rerun for the new identity, no loop

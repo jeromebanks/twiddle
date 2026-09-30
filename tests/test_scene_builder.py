@@ -433,3 +433,24 @@ def test_unwatched_rooms_get_a_usable_venue_id_so_they_can_be_queried(tmp_path):
     snap = read(tmp_path)
     assert all(vid for vid in snap.venue_ids)
     assert [s.billing for s in snap.shows_at("Somewhere Else, S.F.")] == ["Nobody"]
+
+
+def test_a_failed_lookup_hands_its_old_alias_to_spotify_and_bandcamp_before_they_search(tmp_path):
+    """Codex: restoring lookup evidence afterwards let a name collision win."""
+    seen = {}
+
+    def lookup_fill(p):
+        p.alias = "Trimmed Name"
+
+    class SeesAlias(Enr):
+        def enrich(self, p):
+            seen.setdefault(self.name, []).append(p.alias)
+            super().enrich(p)
+    run(tmp_path, [Src("thelist", [COUP])], [Enr("lookup", lookup_fill), SeesAlias("spotify", spotify_fill)])
+    seen.clear()
+    later = 1_790_000_000.0 + builder.PROFILE_TTL_S * 2
+    run(tmp_path, [Src("thelist", [COUP])],
+        [Enr("lookup", raises=RuntimeError("503")), SeesAlias("spotify", spotify_fill)],
+        now=lambda: later)
+    assert seen["spotify"] == ["Trimmed Name"]                 # not None: the old alias, in time
+    assert read(tmp_path).band("Coup Dville")["status"]["lookup"].startswith("kept")

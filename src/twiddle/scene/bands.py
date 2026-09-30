@@ -646,8 +646,13 @@ class BandBook:
         for other in self.enrichers:
             rerun = getattr(other, "wants_rerun", None)
             with self._lock:
+                state = p.status.get(other.name, "")
+                # A song-list fetch that failed for one provider may still have
+                # a newly identified one to try; `wants_rerun` says when the
+                # identity changed, so an unchanged one is never retried.
+                retry_failed = getattr(other, "self_rerun", False) and state.startswith("error")
                 if (other is e and not getattr(e, "self_rerun", False)) \
-                        or p.status.get(other.name) != "done" or not (rerun and rerun(p)):
+                        or (state != "done" and not retry_failed) or not (rerun and rerun(p)):
                     continue
                 p.status[other.name] = "pending"
             self._schedule(other, p, urgent=True)
