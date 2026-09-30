@@ -292,6 +292,9 @@ def _wait_for_audio(rly: relay.Relay, seconds: float) -> bool:
 
 TRACK_POLL = 1.0      # seconds between looks at which track librespot says is playing
 _LIVE = {"PLAYING", "TRANSITIONING"}
+IDLE = "idle"                  # what `follow_track` returns once it has cleared the title
+IDLE_TITLE = "Spotify (relay)"  # the same title `ensure_room_on_relay` starts a room with
+IDLE_AFTER = 4.0               # seconds of `stopped` before the title is cleared
 
 
 def track_key(track: dict) -> str:
@@ -303,7 +306,7 @@ def track_title(track: dict) -> str:
     """"Song \u2014 Artist, Artist": what the Sonos app shows for the stream."""
     artists = ", ".join(track.get("artists") or [])
     return f"{track['name']} \u2014 {artists}" if track.get("name") and artists \
-        else track.get("name") or "Spotify (relay)"
+        else track.get("name") or IDLE_TITLE
 
 
 def follow_track(group, rly: relay.Relay, url: str, last: str | None,
@@ -322,7 +325,19 @@ def follow_track(group, rly: relay.Relay, url: str, last: str | None,
     """
     track = rly.covers.track()
     key = track_key(track)
-    if not key or key == last:
+    if not key:
+        return last
+    if track.get("state") == "stopped":
+        # The song is over and nothing followed it. Clear the title and cover
+        # once it has stayed that way a few seconds: a skip or the gap between
+        # queued tracks also passes through `stopped` briefly.
+        if last in (None, IDLE) or time.time() - track.get("state_ts", 0) < IDLE_AFTER:
+            return last
+        key, title, art = IDLE, IDLE_TITLE, None
+    else:
+        title = track_title(track)
+        art = None
+    if key == last:
         return last
     try:
         now = group.now_playing()
@@ -331,8 +346,9 @@ def follow_track(group, rly: relay.Relay, url: str, last: str | None,
     if (now.get("uri") or "").removeprefix(play.RADIO_SCHEME) != url.removeprefix("http://") \
             or now.get("state") not in _LIVE:
         return last
-    title = track_title(track)
-    group.play_radio(url, title, art=rly.cover_url_for(group.ip, key))
+    if key != IDLE:
+        art = rly.cover_url_for(group.ip, key)
+    group.play_radio(url, title, art=art)
     record("relay_retitle", track=track.get("name"), key=key, title=title)
     return key
 

@@ -241,3 +241,59 @@ def test_cover_url_carries_the_track_key_and_the_server_ignores_it(server):
     rly.covers = object()
     assert rly.cover_url_for("127.0.0.1", "abc").endswith(f"{relay.COVER_PATH}?t=abc")
     assert rly.cover_url_for("127.0.0.1").endswith(relay.COVER_PATH)
+
+
+# -- the title goes when the music does -------------------------------------------
+
+def _quiet(kind, **kw):
+    pass
+
+
+def _stopped(seconds_ago):
+    import time
+    return TRACK | {"state": "stopped", "state_ts": time.time() - seconds_ago}
+
+
+def test_a_song_that_ended_clears_the_title_and_cover():
+    room, seen = _Room(), []
+    last = relay_cli.follow_track(room, _Relay(_stopped(10)), URL, "4N0T",
+                                  lambda kind, **kw: seen.append(kw))
+    assert last == relay_cli.IDLE
+    assert room.calls == [(URL, relay_cli.IDLE_TITLE, None)]
+
+
+def test_a_brief_stop_between_tracks_is_not_cleared():
+    room = _Room()
+    assert relay_cli.follow_track(room, _Relay(_stopped(1)), URL, "4N0T", print) == "4N0T"
+    assert room.calls == []
+
+
+def test_once_cleared_it_stays_cleared_and_a_replay_of_the_same_track_shows_again():
+    room = _Room()
+    idle = relay_cli.follow_track(room, _Relay(_stopped(10)), URL, "4N0T", _quiet)
+    assert relay_cli.follow_track(room, _Relay(_stopped(20)), URL, idle, _quiet) == idle
+    assert len(room.calls) == 1
+    again = TRACK | {"state": "playing"}
+    assert relay_cli.follow_track(room, _Relay(again), URL, idle, _quiet) == "4N0T"
+    assert room.calls[-1][1].startswith("Superstition")
+
+
+def test_a_relay_that_never_showed_a_track_does_not_send_a_clear():
+    room = _Room()
+    assert relay_cli.follow_track(room, _Relay(_stopped(10)), URL, None, print) is None
+    assert room.calls == []
+
+
+def _event(tmp_path, **env):
+    script, state = relay.install_onevent_hook(str(tmp_path))
+    subprocess.run([script], env=os.environ | env, check=True, timeout=30)
+    return json.loads(state.read_text())
+
+
+def test_the_hook_records_stopped_and_keeps_the_track(tmp_path):
+    assert _event(tmp_path, **TRACK_ENV)["state"] == "playing"
+    stopped = _event(tmp_path, PLAYER_EVENT="stopped")
+    assert stopped["state"] == "stopped" and stopped["name"] == "So What"
+    assert stopped["state_ts"] > 0
+    assert _event(tmp_path, PLAYER_EVENT="playing")["state"] == "playing"
+    assert _event(tmp_path, PLAYER_EVENT="volume_changed")["state"] == "playing"
