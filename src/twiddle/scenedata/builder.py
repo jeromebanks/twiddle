@@ -39,12 +39,12 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from .. import spotify, spotify_ops
-from . import bandcamp, dataset, genre, profiles
-from . import venue_info
-from . import venues as venues_mod
-from .bands import (BandProfile, BandcampEnricher, LookupEnricher, SpotifyEnricher,
+from ..scene import bandcamp, dataset, genre, profiles
+from ..scene import venue_info
+from ..scene import venues as venues_mod
+from ..scene.bands import (BandProfile, BandcampEnricher, LookupEnricher, SpotifyEnricher,
                     assess, near)
-from .model import Show
+from ..scene.model import Show
 from .sources import fetch_all
 
 DEFAULT_DAYS = 31           # how far ahead bands are enriched (and asked of Bandcamp)

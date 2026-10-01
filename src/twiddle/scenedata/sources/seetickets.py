@@ -35,7 +35,7 @@ from datetime import date, datetime
 
 import requests
 
-from ..model import Show, _loose
+from ...scene.model import Show, _loose
 from .base import SourceError
 
 # source name -> (calendar page, the venue as a watched venue matches it)

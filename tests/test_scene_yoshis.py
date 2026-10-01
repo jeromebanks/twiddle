@@ -11,9 +11,9 @@ import pytest
 
 from twiddle.scene import venues
 from twiddle.scene.model import Show
-from twiddle.scene.sources import SourceError, fetch_all
-from twiddle.scene.sources import yoshis
-from twiddle.scene.sources.yoshis import (parse_calendar, parse_performances, split_title,
+from twiddle.scenedata.sources import SourceError, fetch_all
+from twiddle.scenedata.sources import yoshis
+from twiddle.scenedata.sources.yoshis import (parse_calendar, parse_performances, split_title,
                                            tidy_case, to_shows)
 
 FIX = Path(__file__).parent / "fixtures"

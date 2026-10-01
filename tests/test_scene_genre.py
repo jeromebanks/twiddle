@@ -164,7 +164,7 @@ def test_bandcamp_enricher_runs_in_the_book():
 def test_a_faraway_band_found_by_name_alone_is_only_a_guess():
     """Measured: "Inayah" at the Great American is an R&B singer; by name
     on Bandcamp, a French death metal band."""
-    from twiddle.scene.builder import guess_from
+    from twiddle.scenedata.builder import guess_from
     inayah = [{"name": "Inayah", "item_url_root": "https://inayah.bandcamp.com",
                "location": "Valenciennes, France", "genre_name": "Metal"}]
     g = guess_from(inayah)
@@ -176,7 +176,7 @@ def test_same_named_pages_that_agree_still_give_a_genre():
     thelma = [{"name": "Thelma And The Sleaze", "location": "Nashville, Tennessee",
                "item_url_root": f"https://t{i}.bandcamp.com", "genre_name": "Rock"}
               for i in range(2)]
-    from twiddle.scene.builder import guess_from
+    from twiddle.scenedata.builder import guess_from
     assert guess_from(thelma).label() == "rock?"
     split = [thelma[0], dict(thelma[1], genre_name="Reggae")]
     assert guess_from(split) is None

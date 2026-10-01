@@ -865,7 +865,7 @@ def test_v_visualizes_and_says_why_when_spotify_has_no_stream_here():
 
 def _no_collection(monkeypatch):
     """Anything that scrapes, searches or looks up now explodes."""
-    import twiddle.scene.sources as srcs
+    import twiddle.scenedata.sources as srcs
     from twiddle.scene import bandcamp, venue_info
     boom = lambda *a, **k: 1 / 0            # noqa: E731
     monkeypatch.setattr(srcs, "fetch_all", boom)

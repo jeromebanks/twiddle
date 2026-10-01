@@ -33,7 +33,7 @@ from datetime import date, datetime, timedelta
 
 import requests
 
-from ..model import Show
+from ...scene.model import Show
 from .base import SourceError
 
 API = "https://kalx.berkeley.edu/wp-json/wp/v2/event"

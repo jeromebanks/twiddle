@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from ..model import Show, dedupe
+from ...scene.model import Show, dedupe
 
 
 class SourceError(RuntimeError):
@@ -93,7 +93,7 @@ def fetch_all(chosen: list[EventSource] | None = None,
 
 def _room():
     """A source's venue spelling -> the watched venue's name, if it is one."""
-    from .. import venues
+    from ...scene import venues
     try:
         watched = venues.watched()
     except ValueError:          # a broken config is reported elsewhere

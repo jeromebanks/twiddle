@@ -9,10 +9,11 @@ from datetime import date
 import pytest
 
 from twiddle import spotify, spotify_ops
-from twiddle.scene import bandcamp, builder, cache, dataset
+from twiddle.scene import bandcamp, cache, dataset
+from twiddle.scenedata import builder
 from twiddle.scene.bands import BandProfile
 from twiddle.scene.model import Show
-from twiddle.scene.sources import SourceError
+from twiddle.scenedata.sources import SourceError
 
 TODAY = date(2026, 10, 1)
 STORK = "Thee Stork Club, Oakland"

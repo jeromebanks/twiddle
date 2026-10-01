@@ -4,7 +4,8 @@ import plistlib
 from datetime import date, timedelta
 
 from twiddle import cli
-from twiddle.scene import builder, dataset
+from twiddle.scene import dataset
+from twiddle.scenedata import builder
 from twiddle.scene import cli as scene_cli
 from twiddle.scene.model import Show
 
@@ -22,7 +23,7 @@ def _tomorrow():
 
 
 def _dead_network(monkeypatch):
-    import twiddle.scene.sources as srcs
+    import twiddle.scenedata.sources as srcs
     from twiddle.scene import venue_info
     boom = lambda *a, **k: 1 / 0            # noqa: E731
     monkeypatch.setattr(srcs, "fetch_all", boom)

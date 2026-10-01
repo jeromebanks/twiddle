@@ -10,10 +10,10 @@ from pathlib import Path
 import pytest
 
 from twiddle.scene.model import Show, dedupe
-from twiddle.scene.sources import SourceError, fetch_all
-from twiddle.scene.sources import seetickets
-from twiddle.scene.sources.gilman import parse_widget, split_title
-from twiddle.scene.sources.seetickets import SeeTickets, parse_page
+from twiddle.scenedata.sources import SourceError, fetch_all
+from twiddle.scenedata.sources import seetickets
+from twiddle.scenedata.sources.gilman import parse_widget, split_title
+from twiddle.scenedata.sources.seetickets import SeeTickets, parse_page
 
 FIX = Path(__file__).parent / "fixtures"
 TODAY = date(2026, 9, 26)
@@ -272,7 +272,7 @@ def test_a_bandless_night_whose_name_was_only_a_date_does_not_crash():
 
 import json  # noqa: E402
 
-from twiddle.scene.sources import venuepilot  # noqa: E402
+from twiddle.scenedata.sources import venuepilot  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -347,7 +347,7 @@ def test_a_joint_billing_matches_its_halves():
 
 # ---- TicketWeb ----------------------------------------------------------------
 
-from twiddle.scene.sources import ticketweb  # noqa: E402
+from twiddle.scenedata.sources import ticketweb  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -388,7 +388,7 @@ def test_ticketweb_names():
 
 # ---- 2026-09-26 additions: Ashkenaz, Sound Room, DeLuxe, Gray Area, Make-Out Room
 
-from twiddle.scene.sources import grayarea, makeoutroom, simplecal, squarespace  # noqa: E402
+from twiddle.scenedata.sources import grayarea, makeoutroom, simplecal, squarespace  # noqa: E402
 
 
 def test_venuepilot_serves_ashkenaz_too():
@@ -479,7 +479,7 @@ def _kalx_posts():
 
 
 def test_kalx_reads_the_weekly_posts_into_shows():
-    from twiddle.scene.sources import kalx
+    from twiddle.scenedata.sources import kalx
     shows = kalx.parse_posts(_kalx_posts(), date(2026, 9, 29))
     assert shows and all(s.source == "kalx" and s.source_url.startswith("https://kalx.") for s in shows)
     assert min(s.day for s in shows) == date(2026, 9, 29)         # nothing before today
@@ -491,7 +491,7 @@ def test_kalx_reads_the_weekly_posts_into_shows():
 
 def test_kalx_rooms_resolve_to_watched_venues_including_the_two_new_ones():
     from twiddle.scene import venues as v
-    from twiddle.scene.sources import kalx
+    from twiddle.scenedata.sources import kalx
     watched = v.watched()
     shows = kalx.parse_posts(_kalx_posts(), date(2026, 9, 22))
     by = {s.venue: v.find(watched, s.venue) for s in shows}
@@ -513,7 +513,7 @@ def test_kalx_rooms_resolve_to_watched_venues_including_the_two_new_ones():
 
 
 def test_kalx_tells_nights_from_lineups():
-    from twiddle.scene.sources.kalx import lineup
+    from twiddle.scenedata.sources.kalx import lineup
     assert lineup("Thelma And The Sleaze, Hypnotic Pattern") == \
         (["Thelma And The Sleaze", "Hypnotic Pattern"], "")
     assert lineup("Open Mic") == ([], "Open Mic")
@@ -529,7 +529,7 @@ def test_kalx_tells_nights_from_lineups():
 
 
 def test_kalx_merges_under_the_list_and_adds_what_it_lacks():
-    from twiddle.scene.sources import kalx
+    from twiddle.scenedata.sources import kalx
     ivy = Show(date(2026, 9, 29), "Ivy Room, Albany", ["Thelma And The Sleaze", "Hypnotic Pattern"],
                price="$15", source="thelist")
     shows = [s for s in kalx.parse_posts(_kalx_posts(), date(2026, 9, 29))
@@ -541,7 +541,7 @@ def test_kalx_merges_under_the_list_and_adds_what_it_lacks():
 
 
 def test_kalx_says_so_when_the_page_changes_or_the_site_is_down(monkeypatch):
-    from twiddle.scene.sources import kalx
+    from twiddle.scenedata.sources import kalx
     import pytest
     with pytest.raises(SourceError, match="no day headings"):
         kalx.parse_posts([{"date": "2026-09-24", "link": "u", "content": {"rendered": "<p>x</p>"}}],
@@ -561,18 +561,18 @@ def test_kalx_says_so_when_the_page_changes_or_the_site_is_down(monkeypatch):
 
 
 def test_kalx_past_weeks_only_is_not_an_error():
-    from twiddle.scene.sources import kalx
+    from twiddle.scenedata.sources import kalx
     assert kalx.parse_posts(_kalx_posts(), date(2027, 3, 1)) == []
 
 
 def test_kalx_is_registered_last():
-    from twiddle.scene.sources import base
+    from twiddle.scenedata.sources import base
     assert list(base._registry())[-1] == "kalx"
 
 
 def test_kalx_keeps_the_last_section_of_a_post_that_leaves_its_paragraph_unclosed():
     """Codex: both posts end `...</strong> x</div>` with no </p>; the regex used to drop them."""
-    from twiddle.scene.sources import kalx
+    from twiddle.scenedata.sources import kalx
     posts = _kalx_posts()
     assert not posts[0]["content"]["rendered"].rstrip().endswith("</p>")     # the fixture is real
     shows = kalx.parse_posts(posts, date(2026, 9, 29))

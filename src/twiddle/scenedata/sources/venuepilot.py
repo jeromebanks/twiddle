@@ -29,7 +29,7 @@ from datetime import date, datetime
 
 import requests
 
-from ..model import Show
+from ...scene.model import Show
 from .base import SourceError
 
 ENDPOINT = "https://www.venuepilot.co/graphql"

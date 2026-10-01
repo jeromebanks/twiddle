@@ -39,7 +39,7 @@ def cmd_list(args) -> int:
     except ValueError as exc:
         return fail(args, f"bad venue config: {exc}")
     if args.refresh:        # an explicit request to run the builder first
-        from .builder import BuildBusy, BuildError, build
+        from ..scenedata.builder import BuildBusy, BuildError, build
         try:
             build(log=lambda m: print(m, file=sys.stderr))
         except BuildBusy as exc:
@@ -165,7 +165,7 @@ def cmd_scene(args) -> int:
 
 def cmd_build(args) -> int:
     """Collect, enrich and publish the dataset. Writes one file; no speaker."""
-    from .builder import BuildBusy, BuildError, build
+    from ..scenedata.builder import BuildBusy, BuildError, build
     try:
         r = build(days=args.days, all_venues=args.all_venues, use_spotify=not args.no_spotify,
                   dry_run=args.dry_run, log=lambda m: print(m, file=sys.stderr, flush=True))

@@ -12,8 +12,8 @@ import pytest
 
 from twiddle.scene import cache, venues
 from twiddle.scene.model import Show, dedupe
-from twiddle.scene.sources import SourceError, fetch_all
-from twiddle.scene.sources.thelist import infer_year, parse_page
+from twiddle.scenedata.sources import SourceError, fetch_all
+from twiddle.scenedata.sources.thelist import infer_year, parse_page
 
 FIXTURE = Path(__file__).parent / "fixtures" / "thelist_by_club.html"
 TODAY = date(2026, 9, 22)

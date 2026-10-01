@@ -133,8 +133,8 @@ def test_a_reader_never_sees_a_partial_file_while_a_writer_runs(tmp_path):
 
 def test_the_reader_needs_no_tui_collectors_or_network_modules():
     code = ("import sys, twiddle.scene.dataset as d\n"
-            "bad = {'textual', 'requests', 'twiddle.scene.sources', 'twiddle.scene.bands',\n"
-            "       'twiddle.scene.app', 'twiddle.scene.builder', 'twiddle.scene.bandcamp'}\n"
+            "bad = {'textual', 'requests', 'twiddle.scenedata.sources', 'twiddle.scene.bands',\n"
+            "       'twiddle.scene.app', 'twiddle.scenedata.builder', 'twiddle.scene.bandcamp'}\n"
             "print(sorted(bad & set(sys.modules)))")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                          check=True).stdout.strip()
