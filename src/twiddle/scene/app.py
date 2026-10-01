@@ -45,12 +45,12 @@ from ..dial import art
 from ..scenespec import dataset, genre as genre_mod, profiles
 from .. import bandcamp
 from . import cache, instagram, pictures
-from . import venues as venues_mod
+from ..scenespec import venue as venues_mod
 from ..scenespec.band import CORROBORATED, NAME_ONLY, NONE, PENDING, UNCERTAIN, UNLOOKED, BandProfile
 from ..scenedata.bands import genre_of     # temporary: leaves with the live enrichment
 from .book import BandBook
 from ..scenespec.model import Show
-from .venue_info import VenueInfo
+from ..scenespec.venue import VenueInfo
 from .players import Device, NeedsConfirmation, Player
 
 BUILD_BUSY = 75             # `scene build`'s exit status when another build holds the lock
@@ -339,7 +339,8 @@ class SceneApp(App):
         self._building = False
         self.player = player
         self.book = book_factory(self._from_worker_band)
-        self.watched = watched if watched is not None else venues_mod.watched()
+        self._watched_given = watched is not None
+        self.watched = watched if watched is not None else ()    # the dataset's, once loaded
         self.all_venues = all_venues or bool(cache.get_state("all_venues", False))
         self.dry_run = dry_run
         self._today = today            # fixed only in tests; otherwise the real date
@@ -451,6 +452,8 @@ class SceneApp(App):
         same_shows = self.snapshot is not None and snap.shows == self.shows
         before = self._profile_sig()
         self.snapshot = snap
+        if not self._watched_given:
+            self.watched = venues_mod.from_rows(snap.venues)
         self._seed_bands(snap)
         failed = [f"{n}: {v.get('error')}" for n, v in snap.sources.items() if not v.get("ok", True)]
         if failed and snap.complete and snap.generated_at != self._told_failures_at:

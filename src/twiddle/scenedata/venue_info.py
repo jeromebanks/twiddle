@@ -19,34 +19,12 @@ from __future__ import annotations
 import json
 import time
 import urllib.parse
-from dataclasses import dataclass, replace
+from dataclasses import replace
 
 import requests
 
+from ..scenespec.venue import VenueInfo
 from . import cache
-
-
-@dataclass(frozen=True)
-class VenueInfo:
-    address: str = ""
-    url: str = ""
-    about: str = ""
-    wikipedia: str = ""         # an article title, only where one is about this room
-    instagram: str = ""         # a handle, from INSTAGRAM below
-
-    @property
-    def instagram_url(self) -> str:
-        return f"https://www.instagram.com/{self.instagram}/" if self.instagram else ""
-
-    @property
-    def map_url(self) -> str:
-        if not self.address:
-            return ""
-        return "https://www.google.com/maps/search/?api=1&query=" + \
-            urllib.parse.quote(self.address)
-
-    def __bool__(self) -> bool:
-        return bool(self.address or self.url or self.about or self.wikipedia)
 
 
 I = VenueInfo

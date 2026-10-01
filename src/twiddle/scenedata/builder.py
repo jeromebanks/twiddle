@@ -41,8 +41,9 @@ from pathlib import Path
 from .. import spotify, spotify_ops
 from . import bandcamp
 from ..scenespec import dataset, genre, profiles
-from ..scene import venue_info
-from ..scene import venues as venues_mod
+from ..scenespec import venue as venue_mod
+from . import venue_info
+from . import venues as venues_mod
 from ..scenespec.band import BandProfile
 from .bands import BandcampEnricher, LookupEnricher, SpotifyEnricher, assess, genre_of, near
 from ..scenespec.model import Show
@@ -138,14 +139,15 @@ def _venue_records(watched, prev: dataset.Snapshot | None,
         out.append({"id": vid, "name": v.name, "match": list(v.match),
                     "address": v.info.address, "url": v.info.url, "about": v.info.about,
                     "wikipedia": v.info.wikipedia, "wikipedia_summary": summary,
-                    "instagram": v.info.instagram, "map_url": v.info.map_url})
+                    "instagram": v.info.instagram, "map_url": v.info.map_url,
+                    "icon": v.icon})
     return out
 
 
 def _show_rows(shows: list[Show], watched) -> list[dict]:
     rooms = []
     for s in shows:
-        v = venues_mod.find(watched, s.venue)
+        v = venue_mod.find(watched, s.venue)
         rooms.append((s, v.name if v else None))
     ids = dataset.unique_ids(rooms)
     # An unwatched room has no venue record, but its show still carries a usable
@@ -312,7 +314,7 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
     for s in sorted(shows, key=lambda s: s.day):
         if s.day < today or s.day >= horizon:
             continue
-        if not all_venues and venues_mod.find(watched, s.venue) is None:
+        if not all_venues and venue_mod.find(watched, s.venue) is None:
             continue
         for b in s.bands:
             wanted.setdefault(dataset.band_id(b), b)

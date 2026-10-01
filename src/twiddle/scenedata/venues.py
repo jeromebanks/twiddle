@@ -21,25 +21,14 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from pathlib import Path
 
-from .venue_info import INFO, VenueInfo
+from ..scenespec.venue import Venue, VenueInfo
+from .venue_info import INFO
 
 CONFIG_PATH = Path(os.environ.get("TWIDDLE_SCENE_CONFIG",
                                   Path.home() / ".config" / "twiddle" / "scene.toml"))
-
-
-@dataclass(frozen=True)
-class Venue:
-    name: str                                   # what the app shows
-    match: tuple[str, ...] = field(default=())  # lowercase substrings of a source's name
-    icon: str | None = None                     # a logo URL, hand-picked (see below)
-    info: VenueInfo = field(default=VenueInfo(), compare=False)   # address, site, about
-
-    def matches(self, listed: str) -> bool:
-        low = listed.lower()
-        return any(m in low for m in self.match)
 
 
 # Icons are picked by hand, not scraped: measured 2026-09-25, a venue's own
@@ -157,34 +146,3 @@ def _info(v: dict) -> VenueInfo:
     known = INFO.get(v["name"], VenueInfo())
     return VenueInfo(**{f: v.get(f) or getattr(known, f)
                         for f in ("address", "url", "about", "wikipedia")})
-
-
-def find(venues: tuple[Venue, ...], listed: str) -> Venue | None:
-    """The watched venue a source's venue name refers to, if any."""
-    return next((v for v in venues if v.matches(listed)), None)
-
-
-def display_name(venues: tuple[Venue, ...], listed: str) -> str:
-    """A watched venue's short name, else the source's name without its city."""
-    v = find(venues, listed)
-    return v.name if v else listed.rsplit(",", 1)[0].strip()
-
-
-def resolve(venues: tuple[Venue, ...], query: str) -> Venue | None:
-    """`--venue stork` -> the Stork Club: a partial, case-insensitive name.
-
-    A match at the start of a word wins over one inside a word, or "eli"
-    would find Stay Gold D*eli* before Eli's; and the venue's own name wins
-    over its match strings, or "uc" would find the Greek ("... UC Berkeley
-    Campus") before the UC Theatre.
-    """
-    q = query.lower()
-
-    def starts(text: str) -> bool:
-        words = text.replace(",", " ").split()
-        return any(" ".join(words[i:]).startswith(q) for i in range(len(words)))
-
-    return (next((v for v in venues if starts(v.name.lower())), None)
-            or next((v for v in venues if any(starts(m) for m in v.match)), None)
-            or next((v for v in venues if q in v.name.lower()
-                     or any(q in m for m in v.match)), None))

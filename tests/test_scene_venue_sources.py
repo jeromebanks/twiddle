@@ -490,11 +490,12 @@ def test_kalx_reads_the_weekly_posts_into_shows():
 
 
 def test_kalx_rooms_resolve_to_watched_venues_including_the_two_new_ones():
-    from twiddle.scene import venues as v
+    from twiddle.scenedata import venues as v
+    from twiddle.scenespec import venue as vf
     from twiddle.scenedata.sources import kalx
     watched = v.watched()
     shows = kalx.parse_posts(_kalx_posts(), date(2026, 9, 22))
-    by = {s.venue: v.find(watched, s.venue) for s in shows}
+    by = {s.venue: vf.find(watched, s.venue) for s in shows}
     for spelled, want in (("Thee Stork Club, East Bay", "Stork Club"),
                           ("Cornerstone, Berkeley", "Cornerstone"),
                           ("The Freight, Berkeley", "Freight"),
@@ -508,8 +509,8 @@ def test_kalx_rooms_resolve_to_watched_venues_including_the_two_new_ones():
         assert spelled in by, spelled
         assert by[spelled] is not None and by[spelled].name == want, spelled
     assert "Hillside Club, Berkeley" in by and "Sweetwater Music Hall, Mill Valley" in by
-    assert v.resolve(watched, "sweetwater").info.address.startswith("19 Corte Madera")
-    assert v.resolve(watched, "hillside").info.url == "https://www.hillsideclub.org/"
+    assert vf.resolve(watched, "sweetwater").info.address.startswith("19 Corte Madera")
+    assert vf.resolve(watched, "hillside").info.url == "https://www.hillsideclub.org/"
 
 
 def test_kalx_tells_nights_from_lineups():

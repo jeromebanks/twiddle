@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from twiddle.scene import venues
+from twiddle.scenedata import venues
+from twiddle.scenespec import venue
 from twiddle.scenespec.model import Show
 from twiddle.scenedata.sources import SourceError, fetch_all
 from twiddle.scenedata.sources import yoshis
@@ -93,7 +94,7 @@ def test_tidy_case_leaves_mixed_case_and_numerals_alone():
 
 def test_every_show_is_matched_by_the_watched_yoshis(events):
     shows = [s for e in events for s in to_shows(e)]
-    assert shows and all(venues.find(venues.DEFAULT_VENUES, s.venue).name == "Yoshi's"
+    assert shows and all(venue.find(venues.DEFAULT_VENUES, s.venue).name == "Yoshi's"
                          for s in shows)
     assert all(s.source == "yoshis" for s in shows)
 

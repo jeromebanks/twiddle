@@ -32,6 +32,13 @@ TRACKS = [{"uri": f"spotify:track:{i}", "name": f"Song {i}", "album": {"name": "
           for i in range(3)]
 
 
+def _default_venue_rows():
+    """The venue table a builder run with the stock Bay Area list would publish."""
+    from twiddle.scenedata.builder import _venue_records
+    from twiddle.scenedata.venues import DEFAULT_VENUES
+    return _venue_records(DEFAULT_VENUES, None, None)
+
+
 def publish_dataset(shows=None, bands=None, venues=None, complete=True, generated_at=None):
     """Put a dataset where the app looks (conftest redirects it to tmp_path).
 
@@ -45,7 +52,8 @@ def publish_dataset(shows=None, bands=None, venues=None, complete=True, generate
             recs[dataset.band_id(b)] = profiles.minimal_record(b, None)
     for name, rec in (bands or {}).items():
         recs[dataset.band_id(name)] = rec
-    dataset.publish(dataset.document(shows=shows, venues=venues or [], bands=recs, sources={},
+    dataset.publish(dataset.document(shows=shows, venues=_default_venue_rows() if venues is None else venues,
+                                     bands=recs, sources={},
                                      enrichers={}, complete=complete, builder="test",
                                      generated_at=generated_at))
 
@@ -327,7 +335,7 @@ def test_band_photo_answer_for_a_band_no_longer_on_screen_is_dropped():
 
 
 def test_venue_icon_is_the_venues_logo_else_a_tile():
-    from twiddle.scene import venues
+    from twiddle.scenespec import venue as venues
     logo = _png()
     watched = (venues.Venue("Stork Club", ("stork club",)),
                venues.Venue("Ivy Room", ("ivy room",), "https://example.test/ivy.png"))
@@ -347,7 +355,7 @@ def test_venue_icon_is_the_venues_logo_else_a_tile():
 
 def test_a_venue_logo_that_failed_once_is_tried_again():
     """scene lives in a tmux pane for days: one failed fetch isn't forever."""
-    from twiddle.scene import venues
+    from twiddle.scenespec import venue as venues
     logo = _png()
     replies = [None, logo]
     watched = (venues.Venue("Stork Club", ("stork club",), "https://example.test/stork.png"),
@@ -694,7 +702,7 @@ def test_an_unwatched_venue_still_gets_a_map_search(monkeypatch):
 
 def test_a_venue_with_an_article_shows_its_stored_summary(monkeypatch):
     """The summary comes out of the dataset: opening the card fetches nothing."""
-    import twiddle.scene.venue_info as vi
+    import twiddle.scenedata.venue_info as vi
     monkeypatch.setattr(vi, "wiki_summary", lambda *a, **k: 1 / 0)
     fox = [Show(date(2026, 9, 23), "Fox Theater, Oakland", ["Somebody"])]
     venue = {"id": "fox-theater", "name": "Fox Theater",
@@ -783,8 +791,8 @@ def test_a_night_with_no_bands_shows_its_name_and_looks_nothing_up(monkeypatch):
 
 
 def test_a_venue_without_a_logo_gets_its_instagram_picture(monkeypatch):
-    from twiddle.scene import venues
-    from twiddle.scene.venue_info import VenueInfo
+    from twiddle.scenespec import venue as venues
+    from twiddle.scenespec.venue import VenueInfo
     pic = _png()
     asked = []
     watched = (venues.Venue("Stork Club", ("stork club",),
@@ -801,8 +809,8 @@ def test_a_venue_without_a_logo_gets_its_instagram_picture(monkeypatch):
 
 
 def test_double_clicking_the_venue_card_opens_its_instagram(monkeypatch):
-    from twiddle.scene import venues
-    from twiddle.scene.venue_info import VenueInfo
+    from twiddle.scenespec import venue as venues
+    from twiddle.scenespec.venue import VenueInfo
     opened = []
     monkeypatch.setattr("twiddle.scene.app.webbrowser.open", opened.append)
     watched = (venues.Venue("Stork Club", ("stork club",),
@@ -869,7 +877,7 @@ def _no_collection(monkeypatch):
     """Anything that scrapes, searches or looks up now explodes."""
     import twiddle.scenedata.sources as srcs
     from twiddle import bandcamp as site
-    from twiddle.scene import venue_info
+    from twiddle.scenedata import venue_info
     from twiddle.scenedata import bandcamp
     boom = lambda *a, **k: 1 / 0            # noqa: E731
     monkeypatch.setattr(srcs, "fetch_all", boom)

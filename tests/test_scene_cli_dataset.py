@@ -12,8 +12,16 @@ from twiddle.scenespec.model import Show
 STORK = "Thee Stork Club, Oakland"
 
 
-def _publish(shows, venues=(), sources=None):
-    dataset.publish(dataset.document(shows=shows, venues=list(venues), bands={},
+def _stock_venues():
+    """The venue table a build with the stock Bay Area list publishes."""
+    from twiddle.scenedata.venues import DEFAULT_VENUES
+    return builder._venue_records(DEFAULT_VENUES, None, None)
+
+
+def _publish(shows, venues=None, sources=None):
+    dataset.publish(dataset.document(shows=shows,
+                                     venues=_stock_venues() if venues is None else list(venues),
+                                     bands={},
                                      sources=sources or {}, enrichers={}, complete=True,
                                      builder="t"))
 
@@ -24,7 +32,7 @@ def _tomorrow():
 
 def _dead_network(monkeypatch):
     import twiddle.scenedata.sources as srcs
-    from twiddle.scene import venue_info
+    from twiddle.scenedata import venue_info
     boom = lambda *a, **k: 1 / 0            # noqa: E731
     monkeypatch.setattr(srcs, "fetch_all", boom)
     monkeypatch.setattr(builder, "build", boom)
@@ -77,10 +85,17 @@ def test_scene_venue_shows_the_stored_wikipedia_summary_offline(monkeypatch, cap
     assert "A restored hall." in capsys.readouterr().out
 
 
-def test_scene_venue_needs_no_dataset_at_all(monkeypatch, capsys):
+def test_scene_venue_reads_its_details_from_the_datasets_venue_table(monkeypatch, capsys):
     _dead_network(monkeypatch)
+    _publish([])
     assert cli.main(["scene", "venue", "gilman"]) == 0
     assert "924 Gilman" in capsys.readouterr().out
+
+
+def test_scene_venue_without_a_dataset_says_how_to_make_one(monkeypatch, capsys):
+    _dead_network(monkeypatch)
+    assert cli.main(["scene", "venue", "gilman"]) == 1
+    assert "no dataset yet" in capsys.readouterr().err
 
 
 def test_scene_build_reports_and_a_busy_lock_exits_75(monkeypatch, capsys):

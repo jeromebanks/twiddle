@@ -93,13 +93,14 @@ def fetch_all(chosen: list[EventSource] | None = None,
 
 def _room():
     """A source's venue spelling -> the watched venue's name, if it is one."""
-    from ...scene import venues
+    from .. import venues
+    from ...scenespec import venue
     try:
         watched = venues.watched()
     except ValueError:          # a broken config is reported elsewhere
         watched = venues.DEFAULT_VENUES
 
     def room(listed: str) -> str:
-        v = venues.find(watched, listed)
+        v = venue.find(watched, listed)
         return v.name if v else listed
     return room

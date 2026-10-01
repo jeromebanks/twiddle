@@ -15,7 +15,7 @@ from datetime import date, timedelta
 
 from ..control_cli import emit, fail
 from ..scenespec import dataset
-from . import venues as venues_mod
+from ..scenespec import venue as venues_mod
 
 BUILD_BUSY = 75         # EX_TEMPFAIL: another build holds the lock; try again later
 LAUNCHD_LABEL = "com.twiddle.scene-build"
@@ -34,10 +34,6 @@ def _read_dataset(args):
 
 
 def cmd_list(args) -> int:
-    try:
-        watched = venues_mod.watched()
-    except ValueError as exc:
-        return fail(args, f"bad venue config: {exc}")
     if args.refresh:        # an explicit request to run the builder first
         from ..scenedata.builder import BuildBusy, BuildError, build
         try:
@@ -49,6 +45,7 @@ def cmd_list(args) -> int:
     snap, code = _read_dataset(args)
     if snap is None:
         return code
+    watched = venues_mod.from_rows(snap.venues)
     shows = snap.shows
     errors = [f"{n}: {v.get('error')}" for n, v in snap.sources.items() if not v.get("ok", True)]
     if not shows:
@@ -93,10 +90,10 @@ def cmd_list(args) -> int:
 def cmd_venue(args) -> int:
     """Where a venue is, what it is, its website. No speaker, no listings fetch."""
     import textwrap
-    try:
-        watched = venues_mod.watched()
-    except ValueError as exc:
-        return fail(args, f"bad venue config: {exc}")
+    snap, code = _read_dataset(args)
+    if snap is None:
+        return code
+    watched = venues_mod.from_rows(snap.venues)
     if not args.name:
         rows = [{"name": v.name, "address": v.info.address, "url": v.info.url}
                 for v in watched]
@@ -107,12 +104,7 @@ def cmd_venue(args) -> int:
     if v is None:
         return fail(args, f"no watched venue matches {args.name!r}",
                     "`twiddle scene venue` lists them")
-    snap = None
-    try:
-        snap = dataset.load()
-    except dataset.DatasetError:
-        pass                # the venue's own details need no dataset
-    rec = snap.venue(v.name) if snap else None
+    rec = snap.venue(v.name)
     wiki = (rec or {}).get("wikipedia_summary")
     lines = [v.name]
     for label, value in (("address", v.info.address), ("website", v.info.url),
@@ -142,11 +134,6 @@ def cmd_scene(args) -> int:
     from .local import LocalSpeaker
     from .players import SpotifyConnectPlayer
 
-    try:
-        watched = venues_mod.watched()
-    except ValueError as exc:
-        return fail(args, f"bad venue config: {exc}")
-
     def book_factory(on_update):
         # TrackEnricher alone fetches song lists; the identity enrichers must not
         # too, or a band with no dataset record has its songs requested twice.
@@ -157,7 +144,7 @@ def cmd_scene(args) -> int:
     app = SceneApp(book_factory=book_factory,
                    player=SpotifyConnectPlayer(room=args.room, dry_run=args.dry_run,
                                                local=LocalSpeaker()),
-                   watched=watched, venue=args.venue, all_venues=args.all_venues,
+                   venue=args.venue, all_venues=args.all_venues,
                    dry_run=args.dry_run, outputs=Outputs(dry_run=args.dry_run))
     app.run()
     return 0
