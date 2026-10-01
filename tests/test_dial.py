@@ -1550,3 +1550,101 @@ def test_switching_output_during_a_volume_write_does_not_wedge_the_keys():
             await asyncio.sleep(0.7)
             assert out.landed[-1] == 53                # and the keys work
     run(go())
+
+
+class AckingProc(PipeProc):
+    """Answers each command line after a delay, as ffmpeg does: it prints
+    "Command reply" to its log when it applies one."""
+    def __init__(self, log, delay):
+        super().__init__()
+        self.log, self.delay, self.applied = log, delay, []
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.touch()                              # as `_spawn` does
+
+    def write(self, data):
+        import threading as _th
+        super().write(data)
+
+        def reply():
+            import time as _t
+            _t.sleep(self.delay)
+            with open(self.log, "ab") as f:
+                f.write(b"Command reply for stream -1: ret:0 res:\n")
+            self.applied.append(data.decode())
+        _th.Thread(target=reply, daemon=True).start()
+
+
+def test_commands_wait_for_ffmpegs_ack_so_none_pile_up(tmp_path):
+    """Codex round 2, finding 1: a rate limit only guesses at ffmpeg's speed.
+    With one outstanding command at a time, the backlog is bounded and the
+    final mute is the very next command."""
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg",
+                      spawn=lambda argv, log: setattr(out, "_p", AckingProc(log, 0.15)) or out._p)
+    out.gain_pace_s = 0.01
+    out.tune(STATIONS["kexp"])
+    proc = out._p
+    for v in range(99, 59, -1):                  # 40 changes, 20 ms apart
+        out.set_volume(v)
+        import time as _t
+        _t.sleep(0.02)
+    out.set_mute(True)
+    assert until(lambda: proc.applied and proc.applied[-1].endswith("volume 0.0000\n"), 3.0)
+    assert len(proc.written) <= 8                # ~ one per 150 ms ack, not 41
+    out.close()
+
+
+def test_a_mute_set_while_the_process_is_starting_is_not_lost():
+    """Codex round 2, finding 2: argv had the old level, `_proc` was still
+    None when the sender looked, and nothing woke it again."""
+    holder = {}
+
+    def spawn(argv, log):
+        holder["out"].set_mute(True)             # the key arrives mid-spawn
+        holder["proc"] = PipeProc()
+        return holder["proc"]
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg", spawn=spawn)
+    holder["out"] = out
+    out.gain_pace_s = 0.01
+    out.tune(STATIONS["kexp"])
+    assert until(lambda: holder["proc"].written == ["cvolume@v -1 volume 0.0000\n"])
+    assert out.state().muted
+    out.close()
+
+
+def test_only_one_sender_thread_ever_exists():
+    """Codex round 2, finding 3: two senders could write mute then an older
+    volume, leaving it audible while the model said muted."""
+    import threading
+    started, release = [], threading.Event()
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg", spawn=lambda a, l: PipeProc())
+    out._gain_loop = lambda: (started.append(1), release.wait(5))   # counts this output's senders
+    out.gain_pace_s = 0.05
+    out.tune(STATIONS["kexp"])
+    ts = [threading.Thread(target=out._push_gain) for _ in range(60)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    release.set()
+    assert len(started) == 1
+
+
+def test_returning_to_an_output_does_not_overlap_its_old_volume_write():
+    """Codex round 2, finding 4: A -> B -> A reset the in-flight flag, so a
+    new write could overtake the old one still running on A."""
+    out = SlowOutput(0.3)
+    out.volume_interval_s = 0.02
+
+    async def go():
+        app = make_app(out)
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("minus")                 # 28 in flight on A
+            await asyncio.sleep(0.05)
+            app._reset_volume_state()                  # away to B ...
+            app._reset_volume_state()                  # ... and back to A
+            app.volume = 30
+            app.action_set_volume(20)                  # must wait for the 28
+            await asyncio.sleep(1.0)
+            await pilot.pause()
+            assert out.landed == [28, 20]
+            assert not app._vol_dirty
+    run(go())

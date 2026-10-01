@@ -270,9 +270,8 @@ class DialApp(App):
         self._vol_timer = None
         self._vol_dirty = False
         self._vol_pushed_at = float("-inf")
-        self._vol_busy = False          # a volume write is running
+        self._vol_busy: set = set()     # outputs with a volume write running
         self._vol_again = False         # ...and a newer value is waiting behind it
-        self._out_gen = 0               # bumps when the output changes
         self._sleep_at: float | None = None      # monotonic time the timer fires
         self._sleep_pending: int | None = None   # minutes chosen, not yet sent (0 = off)
         self._sleep_timer = None
@@ -904,17 +903,19 @@ class DialApp(App):
 
     def _push_volume(self) -> None:
         self._vol_timer = None
-        if self._vol_busy:
+        out = self.output
+        if out in self._vol_busy:
             self._vol_again = True      # `_volume_landed` sends the latest
             return
-        self._vol_busy = True
+        self._vol_busy.add(out)
         self._vol_pushed_at = time.monotonic()
-        self.push_volume(self.output, self.volume, self._out_gen)
+        self.push_volume(out, self.volume)
 
     # Not `exclusive`: that cancels the task, not its thread, and a slow
-    # older write could land after a newer one. `_vol_busy` keeps one in flight.
+    # older write could land after a newer one. One write per output is in
+    # flight (even across A -> B -> A) and the latest waits behind it.
     @work(thread=True, group="volume")
-    def push_volume(self, out, volume: int, gen: int) -> None:
+    def push_volume(self, out, volume: int) -> None:
         try:
             out.set_volume(volume)
         except spotify_ops.PlaybackError as exc:
@@ -922,15 +923,15 @@ class DialApp(App):
         except Exception as exc:
             self.call_from_thread(self._error, spotify_ops.PlaybackError(
                 f"volume: {type(exc).__name__}: {exc}"))
-        self.call_from_thread(self._volume_landed, volume, gen)
+        self.call_from_thread(self._volume_landed, volume, out)
 
-    def _volume_landed(self, volume: int, gen: int) -> None:
+    def _volume_landed(self, volume: int, out) -> None:
         """Only the latest write clears `_vol_dirty`: until then a state poll
         must not snap the bar back to an older level. A write that was
         started on an output we've since left says nothing about this one."""
-        if gen != self._out_gen:
+        self._vol_busy.discard(out)
+        if out is not self.output:
             return
-        self._vol_busy = False
         if self._vol_again:
             self._vol_again = False
             if self._vol_timer is None and self.volume is not None:
@@ -940,12 +941,12 @@ class DialApp(App):
             self._vol_dirty = False
 
     def _reset_volume_state(self) -> None:
-        """Leaving an output: nothing pending or in flight belongs to the next."""
-        self._out_gen += 1
+        """Leaving an output: nothing pending belongs to the next. (A write
+        still in flight stays in `_vol_busy` until it lands.)"""
         if self._vol_timer is not None:
             self._vol_timer.stop()
         self._vol_timer = None
-        self._vol_busy = self._vol_again = self._vol_dirty = False
+        self._vol_again = self._vol_dirty = False
 
     def action_mute(self) -> None:
         self.muted = not self.muted
