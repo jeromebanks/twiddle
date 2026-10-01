@@ -9,10 +9,11 @@ from datetime import date
 import pytest
 
 from twiddle import spotify, spotify_ops
-from twiddle.scene import bandcamp, cache, dataset
+from twiddle.scene import bandcamp, cache
+from twiddle.scenespec import dataset
 from twiddle.scenedata import builder
-from twiddle.scene.bands import BandProfile
-from twiddle.scene.model import Show
+from twiddle.scenespec.band import BandProfile
+from twiddle.scenespec.model import Show
 from twiddle.scenedata.sources import SourceError
 
 TODAY = date(2026, 10, 1)
@@ -365,7 +366,7 @@ def test_a_build_will_not_overwrite_a_dataset_it_cannot_read(tmp_path):
 def test_a_bandcamp_pause_also_stops_the_lookups_last_resort_bandcamp_search(monkeypatch):
     """Codex: MusicBrainz's fallback is a Bandcamp name search that ignored the pause."""
     from twiddle import lookup
-    from twiddle.scene.bands import BandProfile
+    from twiddle.scenespec.band import BandProfile
     asked = []
     monkeypatch.setattr(lookup, "_by_name", lambda a: (None, []))
     monkeypatch.setattr(lookup, "_by_fuzzy", lambda *a: None)
@@ -402,8 +403,8 @@ def test_a_carried_over_answer_is_retried_next_build_not_treated_as_fresh(tmp_pa
 
 
 def test_a_kept_answer_still_counts_as_known_to_the_app_and_the_badge():
-    from twiddle.scene import profiles
-    from twiddle.scene.bands import BandProfile
+    from twiddle.scenespec import profiles
+    from twiddle.scenespec.band import BandProfile
     p = BandProfile("X")
     p.status = {"lookup": "done", "spotify": "kept: error: 429", "bandcamp": "done"}
     p.spotify_artist = {"id": "s1"}

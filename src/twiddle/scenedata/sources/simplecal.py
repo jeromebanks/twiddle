@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from ...scene.model import Show
+from ...scenespec.model import Show
 from .base import SourceError
 
 PACIFIC = ZoneInfo("America/Los_Angeles")

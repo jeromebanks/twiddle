@@ -39,12 +39,13 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from .. import spotify, spotify_ops
-from ..scene import bandcamp, dataset, genre, profiles
+from ..scene import bandcamp
+from ..scenespec import dataset, genre, profiles
 from ..scene import venue_info
 from ..scene import venues as venues_mod
-from ..scene.bands import (BandProfile, BandcampEnricher, LookupEnricher, SpotifyEnricher,
-                    assess, near)
-from ..scene.model import Show
+from ..scenespec.band import BandProfile
+from .bands import BandcampEnricher, LookupEnricher, SpotifyEnricher, assess, genre_of, near
+from ..scenespec.model import Show
 from .sources import fetch_all
 
 DEFAULT_DAYS = 31           # how far ahead bands are enriched (and asked of Bandcamp)
@@ -330,7 +331,7 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
         p = enrich_one(name, active, skip, prior)
         _keep_prior_answers(p, old)
         hits = None if "bandcamp" in skip else _safe(genre_search, name, offline=True)
-        guess = p.genre() or guess_from(hits)
+        guess = genre_of(p) or guess_from(hits)
         bands[key] = profiles.to_record(p, updated_at=now(), guess=guess)
         result.enriched += 1
         if "spotify" in names and "spotify" not in skip and spotify_gap:

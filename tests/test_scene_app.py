@@ -9,10 +9,12 @@ from datetime import date
 
 from twiddle import lookup, spotify, spotify_ops
 from twiddle.dial.output import Outputs
-from twiddle.scene import cache, dataset, genre as genre_mod, profiles
+from twiddle.scene import cache
+from twiddle.scenespec import dataset, genre as genre_mod, profiles
 from twiddle.scene.app import SceneApp
-from twiddle.scene.bands import BandBook, BandcampEnricher, LookupEnricher
-from twiddle.scene.model import Show
+from twiddle.scene.book import BandBook
+from twiddle.scenedata.bands import BandcampEnricher, LookupEnricher
+from twiddle.scenespec.model import Show
 from twiddle.scene.players import Device, NeedsConfirmation, SpotifyConnectPlayer
 
 TODAY = date(2026, 9, 22)
@@ -888,7 +890,7 @@ class Tripwire:
 
 def _compiled(name, **kw):
     """A band the builder fully enriched."""
-    from twiddle.scene.bands import BandProfile
+    from twiddle.scenespec.band import BandProfile
     p = BandProfile(band=name)
     p.status = {"lookup": "done", "spotify": "done", "bandcamp": "done"}
     p.spotify_artist = {"id": "a", "name": name}
@@ -897,7 +899,7 @@ def _compiled(name, **kw):
     p.bc_tracks = BC_TRACKS
     for k, v in kw.items():
         setattr(p, k, v)
-    from twiddle.scene.bands import assess
+    from twiddle.scenedata.bands import assess
     assess(p, use_pins=False)
     return profiles.to_record(p, updated_at=1.0, guess=None)
 
@@ -910,7 +912,8 @@ def _identity_only(name):
 
 def _production_book(on_update):
     """cli.cmd_scene's book, with the network dead: every fetch explodes."""
-    from twiddle.scene.bands import SpotifyEnricher, TrackEnricher
+    from twiddle.scene.book import TrackEnricher
+    from twiddle.scenedata.bands import SpotifyEnricher
 
     def dead_session():
         raise ConnectionError("network is down")
@@ -1145,7 +1148,7 @@ def test_a_checkpoint_of_a_running_build_does_not_move_your_cursor_or_focus():
 
 
 def test_reloading_never_replaces_a_profile_whose_lookup_is_running():
-    from twiddle.scene.bands import BandProfile
+    from twiddle.scenespec.band import BandProfile
     book = BandBook([])
     running = BandProfile(band="Girl Chow")
     running.status = {"spotify": "running"}
@@ -1168,7 +1171,7 @@ def test_reloading_never_replaces_a_profile_whose_lookup_is_running():
 
 
 def _viewed(spotify_id, tracks=True):
-    from twiddle.scene.bands import BandProfile
+    from twiddle.scenespec.band import BandProfile
     p = BandProfile(band="Girl Chow")
     p.status = {"lookup": "done", "spotify": "done", "bandcamp": "done",
                 "tracks": "done" if tracks else "idle"}
@@ -1202,7 +1205,7 @@ def test_a_viewed_band_keeps_its_lists_when_the_record_agrees_on_who_it_is():
 
 def test_a_band_nobody_has_looked_up_is_badged_as_such_not_as_looking():
     from twiddle.scene.app import BADGE
-    from twiddle.scene.bands import UNLOOKED
+    from twiddle.scenespec.band import UNLOOKED
     p = profiles.from_record(profiles.minimal_record("Nobody", None))
     assert p.confidence == UNLOOKED and BADGE[UNLOOKED][2] == "not looked up yet"
 
@@ -1276,7 +1279,8 @@ def test_the_band_on_screen_gets_its_song_lists_and_the_rest_of_the_lineup_does_
     """The dataset knows who each band is but carries no song lists: only the
     band you are looking at pays for them."""
     from twiddle import discover_cli
-    from twiddle.scene.bands import SpotifyEnricher, TrackEnricher
+    from twiddle.scene.book import TrackEnricher
+    from twiddle.scenedata.bands import SpotifyEnricher
     asked = []
     monkeypatch.setattr(discover_cli, "_artist_tracks",
                         lambda sess, artist: asked.append(artist["name"]) or TRACKS)
@@ -1304,7 +1308,8 @@ def test_a_checkpoint_that_enriches_the_band_on_screen_brings_its_song_lists(mon
     away and back to fetch them."""
     import os
     from twiddle import discover_cli
-    from twiddle.scene.bands import SpotifyEnricher, TrackEnricher
+    from twiddle.scene.book import TrackEnricher
+    from twiddle.scenedata.bands import SpotifyEnricher
     monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, a: TRACKS)
 
     async def go():
@@ -1346,7 +1351,7 @@ def test_a_rebuild_that_changes_only_the_bands_details_redraws_the_open_card():
 def test_a_partial_checkpoint_still_corrects_the_artist_it_does_have():
     """Codex: Bandcamp done locally must not veto a record's corrected Spotify
     artist just because the record has not finished Bandcamp yet."""
-    from twiddle.scene.bands import BandProfile
+    from twiddle.scenespec.band import BandProfile
     book = BandBook([])
     viewed = BandProfile(band="Girl Chow")
     viewed.status = {"lookup": "done", "spotify": "done", "bandcamp": "done", "tracks": "done"}
@@ -1366,7 +1371,8 @@ def test_a_partial_checkpoint_still_corrects_the_artist_it_does_have():
 
 def test_a_failed_song_list_fetch_is_shown_not_hidden(monkeypatch):
     """Codex: identity from the dataset, an expired Spotify sign-in for the songs."""
-    from twiddle.scene.bands import SpotifyEnricher, TrackEnricher
+    from twiddle.scene.book import TrackEnricher
+    from twiddle.scenedata.bands import SpotifyEnricher
 
     def expired():
         raise ConnectionError("network is down")
@@ -1387,7 +1393,8 @@ def test_a_failed_song_list_fetch_is_shown_not_hidden(monkeypatch):
 
 def test_the_tuis_book_has_exactly_one_song_list_fetcher():
     """Codex: identity enrichers with tracks on would duplicate TrackEnricher's requests."""
-    from twiddle.scene import bands, cli
+    from twiddle.scene import cli
+
     import inspect
     src = inspect.getsource(cli.cmd_scene)
     assert "SpotifyEnricher(spotify_ops.session, tracks=False)" in src

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from twiddle.scene import venues
-from twiddle.scene.model import Show
+from twiddle.scenespec.model import Show
 from twiddle.scenedata.sources import SourceError, fetch_all
 from twiddle.scenedata.sources import yoshis
 from twiddle.scenedata.sources.yoshis import (parse_calendar, parse_performances, split_title,

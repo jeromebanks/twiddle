@@ -4,10 +4,10 @@ import plistlib
 from datetime import date, timedelta
 
 from twiddle import cli
-from twiddle.scene import dataset
+from twiddle.scenespec import dataset
 from twiddle.scenedata import builder
 from twiddle.scene import cli as scene_cli
-from twiddle.scene.model import Show
+from twiddle.scenespec.model import Show
 
 STORK = "Thee Stork Club, Oakland"
 

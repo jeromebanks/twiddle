@@ -4,8 +4,11 @@ import urllib.error
 import pytest
 
 from twiddle import lookup
-from twiddle.scene import bandcamp, genre
-from twiddle.scene.bands import BandBook, BandcampEnricher, BandProfile, near
+from twiddle.scene import bandcamp
+from twiddle.scenespec import genre
+from twiddle.scenespec.band import BandProfile
+from twiddle.scene.book import BandBook
+from twiddle.scenedata.bands import BandcampEnricher, genre_of, near
 
 SLEEPBOMB = {"name": "Sleepbomb", "item_url_root": "https://sleepbomb.bandcamp.com",
              "location": "San Francisco, California", "genre_name": "Metal",
@@ -140,7 +143,7 @@ def test_bandcamp_enricher_reruns_when_musicbrainz_links_another_page():
                                links={"bandcamp": "https://sleepbomb-sf.bandcamp.com/"})
     assert e.wants_rerun(p)
     e.enrich(p)
-    assert p.bandcamp is other and p.genre().label() == "punk"
+    assert p.bandcamp is other and genre_of(p).label() == "punk"
     assert not e.wants_rerun(p)
 
 

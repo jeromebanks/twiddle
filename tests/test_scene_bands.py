@@ -7,18 +7,11 @@ import threading
 import time
 
 from twiddle import lookup, spotify, spotify_ops
-from twiddle.scene import bands, cache
-from twiddle.scene.bands import (
-    CORROBORATED,
-    NAME_ONLY,
-    NONE,
-    UNCERTAIN,
-    BandBook,
-    BandProfile,
-    LookupEnricher,
-    SpotifyEnricher,
-    assess,
-)
+from twiddle.scene import cache
+from twiddle.scenedata import bands
+from twiddle.scenespec.band import CORROBORATED, NAME_ONLY, NONE, UNCERTAIN, BandProfile
+from twiddle.scene.book import BandBook
+from twiddle.scenedata.bands import LookupEnricher, SpotifyEnricher, assess
 
 
 def artist(name, aid):
@@ -241,7 +234,7 @@ def test_region_matches_bandcamp_and_musicbrainz_spellings():
 
 import pytest  # noqa: E402
 
-from twiddle.scene.bands import BandcampEnricher, name_candidates  # noqa: E402
+from twiddle.scenedata.bands import BandcampEnricher, name_candidates  # noqa: E402
 
 
 @pytest.mark.parametrize("billed, first", [
@@ -361,7 +354,7 @@ def test_a_failed_spotify_search_is_not_reported_as_no_such_artist():
 
 def test_track_enricher_fetches_only_the_lists_that_are_missing(monkeypatch):
     from twiddle import discover_cli
-    from twiddle.scene.bands import TrackEnricher
+    from twiddle.scene.book import TrackEnricher
     asked = []
     monkeypatch.setattr(discover_cli, "_artist_tracks",
                         lambda sess, a: asked.append(("spotify", a["id"])) or [{"uri": "u"}])
@@ -380,7 +373,7 @@ def test_track_enricher_fetches_only_the_lists_that_are_missing(monkeypatch):
 
 def test_track_enricher_does_not_retry_an_artist_with_no_tracks_forever(monkeypatch):
     from twiddle import discover_cli
-    from twiddle.scene.bands import TrackEnricher
+    from twiddle.scene.book import TrackEnricher
     monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, a: [])
     enr = TrackEnricher(SpotifyEnricher(lambda: object(), tracks=False))
     p = BandProfile("X")
@@ -395,7 +388,7 @@ def test_track_enricher_waits_out_an_identity_that_lands_later(monkeypatch):
     """Woken together with Spotify identity, it may run first and find nothing;
     it runs again once the artist is known."""
     from twiddle import discover_cli
-    from twiddle.scene.bands import TrackEnricher
+    from twiddle.scene.book import TrackEnricher
     monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, a: [{"uri": "u"}])
     gate = threading.Event()
 
@@ -428,7 +421,7 @@ def test_track_enricher_checks_again_when_identity_lands_while_it_runs(monkeypat
     """Codex: Spotify's tracks begin before Bandcamp identifies the band; the
     Bandcamp completion sees `tracks` running and schedules nothing."""
     from twiddle import discover_cli
-    from twiddle.scene.bands import TrackEnricher
+    from twiddle.scene.book import TrackEnricher
     monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, a: [{"uri": "u"}])
     started, release = threading.Event(), threading.Event()
 
@@ -528,7 +521,7 @@ def test_changing_a_pin_discards_a_record_that_was_waiting_for_the_old_lookup():
 def test_a_deferred_record_that_corrects_the_artist_wakes_its_song_lists(monkeypatch):
     """Codex: the corrected profile has no tracks; something must fetch them."""
     from twiddle import discover_cli
-    from twiddle.scene.bands import TrackEnricher
+    from twiddle.scene.book import TrackEnricher
     gate, asked = threading.Event(), []
 
     def artist_tracks(sess, artist):
@@ -571,7 +564,7 @@ def test_a_deferred_record_that_corrects_the_artist_wakes_its_song_lists(monkeyp
 def test_song_lists_fetched_for_an_artist_that_changed_meanwhile_are_dropped(monkeypatch):
     """Codex: the old artist's slow reply must not overwrite the corrected artist's songs."""
     from twiddle import discover_cli
-    from twiddle.scene.bands import TrackEnricher
+    from twiddle.scene.book import TrackEnricher
     gate = threading.Event()
 
     def artist_tracks(sess, artist):
@@ -601,7 +594,7 @@ def test_a_failed_song_list_fetch_is_retried_when_a_new_identity_arrives(monkeyp
     """Codex: Spotify's auth failure must not suppress Bandcamp tracks whose identity
     lands later -- and an unchanged identity is not retried forever."""
     from twiddle import discover_cli
-    from twiddle.scene.bands import TrackEnricher
+    from twiddle.scene.book import TrackEnricher
     spotify_calls = []
 
     def artist_tracks(sess, artist):

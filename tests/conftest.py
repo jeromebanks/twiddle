@@ -13,7 +13,7 @@ import pytest
 from twiddle import comedy, lookup, play, spotify_ops, stations, streaminfo
 from twiddle.dial import state as dial_state
 from twiddle.scene import cache as scene_cache
-from twiddle.scene import dataset as scene_dataset
+from twiddle.scenespec import dataset as scene_dataset
 
 
 @pytest.fixture(autouse=True)

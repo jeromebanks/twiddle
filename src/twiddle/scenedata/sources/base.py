@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from ...scene.model import Show, dedupe
+from ...scenespec.model import Show, dedupe
 
 
 class SourceError(RuntimeError):

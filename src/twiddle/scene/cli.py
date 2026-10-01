@@ -14,7 +14,7 @@ import sys
 from datetime import date, timedelta
 
 from ..control_cli import emit, fail
-from . import dataset
+from ..scenespec import dataset
 from . import venues as venues_mod
 
 BUILD_BUSY = 75         # EX_TEMPFAIL: another build holds the lock; try again later
@@ -137,8 +137,8 @@ def cmd_scene(args) -> int:
     from .. import spotify_ops
     from .app import SceneApp
     from ..dial.output import Outputs
-    from .bands import (BandBook, BandcampEnricher, LookupEnricher, SpotifyEnricher,
-                        TrackEnricher)
+    from .book import BandBook, TrackEnricher
+    from ..scenedata.bands import BandcampEnricher, LookupEnricher, SpotifyEnricher
     from .local import LocalSpeaker
     from .players import SpotifyConnectPlayer
 

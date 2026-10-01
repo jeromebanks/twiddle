@@ -30,7 +30,7 @@ from datetime import date, datetime
 
 import requests
 
-from ...scene.model import Show
+from ...scenespec.model import Show
 from .base import SourceError
 
 BASE = "https://app.showslinger.com"

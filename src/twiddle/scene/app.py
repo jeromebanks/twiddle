@@ -42,19 +42,13 @@ from textual_image import widget as _images
 
 from .. import here, spotify_ops
 from ..dial import art
-from . import bandcamp, cache, dataset, genre as genre_mod, instagram, pictures, profiles
+from ..scenespec import dataset, genre as genre_mod, profiles
+from . import bandcamp, cache, instagram, pictures
 from . import venues as venues_mod
-from .bands import (
-    CORROBORATED,
-    NAME_ONLY,
-    NONE,
-    PENDING,
-    UNCERTAIN,
-    UNLOOKED,
-    BandBook,
-    BandProfile,
-)
-from .model import Show
+from ..scenespec.band import CORROBORATED, NAME_ONLY, NONE, PENDING, UNCERTAIN, UNLOOKED, BandProfile
+from ..scenedata.bands import genre_of     # temporary: leaves with the live enrichment
+from .book import BandBook
+from ..scenespec.model import Show
 from .venue_info import VenueInfo
 from .players import Device, NeedsConfirmation, Player
 
@@ -709,7 +703,7 @@ class SceneApp(App):
         """The fullest guess we have: the looked-up profile, else the scan's."""
         p = self.book.profiles.get(self._key(band))
         if p is not None and p.status.get("bandcamp") in ("done", None):
-            g = p.genre()
+            g = genre_of(p)
             if g:
                 return g
         return self._scan_guesses.get(self._key(band))
@@ -864,7 +858,7 @@ class SceneApp(App):
         t.append("\n")
         if p.why:
             t.append(p.why + "\n", style="dim italic")
-        g = p.genre() or self._scan_guesses.get(self._key(p.band))
+        g = genre_of(p) or self._scan_guesses.get(self._key(p.band))
         if g:
             fam = g.top[0]
             t.append("sounds like ", style="dim")

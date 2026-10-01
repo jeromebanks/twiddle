@@ -9,9 +9,9 @@ from datetime import date
 import pytest
 
 from twiddle import lookup
-from twiddle.scene import dataset, genre, profiles
-from twiddle.scene.bands import BandProfile
-from twiddle.scene.model import Show
+from twiddle.scenespec import dataset, genre, profiles
+from twiddle.scenespec.band import BandProfile
+from twiddle.scenespec.model import Show
 
 STORK = "Thee Stork Club, Oakland"
 SHOWS = [Show(date(2026, 10, 5), STORK, ["Girl Chow", "Wiseacre"], source="thelist",
@@ -131,11 +131,14 @@ def test_a_reader_never_sees_a_partial_file_while_a_writer_runs(tmp_path):
     assert dataset.load(path).shows == SHOWS[:1]
 
 
-def test_the_reader_needs_no_tui_collectors_or_network_modules():
-    code = ("import sys, twiddle.scene.dataset as d\n"
-            "bad = {'textual', 'requests', 'twiddle.scenedata.sources', 'twiddle.scene.bands',\n"
-            "       'twiddle.scene.app', 'twiddle.scenedata.builder', 'twiddle.scene.bandcamp'}\n"
-            "print(sorted(bad & set(sys.modules)))")
+def test_the_contract_package_needs_no_client_producer_tui_or_network_modules():
+    """`scenespec` is what producers write and clients read: importing all of it
+    must pull in neither side, Textual, nor an HTTP library."""
+    code = ("import sys, twiddle.scenespec.dataset, twiddle.scenespec.profiles, "
+            "twiddle.scenespec.genre, twiddle.scenespec.band, twiddle.scenespec.model\n"
+            "bad = sorted(m for m in sys.modules if m in {'textual', 'requests'} or "
+            "m.startswith(('twiddle.scene.', 'twiddle.scenedata')) or m == 'twiddle.scene')\n"
+            "print(bad)")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                          check=True).stdout.strip()
     assert out == "[]"
@@ -222,7 +225,8 @@ def test_cache_writes_use_a_private_temp_name_and_leave_nothing_behind(tmp_path,
 def test_a_mismatched_pin_forgets_the_datasets_artist_and_its_tracks():
     """Otherwise the song-list fetch, woken beside the pinned lookup, could put
     the wrong artist's tracks back -- or a "not on Spotify" band's."""
-    from twiddle.scene.bands import SpotifyEnricher, TrackEnricher
+    from twiddle.scene.book import TrackEnricher
+    from twiddle.scenedata.bands import SpotifyEnricher
     rec = profiles.to_record(_profile(), updated_at=1.0, guess=None)
     rec["tracks"] = [{"uri": "spotify:track:1"}]
     for pin in ("other", None):

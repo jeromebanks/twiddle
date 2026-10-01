@@ -22,7 +22,7 @@ from datetime import date, timedelta
 
 import requests
 
-from ...scene.model import Show
+from ...scenespec.model import Show
 from .base import SourceError
 from .seetickets import _day
 

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from twiddle.scene.model import Show, dedupe
+from twiddle.scenespec.model import Show, dedupe
 from twiddle.scenedata.sources import SourceError, fetch_all
 from twiddle.scenedata.sources import seetickets
 from twiddle.scenedata.sources.gilman import parse_widget, split_title

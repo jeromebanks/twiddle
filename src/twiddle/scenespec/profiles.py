@@ -13,7 +13,7 @@ from dataclasses import fields
 
 from .. import lookup
 from . import genre
-from .bands import BandProfile, assess
+from .band import CORROBORATED, NONE, PENDING, UNLOOKED, BandProfile
 from .dataset import iso
 
 ENRICHERS = ("lookup", "spotify", "bandcamp")     # what a build runs
@@ -128,5 +128,20 @@ def from_record(rec: dict, *, pinned: Callable[[str], dict | None] | None = None
             # while the pinned one is looked up.
             p.status["spotify"] = "idle"
             p.spotify_artist, p.spotify_candidates, p.tracks = None, [], []
-    assess(p)
+    if p.status.get("spotify") == "idle":
+        p.confidence, p.why = UNLOOKED, "not looked up on Spotify yet"
+    else:
+        p.confidence = rec.get("confidence") or PENDING
+        p.why = rec.get("why") or ""
+    if pin is not None:
+        apply_pin(p, pin)
     return p
+
+
+def apply_pin(p: BandProfile, pin: dict) -> None:
+    """Grade by what this person chose. The dataset is graded without pins, so
+    a pin is the one thing the reader adds."""
+    if pin.get("spotify_id"):
+        p.confidence, p.why = CORROBORATED, "chosen by you"
+    else:
+        p.confidence, p.why = NONE, "marked by you as not on Spotify"
