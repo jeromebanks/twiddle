@@ -900,6 +900,10 @@ class SceneApp(App):
                               if c.get("disambiguation") else "")
                               for c in p.lookup_candidates[:5])
             t.append(f"\nseveral artists share this name: {names}\n", style="dim")
+        elif lookup_state != "done" and not bc:
+            # Nobody has looked this band up: say so, not that the databases lack them.
+            t.append("\nnot in this dataset yet -- the next build looks them up\n",
+                     style="dim")
         elif not bc:
             t.append("\nnot in MusicBrainz, Discogs or Bandcamp under this name\n",
                      style="dim")

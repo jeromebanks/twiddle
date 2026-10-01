@@ -97,6 +97,8 @@ def cmd_venue(args) -> int:
     if not args.name:
         rows = [{"name": v.name, "address": v.info.address, "url": v.info.url}
                 for v in watched]
+        if not rows:
+            return fail(args, "this dataset lists no venues")
         width = max(len(r["name"]) for r in rows)
         text = "\n".join(f"{r['name']:<{width}}  {r['address'] or '-'}" for r in rows)
         return emit(args, {"venues": rows}, text)
@@ -124,22 +126,24 @@ def cmd_venue(args) -> int:
     return emit(args, data, "\n".join(lines))
 
 
+def tui_book(on_update, session_factory=None, bc_tracks=None):
+    """The TUI's book. Who a band is comes from the dataset; the client only
+    applies your pin and fetches song lists, both of which need your own sign-in."""
+    from .. import bandcamp, spotify_ops
+    from .book import BandBook, PinEnricher, TrackEnricher
+    spotify = PinEnricher(session_factory or spotify_ops.session)
+    return BandBook([spotify, TrackEnricher(spotify, bc_tracks=bc_tracks or bandcamp.tracks)],
+                    on_update=on_update)
+
+
 def cmd_scene(args) -> int:
     # Imported here so no other command pays for loading Textual.
-    from .. import spotify_ops
     from .app import SceneApp
     from ..dial.output import Outputs
-    from .book import BandBook, PinEnricher, TrackEnricher
     from .local import LocalSpeaker
     from .players import SpotifyConnectPlayer
 
-    def book_factory(on_update):
-        # Who a band is comes from the dataset. The client only applies your
-        # pin and fetches song lists, both of which need your own sign-in.
-        spotify = PinEnricher(spotify_ops.session)
-        return BandBook([spotify, TrackEnricher(spotify)], on_update=on_update)
-
-    app = SceneApp(book_factory=book_factory,
+    app = SceneApp(book_factory=tui_book,
                    player=SpotifyConnectPlayer(room=args.room, dry_run=args.dry_run,
                                                local=LocalSpeaker()),
                    venue=args.venue, all_venues=args.all_venues,

@@ -138,3 +138,9 @@ def test_scene_schedule_prints_a_launchd_agent_and_installs_nothing(capsys, tmp_
     assert plist["ProgramArguments"][-3:] == ["twiddle", "scene", "build"]
     assert "launchctl bootstrap" in out
     assert not (tmp_path / "Library" / "LaunchAgents").exists()
+
+
+def test_scene_venue_with_a_dataset_that_lists_no_venues_says_so_instead_of_crashing(capsys):
+    _publish([], venues=[])
+    assert cli.main(["scene", "venue"]) == 1
+    assert "no venues" in capsys.readouterr().err

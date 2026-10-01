@@ -101,21 +101,26 @@ class FakePlayer:
         pass
 
 
+def _bandcamp_record(name, hit):
+    """What a build that found `name` on Bandcamp publishes: the page, its songs,
+    and the genre guess its tags give."""
+    guess = profiles.guess_to_dict(genre_mod.for_band(hit, sure=True))
+    return dict(profiles.minimal_record(name, None), bandcamp=hit, bc_tracks=BC_TRACKS,
+                status={"bandcamp": "done"}, genre=guess)
+
+
 def make_app(player=None, bandcamp=None, **kw):
-    """`bandcamp`: {band: [search results]} -- enables the Bandcamp enricher
-    and the genre scan over those; without it, Bandcamp knows nobody."""
-    known = bandcamp or {}
-
-    def search(name, offline=False):
-        return known.get(name, [])
-
+    """`bandcamp`: {band: [search results]} -- the dataset says each band is on
+    Bandcamp (the client never searches); a band without one knows nobody."""
     if kw.pop("publish", True):
-        publish_dataset(kw.pop("shows", None), kw.pop("bands", None), kw.pop("venues", None))
+        bands = dict(kw.pop("bands", None) or {})
+        for name, results in (bandcamp or {}).items():
+            if results and name not in bands:
+                bands[name] = _bandcamp_record(name, results[0])
+        publish_dataset(kw.pop("shows", None), bands, kw.pop("venues", None))
+
     def book_factory(on_update):
-        enrichers = [LookupEnricher(lambda n: lookup.Result()), FakeSpotify()]
-        if bandcamp is not None:
-            enrichers.append(BandcampEnricher(search=search, tracks=lambda url: BC_TRACKS))
-        return BandBook(enrichers, on_update=on_update)
+        return BandBook([FakeSpotify()], on_update=on_update)
     kw.setdefault("load_image", lambda url: None)      # no network for pictures
     kw.setdefault("band_photo", lambda p: (None, ""))
     kw.setdefault("instagram_picture", lambda handle: None)   # nor for venues
@@ -873,17 +878,6 @@ def _no_collection(monkeypatch):
     monkeypatch.setattr(venue_info, "wiki_summary", boom)
 
 
-class Tripwire:
-    """An enricher that must never run."""
-    serial = False
-
-    def __init__(self, name):
-        self.name = name
-
-    def enrich(self, p):
-        raise AssertionError(f"{self.name} enrich ran for {p.band}")
-
-
 def _compiled(name, **kw):
     """A band the builder fully enriched."""
     from twiddle.scenespec.band import BandProfile
@@ -907,18 +901,15 @@ def _identity_only(name):
 
 
 def _production_book(on_update):
-    """cli.cmd_scene's book, with the network dead: every fetch explodes."""
-    from twiddle.scene.book import TrackEnricher
-    from twiddle.scenedata.bands import SpotifyEnricher
+    """`cli.tui_book`, the production book, with the network dead: every fetch explodes."""
+    from twiddle.scene.cli import tui_book
 
     def dead_session():
         raise ConnectionError("network is down")
-    spot = SpotifyEnricher(dead_session)
 
     def dead(url):
         raise ConnectionError("network is down")
-    return BandBook([Tripwire("lookup"), spot, Tripwire("bandcamp"),
-                     TrackEnricher(spot, bc_tracks=dead)], on_update=on_update)
+    return tui_book(on_update, session_factory=dead_session, bc_tracks=dead)
 
 
 def test_with_the_network_dead_scene_browses_a_compiled_dataset(monkeypatch):
@@ -1393,10 +1384,51 @@ def test_the_tuis_book_does_no_identity_lookup_and_has_one_song_list_fetcher():
     from twiddle.scene import cli
 
     import inspect
-    src = inspect.getsource(cli.cmd_scene)
+    assert "tui_book" in inspect.getsource(cli.cmd_scene)
+    src = inspect.getsource(cli.tui_book)
     assert "PinEnricher" in src and "TrackEnricher" in src
     for identity in ("LookupEnricher", "SpotifyEnricher", "BandcampEnricher", "scenedata"):
         assert identity not in src
+
+
+def test_a_pin_through_the_production_book_fetches_the_chosen_artist_and_its_songs(monkeypatch):
+    """The whole client-side pin flow: the dataset picked artist `a`, you pinned
+    `b`; opening the band fetches `b` by id, then its songs, graded by your choice."""
+    from twiddle import discover_cli
+    from twiddle.scene.cli import tui_book
+    cache.pin("Girl Chow", "b", "Girl Chow (the other one)")
+    fetched = []
+
+    class Sess:
+        def request(self, method, path):
+            fetched.append(path)
+            return {"id": path.rsplit("/", 1)[-1], "name": "Girl Chow"}
+
+    monkeypatch.setattr(discover_cli, "_artist_tracks",
+                        lambda sess, artist: [dict(TRACKS[0], uri=f"spotify:track:{artist['id']}")])
+
+    async def go():
+        app = make_app(bands={"Girl Chow": _identity_only("Girl Chow")})      # dataset's pick: "a"
+        app.book = tui_book(app._from_worker_band, session_factory=Sess, bc_tracks=lambda u: BC_TRACKS)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().tracks)
+            p = app._profile()
+            assert fetched == ["/artists/b"]
+            assert p.spotify_artist["id"] == "b" and p.tracks[0]["uri"] == "spotify:track:b"
+            assert p.confidence == "corroborated" and p.why == "chosen by you"
+    run(go())
+
+
+def test_a_band_nobody_has_looked_up_does_not_claim_the_databases_lack_them():
+    async def go():
+        app = make_app(bands={"Girl Chow": profiles.minimal_record("Girl Chow", None)})
+        app.book = BandBook([], on_update=app._from_worker_band)      # nothing runs: dataset only
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() is not None)
+            card = str(app.query_one("#profile").render())
+            assert "not in MusicBrainz" not in card
+            assert "next build looks them up" in card
+    run(go())
 
 
 def test_a_checkpoint_that_changes_genres_updates_which_shows_a_genre_filter_matches():
