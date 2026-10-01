@@ -9,7 +9,9 @@ on the Roams through the relay. No Sonos is needed; see
 [Running it without the Roams](#running-it-without-the-roams).
 
 It is the first piece of a larger music discovery app, so it is built as
-three swappable layers. See [Extending it](#extending-it).
+three swappable layers. See [Extending it](#extending-it), and
+[SCENE-ARCHITECTURE.md](SCENE-ARCHITECTURE.md) for how the pieces fit: what
+is pulled from where, the builder, the dataset, and the app.
 
 ---
 
@@ -38,6 +40,12 @@ shows                                 # open the app
    tracks, not a random radio queue.
 5. `q` quits. `?` shows every key at any time.
 
+**First run.** `scene` reads a local *dataset* that `scene build` compiles
+(see [The dataset](#the-dataset-and-how-it-stays-fresh)). With none yet, the
+app runs the builder once for you: listings appear in seconds, the band
+details fill in over the following minutes. Then put the build on a timer
+(`twiddle scene schedule`) and the app never has to wait for the network.
+
 Prerequisites (on a new Mac, [QUICKSTART.md](QUICKSTART.md) walks through them):
 - `twiddle spotify auth` and `twiddle scene login` have been run once.
 - **This Mac (speakers)** needs no Spotify app. The app runs its own small
@@ -49,7 +57,9 @@ Prerequisites (on a new Mac, [QUICKSTART.md](QUICKSTART.md) walks through them):
 Without the TUI:
 
 ```bash
-shows list                    # this week's shows at your venues, as text
+shows build                   # compile the dataset scene reads (network; the only thing that does)
+shows schedule                # print a launchd agent that runs the build every 6h
+shows list                    # this week's shows at your venues, as text (reads the dataset)
 shows list --venue stork      # one venue (partial names work)
 shows list --days 3 --json    # for scripts
 shows list --venue greek --links   # each show's listing link under it
@@ -85,7 +95,7 @@ shows --dry-run               # everything works, but nothing plays
 | `/` | filter by band, venue or genre (`metal`, `reggae`; `esc` clears) |
 | `a` | your venues only ↔ every venue on The List (~150 rooms; remembered) |
 | `v` | visualize: the whole window becomes the music (GUIDE.md → Visualizer); `←/→` picture, `c` colours, `,`/`.` delay, `v` back |
-| `r` | refresh listings now |
+| `r` | run `scene build` and reload (a scheduled build appears by itself within ~20s) |
 | `ctrl+t` | next colour theme (remembered) |
 | `?` | help |
 | `q` | quit |
@@ -199,25 +209,26 @@ families:
 
 `/` filters by it: type `metal` or `reggae`.
 
-**Coverage, measured 2026-09-25:** 64 of 83 shows in the next 30 days at
-your venues got a genre, 48 of them without a `?` (158 of 272 bands).
+**Coverage, measured 2026-09-25** (before the venue list grew): 64 of 83
+shows in the next 30 days at your venues got a genre, 48 of them without a
+`?` (158 of 272 bands).
 
-**How it gets there.** At launch, a background scan asks Bandcamp about
-every band in the window, one request a second. The first run over a month
-of listings took **4½ minutes**; the table fills in as it goes, and the
-Shows border shows the progress. Answers are cached for two weeks (misses
-for three days) in `bandcamp.json`, so later launches are instant. The scan
-uses Bandcamp alone: no MusicBrainz and no Spotify, so it can't touch the
-Spotify quota. A 429, or three failures in a row, pauses scene's Bandcamp
-requests for 15 minutes rather than hammering an endpoint that `dial` and
-`lookup` use too (their own Bandcamp calls don't go through this throttle).
-Visiting a band refines its guess with MusicBrainz's tags and the Bandcamp
-page MusicBrainz links.
+**How it gets there.** The *builder* asks Bandcamp about every band at your
+venues in the next 31 days, one request a second (2026-09-25, 272 bands:
+**4½ minutes**; the window is ~1,100 bands now, see *What a build does*), and stores each
+band's guess in the dataset; the table just reads it. Answers are cached for
+two weeks (misses for three days) in `bandcamp.json`, so later builds are
+instant. A 429, or three failures in a row, pauses Bandcamp requests for 15
+minutes rather than hammering an endpoint that `dial` and `lookup` use too;
+the build records `bandcamp: paused: rate-limited` in the dataset, publishes
+what it has, and the next build finishes the rest. Visiting a band refines
+its guess with MusicBrainz's tags and the Bandcamp page MusicBrainz links.
 
-**Only your venues, next 30 days, go to the network.** `a` (every venue)
-and "All upcoming" would mean thousands of requests to an endpoint that
-isn't ours, so those views show what the cache already knows. Any band you
-open is looked up as usual.
+**Only your venues, next 31 days, go to the network** (`--days`,
+`--all-venues` change that). `a` (every venue) and "All upcoming" would mean
+thousands of requests to an endpoint that isn't ours, so bands there carry
+only what the cache already knew when the dataset was built. Open one and
+that single band is looked up on the spot, as it always was.
 
 ---
 
@@ -329,9 +340,136 @@ Caveats:
 - Its spelling of a band is a search term, not an identity. That is why the
   badges exist.
 
-Listings are cached for 6 hours. They show instantly at launch and refresh
-in the background; `r` forces a refresh. A pane left open refreshes itself
-and moves past midnight on its own.
+These are collected by `scene build`, not by the app; see the next
+section.
+
+## The dataset, and how it stays fresh
+
+`scene` does not scrape anything. A separate, one-shot process,
+`twiddle scene build`, does all the collecting (The List, every venue's own
+listings, Wikipedia for venue summaries, and each band's MusicBrainz /
+Bandcamp / Spotify lookups) and **publishes one file**:
+`~/.local/share/twiddle/scene/dataset.json` (`$TWIDDLE_SCENE_DATASET`
+overrides). The TUI, `shows list` and `shows venue` only read it. That makes
+launching instant, makes browsing work with no network at all, and gives any
+other program the same view without importing a line of `scene`'s UI:
+
+```python
+from twiddle.scene import dataset      # stdlib + Show; no Textual, no network
+snap = dataset.load()                  # None if nothing has been built yet
+snap.shows_on(date.today()); snap.shows_at("Ivy Room"); snap.band("Girl Chow")
+snap.generated_at, snap.stale(), snap.sources   # freshness + per-source health
+```
+
+### Running it
+
+```bash
+twiddle scene build               # collect, enrich, publish (minutes the first time)
+twiddle scene build --days 14     # enrich less far ahead
+twiddle scene build --no-spotify  # skip Spotify identity even if signed in
+twiddle scene build --dry-run     # do it all, publish nothing
+twiddle scene schedule            # print the launchd agent (installs nothing)
+```
+
+**A practical schedule: every 6 hours** (what the old in-app cache used).
+`twiddle scene schedule` prints a launchd agent plus the two commands to
+install and remove it; save it to
+`~/Library/LaunchAgents/com.twiddle.scene-build.plist` and
+`launchctl bootstrap gui/$(id -u) <that file>`. It runs `uv run --project
+<this checkout> twiddle scene build` at load and every `--hours`, at low
+priority, logging to `~/Library/Logs/twiddle-scene-build.log`. cron works
+too (`0 */6 * * * cd ~/dev/twiddle && uv run twiddle scene build`). No
+daemon stays running. The build is never interactive: Spotify identity is
+compiled only if this Mac is already signed in (`twiddle spotify auth`),
+otherwise the dataset says `spotify: skipped: not signed in` and the app
+looks up the band on screen itself.
+
+### What a build does
+
+1. Takes `build.lock` next to the dataset, so a scheduled run and `r` never
+   overlap (the second exits with status 75 / "already running").
+2. Fetches every source. One that fails keeps its rows from the previous
+   dataset and is marked `ok: false` (the app and `shows list` say so).
+3. **Publishes shows and venues at once**, so `r` and a first run show
+   listings in seconds.
+4. Enriches the bands playing your venues in the next 31 days, one at a
+   time: who they are (MusicBrainz, the Bandcamp page, the Spotify artist if
+   this Mac is signed in) and what they sound like. **Not their song lists**:
+   those are 2-4 more requests a band and only matter when you press play, so
+   the app fetches them for the band on screen. A band enriched in the last
+   3-4½ days (spread by band, so they don't all expire together) is reused,
+   and the underlying MusicBrainz (30 d) and Bandcamp (14 d) caches still
+   apply. It republishes every 25 bands (a killed build keeps its work).
+   Spotify lookups are paced (0.5 s), and a Spotify or Bandcamp rate limit
+   pauses that source for the rest of the run (`enrichers.spotify: paused:
+   rate-limited`) while the build still publishes.
+
+   **How long:** measured 2026-09-29, the default month at the default venues
+   is ~1,100 bands, and cold bands (nothing cached) cost about 2 s each,
+   bound by MusicBrainz's 1 request/second. So the *first* build is ~35-40
+   minutes (it publishes listings first, so the app is usable meanwhile).
+   After that, a band's record is rebuilt every 3-4½ days from warm
+   MusicBrainz (30 d) and Bandcamp (14 d) caches, which is quick; only bands
+   new to the lineup are cold.
+5. Publishes the finished dataset (`complete: true`).
+
+Every billed band gets a record, enriched or not. Publishing is atomic
+(write a temp file, `fsync`, rename), so a reader sees the old dataset or
+the new one, never half of one.
+
+### What the app does about freshness
+
+- The subtitle says `dataset built 3h ago`; `· enriching…` while a build is
+  still working through bands; `· stale -- r rebuilds` after a day.
+- A build that finishes while the app is open shows up on its own (the app
+  checks the file's mtime every ~20 s). `r` runs `twiddle scene build` in a
+  subprocess and reloads when it ends.
+- **No dataset yet:** the app builds one, once, and says so. **A stale one:**
+  the app only says so; it never starts a build you did not ask for.
+- The only lookups the app still makes itself are for the one band on screen:
+  its song lists (Bandcamp and Spotify), and any identity the dataset lacks (a
+  band outside the build's window, or Spotify on a Mac that was signed out at
+  build time). A band not yet looked up shows a dim `·` badge, not `…`. No
+  lineup prefetch, no venue scraping, no genre scan.
+- A build that finishes (or checkpoints) while you are browsing updates the
+  genre column and badges in place; it does not move your cursor or focus.
+- Quitting during a build does not wait for it: the build runs in its own
+  session and finishes and publishes on its own.
+- Still fetched for display only, fine to fail offline: flyers, band photos
+  and venue icons.
+
+### The file
+
+```
+{"schema": "twiddle.scene.dataset", "version": 1, "generated_at": "...", "complete": true,
+ "sources":   {"thelist": {"ok": true, "fetched_at": "...", "count": 412, "error": null}, ...},
+ "enrichers": {"lookup": "ok", "spotify": "skipped: not signed in", "bandcamp": "ok"},
+ "venues": [{"id": "ivy-room", "name": "Ivy Room", "address": "...", "wikipedia_summary": {...}, ...}],
+ "shows":  [{"id": "9f2c…", "venue_id": "ivy-room", "day": "2026-10-06", "bands": [...],
+             "source": "thelist", "also": ["ivyroom"], "source_url": "...", "tickets": "...",
+             "flyer": "...", ...}],
+ "bands":  {"girl chow": {"name": "Girl Chow", "updated_at": "...", "status": {...},
+             "identifiers": {"mbid": "...", "spotify_id": "...", "bandcamp": "..."},
+             "info": {...}, "genre": {...},   # song lists ("tracks", "bc_tracks") are the app's
+             "confidence": "name_only", "why": "..."}}}
+```
+
+- **Stable identities.** A show's `id` hashes its night, room and headliner
+  (its title and times when it bills no bands); a venue's is its slug; a
+  band's key is its normalised name, and its record carries the MusicBrainz,
+  Spotify and Bandcamp ids it settled on.
+- **Provenance.** `source` + `also` name every source that listed a show,
+  with their links; `sources` says when each was last fetched successfully.
+- **Confidence is graded without anyone's pins.** Your `m` choices stay in
+  `band_pins.json`; the app applies them on load (a band you pinned to a
+  different artist than the build found is looked up again when you open
+  it). The published data holds evidence, not one person's clicks.
+- **Compatibility.** Unknown keys are ignored, malformed rows skipped, and a
+  `version` newer than the reader knows is refused with a message. Adding a
+  key does not bump the version. There are no stored indexes; readers build
+  theirs in memory from the file.
+- Out of scope here, by design: any network sharing or multi-publisher
+  scheme. This is the local producer/consumer boundary those would build on.
 
 ### Your venues
 
@@ -365,8 +503,8 @@ carried it before). They show up whenever The List lists them.
 
 Every default venue has an address, a website and a line about what it is
 (`venue_info.py`); 19 also have a Wikipedia article, whose summary is
-fetched when you open the venue (`i`, or `shows venue <name>`) and cached
-for 30 days. The card under the venue list shows the street.
+fetched by the build and stored in the dataset (cached 30 days), so
+opening the venue (`i`, or `shows venue <name>`) works offline. The card under the venue list shows the street.
 
 They are kept by hand, like the icons, because nothing machine-readable
 covers small rooms. Checked 2026-09-25: every address matched the venue's
@@ -380,10 +518,10 @@ title) per venue; a venue named like a built-in one keeps the built-in
 details for any field you leave out. An unwatched venue has no details, but
 `g` still searches the map for The List's "Name, City".
 
-Watching a venue means its next 30 days of bands are looked up in the
-background. The 2026-09-25 additions brought in ~550 bands, about 9 minutes
-of Bandcamp searches at its 1 request/second the first time, then cached
-for 14 days. Trim the list in `scene.toml` if that's more than you want.
+Watching a venue means its next 30 days of bands are looked up by the
+build. Measured 2026-09-29 the default month is ~1,100 bands, ~2 s each
+the first time (MusicBrainz's 1 request/second is the limit), then cached
+for 14-30 days. Trim the list in `scene.toml` if that's more than you want.
 
 Not yet covered: **SFJAZZ** is on no source (its site refuses scripts), and
 **Freight & Salvage** is only partly on The List (its own calendar is drawn
@@ -427,6 +565,23 @@ A `[[venue]]` list replaces the defaults, so list every venue you want.
 | `deluxe` | The DeLuxe, S.F. | its Google Calendar as rendered by WordPress "Simple Calendar" (`sources/simplecal.py`); no flyers |
 | `grayarea` | Gray Area, S.F. | its events page; courses, workshops, talks and exhibitions dropped |
 | `makeoutroom` | Make-Out Room, S.F. | CalendarWiz (months ahead, needs a cookie session) plus flyers from its blog (next night or two) |
+| `kalx` | ~75 rooms, East Bay and S.F. (incl. Sweetwater Music Hall and Hillside Club, on no other source) | KALX 90.7's weekly "Events" post via the site's WordPress REST API (`sources/kalx.py`); see below. Last in the registry |
+
+**KALX** (kalx.berkeley.edu, measured 2026-09-29) posts one page a week,
+"Events: September 28 – October 4, 2026": a day heading with the year, a
+region (East Bay / San Francisco), then a line per room, `Venue: act, act`.
+The site's REST API (`/wp-json/wp/v2/event`) lists the recent posts with their
+HTML in one request, so nothing guesses next week's URL. It is the widest
+calendar here (about 75 rooms across two weeks) and the only one carrying
+Sweetwater Music Hall and the Hillside Club, but it has **no times, prices,
+flyers or links**, and only the current week or two. So it is registered last:
+where another source knows a night its facts win and KALX only confirms it.
+Two guesses are made and can be wrong: an entry that reads like a night
+("Open Mic", "Irish Céili Dance with live band", "Karaokiki") is kept by its
+name rather than split into bands; and a room's city comes from a small table
+(KALX drops it, and files Sweetwater, in Mill Valley, under "San Francisco").
+The `Name: a, b, c` form is read as a named night with a lineup. Not covered:
+anything beyond the posted weeks.
 
 The Stork Club, Gilman and Ivy Room are on The List already; their own pages add
 **flyers and ticket links**, plus nights The List skips. Measured
@@ -509,7 +664,7 @@ section is one or two pages over. `c` in the app copies a show with its
 link, ready to text.
 
 If one source fails, the others still refresh and the failed one keeps its
-cached shows, so a brief outage at either site doesn't blank the other.
+shows from the last dataset, so a brief outage at either site doesn't blank the other.
 That includes a merged row: if the Stork Club's site is down, The List's
 row keeps the flyer it had.
 
@@ -535,12 +690,12 @@ It's built to live in a tmux pane:
 
 ## What it remembers
 
-Everything lives in `~/.cache/twiddle/scene/`, and all of it is safe to
-delete:
+The published dataset is `~/.local/share/twiddle/scene/dataset.json` (see
+above; delete it and the next build recreates it). Everything else lives in
+`~/.cache/twiddle/scene/`, and all of it is safe to delete:
 
 | File | Holds |
 |---|---|
-| `listings.json` | the last fetch (6h) |
 | `../librespot-local/` | the Mac's own player: its Spotify sign-in, and `librespot.log` if it misbehaves |
 | `bandcamp.json` | Bandcamp's answer for each band name: page, location, genre, tags, photo (14 days; misses 3) |
 | `venue_wiki.json` | Wikipedia's paragraph for each venue that has an article (30 days) |
@@ -570,9 +725,14 @@ src/twiddle/scene/
     simplecal.py     WordPress Simple Calendar pages (The DeLuxe)
     grayarea.py      Gray Area's events page
     makeoutroom.py   Make-Out Room: CalendarWiz + blog flyers
+    kalx.py          KALX 90.7's weekly events post: ~75 rooms, no times/prices/links
   venues.py        watched venues + matching The List's spellings
   venue_info.py    each venue's address, website, description, Instagram; Wikipedia summaries
   instagram.py     a venue's Instagram profile picture, no login
+  dataset.py       THE BOUNDARY: the published file's format, atomic publish, the reader
+                     (Snapshot); no Textual, no collectors, no network
+  builder.py       `scene build`: collect (fetch_all), enrich, publish; the only writer
+  profiles.py      BandProfile <-> dataset band record
   bands.py         WHO A BAND IS
                      Enricher protocol; LookupEnricher (MusicBrainz → Wikipedia/Discogs/Bandcamp),
                      SpotifyEnricher, BandcampEnricher; assess() grades identity;
@@ -583,9 +743,9 @@ src/twiddle/scene/
   players.py       WHERE AUDIO GOES
                      Player protocol; SpotifyConnectPlayer (incl. relay safety + handback)
   local.py         this Mac's speakers: the app's own librespot (rodio -> CoreAudio)
-  cache.py         listings, pins, state
-  app.py/.tcss     the Textual UI -- presentation only, everything injected
-  cli.py           `scene`, `scene list`
+  cache.py         pins, aliases, state (the shows are the dataset's)
+  app.py/.tcss     the Textual UI -- presentation only: reads the dataset, injected services
+  cli.py           `scene`, `scene list/venue` (readers), `scene build`, `scene schedule`
 ```
 
 **A new listings source** is one module in `sources/`. The
@@ -615,9 +775,11 @@ class in `bands.py`:
 own a helper process: start it lazily, reuse one that's already running,
 and on `close` stop only the one you started.
 
-**A new screen** (recommendations, "bands like ones I've played", a
-calendar export) can reuse `fetch_all`, `BandBook` and a `Player` without
-touching `app.py`: none of them import Textual.
+**A new screen or client** (recommendations, "bands like ones I've played", a
+calendar export) reads `dataset.load()` and never needs `fetch_all` or
+`BandBook`; a `Player` is separate again. None of them import Textual.
+**A new listings source or band enricher** takes effect at the next
+`scene build`.
 
 Playback logic shared with the CLI lives in `spotify_ops.py`. It raises
 `PlaybackError(message, hint)` and never prints, so a UI can show the

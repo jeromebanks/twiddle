@@ -37,6 +37,7 @@ class EventSource(Protocol):
 def _registry() -> dict[str, EventSource]:
     from .gilman import Gilman
     from .grayarea import GrayArea
+    from .kalx import KALX
     from .makeoutroom import MakeOutRoom
     from .simplecal import VENUES as SIMPLECAL, SimpleCalendar
     from .squarespace import VENUES as SQUARESPACE, Squarespace
@@ -51,7 +52,9 @@ def _registry() -> dict[str, EventSource]:
             **{name: VenuePilot(name) for name in VENUEPILOT},
             **{name: Squarespace(name) for name in SQUARESPACE},
             **{name: SimpleCalendar(name) for name in SIMPLECAL},
-            "gilman": Gilman(), "grayarea": GrayArea(), "makeoutroom": MakeOutRoom()}
+            "gilman": Gilman(), "grayarea": GrayArea(), "makeoutroom": MakeOutRoom(),
+            # Last: no times, prices or links, so it only adds nights the others lack.
+            "kalx": KALX()}
 
 
 SOURCES: dict[str, EventSource] = {}

@@ -1,9 +1,12 @@
 """The `scene` TUI: venues -> shows -> lineup -> band -> play.
 
-Only presentation lives here. Shows come from `sources`, band knowledge
-from `bands.BandBook`, playback from a `players.Player` -- all injected, so
-the tests drive this with fakes and a future screen (recommendations, a
-calendar) can reuse the same services.
+Only presentation lives here. Shows, venues and what is known about each band
+are *read* from the local dataset that `scene build` publishes (`dataset.py`);
+this app never scrapes a venue or bulk-enriches artists. `r` runs the builder
+in a subprocess and reloads. The one lookup that stays is per band: the band
+on screen, when the dataset has no answer for it (`BandBook`, seeded from the
+dataset), plus playback from a `players.Player` -- all injected, so the tests
+drive this with fakes.
 
 Every network call runs in a worker thread and reports back with
 `call_from_thread`; nothing here blocks the event loop.
@@ -19,6 +22,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import time
 import webbrowser
 from urllib.parse import quote
@@ -38,7 +42,7 @@ from textual_image import widget as _images
 
 from .. import here, spotify_ops
 from ..dial import art
-from . import bandcamp, cache, genre as genre_mod, instagram, pictures
+from . import bandcamp, cache, dataset, genre as genre_mod, instagram, pictures, profiles
 from . import venues as venues_mod
 from .bands import (
     CORROBORATED,
@@ -46,15 +50,16 @@ from .bands import (
     NONE,
     PENDING,
     UNCERTAIN,
+    UNLOOKED,
     BandBook,
     BandProfile,
-    near,
 )
 from .model import Show
-from .venue_info import VenueInfo, wiki_summary
+from .venue_info import VenueInfo
 from .players import Device, NeedsConfirmation, Player
-from .sources import EventSource, fetch_all
-from .sources import sources as all_sources
+
+BUILD_BUSY = 75             # `scene build`'s exit status when another build holds the lock
+BUILD_CANCELLED = -1        # the app quit while a build ran: it was left to finish on its own
 
 # `t` cycles in this order. The List runs ~5 months ahead, so the default
 # is a month: a week hid most of what's there (the first complaint).
@@ -68,7 +73,6 @@ THEMES = ("tokyo-night", "gruvbox", "nord", "catppuccin-mocha", "dracula",
 LINK_ORDER = ("bandcamp", "official", "wikipedia", "spotify", "discogs", "musicbrainz")
 CONFIRM_WINDOW_S = 20
 GENRE_WIDTH = 13
-SCAN_DAYS = 31              # the genre scan's network reach (see scan_genres)
 NARROW_BELOW = 160          # columns: stack the panes, or the lineup column starves
 MAC_OUTPUT = "mac"          # dial.output.MAC, without importing dial's outputs here
 
@@ -84,12 +88,39 @@ BADGE = {
     UNCERTAIN: ("?", "bold dark_orange", "which one?"),
     NONE: ("✗", "bold red", "not on Spotify"),
     PENDING: ("…", "dim", "looking"),
+    UNLOOKED: ("·", "dim", "not looked up yet"),
 }
 
 
 def badge(p: BandProfile | None) -> Text:
     sym, style, _ = BADGE.get(p.confidence if p else PENDING, BADGE[PENDING])
     return Text(sym, style=style)
+
+
+def run_builder(cancelled: Callable[[], bool] = lambda: False,
+                argv: list[str] | None = None) -> tuple[int, str]:
+    """`twiddle scene build` in a subprocess: (exit status, what to tell the user).
+
+    A subprocess, not a call: the UI then holds no collection code, and a
+    build cannot stall or crash the event loop. It runs in its own session,
+    so quitting the app (or Ctrl-C in its terminal) does not kill it: when
+    `cancelled()` turns true this returns `BUILD_CANCELLED` and the build
+    finishes and publishes on its own. A first build takes minutes; `q` must
+    not wait for it.
+    """
+    import tempfile
+    argv = argv or [sys.executable, "-m", "twiddle", "scene", "build"]
+    with tempfile.TemporaryFile("w+") as out:
+        proc = subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT, text=True,
+                                start_new_session=True)
+        while proc.poll() is None:
+            if cancelled():
+                return BUILD_CANCELLED, ""
+            time.sleep(0.25)
+        out.seek(0)
+        lines = out.read().strip().splitlines()
+    errors = [ln for ln in lines if ln.startswith("error:")]
+    return proc.returncode, (errors[-1] if errors else lines[-1] if lines else "")
 
 
 class ChoiceScreen(ModalScreen):
@@ -157,10 +188,12 @@ class VenueScreen(ModalScreen):
                 Binding("g", "map", "Map"),
                 Binding("n", "instagram", "Instagram")]
 
-    def __init__(self, name: str, info: VenueInfo, listed: str = ""):
+    def __init__(self, name: str, info: VenueInfo, listed: str = "",
+                 wiki: dict | None = None):
         super().__init__()
         self.venue_name = name
         self.info = info
+        self.wiki = wiki        # the dataset's stored summary, if it has one
         # An unwatched venue has no details, but The List's "Name, City" is
         # a perfectly good map search.
         self.map_url = info.map_url or (
@@ -185,21 +218,11 @@ class VenueScreen(ModalScreen):
                                     ("n instagram", i.instagram)) if ok]
             t.append("\n" + "   ".join(keys + ["esc close"]), style="dim")
             yield Static(t)
-            yield Static(Text("looking up Wikipedia…", style="dim italic")
-                         if i.wikipedia else "", id="venue-wiki")
-
-    def on_mount(self) -> None:
-        if self.info.wikipedia:
-            self.load_wiki()
-
-    @work(thread=True, exclusive=True, group="venue-wiki")
-    def load_wiki(self) -> None:
-        page = wiki_summary(self.info.wikipedia)
-        t = Text()
-        if page and page.get("extract"):
-            t.append("\n" + page["extract"] + "\n")
-            t.append("— Wikipedia", style="dim italic")
-        self.app.call_from_thread(self.query_one("#venue-wiki", Static).update, t)
+            t = Text()
+            if self.wiki and self.wiki.get("extract"):
+                t.append("\n" + self.wiki["extract"] + "\n")
+                t.append("— Wikipedia", style="dim italic")
+            yield Static(t, id="venue-wiki")
 
     def _open(self, url: str, what: str) -> None:
         if not url:
@@ -234,7 +257,7 @@ HELP = """\
   t        30 days / All / Tonight / 7 days / 2 weeks (remembered)
   /        filter by band, venue or genre ("metal", "reggae")
   a        your venues ↔ every venue listed (~150; remembered)
-  r        refresh listings
+  r        rebuild the dataset (runs `twiddle scene build`); a scheduled build shows up by itself
 [b]Other[/b]
   i        the venue: address, website (w), map (g), Instagram (n), what it is
            double-click the venue's picture for its Instagram, a flyer for the poster
@@ -298,25 +321,32 @@ class SceneApp(App):
         Binding("escape", "clear_search", show=False),
     ]
 
-    def __init__(self, *, sources: list[EventSource] | None = None,
-                 book_factory: Callable[[Callable[[BandProfile], None]], BandBook],
+    def __init__(self, *, book_factory: Callable[[Callable[[BandProfile], None]], BandBook],
                  player: Player, watched: tuple[venues_mod.Venue, ...] | None = None,
                  venue: str | None = None, all_venues: bool = False,
-                 dry_run: bool = False, fetch_on_mount: bool = True,
+                 dry_run: bool = False, bootstrap: bool = True,
+                 load_dataset: Callable = dataset.load,
+                 dataset_mtime: Callable = dataset.mtime,
+                 run_build: Callable | None = None,
                  today: date | None = None, load_image: Callable = art.load,
                  band_photo: Callable = pictures.band_photo,
-                 genre_search: Callable = bandcamp.search,
                  bandcamp_stream: Callable = bandcamp.stream_url,
                  instagram_picture: Callable = instagram.profile_picture,
                  outputs=None):
         super().__init__()
-        self.sources = sources
+        self.load_dataset = load_dataset
+        self.dataset_mtime = dataset_mtime
+        self.run_build = run_build or run_builder
+        self.bootstrap = bootstrap      # build once, unasked, when there is no dataset at all
+        self.snapshot: dataset.Snapshot | None = None
+        self._snap_mtime: float | None = None
+        self._told_failures_at: float | None = None
+        self._building = False
         self.player = player
         self.book = book_factory(self._from_worker_band)
         self.watched = watched if watched is not None else venues_mod.watched()
         self.all_venues = all_venues or bool(cache.get_state("all_venues", False))
         self.dry_run = dry_run
-        self.fetch_on_mount = fetch_on_mount
         self._today = today            # fixed only in tests; otherwise the real date
         self._rendered_day: date | None = None
         saved = cache.get_state("window")
@@ -331,7 +361,6 @@ class SceneApp(App):
         self.device: Device | None = None
         self.now: dict = {}
         self._pending: tuple | None = None       # (uris, offset, device, label, at)
-        self._prefetch_timer = None
         self._rows: dict[str, Show] = {}
         self.load_image = load_image
         self.instagram_picture = instagram_picture
@@ -341,12 +370,10 @@ class SceneApp(App):
         self._venue_images: dict[str, object] = {}
         self._flyer_shown = ""                   # the flyer URL on the venue card
         self._flyer_images: dict[str, object] = {}
-        self.genre_search = genre_search
         self.bandcamp_stream = bandcamp_stream
         self.outputs = outputs          # dial's Outputs: where Bandcamp tracks play
         self.viz_options: dict = {}     # VizScreen keywords; the tests' fakes
         self._scan_guesses: dict[str, genre_mod.Guess | None] = {}   # by band key
-        self._scan_progress = ""
         self.bc_now: dict | None = None  # the Bandcamp track playing, if one is
 
     @property
@@ -400,33 +427,131 @@ class SceneApp(App):
         saved = cache.get_state("device")
         if saved:
             self.device = Device(**saved)
-        shows, at = cache.load_listings()
-        if shows:
-            self._set_shows(shows, at)
-        if self.fetch_on_mount and not (shows and cache.listings_fresh(at, self._source_names())):
-            self.fetch_listings()
+        self._reload(first=True)
         self._render_nowbar()
         self.set_interval(15, self.poll_now)
         self.set_interval(300, self._tick)
+        self.set_interval(20, self._watch_dataset)
         self.query_one("#shows").focus()
 
-    # ---- listings --------------------------------------------------------
+    # ---- the dataset ------------------------------------------------------
 
-    def _source_names(self) -> list[str]:
-        return [s.name for s in (self.sources if self.sources is not None
-                                 else all_sources().values())]
+    def _reload(self, first: bool = False) -> None:
+        """Read the published dataset. Cheap and offline: no collection happens here."""
+        try:
+            snap = self.load_dataset()
+        except dataset.DatasetError as exc:
+            self.notify(str(exc), title="dataset", severity="error", timeout=10)
+            snap = None
+            self._snap_mtime = self.dataset_mtime()     # say it once, not every 20s
+        else:
+            # The mtime of what was read, so a publish landing meanwhile is
+            # noticed by the next check instead of being mistaken for this one.
+            self._snap_mtime = snap.mtime if snap else self.dataset_mtime()
+        if snap is None:
+            self._update_subtitle()
+            if first and self.bootstrap and not self.shows:
+                self.build_dataset()
+            return
+        same_shows = self.snapshot is not None and snap.shows == self.shows
+        before = self._profile_sig()
+        self.snapshot = snap
+        self._seed_bands(snap)
+        failed = [f"{n}: {v.get('error')}" for n, v in snap.sources.items() if not v.get("ok", True)]
+        if failed and snap.complete and snap.generated_at != self._told_failures_at:
+            self._told_failures_at = snap.generated_at
+            self.notify("\n".join(failed), title="last build: sources failed",
+                        severity="warning", timeout=10)
+        if same_shows:
+            # A checkpoint of a running build: only band records changed. Leave
+            # the cursor, focus and lineup where they are.
+            self.fetched_at = snap.generated_at
+            self._refresh_bands_in_place(before)
+        else:
+            self._set_shows(snap.shows, snap.generated_at)
 
-    @work(thread=True, exclusive=True, group="listings")
-    def fetch_listings(self) -> None:
-        self.call_from_thread(self._status, "refreshing listings…")
-        shows, errors = fetch_all(self.sources, stale=self.shows)
-        if shows:
-            cache.save_listings(shows, self._source_names())
-            self.call_from_thread(self._set_shows, shows, time.time())
-        if errors:
-            self.call_from_thread(self.notify, "\n".join(errors),
-                                  title="listings", severity="error", timeout=10)
-        self.call_from_thread(self._status, "")
+    def _profile_sig(self) -> str | None:
+        """Everything the band card and track list show, so a rebuild that
+        changes any of it re-renders them (and one that changes none does not)."""
+        p = self._profile()
+        if p is None:
+            return None
+        return repr((sorted(p.status.items()), p.confidence, p.why,
+                     p.info.to_dict() if p.info else None, p.lookup_candidates,
+                     p.spotify_artist, p.spotify_candidates, p.tracks,
+                     p.bandcamp, p.bc_tracks, p.alias,
+                     profiles.guess_to_dict(self._scan_guesses.get(self._key(p.band)))))
+
+    def _refresh_bands_in_place(self, before: str | None) -> None:
+        # A genre filter is a filter on band records: a checkpoint can change
+        # which shows match. Rebuild the rows only if the membership did.
+        if [s.key for s in self._visible_shows()] != [s.key for s in self._rows.values()]:
+            self._refresh_shows()
+        self._refresh_genre_cells()
+        s = self.current_show
+        if s is not None:
+            lineup = self.query_one("#lineup", OptionList)
+            for idx, b in enumerate(s.bands):
+                if idx < lineup.option_count:
+                    lineup.replace_option_prompt_at_index(idx, self._lineup_label(b))
+        if self.current_band:
+            # The checkpoint may have swapped in a record for the band on
+            # screen; wake whatever it lacks (song lists) as selecting it would.
+            self.book.get(self.current_band, urgent=True)
+        p = self._profile()
+        if p is not None and self._profile_sig() != before:
+            self._render_profile(p)
+        self._update_subtitle()
+
+    def _seed_bands(self, snap: dataset.Snapshot) -> None:
+        """Hand the dataset's band records to the book, and remember the genre
+        guesses for the table. Nothing is scheduled: only the band put on
+        screen is ever looked up, and only for an answer the dataset lacks."""
+        seeded = []
+        self._scan_guesses = {}
+        for key, rec in snap.bands.items():
+            self._scan_guesses[key] = profiles.guess_from_dict(rec.get("genre"))
+            seeded.append(profiles.from_record(rec, pinned=cache.pinned))
+        self.book.seed(seeded)
+        self.book.reseed = lambda band: (
+            profiles.from_record(snap.bands[dataset.band_id(band)], pinned=cache.pinned)
+            if dataset.band_id(band) in snap.bands else None)
+
+    def _watch_dataset(self) -> None:
+        """A scheduled (or `r`-started) build published: show it without a keypress."""
+        if self.dataset_mtime() != self._snap_mtime:
+            self._reload()
+
+    def build_dataset(self) -> None:
+        if self._building:
+            self.notify("already building the dataset", timeout=3)
+            return
+        self._building = True
+        self._status("building the dataset…")
+        self._run_build()
+
+    @work(thread=True, exclusive=True, group="build")
+    def _run_build(self) -> None:
+        from textual.worker import get_current_worker
+        worker = get_current_worker()
+        try:
+            code, tail = self.run_build(lambda: worker.is_cancelled)
+        except Exception as exc:        # the runner itself failed: say so, don't die
+            code, tail = 1, str(exc)
+        if code == BUILD_CANCELLED:
+            return                      # quitting: nothing left to show it to
+        self.call_from_thread(self._build_done, code, tail)
+
+    def _build_done(self, code: int, tail: str) -> None:
+        self._building = False
+        self._status("")
+        if code == BUILD_BUSY:
+            self.notify("a build is already running (a scheduled one?) -- "
+                        "new data will appear when it publishes", timeout=6)
+        elif code != 0:
+            self.notify(tail or f"`scene build` exited {code}", title="build failed",
+                        severity="error", timeout=12)
+        self._reload()
 
     def _set_shows(self, shows: list[Show], at: float | None) -> None:
         self.shows = shows
@@ -440,24 +565,30 @@ class SceneApp(App):
         self._refresh_venues()
         self._refresh_shows()
         self._update_subtitle()
-        self._start_genre_scan()
 
     def _tick(self) -> None:
-        """Every few minutes: roll over at midnight, refetch stale listings."""
+        """Every few minutes: roll over at midnight, refresh the freshness line."""
         if self._rendered_day != self.today:
             self._refresh_venues()
             self._refresh_shows()
-        if self.fetch_on_mount and not cache.listings_fresh(self.fetched_at, self._source_names()):
-            self.fetch_listings()
         self._update_subtitle()
 
     def _update_subtitle(self) -> None:
-        age = ""
-        if self.fetched_at:
-            mins = int((time.time() - self.fetched_at) / 60)
-            age = "just now" if mins < 1 else (f"{mins}m ago" if mins < 120
-                                               else f"{mins // 60}h ago")
-        self.sub_title = f"The List + venues' own · updated {age}" + ("  [dry-run]" if self.dry_run else "")
+        if self.snapshot is None:
+            note = "no dataset yet -- press r to build it" if not self._building else \
+                "building the first dataset…"
+        else:
+            age = ""
+            if self.fetched_at:
+                mins = int((time.time() - self.fetched_at) / 60)
+                age = "just now" if mins < 1 else (f"{mins}m ago" if mins < 120
+                                                   else f"{mins // 60}h ago")
+            note = f"dataset built {age or 'at an unknown time'}"
+            if not self.snapshot.complete:
+                note += " · enriching…"
+            elif self.snapshot.stale():
+                note += " · stale -- r rebuilds"
+        self.sub_title = note + ("  [dry-run]" if self.dry_run else "")
 
     def _in_window(self, s: Show) -> bool:
         if s.day < self.today:
@@ -599,8 +730,7 @@ class SceneApp(App):
     def _shows_subtitle(self, n: int | None = None) -> None:
         table = self.query_one("#shows", DataTable)
         n = len(self._rows) if n is None else n
-        table.border_subtitle = f"{n} shows" + (f" · {self._scan_progress}"
-                                                if self._scan_progress else "")
+        table.border_subtitle = f"{n} shows"
 
     def _refresh_genre_cells(self) -> None:
         table = self.query_one("#shows", DataTable)
@@ -610,66 +740,6 @@ class SceneApp(App):
             except Exception:
                 pass    # the table was rebuilt under us; the next pass catches up
         self._shows_subtitle()
-
-    def _start_genre_scan(self) -> None:
-        bands, online = [], set()
-        horizon = self.today + timedelta(days=SCAN_DAYS)
-        for s in sorted((s for s in self.shows if self._in_scope(s) and self._in_window(s)),
-                        key=lambda s: s.day):
-            new = [b for b in s.bands if self._key(b) not in self._scan_guesses]
-            bands += new
-            if s.day < horizon and venues_mod.find(self.watched, s.venue):
-                online.update(new)
-        if bands:
-            self.scan_genres(list(dict.fromkeys(bands)), online)
-
-    @work(thread=True, exclusive=True, group="genres")
-    def scan_genres(self, bands: list[str], online: set[str]) -> None:
-        """Every listed band's Bandcamp tags, so the table can say what each
-        show sounds like before you visit it. Bandcamp only -- no MusicBrainz,
-        no Spotify -- throttled and cached for weeks (`bandcamp.py`); the
-        cached answers land first, then the network, a band a second.
-
-        Only `online` bands (your venues, the next month: ~270 bands, 4½
-        minutes the first time) are asked over the network. Every venue for
-        five months would be thousands of requests to an endpoint that isn't
-        ours; those views show what the cache knows, and a band you open is
-        looked up as usual."""
-        from textual.worker import get_current_worker
-        worker = get_current_worker()
-        todo = []
-        for band in bands:      # instant: whatever the disk cache knows
-            hits = self.genre_search(band, offline=True)
-            if hits is None:
-                if band in online:
-                    todo.append(band)
-            else:
-                self._scan_guesses[self._key(band)] = self._guess_from(hits)
-        self.call_from_thread(self._refresh_genre_cells)
-        for i, band in enumerate(todo, 1):
-            if worker.is_cancelled:
-                return
-            self._scan_progress = f"genres {i}/{len(todo)}"
-            try:
-                hits = self.genre_search(band)
-            except bandcamp.BlockedError:
-                self._scan_progress = "genres paused: Bandcamp is rate-limiting"
-                break
-            except Exception:
-                continue        # one band's failure is not the scan's
-            self._scan_guesses[self._key(band)] = self._guess_from(hits)
-            if i % 4 == 0 or i == len(todo):
-                self.call_from_thread(self._refresh_genre_cells)
-        else:
-            self._scan_progress = ""
-        self.call_from_thread(self._refresh_genre_cells)
-
-    @staticmethod
-    def _guess_from(hits: list[dict] | None) -> genre_mod.Guess | None:
-        band = bandcamp.choose(hits or [], is_local=near)
-        if band is None:
-            return genre_mod.for_candidates(hits or [])
-        return genre_mod.for_band(band, sure=near(band.get("location")))
 
     # ---- selection -------------------------------------------------------
 
@@ -713,16 +783,6 @@ class SceneApp(App):
             return
         lineup.highlighted = 0
         self._band_selected(s.bands[0])
-        # Prefetch the rest of the lineup once the cursor rests here -- not
-        # on every row the cursor passes while scrolling.
-        if self._prefetch_timer is not None:
-            self._prefetch_timer.stop()
-        self._prefetch_timer = self.set_timer(0.8, lambda: self._prefetch(s))
-
-    def _prefetch(self, s: Show) -> None:
-        if s is self.current_show:
-            for b in s.bands:
-                self.book.get(b, urgent=(b == self.current_band))
 
     def _lineup_label(self, band: str) -> Text:
         p = self.book.profiles.get(self._key(band))
@@ -861,6 +921,9 @@ class SceneApp(App):
         sp_state = p.status.get("spotify", "")
         if sp_state.startswith("error"):
             t.append(f"\nSpotify: {sp_state[7:]}\n", style="red")
+        tr_state = p.status.get("tracks", "")
+        if tr_state.startswith("error"):       # the identity is fine; the songs could not be fetched
+            t.append(f"\nsong lists: {tr_state[7:]}\n", style="red")
         self.query_one("#profile", Static).update(t)
         self.query_one("#profile-scroll").scroll_home(animate=False)
         sig = pictures.signature(p)
@@ -905,9 +968,11 @@ class SceneApp(App):
             tracks.highlighted = tracks.get_option_index(keep if keep in ids else ids[0])
         parts = [f"{len(p.bc_tracks)} on Bandcamp" if p.bc_tracks else "",
                  f"{len(p.tracks)} on Spotify" if p.tracks else ""]
-        busy = p.status.get("bandcamp") in ("pending", "running") or p.confidence == PENDING
+        busy = p.status.get("bandcamp") in ("pending", "running") or p.confidence == PENDING \
+            or p.status.get("tracks") in ("pending", "running")
+        failed = p.status.get("tracks", "").startswith("error")
         tracks.border_subtitle = " · ".join(x for x in parts if x) or \
-            ("searching…" if busy else "")
+            ("searching…" if busy else "song lists failed -- see the band card" if failed else "")
 
     # ---- pictures ------------------------------------------------------------
 
@@ -1062,7 +1127,6 @@ class SceneApp(App):
         cache.set_state("window", self.window)
         self._refresh_venues()
         self._refresh_shows()
-        self._start_genre_scan()
 
     def action_toggle_all_venues(self) -> None:
         self.all_venues = not self.all_venues
@@ -1070,7 +1134,6 @@ class SceneApp(App):
         self.venue_choice = None
         self._refresh_venues()
         self._refresh_shows()
-        self._start_genre_scan()
 
     def viz_source(self):
         """Worker thread (the visualizer's): what to tap for what's playing."""
@@ -1105,7 +1168,7 @@ class SceneApp(App):
             self.query_one("#shows").focus()
 
     def action_refresh(self) -> None:
-        self.fetch_listings()
+        self.build_dataset()
 
     def action_cycle_theme(self) -> None:
         cur = self.theme if self.theme in THEMES else THEMES[-1]
@@ -1133,7 +1196,9 @@ class SceneApp(App):
         v = next((w for w in self.watched if w.name == key), None)
         listed = next((x.venue for x in self.shows if self._venue_key(x.venue) == key), key)
         name = v.name if v else venues_mod.display_name(self.watched, listed)
-        self.push_screen(VenueScreen(name, v.info if v else VenueInfo(), listed))
+        rec = self.snapshot.venue(name) if self.snapshot else None
+        self.push_screen(VenueScreen(name, v.info if v else VenueInfo(), listed,
+                                     (rec or {}).get("wikipedia_summary")))
 
     def action_open_listing(self) -> None:
         """Where the highlighted show was listed: The List's page, Yoshi's event."""

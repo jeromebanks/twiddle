@@ -354,3 +354,290 @@ def test_a_failed_spotify_search_is_not_reported_as_no_such_artist():
     p.status["spotify"] = "error: 429: API rate limit exceeded"
     assess(p)
     assert p.confidence == NONE and p.why == "Spotify: 429: API rate limit exceeded"
+
+
+# ---- song lists for the band on screen --------------------------------------------------
+
+
+def test_track_enricher_fetches_only_the_lists_that_are_missing(monkeypatch):
+    from twiddle import discover_cli
+    from twiddle.scene.bands import TrackEnricher
+    asked = []
+    monkeypatch.setattr(discover_cli, "_artist_tracks",
+                        lambda sess, a: asked.append(("spotify", a["id"])) or [{"uri": "u"}])
+    spot = SpotifyEnricher(lambda: object(), tracks=False)
+    enr = TrackEnricher(spot, bc_tracks=lambda url: asked.append(("bandcamp", url)) or [{"title": "t"}])
+    p = BandProfile("X")
+    p.spotify_artist = {"id": "s1"}
+    p.bandcamp = {"item_url_root": "https://x.bandcamp.com"}
+    assert enr.wants_rerun(p)
+    enr.enrich(p)
+    assert p.tracks == [{"uri": "u"}] and p.bc_tracks == [{"title": "t"}]
+    assert not enr.wants_rerun(p)
+    enr.enrich(p)                                        # nothing missing: nothing asked
+    assert len(asked) == 2
+
+
+def test_track_enricher_does_not_retry_an_artist_with_no_tracks_forever(monkeypatch):
+    from twiddle import discover_cli
+    from twiddle.scene.bands import TrackEnricher
+    monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, a: [])
+    enr = TrackEnricher(SpotifyEnricher(lambda: object(), tracks=False))
+    p = BandProfile("X")
+    p.spotify_artist = {"id": "s1"}
+    enr.enrich(p)
+    assert not enr.wants_rerun(p)                        # tried this identity already
+    p.spotify_artist = {"id": "s2"}
+    assert enr.wants_rerun(p)                            # a different one is worth a look
+
+
+def test_track_enricher_waits_out_an_identity_that_lands_later(monkeypatch):
+    """Woken together with Spotify identity, it may run first and find nothing;
+    it runs again once the artist is known."""
+    from twiddle import discover_cli
+    from twiddle.scene.bands import TrackEnricher
+    monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, a: [{"uri": "u"}])
+    gate = threading.Event()
+
+    class SlowIdentity:
+        name, serial = "spotify", False
+
+        def session(self):
+            return object()
+
+        def enrich(self, p):
+            gate.wait(2)
+            p.spotify_artist = {"id": "s1"}
+    ident = SlowIdentity()
+    book = BandBook([ident, TrackEnricher(ident)])
+    p = BandProfile("X")
+    p.status = {"spotify": "idle", "tracks": "idle"}
+    book.seed([p])
+    book.get("X", urgent=True)
+    time.sleep(0.2)
+    assert p.status["tracks"] == "done" and not p.tracks    # ran first, found no identity
+    gate.set()
+    deadline = time.time() + 3
+    while (not p.tracks or p.busy()) and time.time() < deadline:
+        time.sleep(0.01)
+    book.close()
+    assert p.tracks == [{"uri": "u"}]
+
+
+def test_track_enricher_checks_again_when_identity_lands_while_it_runs(monkeypatch):
+    """Codex: Spotify's tracks begin before Bandcamp identifies the band; the
+    Bandcamp completion sees `tracks` running and schedules nothing."""
+    from twiddle import discover_cli
+    from twiddle.scene.bands import TrackEnricher
+    monkeypatch.setattr(discover_cli, "_artist_tracks", lambda sess, a: [{"uri": "u"}])
+    started, release = threading.Event(), threading.Event()
+
+    def bc_tracks(url):
+        return [{"title": "t"}]
+
+    class SlowSpotifySide:
+        name, serial = "spotify", False
+
+        def session(self):
+            started.set()
+            release.wait(2)          # the Spotify track request is in flight ...
+            return object()
+
+        def enrich(self, p):
+            p.spotify_artist = {"id": "s1"}
+
+    class Bandcamp:
+        name, serial = "bandcamp", False
+
+        def enrich(self, p):
+            started.wait(2)          # ... when Bandcamp identifies the band
+            p.bandcamp = {"item_url_root": "https://x.bandcamp.com"}
+            release.set()
+    spot = SlowSpotifySide()
+    book = BandBook([spot, Bandcamp(), TrackEnricher(spot, bc_tracks=bc_tracks)])
+    p = BandProfile("X")
+    p.status = {"spotify": "done", "bandcamp": "idle", "tracks": "idle"}
+    p.spotify_artist = {"id": "s1"}
+    book.seed([p])
+    book.get("X", urgent=True)
+    deadline = time.time() + 3
+    while (not (p.tracks and p.bc_tracks) or p.busy()) and time.time() < deadline:
+        time.sleep(0.01)
+    book.close()
+    assert p.tracks and p.bc_tracks == [{"title": "t"}]
+
+
+def test_a_record_that_arrives_mid_lookup_is_applied_when_the_lookup_ends():
+    """Codex: the last publish must not be lost because a worker was running."""
+    gate = threading.Event()
+
+    class Slow:
+        name, serial = "spotify", False
+
+        def enrich(self, p):
+            gate.wait(2)
+            p.spotify_artist = {"id": "local"}
+    updates = []
+    book = BandBook([Slow()], on_update=updates.append)
+    p = BandProfile("X")
+    p.status = {"spotify": "idle"}
+    book.seed([p])
+    book.get("X", urgent=True)                             # spotify now running
+    published = BandProfile("X")
+    published.status = {"spotify": "done"}
+    published.spotify_artist = {"id": "from-dataset"}
+    book.seed([published])                                 # arrives mid-lookup: deferred
+    assert book.profiles["x"] is p
+    gate.set()
+    deadline = time.time() + 3
+    while book.profiles["x"] is p and time.time() < deadline:
+        time.sleep(0.01)
+    book.close()
+    assert book.profiles["x"].spotify_artist == {"id": "from-dataset"}
+    assert updates and updates[-1] is book.profiles["x"]
+
+
+def test_changing_a_pin_discards_a_record_that_was_waiting_for_the_old_lookup():
+    """Codex: a checkpoint deferred before the pin changed must not come back after it."""
+    gate = threading.Event()
+
+    class Slow:
+        name, serial = "spotify", False
+
+        def enrich(self, p):
+            gate.wait(2)
+            p.spotify_artist = {"id": "pinned"}
+    book = BandBook([Slow()])
+    p = BandProfile("X")
+    p.status = {"spotify": "idle"}
+    book.seed([p])
+    book.get("X", urgent=True)                             # running
+    stale = BandProfile("X")
+    stale.status = {"spotify": "done"}
+    stale.spotify_artist = {"id": "from-dataset"}
+    book.seed([stale])                                     # deferred
+    assert "x" in book._deferred
+    book.refresh("X")
+    assert "x" not in book._deferred
+    gate.set()
+    time.sleep(0.3)
+    book.close()
+    assert (book.profiles["x"].spotify_artist or {}).get("id") != "from-dataset"
+
+
+def test_a_deferred_record_that_corrects_the_artist_wakes_its_song_lists(monkeypatch):
+    """Codex: the corrected profile has no tracks; something must fetch them."""
+    from twiddle import discover_cli
+    from twiddle.scene.bands import TrackEnricher
+    gate, asked = threading.Event(), []
+
+    def artist_tracks(sess, artist):
+        asked.append(artist["id"])
+        if artist["id"] == "old":
+            gate.wait(2)                                    # this request is in flight ...
+        return [{"uri": artist["id"]}]
+    monkeypatch.setattr(discover_cli, "_artist_tracks", artist_tracks)
+
+    class Ident:
+        name, serial = "spotify", False
+
+        def session(self):
+            return object()
+
+        def enrich(self, p):
+            pass
+    ident = Ident()
+    book = BandBook([ident, TrackEnricher(ident)])
+    p = BandProfile("X")
+    p.status = {"spotify": "done", "tracks": "idle"}
+    p.spotify_artist = {"id": "old"}
+    book.seed([p])
+    book.get("X", urgent=True)
+    deadline = time.time() + 2
+    while "old" not in asked and time.time() < deadline:
+        time.sleep(0.01)
+    corrected = BandProfile("X")
+    corrected.status = {"spotify": "done", "tracks": "idle"}
+    corrected.spotify_artist = {"id": "new"}
+    book.seed([corrected])                                  # ... when the correction arrives
+    gate.set()
+    deadline = time.time() + 3
+    while book.profiles["x"].tracks != [{"uri": "new"}] and time.time() < deadline:
+        time.sleep(0.01)
+    book.close()
+    assert book.profiles["x"].tracks == [{"uri": "new"}] and "new" in asked
+
+
+def test_song_lists_fetched_for_an_artist_that_changed_meanwhile_are_dropped(monkeypatch):
+    """Codex: the old artist's slow reply must not overwrite the corrected artist's songs."""
+    from twiddle import discover_cli
+    from twiddle.scene.bands import TrackEnricher
+    gate = threading.Event()
+
+    def artist_tracks(sess, artist):
+        if artist["id"] == "old":
+            gate.wait(2)
+        return [{"uri": artist["id"]}]
+    monkeypatch.setattr(discover_cli, "_artist_tracks", artist_tracks)
+
+    class Ident:
+        name, serial = "spotify", False
+
+        def session(self):
+            return object()
+    enr = TrackEnricher(Ident())
+    p = BandProfile("X")
+    p.spotify_artist = {"id": "old"}
+    t = threading.Thread(target=enr.enrich, args=(p,))
+    t.start()
+    time.sleep(0.1)
+    p.spotify_artist, p.tracks = {"id": "new"}, [{"uri": "new"}]      # identity corrected meanwhile
+    gate.set()
+    t.join()
+    assert p.tracks == [{"uri": "new"}]
+
+
+def test_a_failed_song_list_fetch_is_retried_when_a_new_identity_arrives(monkeypatch):
+    """Codex: Spotify's auth failure must not suppress Bandcamp tracks whose identity
+    lands later -- and an unchanged identity is not retried forever."""
+    from twiddle import discover_cli
+    from twiddle.scene.bands import TrackEnricher
+    spotify_calls = []
+
+    def artist_tracks(sess, artist):
+        spotify_calls.append(artist["id"])
+        raise ConnectionError("auth expired")
+    monkeypatch.setattr(discover_cli, "_artist_tracks", artist_tracks)
+    gate = threading.Event()
+
+    class Ident:
+        name, serial = "spotify", False
+
+        def session(self):
+            return object()
+
+    class SlowBandcamp:
+        name, serial = "bandcamp", False
+
+        def enrich(self, p):
+            gate.wait(2)                                  # tracks runs (and fails) first
+            p.bandcamp = {"item_url_root": "https://x.bandcamp.com"}
+    ident = Ident()
+    book = BandBook([SlowBandcamp(), TrackEnricher(ident, bc_tracks=lambda u: [{"title": "t"}])])
+    p = BandProfile("X")
+    p.status = {"bandcamp": "idle", "tracks": "idle"}
+    p.spotify_artist = {"id": "s1"}
+    book.seed([p])
+    book.get("X", urgent=True)
+    deadline = time.time() + 2
+    while not p.status.get("tracks", "").startswith("error") and time.time() < deadline:
+        time.sleep(0.01)
+    assert p.status["tracks"].startswith("error") and p.bc_tracks == []
+    gate.set()
+    deadline = time.time() + 3
+    while not p.bc_tracks and time.time() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.2)
+    book.close()
+    assert p.bc_tracks == [{"title": "t"}]                # Bandcamp songs arrived despite the failure
+    assert len(spotify_calls) <= 2                         # one rerun for the new identity, no loop

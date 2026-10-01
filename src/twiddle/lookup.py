@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -481,7 +482,15 @@ def _cache_save(cache: dict) -> None:
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         now = time.time()
         fresh = {k: v for k, v in cache.items() if now - v.get("at", 0) < CACHE_TTL_S}
-        CACHE_FILE.write_text(json.dumps(fresh))
+        # Whole-file rename, private temp name: `scene build`, the app and dial
+        # share this file, and a reader that met a half-written one would get
+        # {} and save just that -- wiping the 30-day cache.
+        tmp = CACHE_FILE.with_name(f".{CACHE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            tmp.write_text(json.dumps(fresh))
+            os.replace(tmp, CACHE_FILE)
+        finally:
+            tmp.unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -496,8 +505,12 @@ def _from_dict(d: dict) -> Result:
 
 def identify(artist: str | None, album: str | None = None, song: str | None = None, *,
              mb_artist_id: str | None = None, mb_release_group_id: str | None = None,
-             use_cache: bool = True) -> Result:
+             use_cache: bool = True, bandcamp_fallback: bool = True) -> Result:
     """Everything worth knowing about who is playing, from the best evidence given.
+
+    `bandcamp_fallback=False` skips the last-resort Bandcamp name search, for a
+    caller that has been told to leave Bandcamp alone (scene's builder, after a
+    rate limit). Such a call may find less; an empty answer is never cached.
 
     Raises only for network failure; "couldn't tell who this is" is an empty
     Result (possibly with candidates), because that is an answer, not an error.
@@ -510,7 +523,8 @@ def identify(artist: str | None, album: str | None = None, song: str | None = No
         return _from_dict(hit["result"])
 
     try:
-        result = _identify(artist, album, song, mb_artist_id, mb_release_group_id)
+        result = _identify(artist, album, song, mb_artist_id, mb_release_group_id,
+                           bandcamp_fallback)
     except OSError as exc:  # URLError, timeouts, and HTTPError are all OSErrors
         raise LookupFailed(f"music databases unreachable: {exc}") from exc
 
@@ -520,7 +534,8 @@ def identify(artist: str | None, album: str | None = None, song: str | None = No
     return result
 
 
-def _identify(artist, album, song, mb_artist_id, mb_release_group_id) -> Result:
+def _identify(artist, album, song, mb_artist_id, mb_release_group_id,
+              bandcamp_fallback: bool = True) -> Result:
     rg_id = mb_release_group_id
     how = "MusicBrainz id from the station" if mb_artist_id else ""
     if not mb_artist_id and artist and album:
@@ -553,6 +568,8 @@ def _identify(artist, album, song, mb_artist_id, mb_release_group_id) -> Result:
 
     # Not in MusicBrainz at all: the smaller the band, the likelier this.
     for source, find in (("Discogs", _by_discogs), ("Bandcamp", _by_bandcamp)):
+        if source == "Bandcamp" and not bandcamp_fallback:
+            continue
         try:
             found = find(artist)
         except (OSError, ValueError, KeyError):

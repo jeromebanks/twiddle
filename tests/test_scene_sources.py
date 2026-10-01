@@ -1,4 +1,4 @@
-"""The List parser, venue matching and the listings cache.
+"""The List parser and venue matching.
 
 The fixture is a trimmed copy of the real by-club pages from 2026-09-22 --
 five venues, 74 rows -- not a hand-written imitation, so it carries The
@@ -122,12 +122,6 @@ def test_one_failing_source_does_not_blank_the_others():
 
     shows, errors = fetch_all([Bad(), Good()])
     assert len(shows) == 1 and errors == ["bad: down"]
-
-
-def test_listings_round_trip_through_the_cache(shows):
-    cache.save_listings(shows)
-    back, at = cache.load_listings()
-    assert back == shows and cache.listings_fresh(at)
 
 
 def test_pins_are_keyed_by_normalised_name():

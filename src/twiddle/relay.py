@@ -742,10 +742,18 @@ class Relay:
         """
         return f"http://{local_ip_for(peer)}:{self.port}{STREAM_PATH}"
 
-    def cover_url_for(self, peer: str) -> str | None:
-        """Where the speaker should look for the cover, if this source has one."""
-        return (f"http://{local_ip_for(peer)}:{self.port}{COVER_PATH}"
-                if self.covers else None)
+    def cover_url_for(self, peer: str, key: str | None = None) -> str | None:
+        """Where the speaker should look for the cover, if this source has one.
+
+        `key` (the track) goes in the query string: the Sonos app fetches the
+        art once per URL it is given and keeps it, so a fixed URL shows the
+        first cover (or a stale one from an earlier session) forever. The
+        server ignores the query (`_is_cover`) and serves the current track.
+        """
+        if not self.covers:
+            return None
+        url = f"http://{local_ip_for(peer)}:{self.port}{COVER_PATH}"
+        return f"{url}?t={key}" if key else url
 
     def alive(self) -> bool:
         return bool(self._src and self._src.poll() is None
