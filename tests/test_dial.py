@@ -266,6 +266,47 @@ def test_dry_run_tunes_nothing(monkeypatch):
     assert out.set_volume(140) == 100 and g.volumes == []
 
 
+def test_disconnect_stops_then_clears_the_transport_uri(monkeypatch):
+    out, g, _ = sonos(monkeypatch, "x-rincon-mp3radio://" + bare(STATIONS["kexp"].url))
+    cleared = []
+    monkeypatch.setattr(output_mod.play, "set_uri", lambda ip, uri, md="": cleared.append((ip, uri)))
+    out.disconnect()
+    assert g.stopped == 1 and cleared == [(g.ip, "")]
+
+
+def test_disconnect_survives_a_speaker_that_refuses_the_clear(monkeypatch):
+    out, g, _ = sonos(monkeypatch, "x-rincon-mp3radio://" + bare(STATIONS["kexp"].url))
+    def refuse(*a, **k):
+        raise RuntimeError("714")
+    monkeypatch.setattr(output_mod.play, "set_uri", refuse)
+    out.disconnect()
+    assert g.stopped == 1
+
+
+def test_a_handoff_stops_a_room_but_never_clears_it():
+    roam, mac = Spot("room:roam", "Roam"), Spot("mac", "This Mac")
+    roam.disconnect = lambda: pytest.fail("a handoff must only stop")
+    outs = SpotOutputs(roam, mac)
+    outs.play("room:roam", KEXP)
+    outs.play("mac", KALX)
+    assert roam.stops == 1
+
+
+def test_D_disconnects_through_outputs_and_forgets_it():
+    roam = Spot("room:roam", "Roam")
+    roam.disconnect = lambda: "disconnected"
+    outs = SpotOutputs(roam)
+    outs.play("room:roam", KEXP)
+    assert outs.disconnect("room:roam") == "disconnected" and outs.owned() == []
+
+
+def test_disconnect_never_silences_the_relay(monkeypatch):
+    out, g, _ = sonos(monkeypatch, "x-rincon-mp3radio://10.0.0.9:8090/stream.mp3")
+    with pytest.raises(spotify_ops.PlaybackError):
+        out.disconnect()
+    assert g.stopped == 0
+
+
 def test_stop_refuses_to_silence_the_relay(monkeypatch):
     out, g, _ = sonos(monkeypatch, "x-rincon-mp3radio://10.0.0.9:8090/stream.mp3")
     with pytest.raises(spotify_ops.PlaybackError):
@@ -1136,6 +1177,7 @@ def test_help_opens_and_its_markup_parses():
 
     from twiddle.dial.app import HELP, DialHelp
     assert "] / [" in Content.from_markup(HELP).plain
+    assert "D           disconnect" in Content.from_markup(HELP).plain
 
     async def go():
         app = make_app(FakeOutput())
@@ -1168,7 +1210,7 @@ def test_v_visualizes_the_tuned_station_and_leaves_no_tap_behind():
             assert RecordingTap.made[0].url == STATIONS["kalx"].url
             # Only the picture is showing: dial's own keys must not reach a
             # speaker unseen (the relay's ask-twice lives on the hidden screen).
-            await pilot.press("enter", "enter", "s", "R", "z", "Z", "d", "1")
+            await pilot.press("enter", "enter", "s", "D", "R", "z", "Z", "d", "1")
             await pilot.pause(0.5)
             assert isinstance(app.screen, VizScreen)
             assert out.tuned_to == [] and out.volumes == [] and out.mutes == []

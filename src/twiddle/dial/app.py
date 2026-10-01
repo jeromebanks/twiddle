@@ -169,6 +169,8 @@ HELP = """\
 [b]Sound[/b]
   + / -       volume ±2          ] / \\[    volume ±5
   m           mute / unmute      s        stop
+  D           disconnect: stop and clear the output -- a Sonos room shows
+              nothing in its app, not a paused station (`s` leaves it there)
   z           sleep timer: 15, 30, 45, 60, 90, 120 min, off    Z  off
   (mouse)     click the volume bar to set it; click ♪ to mute
   d           choose the output: a Sonos room, this Mac, or paired
@@ -218,6 +220,7 @@ class DialApp(App):
         Binding("Z", "sleep_off", show=False),
         Binding("d", "choose_output", "Output"),
         Binding("s", "stop", "Stop", show=False),
+        Binding("D", "disconnect", "Disconnect", show=False),
         Binding("R", "back_to_relay", "→Relay"),
         Binding("t", "choose_tag", "Tags"),
         Binding("i", "expand", "More"),
@@ -982,6 +985,9 @@ class DialApp(App):
 
     def action_stop(self) -> None:
         self._simple(lambda out: self.outputs.stop(out.id))
+
+    def action_disconnect(self) -> None:
+        self._simple(lambda out: self.outputs.disconnect(out.id))
 
     def action_back_to_relay(self) -> None:
         self._pending = None

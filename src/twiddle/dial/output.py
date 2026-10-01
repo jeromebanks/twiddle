@@ -159,6 +159,12 @@ class BaseOutput:
     def back_to_relay(self) -> str:
         raise PlaybackError("R is for a Sonos room", "press d and pick the Roam first")
 
+    def disconnect(self) -> str:
+        """Let go of this output when you say so (`D`): a plain stop, unless
+        the output can leave nothing behind (`SonosOutput`). A handoff never
+        calls this: it stops, and the speaker keeps its resume point."""
+        return self.stop()
+
     def close(self) -> None:
         pass
 
@@ -330,6 +336,20 @@ class SonosOutput(BaseOutput):
             return f"[dry-run] would stop {g.name}"
         g.stop()
         return f"■ {g.name} stopped"
+
+    def disconnect(self) -> str:
+        """Stop, then clear the transport URI, so the Sonos app shows nothing
+        instead of the station sitting there paused. Refuses the relay, like
+        `stop`. The clear is best effort: a speaker that refuses an empty URI
+        is left stopped, and we say so."""
+        msg = self.stop()
+        if self.dry_run:
+            return msg.replace("would stop", "would disconnect")
+        try:
+            play.set_uri(self.group.ip, "")
+        except Exception:
+            return f"■ {self.group.name} stopped (the speaker kept its station)"
+        return f"⏏ {self.group.name} disconnected"
 
     def set_volume(self, volume: int) -> int:
         volume = _clamp(volume)
@@ -744,6 +764,14 @@ class Outputs:
         """Stop `oid` because you said so: unconditionally, and forget it."""
         with self._switch:
             msg = self.get(oid).stop()
+            self._owned.pop(oid, None)
+            return msg
+
+    def disconnect(self, oid: str) -> str:
+        """`D`: let go of `oid` unconditionally, leaving nothing on it, and
+        forget it."""
+        with self._switch:
+            msg = self.get(oid).disconnect()
             self._owned.pop(oid, None)
             return msg
 
