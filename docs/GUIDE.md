@@ -632,7 +632,7 @@ you add analysis.
 | `play.py` | HTTP file server and transport control (writes) |
 | `tone.py` | Soak-test signal generator |
 | `spotify_ops.py` | Spotify playback logic with no CLI attached (shared by `spotify_cli` and `scene`) |
-| `scene/` | The `scene` TUI: `sources/` (listings), `bands.py`, `players.py`, `app.py` |
+| `scene/`, `scenespec/`, `scenedata/` | The `scene` TUI (`players.py`, `app.py`), the dataset's shape, and the producer (`sources/` listings, enrichers, `scene build`) |
 | `viz/` | The visualizer (`v`): `tap.py` (ffmpeg → PCM ring), `source.py` (what to tap), `analysis.py` (bands, beats), `canvas.py` (braille/blocks/palettes), `base.py` (the contract), `modes/` (one file each), `screen.py` |
 | `cli.py` | Command line entry points |
 

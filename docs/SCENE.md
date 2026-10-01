@@ -189,7 +189,7 @@ The **Sounds like** column is a best guess at each show's genre: metal,
 punk, hardcore, rock, indie, pop, electronic, hip-hop, reggae/ska, jazz,
 folk/country, soul/funk, latin, experimental, blues, classical. No AI is
 involved. Bands tag themselves on Bandcamp ("doom", "sludge", "post-metal"),
-MusicBrainz users tag artists, and `scene/genre.py` folds those tags into
+MusicBrainz users tag artists, and `scenespec/genre.py` folds those tags into
 families:
 
 - **Tags are matched whole, never as substrings.** So "post-punk" counts as
@@ -227,8 +227,8 @@ its guess with MusicBrainz's tags and the Bandcamp page MusicBrainz links.
 **Only your venues, next 31 days, go to the network** (`--days`,
 `--all-venues` change that). `a` (every venue) and "All upcoming" would mean
 thousands of requests to an endpoint that isn't ours, so bands there carry
-only what the cache already knew when the dataset was built. Open one and
-that single band is looked up on the spot, as it always was.
+only what the cache already knew when the dataset was built. The app does not
+look them up when you open one: that waits for a build that covers them.
 
 ---
 
@@ -381,8 +381,8 @@ priority, logging to `~/Library/Logs/twiddle-scene-build.log`. cron works
 too (`0 */6 * * * cd ~/dev/twiddle && uv run twiddle scene build`). No
 daemon stays running. The build is never interactive: Spotify identity is
 compiled only if this Mac is already signed in (`twiddle spotify auth`),
-otherwise the dataset says `spotify: skipped: not signed in` and the app
-looks up the band on screen itself.
+otherwise the dataset says `spotify: skipped: not signed in` and those bands
+show as unlooked until a signed-in build.
 
 ### What a build does
 
@@ -426,11 +426,11 @@ the new one, never half of one.
   subprocess and reloads when it ends.
 - **No dataset yet:** the app builds one, once, and says so. **A stale one:**
   the app only says so; it never starts a build you did not ask for.
-- The only lookups the app still makes itself are for the one band on screen:
-  its song lists (Bandcamp and Spotify), and any identity the dataset lacks (a
-  band outside the build's window, or Spotify on a Mac that was signed out at
-  build time). A band not yet looked up shows a dim `·` badge, not `…`. No
-  lineup prefetch, no venue scraping, no genre scan.
+- The only work the app still does itself is for the one band on screen: its
+  song lists (Bandcamp and Spotify) and your own pin. It never looks up who a
+  band is: a band outside the build's window, or Spotify on a Mac that was
+  signed out at build time, shows a dim `·` badge until the next build covers
+  it. No lineup prefetch, no venue scraping, no genre scan.
 - A build that finishes (or checkpoints) while you are browsing updates the
   genre column and badges in place; it does not move your cursor or focus.
 - Quitting during a build does not wait for it: the build runs in its own
@@ -462,8 +462,8 @@ the new one, never half of one.
   with their links; `sources` says when each was last fetched successfully.
 - **Confidence is graded without anyone's pins.** Your `m` choices stay in
   `band_pins.json`; the app applies them on load (a band you pinned to a
-  different artist than the build found is looked up again when you open
-  it). The published data holds evidence, not one person's clicks.
+  different artist than the build found has that artist fetched when you
+  open it). The published data holds evidence, not one person's clicks.
 - **Compatibility.** Unknown keys are ignored, malformed rows skipped, and a
   `version` newer than the reader knows is refused with a message. Adding a
   key does not bump the version. There are no stored indexes; readers build
@@ -711,8 +711,16 @@ days).
 ## Extending it
 
 ```
-src/twiddle/scene/
-  model.py         Show -- the domain type; no UI, no network
+src/twiddle/scenespec/   THE CONTRACT -- what a producer writes and a client reads
+  dataset.py       the published file's format, atomic publish, the reader (Snapshot);
+                     no Textual, no collectors, no network (a test enforces it)
+  model.py         Show -- the domain type; dedupe()
+  band.py          BandProfile and the confidence grades
+  profiles.py      BandProfile <-> dataset band record; apply_pin()
+  venue.py         Venue, VenueInfo, matching The List's spellings, from_rows()
+  genre.py         tags -> genre families; a band's guess, a show's
+
+src/twiddle/scenedata/   ONE PRODUCER -- the bespoke part; never imports scene
   sources/         WHERE SHOWS COME FROM
     base.py          EventSource protocol, registry, fetch_all (one failing source ≠ blank app)
     thelist.py       The List scraper
@@ -726,29 +734,30 @@ src/twiddle/scene/
     grayarea.py      Gray Area's events page
     makeoutroom.py   Make-Out Room: CalendarWiz + blog flyers
     kalx.py          KALX 90.7's weekly events post: ~75 rooms, no times/prices/links
-  venues.py        watched venues + matching The List's spellings
-  venue_info.py    each venue's address, website, description, Instagram; Wikipedia summaries
-  instagram.py     a venue's Instagram profile picture, no login
-  dataset.py       THE BOUNDARY: the published file's format, atomic publish, the reader
-                     (Snapshot); no Textual, no collectors, no network
   builder.py       `scene build`: collect (fetch_all), enrich, publish; the only writer
-  profiles.py      BandProfile <-> dataset band record
   bands.py         WHO A BAND IS
                      Enricher protocol; LookupEnricher (MusicBrainz → Wikipedia/Discogs/Bandcamp),
-                     SpotifyEnricher, BandcampEnricher; assess() grades identity;
-                     BandBook runs enrichers off-thread
-  bandcamp.py      Bandcamp search (throttled, cached, backs off), band choice, releases, stream URLs
-  genre.py         tags -> genre families; a band's guess, a show's
+                     SpotifyEnricher, BandcampEnricher; assess() grades identity; REGION
+  bandcamp.py      Bandcamp search (cached), band choice
+  venues.py        the stock watched venues (+ scene.toml)
+  venue_info.py    each venue's address, website, description, Instagram; Wikipedia summaries
+  cache.py         aliases, Bandcamp and Wikipedia answers
+
+src/twiddle/scene/       THE CLIENT -- reads a dataset, plays music; no scenedata code
+  book.py          BandBook: profiles seeded from the dataset; PinEnricher, TrackEnricher
+  instagram.py     a venue's Instagram profile picture, no login
   pictures.py      which photo a band gets; fetching + tiles are dial/art.py's
   players.py       WHERE AUDIO GOES
                      Player protocol; SpotifyConnectPlayer (incl. relay safety + handback)
   local.py         this Mac's speakers: the app's own librespot (rodio -> CoreAudio)
-  cache.py         pins, aliases, state (the shows are the dataset's)
+  cache.py         your pins and state (the shows are the dataset's)
   app.py/.tcss     the Textual UI -- presentation only: reads the dataset, injected services
   cli.py           `scene`, `scene list/venue` (readers), `scene build`, `scene schedule`
+
+src/twiddle/bandcamp.py  shared: the throttle, a release's songs, fresh stream URLs
 ```
 
-**A new listings source** is one module in `sources/`. The
+**A new listings source** is one module in `scenedata/sources/`. The
 `add-venue-source` skill walks through it; `yoshis.py` is a small worked example:
 - Give it a `name` and a `fetch() -> list[Show]` that raises `SourceError`
   on failure.
@@ -760,7 +769,7 @@ src/twiddle/scene/
 - A night with no bands gets `bands=[]` and a `title`; nothing looks it up.
 
 **New band knowledge** (Last.fm similar artists, YouTube, setlists) is one
-class in `bands.py`:
+class in `scenedata/bands.py`:
 - Give it a `name`, a `serial` flag, and `enrich(profile)`.
 - Set `serial = True` if it uses a rate-limited or non-thread-safe library.
   It then runs on the single lookup lane, one request at a time; the band
@@ -776,7 +785,7 @@ own a helper process: start it lazily, reuse one that's already running,
 and on `close` stop only the one you started.
 
 **A new screen or client** (recommendations, "bands like ones I've played", a
-calendar export) reads `dataset.load()` and never needs `fetch_all` or
+calendar export) reads `scenespec.dataset.load()` and never needs `fetch_all` or
 `BandBook`; a `Player` is separate again. None of them import Textual.
 **A new listings source or band enricher** takes effect at the next
 `scene build`.

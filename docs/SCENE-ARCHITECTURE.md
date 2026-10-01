@@ -21,7 +21,7 @@ this is the map for someone changing the code.
                                      │ or `r`        scene TUI    scene list /     any other
                                                           │       scene venue      client
                                                           ▼
-                                    only per band on screen: song lists, missing identity,
+                                    only per band on screen: song lists, your pin,
                                     then playback (Spotify / Bandcamp / Sonos relay)
 ```
 
@@ -42,29 +42,56 @@ is implemented.
 
 ## 2. Modules
 
+Three packages under `src/twiddle/`, with the dependencies pointing one way:
+
 ```
-src/twiddle/scene/
-  model.py         Show; dedupe(). No UI, no network.
-  dataset.py       THE BOUNDARY: file format, atomic publish, reader (Snapshot).
-                   No Textual, no collectors, no network (a test enforces it).
-  builder.py       `scene build`: collect → publish → enrich → publish.
-  profiles.py      BandProfile <-> dataset band record (incl. the parts JSON has
-                   no type for: nested AlbumInfo, genre.Guess's Counter and set).
-  sources/         WHERE SHOWS COME FROM: one module per site or platform.
-  venues.py        the watched venues (config) and matching the sources' spellings.
-  venue_info.py    hand-kept address/site/description per venue; Wikipedia summary.
-  bands.py         WHO A BAND IS: enrichers, assess() (identity grading), BandBook.
-  bandcamp.py      throttled, cached Bandcamp search; band choice; tracks; stream URLs.
-  genre.py         tags -> genre families (no AI): a band's guess, a show's.
-  cache.py         per-user state: pins, aliases, device/theme/window.
-  cli.py           scene, scene list, scene venue, scene build, scene schedule.
-  app.py / .tcss   the Textual UI: presentation only, everything injected.
-  players.py, local.py, pictures.py, instagram.py    playback and images.
+scene (client)  ──▶  scenespec  ◀──  scenedata (producer)
 ```
 
-Dependency rule: `dataset.py` imports only `model` and the standard library.
-`builder.py` and `app.py` both depend on `dataset.py`; neither depends on the
-other (the app starts the builder as a subprocess, never imports it).
+A client has only the dataset a producer published, so the client never
+imports producer code, and there may be several producers (another city, comedy
+instead of music) writing the same contract. `tests/test_scene_boundaries.py`
+enforces the arrows.
+
+```
+scenespec/         THE CONTRACT: what a producer writes and a client reads.
+  dataset.py         file format, atomic publish, reader (Snapshot).
+  model.py           Show; dedupe().
+  band.py            BandProfile and the confidence grades.
+  profiles.py        BandProfile <-> dataset band record (incl. the parts JSON has
+                     no type for: nested AlbumInfo, genre.Guess's Counter and set);
+                     apply_pin().
+  venue.py           Venue, VenueInfo, find/resolve/display_name, from_rows().
+  genre.py           tags -> genre families (no AI): a band's guess, a show's.
+                     No Textual, no network, no scene/scenedata (a test enforces it).
+
+scenedata/         ONE PRODUCER: everything bespoke.
+  builder.py         `scene build`: collect → publish → enrich → publish.
+  sources/           WHERE SHOWS COME FROM: one module per site or platform.
+  bands.py           WHO A BAND IS: enrichers, assess() (identity grading), REGION.
+  bandcamp.py        cached Bandcamp search and band choice.
+  venues.py          the stock watched venues (+ ~/.config/twiddle/scene.toml).
+  venue_info.py      hand-kept address/site/description per venue; Wikipedia summary.
+  cache.py           aliases and the producer's stores.
+
+scene/             THE CLIENT.
+  book.py            BandBook: profiles seeded from the dataset; the only background
+                     work is PinEnricher (your pin) and TrackEnricher (song lists).
+  cache.py           per-user state: pins, device/theme/window.
+  cli.py             scene, scene list, scene venue, scene build, scene schedule.
+  app.py / .tcss     the Textual UI: presentation only, everything injected.
+  players.py, local.py, pictures.py, instagram.py    playback and images.
+
+twiddle/bandcamp.py   what both sides share: the throttle, a release's songs, fresh
+                      stream URLs (the client needs those at the moment of playing).
+twiddle/jsonstore.py  atomic JSON files, behind both caches.
+```
+
+Dependency rule: `scenespec` imports neither `scene` nor `scenedata` (and no
+Textual or HTTP library). `scenedata` never imports `scene`. `scene` imports no
+`scenedata` code, except that `cli.py` starts a build lazily for `scene build`
+and `scene list --refresh`. The app starts the builder as a subprocess, never
+imports it.
 
 ---
 
@@ -140,7 +167,7 @@ URLs; the app fetches images for display).
 
 ---
 
-## 4. The builder (`builder.py`)
+## 4. The builder (`scenedata/builder.py`)
 
 ```
 take build.lock ─► load previous dataset ─► fetch_all(stale=previous rows)
@@ -191,7 +218,7 @@ limit), so a cold first build of ~1,100 bands takes 35–40 minutes.
 
 ---
 
-## 5. The dataset (`dataset.py`)
+## 5. The dataset (`scenespec/dataset.py`)
 
 One JSON file: `~/.local/share/twiddle/scene/dataset.json`
 (`$TWIDDLE_SCENE_DATASET` overrides). Top level:
@@ -253,12 +280,18 @@ stale dataset is flagged but never rebuilt unasked.
 session, then reloads. A held lock is reported, not an error. Quitting doesn't
 wait for a build: it finishes and publishes on its own.
 
-**The two things the app still looks up itself, for the band on screen only:**
+**The two things the app still does itself, for the band on screen only** (both
+need your own Spotify sign-in or a choice you made, so neither can be baked
+into a shared dataset):
 
 1. *Song lists* (`TrackEnricher`): Bandcamp and Spotify tracks.
-2. *Missing identity*: a band outside the build's window, Spotify on a Mac
-   that was signed out at build time, or a band whose Spotify pin disagrees
-   with the dataset's pick.
+2. *Your pin* (`PinEnricher`): a band whose Spotify pin disagrees with the
+   dataset's pick has the artist you chose fetched by id.
+
+Who a band *is* comes from the dataset and nothing else: the app never searches
+MusicBrainz, Bandcamp or Spotify for identity. A band the dataset lacks (outside
+the build's window, or added since) shows as "not in the dataset yet" until the
+next build; a band the build couldn't ask Spotify about shows as unlooked.
 
 ### The BandBook and profile states
 
@@ -269,26 +302,27 @@ idle ──(band selected: get(urgent=True))──► pending ──► running 
 ```
 
 - `from_record` marks an enricher `done` if the record says so, else `idle`
-  (errors are retried, not trusted; `tracks` is always `idle` from a record).
-- Only the band on screen is woken. There is no lineup prefetch.
-- `enrich` results can change each other (MusicBrainz landing after Spotify may
-  name a different Spotify artist), so an enricher can declare `wants_rerun`;
-  `TrackEnricher` also re-checks itself if identity landed while it ran.
-- **Reload merge (`seed`).** A profile mid-lookup isn't replaced; the new record
-  is deferred and applied when the lookup ends. Otherwise the new record
-  wins, except that identity answered locally and missing from the record is
-  kept, and song lists are kept only if they belong to the same artist.
+  (errors are retried, not trusted; `tracks` is always `idle` from a record). It
+  takes the record's own grade (made without anyone's pins); `regrade` overlays
+  yours.
+- Only the band on screen is woken, and only an enricher with something to do
+  (`PinEnricher.wakes`: you pinned someone the profile doesn't have). There is
+  no lineup prefetch.
+- `TrackEnricher` re-checks itself if identity landed while it ran.
+- **Reload merge (`seed`).** A profile mid-fetch isn't replaced; the new record
+  is deferred and applied when the fetch ends. Otherwise the new record wins,
+  except that song lists are kept only if they belong to the same artist.
 - **Pins.** A hand pin (`m`) that disagrees with the dataset's Spotify pick
-  makes the app forget the dataset's artist and tracks and look up the pinned
-  one. Pins live in `cache.py`, never in the dataset.
+  makes the app forget the dataset's artist and tracks and fetch the pinned
+  one. Pins live in `scene/cache.py`, never in the dataset or the producer.
 
 ### Threading
 
 Textual's loop never blocks. Network work runs in worker threads and reports
 back with `call_from_thread`. `lookup.py` isn't thread-safe (a module-level
-throttle, a read-modify-write cache), so every MusicBrainz call goes through one
-lane (a priority queue with a single thread; the on-screen band jumps the
-queue). Spotify and Bandcamp run on a small pool.
+throttle, a read-modify-write cache), so the builder runs every MusicBrainz call
+one at a time. `BandBook` still has a single-thread priority lane for any
+enricher that declares `serial`; the client's two enrichers don't.
 
 ---
 
@@ -308,9 +342,9 @@ rules for not interrupting what's already playing.
 |---|---|---|
 | `~/.local/share/twiddle/scene/dataset.json` | builder | the published dataset |
 | `…/scene/build.lock` | builder | the lock (empty) |
-| `~/.cache/twiddle/lookup.json` | builder, app, dial, `np` | MusicBrainz/Wikipedia/Discogs answers, 30 days |
-| `~/.cache/twiddle/scene/bandcamp.json` | builder, app | Bandcamp search answers, 14 days (misses 3) |
-| `~/.cache/twiddle/scene/aliases.json` | builder, app | billing → trimmed name that identified it |
+| `~/.cache/twiddle/lookup.json` | builder, dial, `np` | MusicBrainz/Wikipedia/Discogs answers, 30 days |
+| `~/.cache/twiddle/scene/bandcamp.json` | builder | Bandcamp search answers, 14 days (misses 3) |
+| `~/.cache/twiddle/scene/aliases.json` | builder | billing → trimmed name that identified it |
 | `~/.cache/twiddle/scene/band_pins.json` | app (`m`) | your Spotify choices |
 | `~/.cache/twiddle/scene/state.json` | app | device, theme, window, all-venues |
 | `~/.cache/twiddle/scene/instagram/`, `dial/art/` | app | venue icons, images |
@@ -347,7 +381,7 @@ build holds the lock. `schedule` prints the checkout it is run from as
 | Every source is down and there's no previous dataset | nothing published, exit 1 |
 | MusicBrainz / Bandcamp slow or erroring | that band's answer is retried next build |
 | Bandcamp rate-limits, or Spotify 429 | that enricher pauses for the run; the build still publishes |
-| Spotify not signed in | `enrichers.spotify: skipped`; the app looks up the band on screen |
+| Spotify not signed in | `enrichers.spotify: skipped`; those bands show as unlooked until a signed-in build |
 | Build killed midway | the last checkpoint stands |
 | No network at all | the app browses the last dataset; only song lists, playback and images need the network |
 | Dataset file damaged | the app reports it once and keeps what's on screen; the next build replaces it |
@@ -376,12 +410,14 @@ build holds the lock. `schedule` prints the checkout it is run from as
 
 ## 12. Extending
 
-- **A new listings source:** one module in `sources/`, registered in
+- **A new listings source:** one module in `scenedata/sources/`, registered in
   `base._registry()` (order matters); skill `add-venue-source`. It takes
   effect at the next `scene build`.
-- **New band knowledge:** an `Enricher` in `bands.py` (`name`, `serial`,
+- **New band knowledge:** an `Enricher` in `scenedata/bands.py` (`name`, `serial`,
   `enrich`, optionally `wants_rerun`); add it to the builder's list and to
-  `profiles.ENRICHERS`.
-- **A new client of the data:** `dataset.load()`; nothing else is needed.
+  `profiles.ENRICHERS`. It reaches the client through the dataset record.
+- **A new client of the data:** `scenespec.dataset.load()`; nothing else is needed.
+- **A different producer** (another city, another kind of show): write the same
+  contract with its own sources and enrichers; the client needs no change.
 - **Changing the file:** adding a key is free; changing what a key means bumps
   `dataset.VERSION`.
