@@ -155,3 +155,26 @@ def test_bluetooth_shows_up_in_the_picker_with_its_address():
     assert ids == ["mac", "bt:Bose QC45", "bt:Sam’s AirPods Pro"]
     bt = outs.get("bt:Bose QC45")
     assert isinstance(bt, BluetoothOutput) and bt.address == "02:00:5E:00:00:04"
+
+
+def test_a_headset_listed_as_input_and_output_plays_to_the_output():
+    """Seen on the author's Mac 2026-10-01: the Bose is two CoreAudio devices,
+    and the microphone's index (first) made AudioQueueStart fail with -66637,
+    so nothing ever played on the Bluetooth output."""
+    devices = (
+        "[AudioToolbox @ 0x1] CoreAudio devices:\n"
+        "[AudioToolbox @ 0x1] [2]              Mac mini Speakers, BuiltInSpeakerDevice\n"
+        "[AudioToolbox @ 0x1] [3]             Bose QC Headphones, E4-58-BC-77-5F-A8:input\n"
+        "[AudioToolbox @ 0x1] [4]             Bose QC Headphones, E4-58-BC-77-5F-A8:output\n")
+    assert bluetooth.coreaudio_devices("ffmpeg", fake_run(devices))["bose qc headphones"] == 4
+
+
+def test_closing_and_the_sleep_timer_work_on_bluetooth():
+    """BluetoothOutput's injected `sleep` once shadowed ProcessOutput's sleep
+    timer, so close() raised AttributeError on real hardware."""
+    out = BluetoothOutput("Bose QC45", run=fake_run(), spawn=lambda *a: Proc(),
+                          ffmpeg="/bin/ffmpeg")
+    out.play(Media.of(STATIONS["kexp"]))
+    assert out.set_sleep_timer(600) == 600
+    out.close()
+    assert not out.state().playing and out.state().sleep_s is None

@@ -90,7 +90,8 @@ _DEVICE_LINE = re.compile(r"\]\s+\[(\d+)\]\s+(.*?), ")
 
 
 def coreaudio_devices(ffmpeg: str, run: Callable[[list[str]], str] = _run) -> dict[str, int]:
-    """CoreAudio device name (normalised) -> the index `audiotoolbox` wants."""
+    """CoreAudio device name (normalised) -> the index `audiotoolbox` wants, for
+    devices that can play (a headset's microphone entry is skipped)."""
     text = run([ffmpeg, "-hide_banner", "-f", "lavfi", "-i", "anullsrc", "-t", "0.01",
                 "-f", "audiotoolbox", "-list_devices", "true", "-"])
     found = {}
@@ -98,6 +99,11 @@ def coreaudio_devices(ffmpeg: str, run: Callable[[list[str]], str] = _run) -> di
         if "AudioToolbox" not in line:
             continue
         m = _DEVICE_LINE.search(line)
+        # A headset is listed twice, "<address>:input" (its microphone) then
+        # ":output". Only the output can be played to: AudioQueueStart fails
+        # on the microphone's index (-66637), and the first one seen was it.
+        if line.rstrip().endswith(":input"):
+            continue
         if m and m.group(2).strip() != "(null)":
             found.setdefault(norm(m.group(2)), int(m.group(1)))
     return found
@@ -118,7 +124,7 @@ class BluetoothOutput(ProcessOutput):
         self._run = run
         self._ffmpeg = ffmpeg or shutil.which("ffmpeg")
         self._blueutil = blueutil if blueutil is not None else shutil.which("blueutil")
-        self._sleep = sleep
+        self._nap = sleep       # not `_sleep`: ProcessOutput's sleep-timer thread
         self._index: int | None = None
 
     def unavailable(self) -> PlaybackError | None:
@@ -141,7 +147,7 @@ class BluetoothOutput(ProcessOutput):
         self._run([self._blueutil, "--connect", self.address.replace(":", "-")])
         deadline = time.monotonic() + CONNECT_WAIT_S
         while time.monotonic() < deadline:
-            self._sleep(1)
+            self._nap(1)
             if (index := self._find()) is not None:
                 return index
         raise PlaybackError(f"{self.name} didn't connect",
