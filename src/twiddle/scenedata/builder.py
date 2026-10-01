@@ -168,7 +168,7 @@ def _default_enrichers(use_spotify: bool, notes: dict[str, str],
             notes["spotify"] = "skipped: " + ("not signed in -- run `twiddle spotify auth`"
                                               if spotify_ops.not_signed_in(exc) else str(exc))
         else:
-            enrichers.append(SpotifyEnricher(spotify_ops.session, use_pins=False, tracks=False))
+            enrichers.append(SpotifyEnricher(spotify_ops.session, tracks=False))
     else:
         notes["spotify"] = "skipped: --no-spotify"
     enrichers.append(BandcampEnricher(fetch_tracks=False))
@@ -189,7 +189,7 @@ def _keep_prior_answers(p: BandProfile, old: dict | None) -> None:
             p.adopt(name, before, "kept" + (f": {why}" if why else ""))
             kept = True
     if kept:
-        assess(p, use_pins=False)
+        assess(p)
 
 
 def enrich_one(band: str, enrichers: list, skip: set[str],
@@ -227,7 +227,7 @@ def enrich_one(band: str, enrichers: list, skip: set[str],
             if _rate_limited(exc):
                 skip.add(e.name)
             p.status[e.name] = f"error: {getattr(exc, 'message', None) or exc}"
-    assess(p, use_pins=False)
+    assess(p)
     return p
 
 

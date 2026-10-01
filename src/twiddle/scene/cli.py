@@ -129,17 +129,15 @@ def cmd_scene(args) -> int:
     from .. import spotify_ops
     from .app import SceneApp
     from ..dial.output import Outputs
-    from .book import BandBook, TrackEnricher
-    from ..scenedata.bands import BandcampEnricher, LookupEnricher, SpotifyEnricher
+    from .book import BandBook, PinEnricher, TrackEnricher
     from .local import LocalSpeaker
     from .players import SpotifyConnectPlayer
 
     def book_factory(on_update):
-        # TrackEnricher alone fetches song lists; the identity enrichers must not
-        # too, or a band with no dataset record has its songs requested twice.
-        spotify = SpotifyEnricher(spotify_ops.session, tracks=False)
-        return BandBook([LookupEnricher(), spotify, BandcampEnricher(fetch_tracks=False),
-                         TrackEnricher(spotify)], on_update=on_update)
+        # Who a band is comes from the dataset. The client only applies your
+        # pin and fetches song lists, both of which need your own sign-in.
+        spotify = PinEnricher(spotify_ops.session)
+        return BandBook([spotify, TrackEnricher(spotify)], on_update=on_update)
 
     app = SceneApp(book_factory=book_factory,
                    player=SpotifyConnectPlayer(room=args.room, dry_run=args.dry_run,

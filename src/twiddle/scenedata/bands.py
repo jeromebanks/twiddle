@@ -59,7 +59,6 @@ from collections.abc import Callable
 from typing import Protocol
 
 from .. import bandcamp as site, lookup, spotify_ops
-from ..scene import cache as pins      # temporary: leaves with the live enrichment
 from . import bandcamp, cache
 from ..scenespec import genre
 from ..scenespec.band import (CORROBORATED, NAME_ONLY, NONE, PENDING, UNCERTAIN, UNLOOKED,
@@ -145,23 +144,14 @@ def local(info: lookup.ArtistInfo | None) -> bool:
     return near(info.origin if info else None)
 
 
-def assess(p: BandProfile, use_pins: bool = True) -> None:
-    """Grade the Spotify identity from everything gathered so far.
-
-    `use_pins=False` grades on evidence alone: the dataset builder publishes
-    that, so one person's hand-made pins never travel with the data.
-    """
+def assess(p: BandProfile) -> None:
+    """Grade the Spotify identity from everything gathered so far, on evidence
+    alone: one person's hand-made pins never travel with the data (the client
+    overlays its own, `scene/book.py`)."""
     if p.status.get("spotify") == "idle":
         # Seeded from the dataset with no (usable) Spotify answer: the band on
         # screen is looked up when it is selected.
         p.confidence, p.why = UNLOOKED, "not looked up on Spotify yet"
-        return
-    pin = pins.pinned(p.band) if use_pins else None
-    if pin is not None:
-        if pin.get("spotify_id"):
-            p.confidence, p.why = CORROBORATED, "chosen by you"
-        else:
-            p.confidence, p.why = NONE, "marked by you as not on Spotify"
         return
     if p.status.get("spotify") in ("pending", "running"):
         p.confidence, p.why = PENDING, "searching Spotify…"
@@ -278,16 +268,11 @@ class SpotifyEnricher:
     name = "spotify"
     serial = False
 
-    def __init__(self, session_factory: Callable[[], object], use_pins: bool = True,
-                 tracks: bool = True):
+    def __init__(self, session_factory: Callable[[], object], tracks: bool = True):
         self._session_factory = session_factory
-        self._use_pins = use_pins       # the builder's are off: see `assess`
         self._tracks = tracks           # the builder's are off: see `TrackEnricher`
         self._sess = None
         self._lock = threading.Lock()
-
-    def _pin(self, band: str) -> dict | None:
-        return pins.pinned(band) if self._use_pins else None
 
     def session(self):
         with self._lock:
@@ -306,40 +291,30 @@ class SpotifyEnricher:
     def _enrich(self, p: BandProfile) -> None:
         from ..discover_cli import _artist_tracks
         sess = self.session()
-        pin = self._pin(p.band)
-        if pin is not None:
-            p.spotify_candidates = []
-            if not pin.get("spotify_id"):
-                p.spotify_artist, p.tracks = None, []
-                return
-            p.spotify_artist = sess.request("GET", f"/artists/{pin['spotify_id']}")
-        else:
-            term = p.searched["spotify"] = p.search_name
-            hits = sess.search(term, "artist", limit=SEARCH_LIMIT)
-            want = name_key(term)
-            exact = [a for a in hits if name_key(a.get("name")) == want]
-            linked = linked_spotify_id(p)
-            chosen = None
-            if linked:
-                # MusicBrainz names the exact Spotify artist: that settles
-                # it, even among several same-named ones ("Chuck Johnson").
-                chosen = next((a for a in hits if a.get("id") == linked), None) \
-                    or sess.request("GET", f"/artists/{linked}")
-            elif len(exact) == 1:
-                chosen = exact[0]
-            p.spotify_artist = chosen
-            # Only *same-named* artists are candidates. Loose hits for a band
-            # Spotify doesn't have are noise (measured: "Girl Chow" returns
-            # Girlschool and a Maori girls' choir); `m` searches by hand.
-            p.spotify_candidates = exact if (chosen is None and len(exact) > 1) else []
+        term = p.searched["spotify"] = p.search_name
+        hits = sess.search(term, "artist", limit=SEARCH_LIMIT)
+        want = name_key(term)
+        exact = [a for a in hits if name_key(a.get("name")) == want]
+        linked = linked_spotify_id(p)
+        chosen = None
+        if linked:
+            # MusicBrainz names the exact Spotify artist: that settles
+            # it, even among several same-named ones ("Chuck Johnson").
+            chosen = next((a for a in hits if a.get("id") == linked), None) \
+                or sess.request("GET", f"/artists/{linked}")
+        elif len(exact) == 1:
+            chosen = exact[0]
+        p.spotify_artist = chosen
+        # Only *same-named* artists are candidates. Loose hits for a band
+        # Spotify doesn't have are noise (measured: "Girl Chow" returns
+        # Girlschool and a Maori girls' choir); `m` searches by hand.
+        p.spotify_candidates = exact if (chosen is None and len(exact) > 1) else []
         p.tracks = _artist_tracks(sess, p.spotify_artist) \
             if p.spotify_artist and self._tracks else []
 
     def wants_rerun(self, p: BandProfile) -> bool:
         """After the lookup lands: does MusicBrainz name a different artist,
         or did it find the band under a trimmed name we haven't searched?"""
-        if self._pin(p.band) is not None:
-            return False
         linked = linked_spotify_id(p)
         current = (p.spotify_artist or {}).get("id", "")
         return (bool(linked) and linked != current) or \

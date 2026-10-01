@@ -47,7 +47,6 @@ from .. import bandcamp
 from . import cache, instagram, pictures
 from ..scenespec import venue as venues_mod
 from ..scenespec.band import CORROBORATED, NAME_ONLY, NONE, PENDING, UNCERTAIN, UNLOOKED, BandProfile
-from ..scenedata.bands import genre_of     # temporary: leaves with the live enrichment
 from .book import BandBook
 from ..scenespec.model import Show
 from ..scenespec.venue import VenueInfo
@@ -704,12 +703,7 @@ class SceneApp(App):
     # ---- genre -------------------------------------------------------------
 
     def _band_genre(self, band: str) -> genre_mod.Guess | None:
-        """The fullest guess we have: the looked-up profile, else the scan's."""
-        p = self.book.profiles.get(self._key(band))
-        if p is not None and p.status.get("bandcamp") in ("done", None):
-            g = genre_of(p)
-            if g:
-                return g
+        """The dataset's guess for a band, if it has one."""
         return self._scan_guesses.get(self._key(band))
 
     def _show_genre(self, s: Show) -> genre_mod.Guess:
@@ -862,7 +856,7 @@ class SceneApp(App):
         t.append("\n")
         if p.why:
             t.append(p.why + "\n", style="dim italic")
-        g = genre_of(p) or self._scan_guesses.get(self._key(p.band))
+        g = self._scan_guesses.get(self._key(p.band))
         if g:
             fam = g.top[0]
             t.append("sounds like ", style="dim")

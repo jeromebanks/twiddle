@@ -1,5 +1,10 @@
 """The client's book of bands: profiles seeded from the dataset, and the
-background work for the band on screen (song lists today).
+background work for the band on screen.
+
+Who a band *is* comes from the dataset (a producer looked them up); nothing
+here searches MusicBrainz, Bandcamp or Spotify for identity. The client does
+only what needs this person's own Spotify sign-in or a choice they made:
+applying a pin (`PinEnricher`) and fetching song lists (`TrackEnricher`).
 
 `on_update(profile)` is called from worker threads; a UI must marshal it onto
 its own thread (Textual: `app.call_from_thread`).
@@ -12,10 +17,84 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 
-from .. import lookup, spotify_ops
-from ..scenedata.bands import NOT_SIGNED_IN, Enricher, SpotifyEnricher, assess
-from ..scenespec.band import BandProfile
-from .. import bandcamp
+from typing import Protocol
+
+from .. import bandcamp, lookup, spotify_ops
+from ..scenespec.band import UNLOOKED, BandProfile
+from ..scenespec.profiles import apply_pin
+from . import cache
+
+NOT_SIGNED_IN = ("not signed in -- run `twiddle spotify auth`; "
+                 "Bandcamp tracks still play")
+SEARCH_LIMIT = 10   # see spotify_cli.RESOLVE_LIMIT: small limits rank badly
+
+
+class Enricher(Protocol):
+    name: str
+    serial: bool    # True: must run on the single lookup lane
+
+    def enrich(self, p: BandProfile) -> None:
+        """Fill in this enricher's fields on `p`. Raise on failure."""
+        ...
+
+
+def regrade(p: BandProfile) -> None:
+    """Re-apply what only this person knows to a profile's published grade: a
+    pin wins, and a Spotify answer the dataset never had shows as unlooked."""
+    pin = cache.pinned(p.band)
+    if pin is not None:
+        apply_pin(p, pin)
+    elif p.status.get("spotify") == "idle":
+        p.confidence, p.why = UNLOOKED, "not looked up on Spotify yet"
+
+
+class PinEnricher:
+    """Applies this person's Spotify pin: the artist they chose, fetched by id.
+
+    The dataset is graded without pins, so a pin that disagrees with it is the
+    one thing the client resolves itself -- and `m` searches by hand through
+    `search`. A band with no pin is left exactly as the dataset has it.
+    """
+    name = "spotify"
+    serial = False
+
+    def __init__(self, session_factory: Callable[[], object]):
+        self._session_factory = session_factory
+        self._sess = None
+        self._lock = threading.Lock()
+
+    def session(self):
+        with self._lock:
+            if self._sess is None:
+                self._sess = self._session_factory()
+            return self._sess
+
+    def search(self, term: str) -> list[dict]:
+        """Artist candidates for the manual picker."""
+        return self.session().search(term, "artist", limit=SEARCH_LIMIT)
+
+    def wakes(self, p: BandProfile) -> bool:
+        pin = cache.pinned(p.band)
+        return pin is not None and (pin.get("spotify_id") or "") != \
+            (p.spotify_artist or {}).get("id", "")
+
+    def enrich(self, p: BandProfile) -> None:
+        pin = cache.pinned(p.band)
+        if pin is None:
+            return
+        p.spotify_candidates = []
+        if not pin.get("spotify_id"):
+            p.spotify_artist, p.tracks = None, []
+            return
+        try:
+            p.spotify_artist = self.session().request("GET", f"/artists/{pin['spotify_id']}")
+        except Exception as exc:
+            if spotify_ops.not_signed_in(exc):
+                raise RuntimeError(NOT_SIGNED_IN) from exc
+            raise
+
+    def wants_rerun(self, p: BandProfile) -> bool:
+        return False
 
 
 class TrackEnricher:
@@ -31,7 +110,7 @@ class TrackEnricher:
     serial = False
     self_rerun = True   # identity can land while this runs: check again when done
 
-    def __init__(self, spotify: SpotifyEnricher, bc_tracks=bandcamp.tracks):
+    def __init__(self, spotify: PinEnricher, bc_tracks=bandcamp.tracks):
         self._spotify = spotify
         self._bc_tracks = bc_tracks
 
@@ -119,7 +198,7 @@ class BandBook:
                     for n in identity:
                         if old.status.get(n) == "done" and p.status.get(n) != "done":
                             p.adopt(n, old)
-                    assess(p)
+                    regrade(p)
                     self._carry_tracks(old, p)
                 self.profiles[key] = p
 
@@ -154,7 +233,8 @@ class BandBook:
                     p.status[e.name] = "pending"
                 self.profiles[key] = p
         if fresh:
-            assess(p)
+            p.confidence, p.why = UNLOOKED, "not in the dataset yet"
+            regrade(p)
             for e in self.enrichers:
                 self._schedule(e, p, urgent)
         elif urgent:
@@ -181,10 +261,11 @@ class BandBook:
     def _wake(self, p: BandProfile) -> None:
         for e in self.enrichers:
             with self._lock:
-                if p.status.get(e.name) != "idle":
+                if p.status.get(e.name) != "idle" or \
+                        (hasattr(e, "wakes") and not e.wakes(p)):
                     continue
                 p.status[e.name] = "pending"
-            assess(p)
+            regrade(p)
             self._schedule(e, p, urgent=True)
 
     def _schedule(self, e: Enricher, p: BandProfile, urgent: bool) -> None:
@@ -231,7 +312,7 @@ class BandBook:
                     continue
                 p.status[other.name] = "pending"
             self._schedule(other, p, urgent=True)
-        assess(p)
+        regrade(p)
         newer = self._take_deferred(p)
         try:
             self.on_update(newer or p)

@@ -418,20 +418,6 @@ class FakeUrlOutputs(Outputs):
         pass
 
 
-def test_genre_column_fills_from_bandcamp_and_slash_filters_by_it():
-    async def go():
-        app = make_app(bandcamp={"Girl Chow": GIRL_CHOW_BC})
-        async with app.run_test(size=(160, 45)) as pilot:
-            await settle(pilot, app, lambda: app._rows)
-            table = app.query_one("#shows")
-            await settle(pilot, app, lambda: "reggae" in str(table.get_cell("r0", "genre")))
-            assert str(table.get_cell("r1", "genre")) == ""     # nobody knows Coup Dville
-            await pilot.press("slash", *"reggae")
-            await settle(pilot, app, lambda: len(app._rows) == 1)
-            assert app._rows["r0"].headliner == "Girl Chow"
-    run(go())
-
-
 def _bandcamp_app(device, outputs, player=None):
     cache.set_state("device", device)
     return make_app(player, bandcamp={"Girl Chow": GIRL_CHOW_BC}, outputs=outputs)
@@ -910,7 +896,7 @@ def _compiled(name, **kw):
     for k, v in kw.items():
         setattr(p, k, v)
     from twiddle.scenedata.bands import assess
-    assess(p, use_pins=False)
+    assess(p)
     return profiles.to_record(p, updated_at=1.0, guess=None)
 
 
@@ -1401,14 +1387,16 @@ def test_a_failed_song_list_fetch_is_shown_not_hidden(monkeypatch):
     run(go())
 
 
-def test_the_tuis_book_has_exactly_one_song_list_fetcher():
-    """Codex: identity enrichers with tracks on would duplicate TrackEnricher's requests."""
+def test_the_tuis_book_does_no_identity_lookup_and_has_one_song_list_fetcher():
+    """The client shows who a band is from the dataset: no MusicBrainz, Spotify or
+    Bandcamp identity search, only your pin and the song lists."""
     from twiddle.scene import cli
 
     import inspect
     src = inspect.getsource(cli.cmd_scene)
-    assert "SpotifyEnricher(spotify_ops.session, tracks=False)" in src
-    assert "BandcampEnricher(fetch_tracks=False)" in src
+    assert "PinEnricher" in src and "TrackEnricher" in src
+    for identity in ("LookupEnricher", "SpotifyEnricher", "BandcampEnricher", "scenedata"):
+        assert identity not in src
 
 
 def test_a_checkpoint_that_changes_genres_updates_which_shows_a_genre_filter_matches():

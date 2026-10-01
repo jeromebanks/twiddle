@@ -59,13 +59,6 @@ def test_a_local_band_found_only_loosely_is_not_confirmed():
     assert p.confidence == NAME_ONLY
 
 
-def test_pins_override_everything():
-    cache.pin("Shape", "chosen", "Shape")
-    assert done(BandProfile("Shape")).confidence == CORROBORATED
-    cache.pin("Shape", None)
-    assert done(BandProfile("Shape"), spotify_artist=artist("Shape", "s")).confidence == NONE
-
-
 class FakeSession:
     def __init__(self, artists):
         self.artists = artists
@@ -120,43 +113,10 @@ def test_a_musicbrainz_link_picks_among_same_named_artists():
     assert p.spotify_artist["id"] == "5lRV" and p.confidence == CORROBORATED
 
 
-def test_spotify_is_redone_when_the_lookup_lands_later_with_a_link():
-    sess = FakeSession([artist("Chuck Johnson", "other"), artist("Chuck Johnson", "5lRV")])
-    spot = SpotifyEnricher(lambda: sess)
-    info = lookup.ArtistInfo(name="Chuck Johnson",
-                             links={"spotify": "https://open.spotify.com/artist/5lRV"})
-    gate = threading.Event()
-
-    def identify(name):
-        gate.wait(2)            # Spotify finishes first, and finds two
-        return lookup.Result(artist=info)
-
-    book = BandBook([LookupEnricher(identify), spot])
-    p = book.get("Chuck Johnson")
-    deadline = time.time() + 3
-    while p.status.get("spotify") != "done" and time.time() < deadline:
-        time.sleep(0.01)
-    assert p.confidence == UNCERTAIN
-    gate.set()
-    while (p.busy() or p.confidence != CORROBORATED) and time.time() < deadline:
-        time.sleep(0.01)
-    book.close()
-    assert p.spotify_artist["id"] == "5lRV" and p.confidence == CORROBORATED
-
-
 def test_search_asks_for_a_page():
     sess = FakeSession([])
     SpotifyEnricher(lambda: sess).enrich(BandProfile("x"))
     assert sess.calls[0][2] >= 5
-
-
-def test_a_pinned_artist_is_fetched_by_id_not_searched():
-    cache.pin("Shape", "chosen")
-    sess = FakeSession([artist("Shape", "wrong")])
-    p = BandProfile("Shape")
-    SpotifyEnricher(lambda: sess).enrich(p)
-    assert p.spotify_artist["id"] == "chosen"
-    assert not [c for c in sess.calls if c[1] == "artist"]
 
 
 def test_lookups_never_overlap():
@@ -296,47 +256,16 @@ def test_a_billing_the_catalog_knows_is_never_trimmed():
     assert p.alias is None and calls == ["Spanish Harlem Orchestra Band"]
 
 
-def test_spotify_and_bandcamp_search_again_under_the_alias():
-    sess = FakeSession([artist("Mindi Abair", "m")])
-    spot = SpotifyEnricher(lambda: sess)
-    seen = []
-    bc = BandcampEnricher(search=lambda n: seen.append(n) or [], tracks=lambda u: [])
-    gate = threading.Event()
-    identify, _ = _identify({"Mindi Abair"})
-
-    def slow(name):
-        gate.wait(2)            # Spotify and Bandcamp finish first, finding nothing
-        return identify(name)
-
-    book = BandBook([LookupEnricher(slow), spot, bc])
-    p = book.get("Mindi Abair Christmas Show")
-    deadline = time.time() + 3
-    while (p.status.get("spotify") != "done" or p.status.get("bandcamp") != "done") \
-            and time.time() < deadline:
-        time.sleep(0.01)
-    assert p.spotify_artist is None
-    gate.set()
-    while (p.busy() or not p.spotify_artist) and time.time() < deadline:
-        time.sleep(0.01)
-    book.close()
-    assert p.spotify_artist["id"] == "m"
-    artist_searches = [c[0] for c in sess.calls if c[1] == "artist"]
-    assert artist_searches[:2] == ["Mindi Abair Christmas Show", "Mindi Abair"]
-    assert seen[0] == "Mindi Abair Christmas Show" and seen[1] == "Mindi Abair"
-    assert "searched as “Mindi Abair”" in p.why
-
-
 def test_not_signed_in_to_spotify_says_so_not_no_such_artist():
     def signed_out():
         raise spotify_ops.PlaybackError("no Spotify tokens at x") from spotify.AuthError("x")
 
-    seen = []
-    book = BandBook([SpotifyEnricher(signed_out)], on_update=seen.append)
-    p = book.get("Street Eaters")
-    deadline = time.time() + 2
-    while not seen and time.time() < deadline:
-        time.sleep(0.01)
-    book.close()
+    p = BandProfile("Street Eaters", status={"spotify": "pending"})
+    try:
+        SpotifyEnricher(signed_out).enrich(p)
+    except RuntimeError as exc:
+        p.status["spotify"] = f"error: {exc}"
+    assess(p)
     assert p.confidence == NONE
     assert "spotify auth" in p.why and "Bandcamp" in p.why
     assert "no Spotify artist" not in p.why
