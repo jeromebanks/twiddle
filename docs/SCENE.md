@@ -442,6 +442,7 @@ the new one, never half of one.
 
 ```
 {"schema": "twiddle.scene.dataset", "version": 1, "generated_at": "...", "complete": true,
+ "id": "bay-area-music", "name": "Bay Area live music", "region": "...", "kind": "music",   (optional)
  "sources":   {"thelist": {"ok": true, "fetched_at": "...", "count": 412, "error": null}, ...},
  "enrichers": {"lookup": "ok", "spotify": "skipped: not signed in", "bandcamp": "ok"},
  "venues": [{"id": "ivy-room", "name": "Ivy Room", "address": "...", "wikipedia_summary": {...}, ...}],

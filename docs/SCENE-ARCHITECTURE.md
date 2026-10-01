@@ -225,9 +225,11 @@ One JSON file: `~/.local/share/twiddle/scene/dataset.json`
 
 ```
 schema, version, generated_at, builder, complete
+id, name, region, kind   which dataset this is (all optional; the producer's `[dataset]`
+                        table in scene.toml names them, stock: bay-area-music / music)
 sources    {name: {ok, fetched_at, count, error}}
 enrichers  {lookup|spotify|bandcamp: "ok" | "skipped: …" | "paused: rate-limited"}
-venues     [{id, name, match, address, url, about, wikipedia, wikipedia_summary, instagram, map_url}]
+venues     [{id, name, match, address, url, about, wikipedia, wikipedia_summary, instagram, map_url, icon}]
 shows      [{id, venue_id, day, venue, bands, age, price, times, notes, flags,
              source, also, source_url, tickets, flyer, title}]
 bands      {<normalised name>: {name, updated_at, status, identifiers, info,
@@ -252,7 +254,10 @@ bands      {<normalised name>: {name, updated_at, status, identifiers, info,
 
 Reader API: `dataset.load() -> Snapshot | None`; `Snapshot.shows`,
 `.shows_on(day)`, `.shows_at(venue)`, `.venue(name)`, `.band(name)`,
-`.generated_at`, `.age_s()`, `.stale()`, `.complete`, `.sources`, `.mtime`.
+`.generated_at`, `.age_s()`, `.stale()`, `.complete`, `.sources`, `.mtime`, and the
+header's `.id`, `.name`, `.region`, `.kind`, `.label`. `dataset.load_all(paths)` reads
+several datasets (one today); a client that follows more than one starts there. The
+client itself still reads one, and pins/state are not keyed by dataset yet.
 
 ---
 

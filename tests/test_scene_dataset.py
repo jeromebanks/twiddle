@@ -144,6 +144,38 @@ def test_the_contract_package_needs_no_client_producer_tui_or_network_modules():
     assert out == "[]"
 
 
+# ---- the header says which dataset this is ---------------------------------------
+
+
+def test_the_header_names_the_dataset_and_a_file_without_one_still_loads(tmp_path):
+    path = tmp_path / "d.json"
+    dataset.publish(doc(identity={"id": "nyc-comedy", "name": "NYC comedy",
+                                  "region": "New York, NY", "kind": "comedy", "junk": "x"}), path)
+    snap = dataset.load(path)
+    assert (snap.id, snap.name, snap.region, snap.kind) == \
+        ("nyc-comedy", "NYC comedy", "New York, NY", "comedy")
+    assert "junk" not in json.loads(path.read_text()) and snap.label == "NYC comedy"
+    old = tmp_path / "old.json"
+    dataset.publish(doc(), old)                         # a producer that predates the header
+    bare = dataset.load(old)
+    assert (bare.id, bare.name, bare.region, bare.kind) == ("", "", "", "")
+    assert bare.label == "old"                          # falls back to the file's name
+    assert "id" not in json.loads(old.read_text())      # and nothing is written for it
+
+
+def test_load_all_reads_each_dataset_in_order_skips_missing_and_names_a_bad_one(tmp_path):
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    dataset.publish(doc(identity={"id": "a"}), a)
+    dataset.publish(doc(identity={"id": "b"}), b)
+    assert [s.id for s in dataset.load_all([b, tmp_path / "missing.json", a])] == ["b", "a"]
+    assert dataset.load_all([tmp_path / "missing.json"]) == []
+    assert [s.path for s in dataset.load_all()] == []   # the conftest-redirected default: none yet
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with pytest.raises(dataset.DatasetError, match="bad.json"):
+        dataset.load_all([a, bad])
+
+
 # ---- profiles <-> records ----------------------------------------------------------
 
 

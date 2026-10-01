@@ -258,6 +258,7 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
         # A newer version's file, or someone else's: never overwrite what we cannot read.
         raise BuildError(f"not replacing {path}: {exc}") from exc
     watched = watched if watched is not None else venues_mod.watched()
+    identity = venues_mod.identity()
     started = now()
     result = Result(path=path)
 
@@ -301,7 +302,7 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
         dataset.publish(dataset.document(
             shows=shows, show_rows=rows, venues=venue_records, bands=bands,
             sources=source_status, enrichers=enricher_status, complete=complete,
-            builder=_builder_name(), generated_at=started), path)
+            builder=_builder_name(), generated_at=started, identity=identity), path)
 
     publish(complete=False)
     log(f"{len(shows)} shows, {len(bands)} bands; venue summaries, then enriching…")

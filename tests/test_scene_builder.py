@@ -457,3 +457,17 @@ def test_a_failed_lookup_hands_its_old_alias_to_spotify_and_bandcamp_before_they
         now=lambda: later)
     assert seen["spotify"] == ["Trimmed Name"]                 # not None: the old alias, in time
     assert read(tmp_path).band("Coup Dville")["status"]["lookup"].startswith("kept")
+
+
+def test_a_build_says_which_dataset_it_is_and_the_config_can_rename_it(tmp_path, monkeypatch):
+    run(tmp_path, [Src("thelist", [GIRL])])
+    snap = read(tmp_path)
+    assert (snap.id, snap.kind) == ("bay-area-music", "music") and "Bay Area" in snap.region
+    cfg = tmp_path / "scene.toml"
+    cfg.write_text('[dataset]\nid = "nyc-comedy"\nname = "NYC comedy"\nkind = "comedy"\n')
+    from twiddle.scenedata import venues
+    monkeypatch.setattr(venues, "CONFIG_PATH", cfg)
+    run(tmp_path, [Src("thelist", [GIRL])])
+    snap = read(tmp_path)
+    assert (snap.id, snap.name, snap.kind) == ("nyc-comedy", "NYC comedy", "comedy")
+    assert "Bay Area" in snap.region                    # a field the file does not give keeps its default

@@ -11,6 +11,8 @@ needs no lock. Default `~/.local/share/twiddle/scene/dataset.json`, or
 `$TWIDDLE_SCENE_DATASET`.
 
     {"schema": "twiddle.scene.dataset", "version": 1,
+     "id": "bay-area-music", "name": "Bay Area live music",     # which dataset this is:
+     "region": "San Francisco Bay Area, CA", "kind": "music",   # all four optional
      "generated_at": "2026-09-29T18:00:00+00:00", "builder": "twiddle 0.1",
      "complete": true,            # false while a build is still enriching bands
      "sources":  {name: {"ok", "fetched_at", "count", "error"}},
@@ -50,6 +52,7 @@ from .model import Show
 
 SCHEMA = "twiddle.scene.dataset"
 VERSION = 1
+IDENTITY_KEYS = ("id", "name", "region", "kind")      # the optional header: which dataset
 STALE_S = 24 * 3600         # a scheduled build that has missed a day is worth saying so
 DATASET_PATH = Path(os.environ.get("TWIDDLE_SCENE_DATASET",
                                    Path.home() / ".local" / "share" / "twiddle" / "scene"
@@ -130,6 +133,10 @@ class Snapshot:
     version: int
     generated_at: float | None
     builder: str = ""
+    id: str = ""            # which dataset this is; "" in a file that predates the header
+    name: str = ""          # a human label ("Bay Area live music")
+    region: str = ""        # where it covers
+    kind: str = ""          # what it covers: "music", "comedy", ...
     complete: bool = True
     sources: dict[str, dict] = field(default_factory=dict)
     enrichers: dict[str, str] = field(default_factory=dict)
@@ -139,6 +146,11 @@ class Snapshot:
     venue_ids: list[str | None] = field(default_factory=list)   # ditto: the watched room
     bands: dict[str, dict] = field(default_factory=dict)
     mtime: float = 0.0
+
+    @property
+    def label(self) -> str:
+        """What to call this dataset: its name, else its id, else its file."""
+        return self.name or self.id or self.path.stem
 
     def age_s(self, now: float | None = None) -> float | None:
         if self.generated_at is None:
@@ -219,9 +231,24 @@ def load(path: Path | None = None) -> Snapshot | None:
     return Snapshot(
         path=path, version=version, generated_at=_epoch(doc.get("generated_at")),
         builder=str(doc.get("builder", "")), complete=bool(doc.get("complete", True)),
+        id=str(doc.get("id") or ""), name=str(doc.get("name") or ""),
+        region=str(doc.get("region") or ""), kind=str(doc.get("kind") or ""),
         sources=doc.get("sources") or {}, enrichers=doc.get("enrichers") or {},
         venues=[v for v in doc.get("venues", []) if isinstance(v, dict)],
         shows=shows, show_ids=ids, bands=bands, mtime=mtime, venue_ids=venues_of)
+
+
+def load_all(paths: list[Path] | None = None) -> list[Snapshot]:
+    """Every dataset that exists at `paths` (default: the one dataset there is
+    today), in order. A missing file is skipped, as `load` answers None; an
+    unusable one raises, naming its path. A client that follows several
+    datasets (another city, comedy) reads them through this."""
+    out = []
+    for path in paths if paths is not None else [default_path()]:
+        snap = load(path)
+        if snap is not None:
+            out.append(snap)
+    return out
 
 
 def mtime(path: Path | None = None) -> float | None:
@@ -237,8 +264,11 @@ def mtime(path: Path | None = None) -> float | None:
 
 def document(*, shows: list[Show], show_rows: list[dict] | None = None, venues: list[dict],
              bands: dict[str, dict], sources: dict[str, dict], enrichers: dict[str, str],
-             complete: bool, builder: str, generated_at: float | None = None) -> dict:
-    return {"schema": SCHEMA, "version": VERSION, "generated_at": iso(generated_at),
+             complete: bool, builder: str, generated_at: float | None = None,
+             identity: dict[str, str] | None = None) -> dict:
+    """`identity`: any of id / name / region / kind, written when given."""
+    head = {k: v for k, v in (identity or {}).items() if k in IDENTITY_KEYS and v}
+    return {"schema": SCHEMA, "version": VERSION, **head, "generated_at": iso(generated_at),
             "builder": builder, "complete": complete, "sources": sources,
             "enrichers": enrichers, "venues": venues,
             "shows": show_rows if show_rows is not None else [s.to_dict() for s in shows],

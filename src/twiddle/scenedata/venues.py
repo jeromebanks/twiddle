@@ -16,6 +16,14 @@ unless the file gives its own.
 
 A `[[venue]]` list in the file replaces the defaults entirely, so that
 removing one is possible too.
+
+A `[dataset]` table names what this build covers (the dataset's header):
+
+    [dataset]
+    id = "nyc-comedy"
+    name = "NYC comedy"
+    region = "New York, NY"
+    kind = "comedy"
 """
 from __future__ import annotations
 
@@ -129,6 +137,19 @@ def load_config(path: Path | None = None) -> dict:
         return {}
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"{path}: {exc}") from exc
+
+
+# What the stock Bay Area build says it is, in the dataset's header.
+DEFAULT_IDENTITY = {"id": "bay-area-music", "name": "Bay Area live music",
+                    "region": "San Francisco Bay Area, CA", "kind": "music"}
+
+
+def identity(config: dict | None = None) -> dict[str, str]:
+    """The dataset header's id / name / region / kind: the stock ones, each
+    overridden by the config file's `[dataset]` table."""
+    config = load_config() if config is None else config
+    given = config.get("dataset") or {}
+    return {k: str(given.get(k) or v) for k, v in DEFAULT_IDENTITY.items()}
 
 
 def watched(config: dict | None = None) -> tuple[Venue, ...]:
