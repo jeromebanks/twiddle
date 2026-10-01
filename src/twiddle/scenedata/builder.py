@@ -39,7 +39,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from .. import spotify, spotify_ops
-from ..scene import bandcamp
+from . import bandcamp
 from ..scenespec import dataset, genre, profiles
 from ..scene import venue_info
 from ..scene import venues as venues_mod

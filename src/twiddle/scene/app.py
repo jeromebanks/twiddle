@@ -43,7 +43,8 @@ from textual_image import widget as _images
 from .. import here, spotify_ops
 from ..dial import art
 from ..scenespec import dataset, genre as genre_mod, profiles
-from . import bandcamp, cache, instagram, pictures
+from .. import bandcamp
+from . import cache, instagram, pictures
 from . import venues as venues_mod
 from ..scenespec.band import CORROBORATED, NAME_ONLY, NONE, PENDING, UNCERTAIN, UNLOOKED, BandProfile
 from ..scenedata.bands import genre_of     # temporary: leaves with the live enrichment

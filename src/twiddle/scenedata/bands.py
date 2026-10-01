@@ -58,8 +58,9 @@ import threading
 from collections.abc import Callable
 from typing import Protocol
 
-from .. import lookup, spotify_ops
-from ..scene import bandcamp, cache
+from .. import bandcamp as site, lookup, spotify_ops
+from ..scene import cache as pins      # temporary: leaves with the live enrichment
+from . import bandcamp, cache
 from ..scenespec import genre
 from ..scenespec.band import (CORROBORATED, NAME_ONLY, NONE, PENDING, UNCERTAIN, UNLOOKED,
                               BandProfile)
@@ -155,7 +156,7 @@ def assess(p: BandProfile, use_pins: bool = True) -> None:
         # screen is looked up when it is selected.
         p.confidence, p.why = UNLOOKED, "not looked up on Spotify yet"
         return
-    pin = cache.pinned(p.band) if use_pins else None
+    pin = pins.pinned(p.band) if use_pins else None
     if pin is not None:
         if pin.get("spotify_id"):
             p.confidence, p.why = CORROBORATED, "chosen by you"
@@ -212,7 +213,7 @@ def genre_of(p: BandProfile) -> genre.Guess:
     bc = p.bandcamp or {}
     linked = p.info.links.get("bandcamp") if p.info else None
     sure = bool(p.info and p.info.genres) or near(bc.get("location")) or \
-        (bool(linked) and bandcamp._host(linked) == bandcamp._host(bc.get("item_url_root")))
+        (bool(linked) and site._host(linked) == site._host(bc.get("item_url_root")))
     return genre.for_band(p.bandcamp, p.info.genres if p.info else (), sure)
 
 
@@ -286,7 +287,7 @@ class SpotifyEnricher:
         self._lock = threading.Lock()
 
     def _pin(self, band: str) -> dict | None:
-        return cache.pinned(band) if self._use_pins else None
+        return pins.pinned(band) if self._use_pins else None
 
     def session(self):
         with self._lock:
@@ -358,7 +359,7 @@ class BandcampEnricher:
     name = "bandcamp"
     serial = False
 
-    def __init__(self, search=bandcamp.search, tracks=bandcamp.tracks,
+    def __init__(self, search=bandcamp.search, tracks=site.tracks,
                  fetch_tracks: bool = True):
         self._search = search
         self._tracks = tracks
@@ -386,5 +387,5 @@ class BandcampEnricher:
     def wants_rerun(self, p: BandProfile) -> bool:
         linked = self._linked(p)
         have = (p.bandcamp or {}).get("item_url_root")
-        return (bool(linked) and bandcamp._host(linked) != bandcamp._host(have)) or \
+        return (bool(linked) and site._host(linked) != site._host(have)) or \
             bool(p.alias and p.searched.get("bandcamp") != p.alias)

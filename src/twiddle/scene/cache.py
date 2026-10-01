@@ -1,5 +1,5 @@
-"""What `scene` remembers between runs: band matches, aliases, the device.
-(The shows themselves are `dataset.py`'s, published by `scene build`.)
+"""What the `scene` client remembers between runs: your pins, the device, the theme.
+(The shows themselves are the dataset's; the producer's caches are `scenedata/cache.py`.)
 
 Everything lives in `~/.cache/twiddle/scene/` as small JSON files, written
 atomically (temp file + rename) so a crash mid-write cannot leave a file the
@@ -7,67 +7,27 @@ next launch refuses to read.
 
   band_pins.json  "this band is *that* Spotify artist" (or "not on Spotify"),
                   chosen by hand -- the only fully trustworthy identity
-  aliases.json    billing -> the trimmed name the music databases knew it by
-                  ("Mindi Abair Christmas Show" -> "Mindi Abair"), or "" if none
   state.json      last device, theme
 """
 from __future__ import annotations
 
-import json
 import os
-import threading
 import time
 from pathlib import Path
 
+from .. import jsonstore
 from ..lookup import norm
 
 CACHE_DIR = Path(os.environ.get("TWIDDLE_SCENE_CACHE",
                                 Path.home() / ".cache" / "twiddle" / "scene"))
 
 
-def _path(name: str) -> Path:
-    return CACHE_DIR / name
-
-
 def _read(name: str) -> dict:
-    try:
-        return json.loads(_path(name).read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    return jsonstore.read(CACHE_DIR / name)
 
 
 def _write(name: str, data: dict) -> None:
-    p = _path(name)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    # Unique per process and thread: `scene build` and the app are two
-    # processes writing the same files, and a shared temp name could be
-    # renamed into place half-written by the other.
-    tmp = p.with_name(f".{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    try:
-        tmp.write_text(json.dumps(data, indent=1))
-        tmp.replace(p)
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
-# ---- aliases ----------------------------------------------------------------
-
-ALIAS_TTL_S = 14 * 86400        # a band that finds nothing today may be added later
-
-
-def alias(billed: str) -> str | None:
-    """The name a billing was found under; "" if trims were tried and failed;
-    None if never tried (or long enough ago to try again)."""
-    hit = _read("aliases.json").get(norm(billed))
-    if not hit or time.time() - hit.get("at", 0) > ALIAS_TTL_S:
-        return None
-    return hit.get("alias", "")
-
-
-def save_alias(billed: str, name: str) -> None:
-    aliases = _read("aliases.json")
-    aliases[norm(billed)] = {"alias": name, "billed": billed, "at": time.time()}
-    _write("aliases.json", aliases)
+    jsonstore.write(CACHE_DIR / name, data)
 
 
 # ---- band pins --------------------------------------------------------------

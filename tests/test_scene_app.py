@@ -534,7 +534,7 @@ def test_bandcamp_wont_go_to_a_phone():
 def test_the_genre_column_comes_from_the_dataset_and_browsing_asks_no_network(monkeypatch):
     """The table's "Sounds like" was a Bandcamp scan run by the TUI. It is the
     builder's now: the app reads each band's stored guess and asks nobody."""
-    from twiddle.scene import bandcamp
+    from twiddle.scenedata import bandcamp
     monkeypatch.setattr(bandcamp, "search", lambda *a, **k: 1 / 0)
     guess = profiles.guess_to_dict(genre_mod.for_band(GIRL_CHOW_BC[0], sure=True))
     known = {"Girl Chow": dict(profiles.minimal_record("Girl Chow", None), genre=guess)}
@@ -868,11 +868,13 @@ def test_v_visualizes_and_says_why_when_spotify_has_no_stream_here():
 def _no_collection(monkeypatch):
     """Anything that scrapes, searches or looks up now explodes."""
     import twiddle.scenedata.sources as srcs
-    from twiddle.scene import bandcamp, venue_info
+    from twiddle import bandcamp as site
+    from twiddle.scene import venue_info
+    from twiddle.scenedata import bandcamp
     boom = lambda *a, **k: 1 / 0            # noqa: E731
     monkeypatch.setattr(srcs, "fetch_all", boom)
     monkeypatch.setattr(bandcamp, "search", boom)
-    monkeypatch.setattr(bandcamp, "_get", boom)
+    monkeypatch.setattr(site, "_get", boom)
     monkeypatch.setattr(lookup, "identify", boom)
     monkeypatch.setattr(venue_info, "wiki_summary", boom)
 

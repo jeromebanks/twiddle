@@ -9,7 +9,8 @@ from datetime import date
 import pytest
 
 from twiddle import spotify, spotify_ops
-from twiddle.scene import bandcamp, cache
+from twiddle.scene import cache
+from twiddle.scenedata import bandcamp, cache as data_cache
 from twiddle.scenespec import dataset
 from twiddle.scenedata import builder
 from twiddle.scenespec.band import BandProfile
@@ -381,7 +382,7 @@ def test_a_bandcamp_pause_also_stops_the_lookups_last_resort_bandcamp_search(mon
     skip.add("bandcamp")
     lookup_enricher.enrich(BandProfile("Unknown Two"))
     assert asked == ["Unknown One"]                       # paused: not asked again
-    assert cache.alias("Unknown Two") is None             # and no false "nothing worked" recorded
+    assert data_cache.alias("Unknown Two") is None             # and no false "nothing worked" recorded
 
 
 def test_a_carried_over_answer_is_retried_next_build_not_treated_as_fresh(tmp_path):

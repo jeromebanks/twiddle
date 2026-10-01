@@ -15,7 +15,7 @@ from collections.abc import Callable
 from .. import lookup, spotify_ops
 from ..scenedata.bands import NOT_SIGNED_IN, Enricher, SpotifyEnricher, assess
 from ..scenespec.band import BandProfile
-from . import bandcamp
+from .. import bandcamp
 
 
 class TrackEnricher:
