@@ -302,6 +302,12 @@ uv run twiddle dial --no-splash     # skip the opening card
   PulseAudio falls back to `ffplay` and the system sink's volume. Inside the
   visualizer (`v`), `+`/`-`/`[`/`]` and `m` still work in dial, and the overlay
   shows the level.
+  `s` stops the output and leaves the speaker's last station as its resume
+  point. **`D` disconnects**: it stops, then clears a Sonos room's transport
+  URI so the Sonos app shows nothing, not a paused station (journalled; never
+  the relay; if the speaker refuses the clear it says so and stays stopped).
+  On This Mac and Bluetooth it is the same as `s`. A handoff only stops, never
+  clears. Quitting dial leaves a Sonos room playing; the Mac's own stream stops.
   **The station moves with you**: it starts on the new output, then stops on
   the old one -- so `d` writes. Only a station dial can see is moved, and an
   output is stopped only while it still plays what dial put there: a room on

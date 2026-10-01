@@ -143,8 +143,16 @@ EOF
 
 Then steps 3–5 as above. The differences from a Mac:
 
-- `dial` plays on the Chromebook's speakers; `+`/`-`/`m` set the ChromeOS
-  volume through `pactl`.
+- `dial` plays on the Chromebook's speakers (`ffmpeg -f pulse`); `+`/`-`/`m`
+  are dial's own volume, on top of the container's audio sink and ChromeOS's
+  volume, and the three multiply. The container's sink can start low (it was
+  40%, about -24 dB), which sounds like dial being quiet at its maximum.
+  `scripts/chromebook.sh` sets it to 100% (`TWIDDLE_SINK_VOLUME=keep` skips
+  that), and logs what it found to `logs/chromebook.log` to show whether it
+  resets after a reboot.
+- Run dial with `scripts/chromebook.sh` (any `twiddle` command works after
+  it): it sets `TWIDDLE_ANCHOR` (edit the default IP in the script, or export
+  your own), warns if that speaker doesn't answer, and sets the sink volume.
 - The container is NATed off the LAN, so Sonos discovery never answers.
   Speakers are reachable directly, which is what `TWIDDLE_ANCHOR` is for.
 - Bluetooth output in `dial` is macOS-only. Pair headphones in ChromeOS
