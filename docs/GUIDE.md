@@ -297,8 +297,11 @@ uv run twiddle dial --no-splash     # skip the opening card
 - **Output.** `d` picks the output: any Sonos room, or **This Mac**. On the
   Mac the stream plays through `ffmpeg` (`audiotoolbox`), and so does a
   Bluetooth device. Volume and mute there are dial's own, applied live to the
-  stream: the Mac's system volume and its other apps are untouched. (Linux still
-  uses `ffplay` and the system sink's volume.)
+  stream: the Mac's system volume and its other apps are untouched. On Linux (a Chromebook's
+  container) it is `ffmpeg -f pulse` the same way; only an ffmpeg built without
+  PulseAudio falls back to `ffplay` and the system sink's volume. Inside the
+  visualizer (`v`), `+`/`-`/`[`/`]` and `m` still work in dial, and the overlay
+  shows the level.
   **The station moves with you**: it starts on the new output, then stops on
   the old one -- so `d` writes. Only a station dial can see is moved, and an
   output is stopped only while it still plays what dial put there: a room on

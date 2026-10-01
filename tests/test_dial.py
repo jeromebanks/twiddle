@@ -306,7 +306,7 @@ def test_local_output_plays_with_ffmpeg_and_keeps_its_own_volume():
         spawned.append(argv)
         procs.append(PipeProc())
         return procs[-1]
-    out = LocalOutput(spawn=spawn, pactl=None, ffmpeg="/bin/ffmpeg")
+    out = LocalOutput(spawn=spawn, sink="audiotoolbox", ffmpeg="/bin/ffmpeg")
     out.tune(STATIONS["kexp"])
     argv = spawned[0]
     assert argv[0] == "/bin/ffmpeg" and STATIONS["kexp"].url in argv
@@ -336,7 +336,7 @@ def test_local_output_plays_with_ffmpeg_and_keeps_its_own_volume():
 def test_volume_before_anything_plays_is_kept_for_the_first_station():
     spawned = []
     out = LocalOutput(spawn=lambda argv, log: spawned.append(argv) or PipeProc(),
-                      pactl=None, ffmpeg="/bin/ffmpeg")
+                      sink="audiotoolbox", ffmpeg="/bin/ffmpeg")
     out.set_volume(20)
     out.set_mute(True)
     out.tune(STATIONS["kexp"])
@@ -350,7 +350,7 @@ def test_a_process_that_just_died_does_not_break_the_volume_key():
     def broken(data):
         raise BrokenPipeError
     proc.write = broken
-    out = LocalOutput(spawn=lambda argv, log: proc, pactl=None, ffmpeg="/bin/ffmpeg")
+    out = LocalOutput(spawn=lambda argv, log: proc, sink="audiotoolbox", ffmpeg="/bin/ffmpeg")
     out.tune(STATIONS["kexp"])
     assert out.set_volume(10) == 10 and out.state().volume == 10
     out.close()
@@ -358,7 +358,7 @@ def test_a_process_that_just_died_does_not_break_the_volume_key():
 
 def test_dry_run_volume_writes_nothing():
     proc = PipeProc()
-    out = LocalOutput(dry_run=True, spawn=lambda argv, log: proc, pactl=None,
+    out = LocalOutput(dry_run=True, spawn=lambda argv, log: proc, sink="audiotoolbox",
                       ffmpeg="/bin/ffmpeg")
     out.set_volume(10)
     assert proc.written == []
@@ -374,7 +374,7 @@ def test_this_computer_on_linux_uses_pactl_for_volume_and_mute():
         return {"get-sink-volume": "Volume: front-left: 45875 /  70% / -9.29 dB,   "
                                    "front-right: 45875 /  70% / -9.29 dB",
                 "get-sink-mute": "Mute: yes"}.get(args[0], "")
-    out = LocalOutput(pactl=pactl, ffplay="/bin/ffplay", spawn=lambda *a: None)
+    out = LocalOutput(sink="ffplay", pactl=pactl, ffplay="/bin/ffplay", spawn=lambda *a: None)
     assert out._volume() == (70, True)
     out.set_volume(55)
     out.set_mute(False)
@@ -418,7 +418,7 @@ def test_local_play_url_exits_when_the_track_ends():
         def wait(self, timeout=None):
             return 0
     out = LocalOutput(spawn=lambda argv, log: spawned.append(argv) or Proc(),
-                      pactl=lambda *a: "", ffplay="/bin/ffplay")     # the Linux path
+                      sink="ffplay", pactl=lambda *a: "", ffplay="/bin/ffplay")     # no PulseAudio in ffmpeg
     out.play_url("https://t4.bcbits.com/stream/x", "a track")
     assert "-autoexit" in spawned[0]
     out.tune(STATIONS["kexp"])
@@ -1168,8 +1168,7 @@ def test_v_visualizes_the_tuned_station_and_leaves_no_tap_behind():
             assert RecordingTap.made[0].url == STATIONS["kalx"].url
             # Only the picture is showing: dial's own keys must not reach a
             # speaker unseen (the relay's ask-twice lives on the hidden screen).
-            await pilot.press("enter", "enter", "plus", "minus", "right_square_bracket",
-                              "m", "s", "R", "z", "Z", "d", "1")
+            await pilot.press("enter", "enter", "s", "R", "z", "Z", "d", "1")
             await pilot.pause(0.5)
             assert isinstance(app.screen, VizScreen)
             assert out.tuned_to == [] and out.volumes == [] and out.mutes == []
@@ -1177,6 +1176,36 @@ def test_v_visualizes_the_tuned_station_and_leaves_no_tap_behind():
             await pilot.pause()
             assert not isinstance(app.screen, VizScreen)
             assert RecordingTap.made[0].stopped
+    asyncio.run(run())
+
+
+def test_volume_and_mute_work_inside_the_visualizer():
+    """Issue #1, Jerome's observation: the modal screen swallowed them. Only
+    those keys are forwarded; the overlay shows the level, since the bar is hidden."""
+    from tests.test_viz_screen import options
+    from twiddle.viz.screen import VizScreen
+
+    out = FakeOutput(tuned="kalx")
+    out.st.uri = STATIONS["kalx"].url
+    _store, kw = options()
+
+    async def run():
+        app = make_app(out)
+        app.viz_options = kw
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("v")
+            await pilot.pause(0.3)
+            assert isinstance(app.screen, VizScreen)
+            await pilot.press("minus")
+            await pilot.pause(0.2)
+            assert app.volume == 28 and out.volumes == [28]
+            assert "volume 28" in "\n".join(app.screen._overlay_lines())
+            await pilot.press("m")
+            await pilot.pause(0.2)
+            assert out.mutes == [True]
+            assert "muted" in "\n".join(app.screen._overlay_lines())
+            assert isinstance(app.screen, VizScreen)
     asyncio.run(run())
 
 
@@ -1328,3 +1357,38 @@ def test_the_bar_is_not_snapped_back_by_a_poll_mid_hold():
             await pilot.pause()
             assert out.volumes[-1] == 26 and not app._vol_dirty
     run(go())
+
+
+def test_linux_with_pulse_in_ffmpeg_gets_dials_own_volume_too(monkeypatch):
+    """Chromebook parity: `-f pulse default` takes the same live gain, and
+    the system volume (pactl) is not touched."""
+    import subprocess as sp
+    monkeypatch.setattr(output_mod.sys, "platform", "linux")
+    devices = (" D. = Demuxing supported\n .E = Muxing supported\n --\n"
+               "  E alsa            ALSA audio output\n  E pulse           Pulse audio output\n")
+    monkeypatch.setattr(output_mod.subprocess, "run",
+                        lambda *a, **k: sp.CompletedProcess(a, 0, stdout=devices, stderr=""))
+    spawned, procs = [], []
+    calls = []
+
+    def spawn(argv, log):
+        spawned.append(argv)
+        procs.append(PipeProc())
+        return procs[-1]
+    out = LocalOutput(spawn=spawn, ffmpeg="/usr/bin/ffmpeg", pactl=lambda *a: calls.append(a))
+    assert out.sink == "pulse"
+    out.tune(STATIONS["kexp"])
+    argv = spawned[0]
+    assert argv[argv.index("-f") + 1] == "pulse" and argv[-1] == "default"
+    out.set_volume(50)
+    assert procs[0].written == ["cvolume@v -1 volume 0.2500\n"] and calls == []
+    out.close()
+
+
+def test_linux_without_pulse_in_ffmpeg_falls_back_to_ffplay_and_the_sink_volume(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(output_mod.sys, "platform", "linux")
+    monkeypatch.setattr(output_mod.subprocess, "run",
+                        lambda *a, **k: sp.CompletedProcess(a, 0, stdout="  E alsa  ALSA\n", stderr=""))
+    out = LocalOutput(ffmpeg="/usr/bin/ffmpeg", ffplay="/usr/bin/ffplay", pactl=lambda *a: "")
+    assert out.sink == "ffplay" and out.argv(output_mod.Media.of(STATIONS["kexp"]))[0] == "/usr/bin/ffplay"

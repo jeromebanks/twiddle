@@ -765,7 +765,9 @@ class DialApp(App):
         if msg:
             t.append("\n")
             t.append(msg, style=style or "italic")
-        self.query_one("#nowbar", Static).update(t)
+        # The base screen, not `self.screen`: the visualizer sits above it and
+        # still nudges volume, which redraws this bar.
+        self.screen_stack[0].query_one("#nowbar", Static).update(t)
 
     @work(thread=True, exclusive=True, group="output-state")
     def poll_output(self) -> None:
@@ -1086,7 +1088,13 @@ class DialApp(App):
 
     def action_visualize(self) -> None:
         from ..viz.screen import VizScreen     # numpy: only when asked for
-        self.push_screen(VizScreen(self.viz_source, **self.viz_options))
+        from ..viz.screen import VolumeControls
+        controls = VolumeControls(
+            nudge=self.action_volume, mute=self.action_mute,
+            level=lambda: (" volume: not known yet " if self.volume is None
+                           else f" ✕ muted ({self.volume}) " if self.muted
+                           else f" ♪ volume {self.volume} "))
+        self.push_screen(VizScreen(self.viz_source, controls=controls, **self.viz_options))
 
     def on_unmount(self) -> None:
         self.feed.close()
