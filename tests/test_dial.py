@@ -273,35 +273,95 @@ def test_stop_refuses_to_silence_the_relay(monkeypatch):
     assert g.stopped == 0
 
 
-def test_local_output_plays_with_ffplay_and_uses_the_macs_volume(tmp_path):
-    spawned, scripts = [], []
+class PipeProc:
+    """A process with a stdin to listen on, as `_spawn` now gives."""
+    def __init__(self):
+        self.written = []
+        self.stdin = self
+        self.done = None
 
-    class Proc:
-        def poll(self):
-            return None
+    def write(self, data):
+        self.written.append(data.decode())
 
-        def terminate(self):
-            spawned.append("killed")
+    def flush(self):
+        pass
 
-        def wait(self, timeout=None):
-            return 0
+    def poll(self):
+        return self.done
 
-    def osa(script):
-        scripts.append(script)
-        return {"output volume of (get volume settings)": "40",
-                "output muted of (get volume settings)": "false"}.get(script, "")
-    out = LocalOutput(spawn=lambda argv, log: spawned.append(argv) or Proc(),
-                      osascript=osa, ffplay="/bin/ffplay")
+    def terminate(self):
+        self.done = 0
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def test_local_output_plays_with_ffmpeg_and_keeps_its_own_volume():
+    """Issue #1: volume and mute are dial's own, never the Mac's. Nothing
+    here may reach osascript, and the change reaches the running process
+    without a restart."""
+    spawned, procs = [], []
+
+    def spawn(argv, log):
+        spawned.append(argv)
+        procs.append(PipeProc())
+        return procs[-1]
+    out = LocalOutput(spawn=spawn, pactl=None, ffmpeg="/bin/ffmpeg")
     out.tune(STATIONS["kexp"])
-    assert spawned[0][0] == "/bin/ffplay" and spawned[0][-1] == STATIONS["kexp"].url
-    assert out.state() == OutputState(tuned="kexp", playing=True, volume=40, muted=False,
+    argv = spawned[0]
+    assert argv[0] == "/bin/ffmpeg" and STATIONS["kexp"].url in argv
+    assert "-nostdin" not in argv
+    assert argv[argv.index("-af") + 1] == "volume@v=1.0000"        # unity, as before
+    assert out.state() == OutputState(tuned="kexp", playing=True, volume=100, muted=False,
                                       uri=bare(STATIONS["kexp"].url))
-    out.set_volume(55)
+
+    assert out.set_volume(50) == 50
+    assert procs[0].written == ["cvolume@v -1 volume 0.2500\n"]      # squared, live
     out.set_mute(True)
-    assert "set volume output volume 55" in scripts
-    assert "set volume output muted true" in scripts
+    assert procs[0].written[-1] == "cvolume@v -1 volume 0.0000\n"
+    assert out.state().volume == 50 and out.state().muted      # unmute keeps the level
+    out.set_mute(False)
+    assert procs[0].written[-1] == "cvolume@v -1 volume 0.2500\n"
+
+    out.set_volume(140)                                          # never a boost
+    assert out.state().volume == 100
+    assert procs[0].written[-1] == "cvolume@v -1 volume 1.0000\n"
+
+    out.set_volume(30)
+    out.tune(STATIONS["kalx"])                                   # the next station keeps it
+    assert spawned[1][spawned[1].index("-af") + 1] == "volume@v=0.0900"
     out.close()
-    assert "killed" in spawned
+
+
+def test_volume_before_anything_plays_is_kept_for_the_first_station():
+    spawned = []
+    out = LocalOutput(spawn=lambda argv, log: spawned.append(argv) or PipeProc(),
+                      pactl=None, ffmpeg="/bin/ffmpeg")
+    out.set_volume(20)
+    out.set_mute(True)
+    out.tune(STATIONS["kexp"])
+    assert spawned[0][spawned[0].index("-af") + 1] == "volume@v=0.0000"
+    out.close()
+
+
+def test_a_process_that_just_died_does_not_break_the_volume_key():
+    proc = PipeProc()
+
+    def broken(data):
+        raise BrokenPipeError
+    proc.write = broken
+    out = LocalOutput(spawn=lambda argv, log: proc, pactl=None, ffmpeg="/bin/ffmpeg")
+    out.tune(STATIONS["kexp"])
+    assert out.set_volume(10) == 10 and out.state().volume == 10
+    out.close()
+
+
+def test_dry_run_volume_writes_nothing():
+    proc = PipeProc()
+    out = LocalOutput(dry_run=True, spawn=lambda argv, log: proc, pactl=None,
+                      ffmpeg="/bin/ffmpeg")
+    out.set_volume(10)
+    assert proc.written == []
 
 
 def test_this_computer_on_linux_uses_pactl_for_volume_and_mute():
@@ -358,7 +418,7 @@ def test_local_play_url_exits_when_the_track_ends():
         def wait(self, timeout=None):
             return 0
     out = LocalOutput(spawn=lambda argv, log: spawned.append(argv) or Proc(),
-                      osascript=lambda s: "", ffplay="/bin/ffplay")
+                      pactl=lambda *a: "", ffplay="/bin/ffplay")     # the Linux path
     out.play_url("https://t4.bcbits.com/stream/x", "a track")
     assert "-autoexit" in spawned[0]
     out.tune(STATIONS["kexp"])
@@ -512,7 +572,7 @@ def test_enter_tunes_and_relay_needs_a_second_press():
     run(go())
 
 
-def test_a_burst_of_volume_keys_is_one_write():
+def test_a_burst_of_volume_keys_is_a_leading_write_and_a_trailing_one():
     out = FakeOutput(tuned="kexp")
 
     async def go():
@@ -526,7 +586,8 @@ def test_a_burst_of_volume_keys_is_one_write():
             await asyncio.sleep(0.6)
             await app.workers.wait_for_complete()
             await pilot.pause()
-            assert out.volumes == [40]
+            assert out.volumes[0] == 32 and out.volumes[-1] == 40   # not one per press
+            assert len(out.volumes) == 2
             await pilot.press("m")
             await app.workers.wait_for_complete()
             assert out.mutes == [True] and app.muted
@@ -550,7 +611,7 @@ def test_clicking_the_gauge_sets_volume_and_the_icon_mutes():
             assert app.volume == 0
             await asyncio.sleep(0.6)
             await app.workers.wait_for_complete()
-            assert out.volumes == [0]                           # one settled write
+            assert out.volumes[-1] == 0 and len(out.volumes) == 2   # first click, then the last
             await pilot.click("#nowbar", offset=(icon, 0))
             await app.workers.wait_for_complete()
             assert out.mutes == [True] and app.muted
@@ -1220,4 +1281,50 @@ def test_ctrl_w_brings_the_splash_back_and_any_key_leaves_it():
             await pilot.pause(0.1)
             assert not isinstance(app.screen, SplashScreen)
             assert out.tuned_to == [] and app.is_running
+    run(go())
+
+
+def test_a_held_volume_key_is_applied_as_it_goes_not_when_released():
+    """Issue #1, point 1: the bar ran ahead of the sound because every press
+    reset a 0.35s timer. The first press is written at once, a held key
+    is written every interval, and the last value always lands."""
+    out = FakeOutput()
+    out.volume_interval_s = 0.05
+
+    async def go():
+        app = make_app(out)
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            assert app.volume == 30
+            await pilot.press("minus")
+            await pilot.pause()
+            assert out.volumes == [28]                      # no waiting for a pause
+            for _ in range(10):                             # a held key
+                await pilot.press("minus")
+                await asyncio.sleep(0.02)
+            await asyncio.sleep(0.3)
+            await pilot.pause()
+            assert len(out.volumes) > 2                     # applied during the hold
+            assert out.volumes[-1] == app.volume == 8       # and the last one lands
+            assert not app._vol_dirty
+    run(go())
+
+
+def test_the_bar_is_not_snapped_back_by_a_poll_mid_hold():
+    out = FakeOutput()
+    out.volume_interval_s = 0.4
+
+    async def go():
+        app = make_app(out)
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("minus")
+            await pilot.press("minus")                      # second is pending: bar is ahead
+            assert app._vol_dirty and app.volume == 26
+            app._set_output_state(out, OutputState(tuned="relay", playing=True,
+                                                   volume=28, muted=False))
+            assert app.volume == 26                         # a stale read didn't win
+            await asyncio.sleep(0.7)
+            await pilot.pause()
+            assert out.volumes[-1] == 26 and not app._vol_dirty
     run(go())

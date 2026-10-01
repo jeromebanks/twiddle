@@ -89,7 +89,7 @@ def test_plays_to_the_headphones_index_without_touching_the_macs_output():
     assert argv[argv.index("-audio_device_index") + 1] == "3"
     assert STATIONS["kexp"].url in argv
     assert out.state() == OutputState(tuned="kexp", playing=True,
-                                      uri=bare(STATIONS["kexp"].url))
+                                      volume=100, uri=bare(STATIONS["kexp"].url))
     out.stop()
     assert not out.state().playing
 
@@ -117,11 +117,35 @@ def test_blueutil_connects_then_it_plays():
     assert spawned and "3" in spawned[0]
 
 
-def test_no_volume_control_says_so():
-    out = BluetoothOutput("Bose QC45", run=fake_run(), ffmpeg="/bin/ffmpeg")
-    with pytest.raises(PlaybackError):
-        out.set_volume(40)
-    assert out.state().volume is None
+def test_bluetooth_has_its_own_live_volume_and_mute():
+    """Issue #1 asked for the fix on every sink, not only the Mac's speakers."""
+    class Pipe(Proc):
+        def __init__(self):
+            super().__init__()
+            self.stdin = self
+            self.written = []
+
+        def write(self, data):
+            self.written.append(data.decode())
+
+        def flush(self):
+            pass
+    spawned, procs = [], []
+
+    def spawn(argv, log):
+        spawned.append(argv)
+        procs.append(Pipe())
+        return procs[-1]
+    out = BluetoothOutput("Bose QC45", run=fake_run(), spawn=spawn, ffmpeg="/bin/ffmpeg")
+    out.set_volume(40)                                  # before it plays: kept
+    out.play(Media.of(STATIONS["kexp"]))
+    assert "-nostdin" not in spawned[0]
+    assert spawned[0][spawned[0].index("-af") + 1] == "volume@v=0.1600"
+    out.set_volume(100)
+    out.set_mute(True)
+    assert procs[0].written == ["cvolume@v -1 volume 1.0000\n",
+                                "cvolume@v -1 volume 0.0000\n"]
+    assert out.state().volume == 100 and out.state().muted
 
 
 def test_bluetooth_shows_up_in_the_picker_with_its_address():

@@ -295,7 +295,10 @@ uv run twiddle dial --no-splash     # skip the opening card
   sits in the header. On a Sonos room it is the speaker's own timer, so it
   fires with dial closed; on This Mac, dial holds it.
 - **Output.** `d` picks the output: any Sonos room, or **This Mac**. On the
-  Mac the stream plays through `ffplay`, and volume is the Mac's own.
+  Mac the stream plays through `ffmpeg` (`audiotoolbox`), and so does a
+  Bluetooth device. Volume and mute there are dial's own, applied live to the
+  stream: the Mac's system volume and its other apps are untouched. (Linux still
+  uses `ffplay` and the system sink's volume.)
   **The station moves with you**: it starts on the new output, then stops on
   the old one -- so `d` writes. Only a station dial can see is moved, and an
   output is stopped only while it still plays what dial put there: a room on

@@ -135,6 +135,9 @@ class BaseOutput:
     id = ""
     label = ""
     dry_run = False
+    # How often a held volume key may reach `set_volume`: a Sonos write is a
+    # journalled SOAP call, so it is paced; a pipe write is free.
+    volume_interval_s = 0.3
 
     def tune(self, station: Station, *, confirmed: bool = False) -> str:
         return self.play(Media.of(station), confirmed=confirmed)
@@ -367,23 +370,36 @@ def _pactl(*args: str) -> str:
 
 
 def _spawn(argv: list[str], log: Path) -> subprocess.Popen:
-    # A log file, never the terminal: anything ffplay prints would draw over the TUI.
+    # A log file, never the terminal: anything ffmpeg prints would draw over the TUI.
+    # stdin is a pipe: it is how `ProcessOutput.set_volume` reaches the running process.
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "ab") as out:
-        return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out,
+        return subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=out,
                                 stderr=subprocess.STDOUT)
 
 
 class ProcessOutput(BaseOutput):
     """An output that is a local process fed the stream's URL.
 
-    Subclasses give `argv` (and, if they have them, volume and mute). The
-    process is ours: it stops when the app quits. `ffplay` to this Mac is
-    the one that exists; `ffmpeg -f audiotoolbox -audio_device_index N`
-    (a Bluetooth speaker) or `ffmpeg -f mp3 tcp://host:port` (a socket)
-    would each be another `argv`.
+    Subclasses give `argv`. The process is ours: it stops when the app quits.
+    `ffmpeg -f audiotoolbox` is the one for this Mac, with
+    `-audio_device_index N` for a Bluetooth speaker; `ffmpeg -f mp3
+    tcp://host:port` (a socket) would be another `argv`.
+
+    ## Volume and mute are twiddle's own
+
+    Not the system's: turning dial down must not turn down the Mac's other
+    audio, and a Bluetooth device has no system volume to reach. `argv` is
+    built with `gain_args()`, an `ffmpeg` `volume@v` filter, and `set_volume`
+    changes it *live* by writing ffmpeg's interactive command (`c`, then
+    `volume@v -1 volume G`) to its stdin, so there is no restart and no gap.
+    The level is kept here, so every respawn (next station, `d`, a Bluetooth
+    reconnect) starts at it. 100 is unity: it never boosts. The curve is
+    squared, since loudness is not linear in amplitude. ffplay cannot be
+    commanded this way, which is why nothing here uses it.
     """
     log_name = "output.log"
+    volume_interval_s = 0.03
 
     def __init__(self, *, dry_run: bool = False, spawn=_spawn):
         self.dry_run = dry_run
@@ -393,9 +409,42 @@ class ProcessOutput(BaseOutput):
         self._lock = threading.Lock()
         self._sleep: threading.Timer | None = None
         self._sleep_at: float | None = None      # monotonic deadline
+        self._vol, self._muted = 100, False
 
     def argv(self, media: Media) -> list[str]:
         raise NotImplementedError
+
+    def _gain(self) -> float:
+        return 0.0 if self._muted else (self._vol / 100) ** 2
+
+    def gain_args(self) -> list[str]:
+        """The filter `set_volume` later retunes; put it in every `argv`."""
+        return ["-af", f"volume@v={self._gain():.4f}"]
+
+    def _push_gain(self) -> None:
+        """Tell the running process. Nothing running is fine: the level is
+        kept and the next `argv` starts at it."""
+        with self._lock:
+            stdin = getattr(self._proc, "stdin", None) if self._alive() else None
+            if stdin is None:
+                return
+            try:
+                # One `c`, one line: ffmpeg reads a line after the key.
+                stdin.write(f"cvolume@v -1 volume {self._gain():.4f}\n".encode())
+                stdin.flush()
+            except (OSError, ValueError):       # it just exited
+                pass
+
+    def set_volume(self, volume: int) -> int:
+        self._vol = _clamp(volume)
+        if not self.dry_run:
+            self._push_gain()
+        return self._vol
+
+    def set_mute(self, muted: bool) -> None:
+        self._muted = bool(muted)
+        if not self.dry_run:
+            self._push_gain()
 
     def unavailable(self) -> PlaybackError | None:
         """Why this output can't play at all (a missing binary), or None."""
@@ -409,7 +458,7 @@ class ProcessOutput(BaseOutput):
         return self._proc is not None and self._proc.poll() is None
 
     def _volume(self) -> tuple[int | None, bool]:
-        return None, False
+        return self._vol, self._muted
 
     def state(self) -> OutputState:
         vol, muted = self._volume()
@@ -472,63 +521,75 @@ class ProcessOutput(BaseOutput):
 
 
 class LocalOutput(ProcessOutput):
-    """`ffplay` for the stream; the Mac's own output volume for volume and mute.
+    """This computer's speakers. On a Mac that is `ffmpeg -f audiotoolbox` to
+    the default output, with twiddle's own volume and mute (`ProcessOutput`).
 
     Nothing here touches a speaker or Spotify. The stream stops when the app
     quits, the same as `scene`'s "This Mac".
+
+    Off macOS (a Chromebook's Linux container) it is still `ffplay` and the
+    default PulseAudio/PipeWire sink's volume: not yet moved to ffmpeg,
+    because `-f pulse` is untested there. `pactl` selects that path.
     """
     id = MAC
     label = MAC_LABEL
     log_name = "ffplay.log"
 
-    def __init__(self, *, dry_run: bool = False, spawn=_spawn, osascript=None, pactl=None,
-                 ffplay: str | None = None):
+    def __init__(self, *, dry_run: bool = False, spawn=_spawn, pactl=None,
+                 ffplay: str | None = None, ffmpeg: str | None = None):
         super().__init__(dry_run=dry_run, spawn=spawn)
-        # The system volume: AppleScript on macOS, `pactl` anywhere else.
-        if osascript is None and pactl is None:
-            osascript, pactl = (_osascript, None) if sys.platform == "darwin" else (None, _pactl)
-        self._osa, self._pactl = osascript, pactl
+        if pactl is None and sys.platform != "darwin":
+            pactl = _pactl
+        self._pactl = pactl
         self._ffplay = ffplay or shutil.which("ffplay")
+        self._ffmpeg = ffmpeg or shutil.which("ffmpeg")
+        if self._pactl is None:
+            self.log_name = "ffmpeg.log"
+            self.volume_interval_s = ProcessOutput.volume_interval_s
+        else:
+            self.volume_interval_s = 0.3    # a subprocess per write
 
     def unavailable(self) -> PlaybackError | None:
         hint = "brew install ffmpeg" if here.KIND == "Mac" else "sudo apt install ffmpeg"
-        return None if self._ffplay else PlaybackError("ffplay isn't installed", hint)
+        have = self._ffplay if self._pactl is not None else self._ffmpeg
+        name = "ffplay" if self._pactl is not None else "ffmpeg"
+        return None if have else PlaybackError(f"{name} isn't installed", hint)
 
     def argv(self, media: Media) -> list[str]:
+        if self._pactl is None:
+            # ffmpeg ends at the end of a track by itself; a station never ends.
+            return [self._ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostats",
+                    "-i", media.url, "-vn", *self.gain_args(), "-f", "audiotoolbox", "-"]
         # A track ends, unlike a station: -autoexit, or ffplay would sit
         # there silent and look alive. Stations keep their old flags.
         flags = ["-nodisp"] + (["-autoexit"] if media.station is None else [])
         return [self._ffplay, *flags, "-loglevel", "warning", media.url]
 
     def _volume(self) -> tuple[int | None, bool]:
+        if self._pactl is None:
+            return super()._volume()
         try:
-            if self._pactl is not None:
-                # "Volume: front-left: 65536 / 100% / 0.00 dB, ..." -- the first channel's %.
-                m = re.search(r"(\d+)%", self._pactl("get-sink-volume", "@DEFAULT_SINK@"))
-                vol = int(m.group(1)) if m else -1
-                muted = self._pactl("get-sink-mute", "@DEFAULT_SINK@").endswith("yes")
-            else:
-                vol = int(self._osa("output volume of (get volume settings)") or -1)
-                muted = self._osa("output muted of (get volume settings)") == "true"
+            # "Volume: front-left: 65536 / 100% / 0.00 dB, ..." -- the first channel's %.
+            m = re.search(r"(\d+)%", self._pactl("get-sink-volume", "@DEFAULT_SINK@"))
+            vol = int(m.group(1)) if m else -1
+            muted = self._pactl("get-sink-mute", "@DEFAULT_SINK@").endswith("yes")
         except (ValueError, OSError, subprocess.SubprocessError):
             vol, muted = -1, False
         return (vol if vol >= 0 else None), muted
 
     def set_volume(self, volume: int) -> int:
+        if self._pactl is None:
+            return super().set_volume(volume)
         volume = _clamp(volume)
         if not self.dry_run:
-            if self._pactl is not None:
-                self._pactl("set-sink-volume", "@DEFAULT_SINK@", f"{volume}%")
-            else:
-                self._osa(f"set volume output volume {volume}")
+            self._pactl("set-sink-volume", "@DEFAULT_SINK@", f"{volume}%")
         return volume
 
     def set_mute(self, muted: bool) -> None:
+        if self._pactl is None:
+            return super().set_mute(muted)
         if not self.dry_run:
-            if self._pactl is not None:
-                self._pactl("set-sink-mute", "@DEFAULT_SINK@", "1" if muted else "0")
-            else:
-                self._osa(f"set volume output muted {'true' if muted else 'false'}")
+            self._pactl("set-sink-mute", "@DEFAULT_SINK@", "1" if muted else "0")
 
 
 # ---- choosing one --------------------------------------------------------------

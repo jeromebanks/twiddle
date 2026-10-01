@@ -42,7 +42,7 @@ from .enrich import ArtistCard, Enricher, query_of
 from .feed import StationFeed, StationState
 
 CONFIRM_WINDOW_S = 20
-VOLUME_SETTLE_S = 0.35      # coalesce a held key into one journalled write
+VOLUME_SETTLE_S = 0.35      # an output with no `volume_interval_s` of its own
 SLEEP_SETTLE_S = 1.2        # z z z to reach 45 min is one write, not three
 SLEEP_PRESETS_MIN = (15, 30, 45, 60, 90, 120)
 STATE_POLL_S = 12
@@ -266,6 +266,7 @@ class DialApp(App):
         self.muted = False
         self._vol_timer = None
         self._vol_dirty = False
+        self._vol_pushed_at = float("-inf")
         self._sleep_at: float | None = None      # monotonic time the timer fires
         self._sleep_pending: int | None = None   # minutes chosen, not yet sent (0 = off)
         self._sleep_timer = None
@@ -873,19 +874,28 @@ class DialApp(App):
         self.action_set_volume(self.volume + delta)
 
     def action_set_volume(self, volume: int) -> None:
-        """Keys and clicks on the gauge both land here; the settle timer
-        turns a burst of either into one journalled write."""
+        """Keys and clicks on the gauge both land here. The first press is
+        written at once; a held key is then written every
+        `volume_interval_s` of the output (a journalled Sonos write is paced,
+        a process's is free) and once more when it stops, so the sound follows
+        the bar instead of waiting for the key to be let go."""
         if self.volume is None:
             return
         self.volume = max(0, min(100, volume))
         self._vol_dirty = True
         self._render_nowbar()
+        gap = getattr(self.output, "volume_interval_s", VOLUME_SETTLE_S)
         if self._vol_timer is not None:
-            self._vol_timer.stop()
-        self._vol_timer = self.set_timer(VOLUME_SETTLE_S, self._push_volume)
+            return                  # the trailing write will carry the latest
+        wait = self._vol_pushed_at + gap - time.monotonic()
+        if wait <= 0:
+            self._push_volume()
+        else:
+            self._vol_timer = self.set_timer(wait, self._push_volume)
 
     def _push_volume(self) -> None:
         self._vol_timer = None
+        self._vol_pushed_at = time.monotonic()
         self.push_volume(self.output, self.volume)
 
     @work(thread=True, exclusive=True, group="volume")
@@ -897,10 +907,12 @@ class DialApp(App):
         except Exception as exc:
             self.call_from_thread(self._error, spotify_ops.PlaybackError(
                 f"volume: {type(exc).__name__}: {exc}"))
-        self.call_from_thread(self._volume_landed)
+        self.call_from_thread(self._volume_landed, volume)
 
-    def _volume_landed(self) -> None:
-        if self._vol_timer is None:
+    def _volume_landed(self, volume: int) -> None:
+        """Only the latest write clears `_vol_dirty`: until then a state poll
+        must not snap the bar back to an older level."""
+        if self._vol_timer is None and volume == self.volume:
             self._vol_dirty = False
 
     def action_mute(self) -> None:
@@ -994,8 +1006,9 @@ class DialApp(App):
                 for oid, label in choices]
         k = here.KIND
         note = (f"A Sonos room plays the station itself (the {k} can sleep). "
-                f"This {k} plays it here with ffplay; volume there is the {k}'s. "
-                f"Bluetooth plays from this {k} to the headphones; use their buttons for volume. "
+                f"This {k} plays it here with ffmpeg; "
+                f"Bluetooth plays from this {k} to the headphones. Volume and mute on both "
+                "are dial's own: other apps' sound is left alone. "
                 "A station playing now moves to the new output and stops on the old.")
 
         def done(choice: str | None) -> None:

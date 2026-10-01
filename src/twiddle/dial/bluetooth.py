@@ -17,9 +17,10 @@ stable:
 
 If the device isn't connected, `blueutil --connect` (brew install blueutil)
 is tried when it's installed; otherwise the error says to connect it from
-Control Center. There is no volume control here: `audiotoolbox` has none,
-and per-device volume isn't reachable from `osascript`. The headphones'
-own buttons work (they set the device's volume over AVRCP).
+Control Center. Volume and mute are twiddle's own, a live `volume` filter on
+the stream (see `ProcessOutput`): `audiotoolbox` has no device volume and
+`osascript` can't reach one. The headphones' own buttons still work, and
+multiply with it (they set the device's volume over AVRCP).
 
 **Not yet tried with the Bose** -- only the `audiotoolbox` path itself, on
 the Mac's built-in speakers.
@@ -154,8 +155,9 @@ class BluetoothOutput(ProcessOutput):
         return super().play(media, confirmed=confirmed, source=source)
 
     def argv(self, media: Media) -> list[str]:
-        return [self._ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "warning",
-                "-i", media.url, "-vn", "-f", "audiotoolbox",
+        # stdin stays open: it is how set_volume reaches the running ffmpeg.
+        return [self._ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostats",
+                "-i", media.url, "-vn", *self.gain_args(), "-f", "audiotoolbox",
                 "-audio_device_index", str(self._index), "-"]
 
 

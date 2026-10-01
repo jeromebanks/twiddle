@@ -24,7 +24,7 @@ cd twiddle
 uv sync                 # fetches Python 3.12+ and the dependencies
 ```
 
-`librespot` is the Spotify player; `ffmpeg` provides `ffplay`, which plays
+`librespot` is the Spotify player; `ffmpeg` (and `ffplay`) plays
 radio and Bandcamp tracks on your Mac. Clone it wherever you like.
 
 ## 2. The short names
@@ -113,7 +113,7 @@ artist "street eaters"    # who is this band?
 |---|---|
 | `shows: command not found` | step 2, or open a new terminal |
 | `librespot not found` | `brew install librespot` |
-| `ffplay isn't installed` | `brew install ffmpeg` |
+| `ffmpeg isn't installed` (`ffplay` on Linux) | `brew install ffmpeg` |
 | "this Mac isn't signed in to Spotify as a speaker yet" | `uv run twiddle scene login` |
 | "the local Spotify player exited as it started" | read `~/.cache/twiddle/librespot-local/librespot.log`. It's usually a free (non-Premium) account, or a sign-in that needs redoing: `scene login --force` |
 | A band's badge says "Spotify: not signed in" | expected without steps 3–4; its Bandcamp tracks (listed first) still play |
