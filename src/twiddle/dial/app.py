@@ -270,6 +270,9 @@ class DialApp(App):
         self._vol_timer = None
         self._vol_dirty = False
         self._vol_pushed_at = float("-inf")
+        self._vol_busy = False          # a volume write is running
+        self._vol_again = False         # ...and a newer value is waiting behind it
+        self._out_gen = 0               # bumps when the output changes
         self._sleep_at: float | None = None      # monotonic time the timer fires
         self._sleep_pending: int | None = None   # minutes chosen, not yet sent (0 = off)
         self._sleep_timer = None
@@ -880,10 +883,11 @@ class DialApp(App):
 
     def action_set_volume(self, volume: int) -> None:
         """Keys and clicks on the gauge both land here. The first press is
-        written at once; a held key is then written every
-        `volume_interval_s` of the output (a journalled Sonos write is paced,
-        a process's is free) and once more when it stops, so the sound follows
-        the bar instead of waiting for the key to be let go."""
+        written at once; a held key is then written every `volume_interval_s`
+        of the output (a journalled Sonos write is paced, a process's is free)
+        and once more when it stops, so the sound follows the bar instead of
+        waiting for the key to be let go. Writes never overlap: one in flight,
+        and the latest value waits behind it."""
         if self.volume is None:
             return
         self.volume = max(0, min(100, volume))
@@ -900,11 +904,17 @@ class DialApp(App):
 
     def _push_volume(self) -> None:
         self._vol_timer = None
+        if self._vol_busy:
+            self._vol_again = True      # `_volume_landed` sends the latest
+            return
+        self._vol_busy = True
         self._vol_pushed_at = time.monotonic()
-        self.push_volume(self.output, self.volume)
+        self.push_volume(self.output, self.volume, self._out_gen)
 
-    @work(thread=True, exclusive=True, group="volume")
-    def push_volume(self, out, volume: int) -> None:
+    # Not `exclusive`: that cancels the task, not its thread, and a slow
+    # older write could land after a newer one. `_vol_busy` keeps one in flight.
+    @work(thread=True, group="volume")
+    def push_volume(self, out, volume: int, gen: int) -> None:
         try:
             out.set_volume(volume)
         except spotify_ops.PlaybackError as exc:
@@ -912,13 +922,30 @@ class DialApp(App):
         except Exception as exc:
             self.call_from_thread(self._error, spotify_ops.PlaybackError(
                 f"volume: {type(exc).__name__}: {exc}"))
-        self.call_from_thread(self._volume_landed, volume)
+        self.call_from_thread(self._volume_landed, volume, gen)
 
-    def _volume_landed(self, volume: int) -> None:
+    def _volume_landed(self, volume: int, gen: int) -> None:
         """Only the latest write clears `_vol_dirty`: until then a state poll
-        must not snap the bar back to an older level."""
+        must not snap the bar back to an older level. A write that was
+        started on an output we've since left says nothing about this one."""
+        if gen != self._out_gen:
+            return
+        self._vol_busy = False
+        if self._vol_again:
+            self._vol_again = False
+            if self._vol_timer is None and self.volume is not None:
+                self._push_volume()
+                return
         if self._vol_timer is None and volume == self.volume:
             self._vol_dirty = False
+
+    def _reset_volume_state(self) -> None:
+        """Leaving an output: nothing pending or in flight belongs to the next."""
+        self._out_gen += 1
+        if self._vol_timer is not None:
+            self._vol_timer.stop()
+        self._vol_timer = None
+        self._vol_busy = self._vol_again = self._vol_dirty = False
 
     def action_mute(self) -> None:
         self.muted = not self.muted
@@ -1029,6 +1056,7 @@ class DialApp(App):
             self.out_ready = False
             self.out_state = output_mod.OutputState()
             self.volume, self._pending = None, None
+            self._reset_volume_state()
             self._sleep_at, self._sleep_pending = None, None
             if self._sleep_timer is not None:
                 self._sleep_timer.stop()

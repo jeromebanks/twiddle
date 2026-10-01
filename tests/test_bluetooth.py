@@ -1,6 +1,7 @@
 """`dial`'s Bluetooth output: finding the headphones by name, connecting
 them, and the ffmpeg line that plays to them. No Bluetooth, no ffmpeg."""
 import json
+import time
 
 import pytest
 
@@ -137,12 +138,17 @@ def test_bluetooth_has_its_own_live_volume_and_mute():
         procs.append(Pipe())
         return procs[-1]
     out = BluetoothOutput("Bose QC45", run=fake_run(), spawn=spawn, ffmpeg="/bin/ffmpeg")
+    out.gain_pace_s = 0.01
     out.set_volume(40)                                  # before it plays: kept
     out.play(Media.of(STATIONS["kexp"]))
     assert "-nostdin" not in spawned[0]
     assert spawned[0][spawned[0].index("-af") + 1] == "volume@v=0.1600"
     out.set_volume(100)
+    time.sleep(0.1)
     out.set_mute(True)
+    deadline = time.monotonic() + 2
+    while len(procs[0].written) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
     assert procs[0].written == ["cvolume@v -1 volume 1.0000\n",
                                 "cvolume@v -1 volume 0.0000\n"]
     assert out.state().volume == 100 and out.state().muted

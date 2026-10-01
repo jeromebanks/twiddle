@@ -41,6 +41,7 @@ own: listeners falls to 0 (so `dropped_chunks` cannot climb).
 """
 from __future__ import annotations
 
+import functools
 import re
 import shutil
 import subprocess
@@ -399,6 +400,23 @@ def _spawn(argv: list[str], log: Path) -> subprocess.Popen:
                                 stderr=subprocess.STDOUT)
 
 
+@functools.lru_cache(maxsize=8)
+def _fast_commands(ffmpeg: str | None) -> bool:
+    """Does this ffmpeg take `-stats_period`? ffmpeg reads one interactive
+    command per wake of its main loop, which is every stats period (0.5s by
+    default): a held volume key would queue up stale levels. At 0.05s it
+    applies about one every 70ms."""
+    if not ffmpeg:
+        return False
+    try:
+        r = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "quiet", "-stats_period", "0.05",
+                            "-f", "lavfi", "-i", "anullsrc", "-t", "0.01", "-f", "null", "-"],
+                           capture_output=True, timeout=10, check=False)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 class ProcessOutput(BaseOutput):
     """An output that is a local process fed the stream's URL.
 
@@ -427,20 +445,39 @@ class ProcessOutput(BaseOutput):
         self._sleep: threading.Timer | None = None
         self._sleep_at: float | None = None      # monotonic deadline
         self.gain = LiveGain()
+        self.gain_pace_s: float | None = None     # set from ffmpeg's rate by gain_args
+        self._gain_wake = threading.Event()
+        self._gain_thread: threading.Thread | None = None
+        self._closed = False
 
     def argv(self, media: Media) -> list[str]:
         raise NotImplementedError
 
     def gain_args(self) -> list[str]:
         """The filter `set_volume` later retunes; put it in every `argv`."""
-        return self.gain.args()
+        fast = _fast_commands(getattr(self, "_ffmpeg", None))
+        if self.gain_pace_s is None:
+            self.gain_pace_s = 0.08 if fast else 0.55    # one command per ffmpeg wake
+        return (["-stats_period", "0.05"] if fast else []) + self.gain.args()
 
     def _push_gain(self) -> None:
-        # Under the lock: `play` swaps `_proc` from another thread. Nothing
-        # running is fine: the level is kept for the next `argv`.
-        with self._lock:
-            if self._alive():
-                self.gain.push(self._proc)
+        """Ask for the current level to reach the process. It is sent by one
+        thread, only the latest level, no faster than ffmpeg applies commands
+        (so a held key never queues stale ones, and a stalled pipe can block
+        only that thread -- never stop, respawn or close). Nothing running is
+        fine: the level is kept for the next `argv`."""
+        self._gain_wake.set()
+        if self._gain_thread is None or not self._gain_thread.is_alive():
+            self._gain_thread = threading.Thread(target=self._gain_loop, daemon=True)
+            self._gain_thread.start()
+
+    def _gain_loop(self) -> None:
+        while self._gain_wake.wait() and not self._closed:
+            self._gain_wake.clear()
+            proc = self._proc            # read once; a respawn gets the level via argv
+            if proc is not None and proc.poll() is None:
+                self.gain.push(proc)
+            time.sleep(self.gain_pace_s or 0.55)
 
     def set_volume(self, volume: int) -> int:
         self.gain.volume = _clamp(volume)
@@ -525,6 +562,8 @@ class ProcessOutput(BaseOutput):
     def close(self) -> None:
         self.set_sleep_timer(0)
         self.stop()
+        self._closed = True
+        self._gain_wake.set()           # let the sender thread end
 
 
 def _ffmpeg_sink(ffmpeg: str | None) -> str:
