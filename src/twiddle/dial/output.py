@@ -42,6 +42,8 @@ own: listeners falls to 0 (so `dropped_chunks` cannot climb).
 from __future__ import annotations
 
 import functools
+import itertools
+import os
 import re
 import shutil
 import subprocess
@@ -450,7 +452,7 @@ class ProcessOutput(BaseOutput):
         self._gain_thread: threading.Thread | None = None
         self._gain_start = threading.Lock()
         self._argv_gain: tuple[int, bool] | None = None
-        self._log_offset = 0
+        self._log_path: Path | None = None
         self._closed = False
 
     def argv(self, media: Media) -> list[str]:
@@ -461,8 +463,11 @@ class ProcessOutput(BaseOutput):
         fast = _fast_commands(getattr(self, "_ffmpeg", None))
         if self.gain_pace_s is None:
             self.gain_pace_s = 0.08 if fast else 0.55    # one command per ffmpeg wake
-        self._argv_gain = (self.gain.volume, self.gain.muted)
-        return (["-stats_period", "0.05"] if fast else []) + self.gain.args()
+        # One snapshot for both the filter and the later "did it change?"
+        # comparison: reading the live state twice could disagree.
+        snap = (self.gain.volume, self.gain.muted)
+        self._argv_gain = snap
+        return (["-stats_period", "0.05"] if fast else []) + LiveGain(*snap).args()
 
     def _push_gain(self) -> None:
         """Ask for the current level to reach the process. One sender thread
@@ -478,34 +483,37 @@ class ProcessOutput(BaseOutput):
                                                      name="gain-sender")
                 self._gain_thread.start()
 
-    def _replies(self, offset: int) -> int:
-        """Commands ffmpeg has answered since the log was `offset` bytes long:
-        it prints "Command reply" to its log for each one it applies."""
+    @staticmethod
+    def _replies(log: Path) -> int:
+        """Commands ffmpeg has answered, counted in its own log (one per
+        process, so nothing else's replies are counted): it prints "Command
+        reply" for each one it applies. -1: no readable log."""
         try:
-            with open(self.log, "rb") as f:
-                f.seek(offset)
-                return f.read().count(b"Command reply")
+            return log.read_bytes().count(b"Command reply")
         except OSError:
             return -1
 
     def _gain_loop(self) -> None:
         while self._gain_wake.wait() and not self._closed:
             self._gain_wake.clear()
-            proc, offset = self._proc, self._log_offset   # read once
+            proc, log = self._proc, self.log          # read once
             if proc is None or proc.poll() is not None:
                 continue                # a respawn gets the level via argv
-            before = self._replies(offset)
+            before = self._replies(log)
             if not self.gain.push(proc):
                 continue
-            # The ack. Without a readable log (a fake, an old ffmpeg) it
-            # degrades to a pause as long as ffmpeg's wake rate.
-            pace = self.gain_pace_s or 0.55
-            deadline = time.monotonic() + max(1.5, pace * 3)
             if before < 0:
-                time.sleep(pace)
+                # No log to read an ack from (a fake process in a test, a
+                # sink that doesn't log): the only explicit fallback is a
+                # pause, as long as ffmpeg's slowest observed wake.
+                time.sleep(self.gain_pace_s or 0.55)
                 continue
-            while (time.monotonic() < deadline and not self._closed
-                   and proc.poll() is None and self._replies(offset) <= before):
+            # The ack. One command stays outstanding until ffmpeg answers it
+            # -- however long that takes (it may be busy opening the input) --
+            # or the process is gone/replaced. Timing out and sending more is
+            # exactly what builds a backlog.
+            while (not self._closed and self._proc is proc and proc.poll() is None
+                   and self._replies(log) <= before):
                 time.sleep(0.01)
 
     def set_volume(self, volume: int) -> int:
@@ -525,7 +533,24 @@ class ProcessOutput(BaseOutput):
 
     @property
     def log(self) -> Path:
-        return dial_state.CACHE_DIR / self.log_name
+        return self._log_path or dial_state.CACHE_DIR / self.log_name
+
+    _log_seq = itertools.count(1)
+
+    def _new_log(self) -> Path:
+        """A log of this process's own: acks are read from it, so another
+        process (a second dial, the next respawn) must not write to it. The
+        newest few are kept for debugging."""
+        d = dial_state.CACHE_DIR
+        stem = self.log_name.removesuffix(".log")
+        path = d / f"{stem}.{os.getpid()}.{next(self._log_seq)}.log"
+        try:
+            old = sorted(d.glob(f"{stem}.*.log"), key=lambda p: p.stat().st_mtime)
+            for p in old[:-7]:
+                p.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return path
 
     def _alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -550,10 +575,7 @@ class ProcessOutput(BaseOutput):
             return f"[dry-run] would play {media.name} on {self.label}"
         with self._lock:
             self._kill()
-            try:
-                self._log_offset = self.log.stat().st_size
-            except OSError:
-                self._log_offset = 0
+            self._log_path = self._new_log()
             self._proc = self._spawn(self.argv(media), self.log)
             self._media = media
             changed = self._argv_gain != (self.gain.volume, self.gain.muted)

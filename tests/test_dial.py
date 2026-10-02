@@ -1648,3 +1648,54 @@ def test_returning_to_an_output_does_not_overlap_its_old_volume_write():
             assert out.landed == [28, 20]
             assert not app._vol_dirty
     run(go())
+
+
+def test_an_unanswered_command_is_never_followed_by_more():
+    """Codex round 3, finding 1: after a timeout the sender released more
+    commands and rebuilt the backlog. One stays outstanding until answered."""
+    proc = PipeProc()
+
+    def spawn(argv, log):
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.touch()                              # readable, but ffmpeg never replies
+        return proc
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg", spawn=spawn)
+    out.gain_pace_s = 0.01
+    out.tune(STATIONS["kexp"])
+    import time as _t
+    for v in (90, 80, 70, 60, 50):
+        out.set_volume(v)
+        _t.sleep(0.15)
+    out.set_mute(True)
+    _t.sleep(0.3)
+    assert len(proc.written) == 1                # still waiting for the first ack
+    with open(out.log, "ab") as f:               # now it answers
+        f.write(b"Command reply for stream -1: ret:0 res:\n")
+    assert until(lambda: len(proc.written) == 2 and proc.written[-1].endswith("0.0000\n"))
+    out.close()
+
+
+def test_each_process_has_its_own_log_so_replies_are_not_shared(tmp_path):
+    """Codex round 3, finding 3: one shared log let another process's reply
+    release this one's wait."""
+    paths = []
+    out_a = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg",
+                        spawn=lambda argv, log: paths.append(log) or PipeProc())
+    out_b = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg",
+                        spawn=lambda argv, log: paths.append(log) or PipeProc())
+    out_a.tune(STATIONS["kexp"])
+    out_b.tune(STATIONS["kexp"])
+    out_a.tune(STATIONS["kalx"])                 # a respawn
+    assert len(set(paths)) == 3
+    for o in (out_a, out_b):
+        o.close()
+
+
+def test_the_filter_and_the_changed_check_use_one_snapshot():
+    """Codex round 3, finding 2."""
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg", spawn=lambda a, l: PipeProc())
+    out.set_volume(40)
+    out.set_mute(True)
+    args = out.gain_args()
+    assert args[-1] == "volume@v=0.0000" and out._argv_gain == (40, True)
+    out.close()
