@@ -47,6 +47,7 @@ from . import venues as venues_mod
 from ..scenespec.band import BandProfile
 from .bands import BandcampEnricher, LookupEnricher, SpotifyEnricher, assess, genre_of, near
 from ..scenespec.model import Show
+from . import deadletters
 from .pacing import Backpressure, Progress
 from .sources import fetch_all
 
@@ -69,6 +70,7 @@ class Result:
     path: Path
     shows: int = 0
     bands: int = 0
+    dead_letters: dict = field(default_factory=dict)    # what this build added to / cleared from the queue
     enriched: int = 0           # bands looked up this run
     reused: int = 0             # bands whose last record was still good
     errors: list[str] = field(default_factory=list)
@@ -350,6 +352,15 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
     # Wikipedia can take seconds a venue when cold: after the listings are out.
     venue_records[:] = _venue_records(watched, prev, wiki)
 
+    if not dry_run:
+        # What an AI or a person resolved since last time: look those bands up again.
+        try:
+            for key in deadletters.apply_resolutions(path):
+                if key in bands:
+                    bands[key] = dict(bands[key], updated_at=None)
+        except Exception as exc:        # the queue is garnish: it must never fail a build
+            log(f"dead-letter queue: could not apply resolutions ({exc})")
+
     # 3. enrich the bands that matter now
     horizon = today + timedelta(days=days)
     wanted: dict[str, str] = {}
@@ -392,6 +403,15 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
     for n in skip:
         enricher_status[n] = "paused: " + reasons.get(n, "rate-limited")
     progress.phase("publishing")
+    if not dry_run:
+        try:
+            billed = {f"band:{k}" for k in bands} | {f"venue:{dataset.venue_id(s.venue)}" for s in shows}
+            result.dead_letters = deadletters.sync(
+                {**deadletters.band_letters(bands, shows), **deadletters.venue_letters(shows, watched)},
+                path, billed=billed)
+            log("dead letters: " + ", ".join(f"{n} {k}" for k, n in result.dead_letters.items() if n))
+        except Exception as exc:
+            log(f"dead-letter queue: not updated ({exc})")
     result.enrichers = enricher_status
     publish(complete=True)
     log(f"published {path}" if not dry_run else "dry run: nothing written")

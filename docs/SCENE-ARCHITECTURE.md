@@ -74,6 +74,8 @@ scenedata/         ONE PRODUCER: everything bespoke.
   venues.py          the stock watched venues (+ ~/.config/twiddle/scene.toml).
   venue_info.py      hand-kept address/site/description per venue; Wikipedia summary.
   cache.py           aliases and the producer's stores.
+  deadletters.py     the dead-letter queue: unfound/ambiguous bands and unwatched venues,
+                     with evidence, for an AI to resolve (dead-letters.json beside the dataset).
   pacing.py          Backpressure (wait out a stated rate limit once, else pause) and
                      Progress (ETA, the status file).
 

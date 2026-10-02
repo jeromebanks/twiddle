@@ -384,6 +384,38 @@ compiled only if this Mac is already signed in (`twiddle spotify auth`),
 otherwise the dataset says `spotify: skipped: not signed in` and those bands
 show as unlooked until a signed-in build.
 
+### Dead letters: what a build could not identify
+
+Most bands and venues resolve deterministically. The rest go to a queue,
+`dead-letters.json` next to the dataset, with *what was already tried*, so an
+AI (or you) starts from the evidence instead of repeating it:
+
+```bash
+uv run twiddle scene dlq                       # counts, then the busiest pending letters
+uv run twiddle scene dlq export --kind band    # JSON lines: name, reason, evidence, sample shows
+uv run twiddle scene dlq resolve "band:girl chow" --alias "Girl Chow" --by ai
+uv run twiddle scene dlq resolve "venue:ritz-san-jose" --resolution '{"address": "...", "url": "..."}'
+uv run twiddle scene dlq abandon "band:private event" --note "not a band"
+uv run twiddle scene dlq scan                  # re-derive from the dataset (a build does this too)
+```
+
+Reasons: `unfound` (MusicBrainz, Bandcamp and, if it ran, Spotify all empty),
+`ambiguous` (several same-named candidates, nothing to choose), and
+`unwatched_venue` (a room in the listings that is on no venue list, so it has
+no address, site or description). A band whose lookup *errored* or was
+rate-limited is not a dead letter; the next build retries it. Each band letter
+carries cheap deterministic clues (`several_names_joined`, `looks_like_a_night`,
+`unbalanced_parenthesis`, `show_words`), because much of the tail is not a band
+at all ("Private Event", "Bachata Nightz", "Astrozombies SF , Rusty Chains"
+unsplit).
+
+A letter stays `pending` until resolved; a later build marks it `resolved`
+(found) or `expired` (no longer billed), and never reopens one a person or an AI
+closed. What a build applies from a resolution: a band's `alias` (searched
+under that name from the next build, and the band is looked up again). A
+venue's resolution is stored and exported but **not yet put into the dataset**:
+that needs the client to tell watched rooms from merely known ones.
+
 ### Watching a build, and being polite
 
 ```bash

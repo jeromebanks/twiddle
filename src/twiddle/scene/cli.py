@@ -197,6 +197,61 @@ def cmd_status(args) -> int:
     return emit(args, st, buildstatus.render(st))
 
 
+def cmd_dlq(args) -> int:
+    """The dead-letter queue: bands and venues no build could identify, with what was tried.
+    Reads and writes only `dead-letters.json` next to the dataset; no network."""
+    # The queue is the producer's; the client only starts it, like `build`.
+    from ..scenedata import deadletters as dl
+    sub = getattr(args, "dlq_cmd", None) or "list"
+    try:
+        if sub in ("resolve", "abandon", "reopen"):
+            if sub == "resolve":
+                try:
+                    res = json.loads(args.resolution) if args.resolution else {}
+                except json.JSONDecodeError as exc:
+                    return fail(args, f"--resolution is not valid JSON ({exc})")
+                if args.alias:
+                    res["alias"] = args.alias
+                if not res:
+                    return fail(args, "nothing to record", "give --alias NAME or --resolution '{...}'")
+                l = dl.resolve(args.id, res, by=args.by)
+            elif sub == "abandon":
+                l = dl.abandon(args.id, args.note)
+            else:
+                l = dl.reopen(args.id)
+            return emit(args, {"id": args.id, "status": l["status"]}, f"{args.id}: {l['status']}")
+    except KeyError:
+        return fail(args, f"no dead letter {args.id!r}", "`twiddle scene dlq` lists them")
+    if sub == "scan":                   # re-derive the queue from the dataset: no network
+        snap, code = _read_dataset(args)
+        if snap is None:
+            return code
+        watched = venues_mod.from_rows(snap.venues)
+        billed = {f"band:{k}" for k in snap.bands} | \
+            {f"venue:{dataset.venue_id(sh.venue)}" for sh in snap.shows}
+        counts = dl.sync({**dl.band_letters(snap.bands, snap.shows),
+                          **dl.venue_letters(snap.shows, watched)}, billed=billed)
+        return emit(args, counts, "queue updated: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
+    doc = dl.load()
+    status = None if getattr(args, "all", False) else (getattr(args, "status", None) or dl.PENDING)
+    rows = dl.select(doc, kind=getattr(args, "kind", None), status=status,
+                     limit=getattr(args, "limit", 20))
+    if sub == "export":                 # one JSON object per line, for an AI or a script
+        for lid, l in rows:
+            print(json.dumps(dict(l, id=lid), ensure_ascii=False))
+        return 0
+    counts: dict[str, int] = {}
+    for l in doc["letters"].values():
+        k = f"{l['kind']}/{l['reason']}/{l['status']}"
+        counts[k] = counts.get(k, 0) + 1
+    lines = [f"{n:>5}  {k}" for k, n in sorted(counts.items())] or ["the queue is empty"]
+    lines.append("")
+    for lid, l in rows:
+        lines.append(f"{lid}  ({l['reason']}, {l.get('show_count', 0)} shows)  {l['name']}")
+    return emit(args, {"counts": counts, "letters": [dict(l, id=lid) for lid, l in rows]},
+                "\n".join(lines))
+
+
 def cmd_schedule(args) -> int:
     """Print the launchd agent that keeps the dataset fresh. Installs nothing."""
     import plistlib
@@ -259,6 +314,36 @@ def register(sub, parents=None):
                          help="how `scene build` is going: bands done, ETA, request rates "
                               "against their caps (read-only)")
     st.set_defaults(func=cmd_status)
+    dq = ssub.add_parser(**kw, name="dlq",
+                         help="bands and venues no build could identify, with what was tried: "
+                              "list, export for an AI, resolve, abandon (writes only the queue file)")
+    dq.set_defaults(func=cmd_dlq, dlq_cmd="list")
+    dsub = dq.add_subparsers(dest="dlq_cmd", metavar="<command>")
+    for name, hlp in (("list", "counts, then the busiest pending letters"),
+                      ("export", "pending letters as JSON lines (for an AI or a script)")):
+        y = dsub.add_parser(**kw, name=name, help=hlp)
+        y.set_defaults(func=cmd_dlq, dlq_cmd=name)
+        y.add_argument("--kind", choices=("band", "venue"), default=None)
+        y.add_argument("--status", default=None,
+                       help="pending (default), resolved, abandoned or expired")
+        y.add_argument("--all", action="store_true", help="every status")
+        y.add_argument("--limit", type=int, default=20 if name == "list" else None)
+    sn = dsub.add_parser(**kw, name="scan", help="re-derive the queue from the current dataset "
+                                                 "(a build does this too; no network)")
+    sn.set_defaults(func=cmd_dlq, dlq_cmd="scan")
+    rs = dsub.add_parser(**kw, name="resolve", help="record what a letter turned out to be")
+    rs.add_argument("id")
+    rs.add_argument("--alias", help="a band: the name to search for instead of the billing")
+    rs.add_argument("--resolution", help="any resolution as JSON, e.g. a venue's address/url/about")
+    rs.add_argument("--by", choices=("ai", "human"), default="human")
+    rs.set_defaults(func=cmd_dlq, dlq_cmd="resolve")
+    ab = dsub.add_parser(**kw, name="abandon", help="give up on a letter (a build never reopens it)")
+    ab.add_argument("id")
+    ab.add_argument("--note", default="")
+    ab.set_defaults(func=cmd_dlq, dlq_cmd="abandon")
+    ro = dsub.add_parser(**kw, name="reopen", help="make a resolved or abandoned letter pending again")
+    ro.add_argument("id")
+    ro.set_defaults(func=cmd_dlq, dlq_cmd="reopen")
     sc = ssub.add_parser(**kw, name="schedule",
                          help="print a launchd agent that runs `scene build` on a timer "
                               "(read-only; installs nothing)")
