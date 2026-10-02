@@ -28,6 +28,14 @@ def test_a_result_that_is_not_the_room_is_a_miss_never_a_guess():
     assert geocode.choose(ROOM, [result(lat="x")]) is None and geocode.choose(ROOM, []) is None
 
 
+def test_a_street_named_like_the_room_is_not_the_room():
+    # measured: "Ritz, San Jose" matched Ritz Court, a road in east San Jose
+    ritz = cluster({"Ritz, San Jose": 1})[0]
+    road = result(name="Ritz Court", city="San Jose", category="highway", addresstype="road")
+    assert geocode.choose(ritz, [road]) is None
+    assert geocode.choose(ritz, [road, result(name="The Ritz", city="San Jose", category="amenity")])["state"] == "CA"
+
+
 def test_the_query_names_the_room_stays_in_the_bay_area_and_asks_for_few():
     url = geocode.query_url(ROOM)
     assert "q=Hopmonk%2C+Novato%2C+California" in url and "bounded=1" in url and "limit=5" in url

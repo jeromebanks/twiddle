@@ -82,6 +82,8 @@ def _city_of(addr: dict) -> str:
 def choose(room: Room, results: list) -> dict | None:
     """The result that is this room, as the fields a `known_venues` row takes, or None."""
     for r in results or []:
+        if r.get("category") == "highway" or r.get("addresstype") == "road":
+            continue            # a street named like the room ("Ritz Court") is not the room
         addr = r.get("address") or {}
         name = r.get("name") or (r.get("display_name") or "").split(",")[0]
         city = _city_of(addr)
