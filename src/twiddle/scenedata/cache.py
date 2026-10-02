@@ -44,6 +44,17 @@ def alias(billed: str) -> str | None:
     return hit.get("alias", "")
 
 
+def pick(billed: str) -> str:
+    """The MusicBrainz id someone (or a rule) chose for this billing, else ""."""
+    return (_read("picks.json").get(norm(billed)) or {}).get("mbid", "")
+
+
+def save_pick(billed: str, mbid: str) -> None:
+    picks = _read("picks.json")
+    picks[norm(billed)] = {"mbid": mbid, "billed": billed, "at": time.time()}
+    _write("picks.json", picks)
+
+
 def save_alias(billed: str, name: str) -> None:
     aliases = _read("aliases.json")
     aliases[norm(billed)] = {"alias": name, "billed": billed, "at": time.time()}

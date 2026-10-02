@@ -230,6 +230,7 @@ def cmd_dlq(args) -> int:
         billed = dl.billed_ids(snap.bands, snap.shows, watched)
         counts = dl.sync({**dl.band_letters(snap.bands, snap.shows),
                           **dl.venue_letters(snap.shows, watched)}, billed=billed)
+        counts["settled_by_rule"] = dl.settle_ambiguous()
         return emit(args, counts, "queue updated: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
     doc = dl.load()
     status = None if getattr(args, "all", False) else (getattr(args, "status", None) or dl.PENDING)

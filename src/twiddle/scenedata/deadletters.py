@@ -28,7 +28,8 @@ re-checks pending letters: found now -> `resolved` (by `build`); no longer bille
 build. `resolution` is free-form; these keys are understood on the next build:
 
   band:   `{"alias": "Mindi Abair"}` -- search under this name from now on
-          (stored as the billing's alias, where a trimmed name would be).
+          (stored as the billing's alias, where a trimmed name would be);
+          `{"mbid": "..."}` -- the MusicBrainz artist to use among same-named ones.
   venue:  `{"name", "address", "url", "about", "wikipedia", "instagram", "icon"}`
           -- kept and exported; promoting an unwatched room into the dataset's
           venue table needs the client to tell watched from merely known rooms,
@@ -47,7 +48,7 @@ from ..lookup import norm
 from ..scenespec import dataset
 from ..scenespec import venue as venue_mod
 from . import cache, venue_names
-from .bands import SHOW_WORDS, non_band
+from .bands import SHOW_WORDS, near, non_band
 
 SCHEMA = "twiddle.scene.dead-letters"
 VERSION = 1
@@ -219,6 +220,28 @@ def sync(current: dict[str, dict], dataset_path: Path | None = None, *,
     return counts
 
 
+def settle_ambiguous(dataset_path: Path | None = None) -> int:
+    """Settle, by rule, the ambiguous bands where exactly one same-named candidate
+    is described as local ("pop duo from Oakland, CA", "Bay Area post-hardcore
+    band"): billed at a Bay Area room, that is the one. Resolved `by="rule"`, so a
+    person can still `reopen` it. Returns how many it settled."""
+    doc = load(dataset_path)
+    n = 0
+    for lid, l in doc["letters"].items():
+        if l["kind"] != "band" or l["reason"] != "ambiguous" or l["status"] != PENDING:
+            continue
+        local = [c for c in l["evidence"].get("lookup_candidates", [])
+                 if c.get("mbid") and near(c.get("disambiguation"))]
+        if len(local) == 1:
+            l.update(status=RESOLVED, resolved_by="rule", applied=False, attempts=l.get("attempts", 0) + 1,
+                     resolution={"mbid": local[0]["mbid"], "why": "the only candidate described as local: "
+                                 + str(local[0].get("disambiguation"))})
+            n += 1
+    if n:
+        save(doc, dataset_path)
+    return n
+
+
 def apply_resolutions(dataset_path: Path | None = None) -> list[str]:
     """Hand what an AI or a human resolved to the next build; returns the band keys
     it touched so the build can look those bands up again.
@@ -230,8 +253,11 @@ def apply_resolutions(dataset_path: Path | None = None) -> list[str]:
     for l in doc["letters"].values():
         res = l.get("resolution") or {}
         if l["kind"] == "band" and l["status"] == RESOLVED and l.get("resolved_by") != "build" \
-                and res.get("alias") and not l.get("applied"):
-            cache.save_alias(l["name"], str(res["alias"]))
+                and (res.get("alias") or res.get("mbid")) and not l.get("applied"):
+            if res.get("alias"):
+                cache.save_alias(l["name"], str(res["alias"]))
+            if res.get("mbid"):
+                cache.save_pick(l["name"], str(res["mbid"]))
             l["applied"] = True
             keys.append(dataset.band_id(l["name"]))
     if keys:

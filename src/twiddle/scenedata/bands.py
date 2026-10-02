@@ -242,7 +242,9 @@ class LookupEnricher:
         ok = self._bandcamp_ok() if self._bandcamp_ok else True
         identify = self._identify or (
             lambda name: lookup.identify(name, bandcamp_fallback=ok))
-        r = identify(p.band)
+        chosen = cache.pick(p.band)      # several same-named artists, and one was chosen
+        r = lookup.identify(p.band, mb_artist_id=chosen, bandcamp_fallback=ok) \
+            if chosen and self._identify is None else identify(p.band)
         if not r.artist and not r.candidates:
             r = self._trimmed(p, identify, record_miss=ok) or r
         p.info = r.artist

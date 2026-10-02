@@ -355,6 +355,7 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
     if not dry_run:
         # What an AI or a person resolved since last time: look those bands up again.
         try:
+            deadletters.settle_ambiguous(path)
             for key in deadletters.apply_resolutions(path):
                 if key in bands:
                     bands[key] = dict(bands[key], updated_at=None)

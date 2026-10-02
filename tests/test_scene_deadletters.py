@@ -228,3 +228,36 @@ def test_a_city_in_a_listing_is_read_through_typos_and_regions():
     assert parse("Hertz Hall, East Bay").city == "" and parse("Castro,").name == "Castro"
     assert parse("Some Bar, Oakland, CA").state == "CA"
     assert parse("Frost Amphitheater, Stanford Campus").city == "Stanford"
+
+
+def test_the_one_local_candidate_among_same_named_artists_is_chosen_by_rule(tmp_path):
+    from twiddle.scenedata import cache
+    path = tmp_path / "dataset.json"
+    cand = lambda mbid, d: {"name": "Abracadabra", "mbid": mbid, "disambiguation": d}
+    doc = dl.load(path)
+    for lid, name, cands in (
+            ("band:abracadabra", "Abracadabra", [cand("a", "Argentine band"), cand("b", "pop duo from Oakland, CA")]),
+            ("band:castle", "Castle", [cand("c", "Bay Area band"), cand("d", "metal from San Jose, California")]),
+            ("band:melt", "Melt", [cand("e", "Swedish band"), cand("f", "Japanese band")])):
+        doc["letters"][lid] = {"kind": "band", "name": name, "reason": "ambiguous", "status": "pending",
+                               "evidence": {"lookup_candidates": cands}, "show_count": 1}
+    dl.save(doc, path)
+    assert dl.settle_ambiguous(path) == 1
+    ls = dl.load(path)["letters"]
+    assert ls["band:abracadabra"]["resolution"]["mbid"] == "b" and ls["band:abracadabra"]["resolved_by"] == "rule"
+    assert ls["band:castle"]["status"] == "pending" and ls["band:melt"]["status"] == "pending"   # two local / none
+    assert dl.apply_resolutions(path) == ["abracadabra"] and cache.pick("Abracadabra") == "b"
+    assert dl.apply_resolutions(path) == []                                  # once
+
+
+def test_a_chosen_artist_is_what_the_lookup_asks_for(tmp_path, monkeypatch):
+    from twiddle import lookup
+    from twiddle.scenedata import cache
+    from twiddle.scenedata.bands import LookupEnricher
+    from twiddle.scenespec.band import BandProfile
+    cache.save_pick("Abracadabra", "mb-b")
+    seen = []
+    monkeypatch.setattr(lookup, "identify", lambda name, **kw: seen.append((name, kw.get("mb_artist_id")))
+                        or lookup.Result(None, []))
+    LookupEnricher().enrich(BandProfile(band="Abracadabra"))
+    assert seen[0] == ("Abracadabra", "mb-b")
