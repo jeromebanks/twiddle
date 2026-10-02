@@ -252,3 +252,33 @@ def test_share_text_is_a_message_a_person_can_read():
     # An unwatched room: the source's own spelling, which carries the city.
     assert "Greek Theater, UC Berkeley Campus" in Show(
         date(2026, 10, 3), "Greek Theater, UC Berkeley Campus", ["X"]).share_text()
+
+
+# ---- a bracket is a note, not a lineup ---------------------------------------
+
+
+def test_the_list_keeps_a_bracketed_lineup_with_its_band():
+    # measured: The List anchors each comma-separated name, even inside "( )",
+    # so Black Flag's members used to come out as three "bands" with stray brackets
+    from datetime import date
+    from twiddle.scenedata.sources import thelist
+    row = ('<B><A HREF="by-date.0.html">Oct 23</A></B> <A HREF="by-band.1">Black Flag (Greg Ginn, '
+           'Max Zanelly</A>, <A HREF="by-band.2">David Rodriquez</A>, '
+           '<A HREF="by-band.3">Bryce Weston)</A>, <A HREF="by-band.4">Opener</A> 21+ $20')
+    show = thelist.parse_row(row, "Felton Music Hall, Felton", date(2026, 10, 1))
+    assert show.bands == ["Black Flag", "Opener"]
+    assert any("Greg Ginn" in n and n.startswith("Black Flag") for n in show.notes)
+
+
+def test_an_unclosed_bracket_does_not_swallow_the_lineup():
+    from twiddle.scenedata.sources.base import join_open_parens, split_outside_parens
+    assert join_open_parens(["A (b", "C", "D"]) == ["A (b", "C", "D"]
+    assert split_outside_parens("A (x, y", r"\s*,\s*") == ["A (x", "y"]
+    assert split_outside_parens("Crash Out (a, b), Other", r"\s*,\s*") == ["Crash Out (a, b)", "Other"]
+
+
+def test_ticketweb_does_not_split_inside_a_bracket():
+    from twiddle.scenedata.sources import ticketweb
+    bands, notes = ticketweb._split("AFROBASHMENT(afrobeats, dancehall, hip-hop & more), DJ Foo")
+    assert bands == ["AFROBASHMENT", "DJ Foo"]
+    assert notes == ["AFROBASHMENT: afrobeats, dancehall, hip-hop & more"]

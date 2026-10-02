@@ -27,7 +27,7 @@ from datetime import date, datetime
 import requests
 
 from ...scenespec.model import Show
-from .base import SourceError
+from .base import SourceError, join_open_parens
 
 BASE = "http://www.foopee.com/punk/the-list/"
 MAX_PAGES = 20          # a runaway guard; 4 pages cover ~5 months today
@@ -80,8 +80,8 @@ def parse_row(row: str, venue: str, today: date, url: str = "") -> Show | None:
     # name here, or every lookup would search for "Totalna Tama (record release)".
     bands: list[str] = []
     notes: list[str] = []
-    for raw in _BAND.findall(body):
-        name = _text(raw)
+    for raw in join_open_parens([_text(r) for r in _BAND.findall(body)]):
+        name = raw
         for p in _PAREN.findall(name):
             notes.append(f"{_PAREN.sub('', name).strip()}: {p.strip('() ')}")
         name = re.sub(r"\s+", " ", _PAREN.sub(" ", name)).strip()
