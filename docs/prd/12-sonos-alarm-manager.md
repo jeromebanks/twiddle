@@ -226,7 +226,7 @@ Mockup (illustrative):
 None of the questions were answered, so the stated defaults stand:
 
 1. `twiddle alarm` is a command in this repo, like `dial` and `scene`.
-2. Mac-dependent sources (Bandcamp, alarm sounds) are in. They're labelled `⌁` and fall back to the chime. **This is still unverified:** before planning, check on the real Roam that the speaker falls back to its chime when a source is unreachable. That check writes to a speaker, so it needs the maintainer's go-ahead.
+2. Mac-dependent sources (Bandcamp, alarm sounds) are in. They're labelled `⌁` and fall back to the chime. **Verified on the real Roam on 2026-10-02** ([details](https://github.com/jeromebanks/twiddle/issues/12#issuecomment-5962458601)). With the source refused, the speaker switched to its chime (`x-rincon-buzzer:0`) within 3 seconds, and it was heard in the room. Not yet tested: a source host that doesn't exist at all (Mac fully off the network).
 3. Alarms use Sonos-native Spotify, not the relay.
 4. Sounds are a mix of generated tones and CC0 recordings, at least 4.
 5. Snooze is 10 minutes by default, changeable per press (5/10/15/30).
