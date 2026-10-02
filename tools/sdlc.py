@@ -461,6 +461,39 @@ def command_transition(args: argparse.Namespace, config: dict[str, Any]) -> int:
     return 0
 
 
+def prd_pr_errors(pr: dict[str, Any], default_branch: str) -> list[str]:
+    """Why a PRD pull request may not be merged by the SDLC (empty list = fine)."""
+    errs = []
+    if pr.get("state") != "OPEN":
+        errs.append(f"PR is {pr.get('state')}, not OPEN")
+    if pr.get("baseRefName") != default_branch:
+        errs.append(f"PR targets {pr.get('baseRefName')}, not {default_branch}")
+    paths = [f["path"] for f in pr.get("files", [])]
+    stray = [f for f in paths if not f.startswith("docs/prd/")]
+    if not paths or stray:
+        errs.append("a PRD PR may only change files under docs/prd/" + (f" (also changes: {', '.join(stray[:5])})" if stray else ""))
+    if pr.get("mergeable") != "MERGEABLE":
+        errs.append(f"PR is not mergeable yet ({pr.get('mergeable')})")
+    return errs
+
+
+def command_merge_prd(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Squash-merge the docs-only PR that carries an approved PRD."""
+    repo = repo_of(config)
+    st = bundle_state(fetch_bundle(args.number, config), config)
+    errs = [] if st["state"] == "approved" else [f"#{args.number} is {st['state']}, not approved"]
+    pr = gh_json(["pr", "view", str(args.pr), "--repo", repo, "--json", "state,mergeable,baseRefName,files"])
+    errs += prd_pr_errors(pr, config.get("default_branch", "main"))
+    if errs:
+        raise SdlcError("; ".join(errs))
+    if args.dry_run:
+        print(f"would squash-merge PR #{args.pr} (docs/prd only) for approved #{args.number}")
+        return 0
+    gh(["pr", "merge", str(args.pr), "--repo", repo, "--squash", "--delete-branch"])
+    print(f"merged PR #{args.pr}")
+    return 0
+
+
 def command_reconcile(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """A maintainer added `sdlc:approved` by hand: back it with an approval record."""
     bundle = load_bundle(args, config)
@@ -532,6 +565,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--from-file")
     p.set_defaults(fn=command_reconcile)
+
+    p = sub.add_parser("merge-prd", help="merge the docs-only PR carrying an approved PRD")
+    p.add_argument("number", type=int, help="the issue")
+    p.add_argument("pr", type=int)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=command_merge_prd)
 
     args = ap.parse_args(argv)
     try:

@@ -1,6 +1,7 @@
 {
   "schema": 1,
   "repository": "jeromebanks/twiddle",
+  "default_branch": "main",
   "max_rounds": 5,
   "confirm_before_posting": false,
   "agent_name": "twiddle triage",

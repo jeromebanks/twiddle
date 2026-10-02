@@ -197,3 +197,13 @@ def test_state_cli_from_file(tmp_path, capsys):
     f.write_text(json.dumps({"issue": issue([]), "comments": [], "trusted": [OWNER]}))
     assert sdlc.main(["state", "--from-file", str(f), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["action"] == "triage"
+
+
+def test_prd_pr_guard():
+    ok = {"state": "OPEN", "baseRefName": "main", "mergeable": "MERGEABLE", "files": [{"path": "docs/prd/12-x.md"}]}
+    assert sdlc.prd_pr_errors(ok, "main") == []
+    assert sdlc.prd_pr_errors({**ok, "files": ok["files"] + [{"path": "src/twiddle/cli.py"}]}, "main")
+    assert sdlc.prd_pr_errors({**ok, "files": []}, "main")
+    assert sdlc.prd_pr_errors({**ok, "baseRefName": "dev"}, "main")
+    assert sdlc.prd_pr_errors({**ok, "mergeable": "UNKNOWN"}, "main")
+    assert sdlc.prd_pr_errors({**ok, "state": "MERGED"}, "main")
