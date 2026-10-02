@@ -17,9 +17,10 @@ stable:
 
 If the device isn't connected, `blueutil --connect` (brew install blueutil)
 is tried when it's installed; otherwise the error says to connect it from
-Control Center. There is no volume control here: `audiotoolbox` has none,
-and per-device volume isn't reachable from `osascript`. The headphones'
-own buttons work (they set the device's volume over AVRCP).
+Control Center. Volume and mute are twiddle's own, a live `volume` filter on
+the stream (see `ProcessOutput`): `audiotoolbox` has no device volume and
+`osascript` can't reach one. The headphones' own buttons still work, and
+multiply with it (they set the device's volume over AVRCP).
 
 **Not yet tried with the Bose** -- only the `audiotoolbox` path itself, on
 the Mac's built-in speakers.
@@ -89,7 +90,8 @@ _DEVICE_LINE = re.compile(r"\]\s+\[(\d+)\]\s+(.*?), ")
 
 
 def coreaudio_devices(ffmpeg: str, run: Callable[[list[str]], str] = _run) -> dict[str, int]:
-    """CoreAudio device name (normalised) -> the index `audiotoolbox` wants."""
+    """CoreAudio device name (normalised) -> the index `audiotoolbox` wants, for
+    devices that can play (a headset's microphone entry is skipped)."""
     text = run([ffmpeg, "-hide_banner", "-f", "lavfi", "-i", "anullsrc", "-t", "0.01",
                 "-f", "audiotoolbox", "-list_devices", "true", "-"])
     found = {}
@@ -97,6 +99,11 @@ def coreaudio_devices(ffmpeg: str, run: Callable[[list[str]], str] = _run) -> di
         if "AudioToolbox" not in line:
             continue
         m = _DEVICE_LINE.search(line)
+        # A headset is listed twice, "<address>:input" (its microphone) then
+        # ":output". Only the output can be played to: AudioQueueStart fails
+        # on the microphone's index (-66637), and the first one seen was it.
+        if line.rstrip().endswith(":input"):
+            continue
         if m and m.group(2).strip() != "(null)":
             found.setdefault(norm(m.group(2)), int(m.group(1)))
     return found
@@ -117,7 +124,7 @@ class BluetoothOutput(ProcessOutput):
         self._run = run
         self._ffmpeg = ffmpeg or shutil.which("ffmpeg")
         self._blueutil = blueutil if blueutil is not None else shutil.which("blueutil")
-        self._sleep = sleep
+        self._nap = sleep       # not `_sleep`: ProcessOutput's sleep-timer thread
         self._index: int | None = None
 
     def unavailable(self) -> PlaybackError | None:
@@ -140,7 +147,7 @@ class BluetoothOutput(ProcessOutput):
         self._run([self._blueutil, "--connect", self.address.replace(":", "-")])
         deadline = time.monotonic() + CONNECT_WAIT_S
         while time.monotonic() < deadline:
-            self._sleep(1)
+            self._nap(1)
             if (index := self._find()) is not None:
                 return index
         raise PlaybackError(f"{self.name} didn't connect",
@@ -154,8 +161,9 @@ class BluetoothOutput(ProcessOutput):
         return super().play(media, confirmed=confirmed, source=source)
 
     def argv(self, media: Media) -> list[str]:
-        return [self._ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "warning",
-                "-i", media.url, "-vn", "-f", "audiotoolbox",
+        # stdin stays open: it is how set_volume reaches the running ffmpeg.
+        return [self._ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostats",
+                "-i", media.url, "-vn", *self.gain_args(), "-f", "audiotoolbox",
                 "-audio_device_index", str(self._index), "-"]
 
 

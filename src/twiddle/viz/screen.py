@@ -15,6 +15,7 @@ from __future__ import annotations
 import textwrap
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from rich.cells import cell_len
 from rich.segment import Segment
@@ -66,6 +67,16 @@ class VizCanvas(Widget):
         return Strip.blank(self.size.width)
 
 
+@dataclass
+class VolumeControls:
+    """What an app hands the visualizer so volume and mute work while it is
+    up (the screen is modal, so the app's own keys can't reach them).
+    `scene` has no volume of its own and passes none: the keys then do nothing."""
+    nudge: Callable[[int], None]        # +/- a step, as the app's own keys do
+    mute: Callable[[], None]
+    level: Callable[[], str]            # " ♪  40 " / " ✕ muted ", for the overlay
+
+
 class VizScreen(ModalScreen):
     """Modal so the app's own keys stop here: with only the picture showing,
     dial's enter / volume / R and scene's space / R would otherwise act on a
@@ -82,14 +93,21 @@ class VizScreen(ModalScreen):
         Binding("full_stop", "delay(1)", "Later"),
         Binding("comma", "delay(-1)", "Sooner"),
         Binding("i,question_mark", "overlay", "Info"),
+        Binding("plus,equals_sign", "volume(2)", "Vol+", show=False),
+        Binding("minus,underscore", "volume(-2)", "Vol−", show=False),
+        Binding("right_square_bracket", "volume(5)", show=False),
+        Binding("left_square_bracket", "volume(-5)", show=False),
+        Binding("m", "mute", "Mute", show=False),
     ]
 
     def __init__(self, source: Callable[[], TapSource], *,
                  tap_factory: Callable[[str], AudioTap] = AudioTap,
                  load_prefs: Callable[[], dict] = _load_prefs,
                  save_prefs: Callable[[dict], None] = _save_prefs,
-                 plugins=base.PLUGIN_DIR, fps: int = FPS):
+                 plugins=base.PLUGIN_DIR, fps: int = FPS,
+                 controls: VolumeControls | None = None):
         super().__init__()
+        self.controls = controls
         self.source_fn = source
         self.tap_factory = tap_factory
         self.save_prefs = save_prefs
@@ -220,7 +238,11 @@ class VizScreen(ModalScreen):
             lines.append(f" {self.src.label} ")
         if self.tap is not None:
             lines.append(f" the stream, not the speaker · picture delayed {self.delay:+.2f}s ")
-        lines.append(" ←/→ visualizer  c colours  ,/. delay  i info  v close ")
+        keys = " ←/→ visualizer  c colours  ,/. delay  i info  v close "
+        if self.controls is not None:
+            lines.append(self.controls.level())
+            keys = " ←/→ visualizer  c colours  ,/. delay  +/- volume  m mute  i info  v close "
+        lines.append(keys)
         if self.runner.error:
             lines.append(f" ⚠ {self.runner.error} ")
         lines += [f" ⚠ {w} " for w in self.warnings]
@@ -274,6 +296,16 @@ class VizScreen(ModalScreen):
         self.prefs["delay"] = delays
         self.save_prefs(self.prefs)
         self._show_overlay()
+
+    def action_volume(self, delta: int) -> None:
+        if self.controls is not None:
+            self.controls.nudge(delta)
+            self._show_overlay()
+
+    def action_mute(self) -> None:
+        if self.controls is not None:
+            self.controls.mute()
+            self._show_overlay()
 
     def action_overlay(self) -> None:
         self._pinned = not self._pinned

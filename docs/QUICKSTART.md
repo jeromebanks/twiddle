@@ -24,7 +24,7 @@ cd twiddle
 uv sync                 # fetches Python 3.12+ and the dependencies
 ```
 
-`librespot` is the Spotify player; `ffmpeg` provides `ffplay`, which plays
+`librespot` is the Spotify player; `ffmpeg` (and `ffplay`) plays
 radio and Bandcamp tracks on your Mac. Clone it wherever you like.
 
 ## 2. The short names
@@ -113,7 +113,7 @@ artist "street eaters"    # who is this band?
 |---|---|
 | `shows: command not found` | step 2, or open a new terminal |
 | `librespot not found` | `brew install librespot` |
-| `ffplay isn't installed` | `brew install ffmpeg` |
+| `ffmpeg isn't installed` (`ffplay` on Linux) | `brew install ffmpeg` |
 | "this Mac isn't signed in to Spotify as a speaker yet" | `uv run twiddle scene login` |
 | "the local Spotify player exited as it started" | read `~/.cache/twiddle/librespot-local/librespot.log`. It's usually a free (non-Premium) account, or a sign-in that needs redoing: `scene login --force` |
 | A band's badge says "Spotify: not signed in" | expected without steps 3–4; its Bandcamp tracks (listed first) still play |
@@ -143,8 +143,16 @@ EOF
 
 Then steps 3–5 as above. The differences from a Mac:
 
-- `dial` plays on the Chromebook's speakers; `+`/`-`/`m` set the ChromeOS
-  volume through `pactl`.
+- `dial` plays on the Chromebook's speakers (`ffmpeg -f pulse`); `+`/`-`/`m`
+  are dial's own volume, on top of the container's audio sink and ChromeOS's
+  volume, and the three multiply. The container's sink can start low (it was
+  40%, about -24 dB), which sounds like dial being quiet at its maximum.
+  `scripts/chromebook.sh` sets it to 100% (`TWIDDLE_SINK_VOLUME=keep` skips
+  that), and logs what it found to `logs/chromebook.log` to show whether it
+  resets after a reboot.
+- Run dial with `scripts/chromebook.sh` (any `twiddle` command works after
+  it): it sets `TWIDDLE_ANCHOR` (edit the default IP in the script, or export
+  your own), warns if that speaker doesn't answer, and sets the sink volume.
 - The container is NATed off the LAN, so Sonos discovery never answers.
   Speakers are reachable directly, which is what `TWIDDLE_ANCHOR` is for.
 - Bluetooth output in `dial` is macOS-only. Pair headphones in ChromeOS

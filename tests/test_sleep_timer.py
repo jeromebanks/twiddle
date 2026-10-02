@@ -61,7 +61,7 @@ def test_cancelling_journals_the_call_but_no_span(monkeypatch):
 
 
 def test_the_macs_timer_is_dials_own_and_can_be_called_off():
-    out = LocalOutput(osascript=lambda s: "30", ffplay="/bin/true", spawn=lambda *a: None)
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/true", spawn=lambda *a: None)
     assert out.set_sleep_timer(600) == 600
     assert 598 <= out.state().sleep_s <= 600
     assert out.set_sleep_timer(0) is None

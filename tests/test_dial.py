@@ -266,6 +266,47 @@ def test_dry_run_tunes_nothing(monkeypatch):
     assert out.set_volume(140) == 100 and g.volumes == []
 
 
+def test_disconnect_stops_then_clears_the_transport_uri(monkeypatch):
+    out, g, _ = sonos(monkeypatch, "x-rincon-mp3radio://" + bare(STATIONS["kexp"].url))
+    cleared = []
+    monkeypatch.setattr(output_mod.play, "set_uri", lambda ip, uri, md="": cleared.append((ip, uri)))
+    out.disconnect()
+    assert g.stopped == 1 and cleared == [(g.ip, "")]
+
+
+def test_disconnect_survives_a_speaker_that_refuses_the_clear(monkeypatch):
+    out, g, _ = sonos(monkeypatch, "x-rincon-mp3radio://" + bare(STATIONS["kexp"].url))
+    def refuse(*a, **k):
+        raise RuntimeError("714")
+    monkeypatch.setattr(output_mod.play, "set_uri", refuse)
+    out.disconnect()
+    assert g.stopped == 1
+
+
+def test_a_handoff_stops_a_room_but_never_clears_it():
+    roam, mac = Spot("room:roam", "Roam"), Spot("mac", "This Mac")
+    roam.disconnect = lambda: pytest.fail("a handoff must only stop")
+    outs = SpotOutputs(roam, mac)
+    outs.play("room:roam", KEXP)
+    outs.play("mac", KALX)
+    assert roam.stops == 1
+
+
+def test_D_disconnects_through_outputs_and_forgets_it():
+    roam = Spot("room:roam", "Roam")
+    roam.disconnect = lambda: "disconnected"
+    outs = SpotOutputs(roam)
+    outs.play("room:roam", KEXP)
+    assert outs.disconnect("room:roam") == "disconnected" and outs.owned() == []
+
+
+def test_disconnect_never_silences_the_relay(monkeypatch):
+    out, g, _ = sonos(monkeypatch, "x-rincon-mp3radio://10.0.0.9:8090/stream.mp3")
+    with pytest.raises(spotify_ops.PlaybackError):
+        out.disconnect()
+    assert g.stopped == 0
+
+
 def test_stop_refuses_to_silence_the_relay(monkeypatch):
     out, g, _ = sonos(monkeypatch, "x-rincon-mp3radio://10.0.0.9:8090/stream.mp3")
     with pytest.raises(spotify_ops.PlaybackError):
@@ -273,35 +314,108 @@ def test_stop_refuses_to_silence_the_relay(monkeypatch):
     assert g.stopped == 0
 
 
-def test_local_output_plays_with_ffplay_and_uses_the_macs_volume(tmp_path):
-    spawned, scripts = [], []
+class PipeProc:
+    """A process with a stdin to listen on, as `_spawn` now gives."""
+    def __init__(self):
+        self.written = []
+        self.stdin = self
+        self.done = None
 
-    class Proc:
-        def poll(self):
-            return None
+    def write(self, data):
+        self.written.append(data.decode())
 
-        def terminate(self):
-            spawned.append("killed")
+    def flush(self):
+        pass
 
-        def wait(self, timeout=None):
-            return 0
+    def poll(self):
+        return self.done
 
-    def osa(script):
-        scripts.append(script)
-        return {"output volume of (get volume settings)": "40",
-                "output muted of (get volume settings)": "false"}.get(script, "")
-    out = LocalOutput(spawn=lambda argv, log: spawned.append(argv) or Proc(),
-                      osascript=osa, ffplay="/bin/ffplay")
+    def terminate(self):
+        self.done = 0
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def until(cond, timeout=2.0):
+    """The gain sender is a thread: wait for what it should have written."""
+    import time as _t
+    end = _t.monotonic() + timeout
+    while _t.monotonic() < end:
+        if cond():
+            return True
+        _t.sleep(0.005)
+    return cond()
+
+
+def test_local_output_plays_with_ffmpeg_and_keeps_its_own_volume():
+    """Issue #1: volume and mute are dial's own, never the Mac's. Nothing
+    here may reach osascript, and the change reaches the running process
+    without a restart."""
+    spawned, procs = [], []
+
+    def spawn(argv, log):
+        spawned.append(argv)
+        procs.append(PipeProc())
+        return procs[-1]
+    out = LocalOutput(spawn=spawn, sink="audiotoolbox", ffmpeg="/bin/ffmpeg")
+    out.gain_pace_s = 0.01
     out.tune(STATIONS["kexp"])
-    assert spawned[0][0] == "/bin/ffplay" and spawned[0][-1] == STATIONS["kexp"].url
-    assert out.state() == OutputState(tuned="kexp", playing=True, volume=40, muted=False,
+    argv = spawned[0]
+    assert argv[0] == "/bin/ffmpeg" and STATIONS["kexp"].url in argv
+    assert "-nostdin" not in argv
+    assert argv[argv.index("-af") + 1] == "volume@v=1.0000"        # unity, as before
+    assert out.state() == OutputState(tuned="kexp", playing=True, volume=100, muted=False,
                                       uri=bare(STATIONS["kexp"].url))
-    out.set_volume(55)
+
+    assert out.set_volume(50) == 50
+    assert until(lambda: procs[0].written == ["cvolume@v -1 volume 0.2500\n"])    # squared, live
     out.set_mute(True)
-    assert "set volume output volume 55" in scripts
-    assert "set volume output muted true" in scripts
+    assert until(lambda: procs[0].written[-1] == "cvolume@v -1 volume 0.0000\n")
+    assert out.state().volume == 50 and out.state().muted      # unmute keeps the level
+    out.set_mute(False)
+    assert until(lambda: procs[0].written[-1] == "cvolume@v -1 volume 0.2500\n")
+
+    out.set_volume(140)                                          # never a boost
+    assert out.state().volume == 100
+    assert until(lambda: procs[0].written[-1] == "cvolume@v -1 volume 1.0000\n")
+
+    out.set_volume(30)
+    out.tune(STATIONS["kalx"])                                   # the next station keeps it
+    assert spawned[1][spawned[1].index("-af") + 1] == "volume@v=0.0900"
     out.close()
-    assert "killed" in spawned
+
+
+def test_volume_before_anything_plays_is_kept_for_the_first_station():
+    spawned = []
+    out = LocalOutput(spawn=lambda argv, log: spawned.append(argv) or PipeProc(),
+                      sink="audiotoolbox", ffmpeg="/bin/ffmpeg")
+    out.set_volume(20)
+    out.set_mute(True)
+    out.tune(STATIONS["kexp"])
+    assert spawned[0][spawned[0].index("-af") + 1] == "volume@v=0.0000"
+    out.close()
+
+
+def test_a_process_that_just_died_does_not_break_the_volume_key():
+    proc = PipeProc()
+
+    def broken(data):
+        raise BrokenPipeError
+    proc.write = broken
+    out = LocalOutput(spawn=lambda argv, log: proc, sink="audiotoolbox", ffmpeg="/bin/ffmpeg")
+    out.gain_pace_s = 0.01
+    out.tune(STATIONS["kexp"])
+    assert out.set_volume(10) == 10 and out.state().volume == 10
+    out.close()
+
+
+def test_dry_run_volume_writes_nothing():
+    proc = PipeProc()
+    out = LocalOutput(dry_run=True, spawn=lambda argv, log: proc, sink="audiotoolbox",
+                      ffmpeg="/bin/ffmpeg")
+    out.set_volume(10)
+    assert proc.written == []
 
 
 def test_this_computer_on_linux_uses_pactl_for_volume_and_mute():
@@ -314,7 +428,7 @@ def test_this_computer_on_linux_uses_pactl_for_volume_and_mute():
         return {"get-sink-volume": "Volume: front-left: 45875 /  70% / -9.29 dB,   "
                                    "front-right: 45875 /  70% / -9.29 dB",
                 "get-sink-mute": "Mute: yes"}.get(args[0], "")
-    out = LocalOutput(pactl=pactl, ffplay="/bin/ffplay", spawn=lambda *a: None)
+    out = LocalOutput(sink="ffplay", pactl=pactl, ffplay="/bin/ffplay", spawn=lambda *a: None)
     assert out._volume() == (70, True)
     out.set_volume(55)
     out.set_mute(False)
@@ -358,7 +472,7 @@ def test_local_play_url_exits_when_the_track_ends():
         def wait(self, timeout=None):
             return 0
     out = LocalOutput(spawn=lambda argv, log: spawned.append(argv) or Proc(),
-                      osascript=lambda s: "", ffplay="/bin/ffplay")
+                      sink="ffplay", pactl=lambda *a: "", ffplay="/bin/ffplay")     # no PulseAudio in ffmpeg
     out.play_url("https://t4.bcbits.com/stream/x", "a track")
     assert "-autoexit" in spawned[0]
     out.tune(STATIONS["kexp"])
@@ -512,7 +626,7 @@ def test_enter_tunes_and_relay_needs_a_second_press():
     run(go())
 
 
-def test_a_burst_of_volume_keys_is_one_write():
+def test_a_burst_of_volume_keys_is_a_leading_write_and_a_trailing_one():
     out = FakeOutput(tuned="kexp")
 
     async def go():
@@ -526,7 +640,8 @@ def test_a_burst_of_volume_keys_is_one_write():
             await asyncio.sleep(0.6)
             await app.workers.wait_for_complete()
             await pilot.pause()
-            assert out.volumes == [40]
+            assert out.volumes[0] == 32 and out.volumes[-1] == 40   # not one per press
+            assert len(out.volumes) == 2
             await pilot.press("m")
             await app.workers.wait_for_complete()
             assert out.mutes == [True] and app.muted
@@ -550,7 +665,7 @@ def test_clicking_the_gauge_sets_volume_and_the_icon_mutes():
             assert app.volume == 0
             await asyncio.sleep(0.6)
             await app.workers.wait_for_complete()
-            assert out.volumes == [0]                           # one settled write
+            assert out.volumes[-1] == 0 and len(out.volumes) == 2   # first click, then the last
             await pilot.click("#nowbar", offset=(icon, 0))
             await app.workers.wait_for_complete()
             assert out.mutes == [True] and app.muted
@@ -1075,6 +1190,7 @@ def test_help_opens_and_its_markup_parses():
 
     from twiddle.dial.app import HELP, DialHelp
     assert "] / [" in Content.from_markup(HELP).plain
+    assert "D           disconnect" in Content.from_markup(HELP).plain
 
     async def go():
         app = make_app(FakeOutput())
@@ -1107,8 +1223,7 @@ def test_v_visualizes_the_tuned_station_and_leaves_no_tap_behind():
             assert RecordingTap.made[0].url == STATIONS["kalx"].url
             # Only the picture is showing: dial's own keys must not reach a
             # speaker unseen (the relay's ask-twice lives on the hidden screen).
-            await pilot.press("enter", "enter", "plus", "minus", "right_square_bracket",
-                              "m", "s", "R", "z", "Z", "d", "1")
+            await pilot.press("enter", "enter", "s", "D", "R", "z", "Z", "d", "1")
             await pilot.pause(0.5)
             assert isinstance(app.screen, VizScreen)
             assert out.tuned_to == [] and out.volumes == [] and out.mutes == []
@@ -1116,6 +1231,36 @@ def test_v_visualizes_the_tuned_station_and_leaves_no_tap_behind():
             await pilot.pause()
             assert not isinstance(app.screen, VizScreen)
             assert RecordingTap.made[0].stopped
+    asyncio.run(run())
+
+
+def test_volume_and_mute_work_inside_the_visualizer():
+    """Issue #1, Jerome's observation: the modal screen swallowed them. Only
+    those keys are forwarded; the overlay shows the level, since the bar is hidden."""
+    from tests.test_viz_screen import options
+    from twiddle.viz.screen import VizScreen
+
+    out = FakeOutput(tuned="kalx")
+    out.st.uri = STATIONS["kalx"].url
+    _store, kw = options()
+
+    async def run():
+        app = make_app(out)
+        app.viz_options = kw
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("v")
+            await pilot.pause(0.3)
+            assert isinstance(app.screen, VizScreen)
+            await pilot.press("minus")
+            await pilot.pause(0.2)
+            assert app.volume == 28 and out.volumes == [28]
+            assert "volume 28" in "\n".join(app.screen._overlay_lines())
+            await pilot.press("m")
+            await pilot.pause(0.2)
+            assert out.mutes == [True]
+            assert "muted" in "\n".join(app.screen._overlay_lines())
+            assert isinstance(app.screen, VizScreen)
     asyncio.run(run())
 
 
@@ -1221,3 +1366,398 @@ def test_ctrl_w_brings_the_splash_back_and_any_key_leaves_it():
             assert not isinstance(app.screen, SplashScreen)
             assert out.tuned_to == [] and app.is_running
     run(go())
+
+
+def test_a_held_volume_key_is_applied_as_it_goes_not_when_released():
+    """Issue #1, point 1: the bar ran ahead of the sound because every press
+    reset a 0.35s timer. The first press is written at once, a held key
+    is written every interval, and the last value always lands."""
+    out = FakeOutput()
+    out.volume_interval_s = 0.05
+
+    async def go():
+        app = make_app(out)
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            assert app.volume == 30
+            await pilot.press("minus")
+            await pilot.pause()
+            assert out.volumes == [28]                      # no waiting for a pause
+            for _ in range(10):                             # a held key
+                await pilot.press("minus")
+                await asyncio.sleep(0.02)
+            await asyncio.sleep(0.3)
+            await pilot.pause()
+            assert len(out.volumes) > 2                     # applied during the hold
+            assert out.volumes[-1] == app.volume == 8       # and the last one lands
+            assert not app._vol_dirty
+    run(go())
+
+
+def test_the_bar_is_not_snapped_back_by_a_poll_mid_hold():
+    out = FakeOutput()
+    out.volume_interval_s = 0.4
+
+    async def go():
+        app = make_app(out)
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("minus")
+            await pilot.press("minus")                      # second is pending: bar is ahead
+            assert app._vol_dirty and app.volume == 26
+            app._set_output_state(out, OutputState(tuned="relay", playing=True,
+                                                   volume=28, muted=False))
+            assert app.volume == 26                         # a stale read didn't win
+            await asyncio.sleep(0.7)
+            await pilot.pause()
+            assert out.volumes[-1] == 26 and not app._vol_dirty
+    run(go())
+
+
+def test_linux_with_pulse_in_ffmpeg_gets_dials_own_volume_too(monkeypatch):
+    """Chromebook parity: `-f pulse default` takes the same live gain, and
+    the system volume (pactl) is not touched."""
+    import subprocess as sp
+    monkeypatch.setattr(output_mod.sys, "platform", "linux")
+    devices = (" D. = Demuxing supported\n .E = Muxing supported\n --\n"
+               "  E alsa            ALSA audio output\n  E pulse           Pulse audio output\n")
+    monkeypatch.setattr(output_mod.subprocess, "run",
+                        lambda *a, **k: sp.CompletedProcess(a, 0, stdout=devices, stderr=""))
+    spawned, procs = [], []
+    calls = []
+
+    def spawn(argv, log):
+        spawned.append(argv)
+        procs.append(PipeProc())
+        return procs[-1]
+    out = LocalOutput(spawn=spawn, ffmpeg="/usr/bin/ffmpeg", pactl=lambda *a: calls.append(a))
+    assert out.sink == "pulse"
+    out.tune(STATIONS["kexp"])
+    argv = spawned[0]
+    assert argv[argv.index("-f") + 1] == "pulse" and argv[-1] == "default"
+    out.gain_pace_s = 0.01
+    out.set_volume(50)
+    assert until(lambda: procs[0].written == ["cvolume@v -1 volume 0.2500\n"]) and calls == []
+    out.close()
+
+
+def test_linux_without_pulse_in_ffmpeg_falls_back_to_ffplay_and_the_sink_volume(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(output_mod.sys, "platform", "linux")
+    monkeypatch.setattr(output_mod.subprocess, "run",
+                        lambda *a, **k: sp.CompletedProcess(a, 0, stdout="  E alsa  ALSA\n", stderr=""))
+    out = LocalOutput(ffmpeg="/usr/bin/ffmpeg", ffplay="/usr/bin/ffplay", pactl=lambda *a: "")
+    assert out.sink == "ffplay" and out.argv(output_mod.Media.of(STATIONS["kexp"]))[0] == "/usr/bin/ffplay"
+
+
+def test_a_held_key_sends_only_the_latest_level_not_a_queue_of_stale_ones():
+    """Codex finding 1: ffmpeg applies about one command per wake, so sending
+    one per key press queued stale levels and mute waited behind them."""
+    proc = PipeProc()
+    out = LocalOutput(spawn=lambda argv, log: proc, sink="audiotoolbox", ffmpeg="/bin/ffmpeg")
+    out.gain_pace_s = 0.05
+    out.tune(STATIONS["kexp"])
+    for v in range(99, 59, -1):                  # 40 presses in a burst
+        out.set_volume(v)
+    out.set_mute(True)                           # and mute right after
+    assert until(lambda: proc.written and proc.written[-1].endswith("volume 0.0000\n"))
+    assert len(proc.written) <= 4                # coalesced, and the last one lands
+    out.close()
+
+
+def test_a_blocked_pipe_never_blocks_stop_or_close():
+    """Codex finding 4: a stalled ffmpeg that stops reading stdin must not
+    hold the lock stop/respawn/close need."""
+    import threading
+    release = threading.Event()
+
+    class Stuck(PipeProc):
+        def write(self, data):
+            release.wait(5)                      # the pipe is full
+            raise BrokenPipeError
+    proc = Stuck()
+    out = LocalOutput(spawn=lambda argv, log: proc, sink="audiotoolbox", ffmpeg="/bin/ffmpeg")
+    out.gain_pace_s = 0.01
+    out.tune(STATIONS["kexp"])
+    out.set_volume(20)
+    import time as _t
+    _t.sleep(0.1)                                # the sender is now stuck in write
+    t0 = _t.monotonic()
+    out.stop()
+    out.tune(STATIONS["kalx"])                   # respawn
+    out.close()
+    assert _t.monotonic() - t0 < 1.0 and proc.done == 0
+    release.set()
+
+
+class SlowOutput(FakeOutput):
+    """Each set_volume takes a while, as a Sonos SOAP call can."""
+    def __init__(self, delay, **kw):
+        super().__init__(**kw)
+        self.delay = delay
+        self.landed = []
+
+    def set_volume(self, v):
+        import time as _t
+        _t.sleep(self.delay)
+        self.landed.append(v)
+        return super().set_volume(v)
+
+
+def test_overlapping_slow_volume_writes_never_land_out_of_order():
+    """Codex finding 2: exclusive=True cancels a worker task, not its thread,
+    so an older slow write could land after the newest and win."""
+    out = SlowOutput(0.15)
+    out.volume_interval_s = 0.02
+
+    async def go():
+        app = make_app(out)
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            for _ in range(6):
+                await pilot.press("minus")
+                await asyncio.sleep(0.04)
+            await asyncio.sleep(1.2)
+            await pilot.pause()
+            assert out.landed == sorted(out.landed, reverse=True)    # 28, 26, ... never back up
+            assert out.landed[-1] == app.volume == 18
+            assert not app._vol_dirty
+    run(go())
+
+
+def test_switching_output_during_a_volume_write_does_not_wedge_the_keys():
+    """Codex finding 3: a write still in flight when the output changed left
+    _vol_dirty set, so the new output's volume was never shown or settable."""
+    out = SlowOutput(0.3)
+    out.volume_interval_s = 0.02
+
+    async def go():
+        app = make_app(out)
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("minus")                 # write now in flight
+            await asyncio.sleep(0.05)
+            assert app._vol_busy
+            app._reset_volume_state()                  # what choosing another output does
+            app.volume = None
+            await asyncio.sleep(0.6)                   # the old write lands
+            await pilot.pause()
+            assert not app._vol_dirty and not app._vol_busy
+            app._set_output_state(app.output, OutputState(tuned="relay", playing=True,
+                                                          volume=55, muted=False))
+            assert app.volume == 55                    # the new output's volume shows
+            await pilot.press("minus")
+            await asyncio.sleep(0.7)
+            assert out.landed[-1] == 53                # and the keys work
+    run(go())
+
+
+class AckingProc(PipeProc):
+    """Answers each command line after a delay, as ffmpeg does: it prints
+    "Command reply" to its log when it applies one."""
+    def __init__(self, log, delay):
+        super().__init__()
+        self.log, self.delay, self.applied = log, delay, []
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.touch()                              # as `_spawn` does
+
+    def write(self, data):
+        import threading as _th
+        super().write(data)
+
+        def reply():
+            import time as _t
+            _t.sleep(self.delay)
+            with open(self.log, "ab") as f:
+                f.write(b"Command reply for stream -1: ret:0 res:\n")
+            self.applied.append(data.decode())
+        _th.Thread(target=reply, daemon=True).start()
+
+
+def test_commands_wait_for_ffmpegs_ack_so_none_pile_up(tmp_path):
+    """Codex round 2, finding 1: a rate limit only guesses at ffmpeg's speed.
+    With one outstanding command at a time, the backlog is bounded and the
+    final mute is the very next command."""
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg",
+                      spawn=lambda argv, log: setattr(out, "_p", AckingProc(log, 0.15)) or out._p)
+    out.gain_pace_s = 0.01
+    out.tune(STATIONS["kexp"])
+    proc = out._p
+    for v in range(99, 59, -1):                  # 40 changes, 20 ms apart
+        out.set_volume(v)
+        import time as _t
+        _t.sleep(0.02)
+    out.set_mute(True)
+    assert until(lambda: proc.applied and proc.applied[-1].endswith("volume 0.0000\n"), 3.0)
+    assert len(proc.written) <= 8                # ~ one per 150 ms ack, not 41
+    out.close()
+
+
+def test_a_mute_set_while_the_process_is_starting_is_not_lost():
+    """Codex round 2, finding 2: argv had the old level, `_proc` was still
+    None when the sender looked, and nothing woke it again."""
+    holder = {}
+
+    def spawn(argv, log):
+        holder["out"].set_mute(True)             # the key arrives mid-spawn
+        holder["proc"] = PipeProc()
+        return holder["proc"]
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg", spawn=spawn)
+    holder["out"] = out
+    out.gain_pace_s = 0.01
+    out.tune(STATIONS["kexp"])
+    assert until(lambda: holder["proc"].written == ["cvolume@v -1 volume 0.0000\n"])
+    assert out.state().muted
+    out.close()
+
+
+def test_only_one_sender_thread_ever_exists():
+    """Codex round 2, finding 3: two senders could write mute then an older
+    volume, leaving it audible while the model said muted."""
+    import threading
+    started, release = [], threading.Event()
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg", spawn=lambda a, l: PipeProc())
+    out._gain_loop = lambda: (started.append(1), release.wait(5))   # counts this output's senders
+    out.gain_pace_s = 0.05
+    out.tune(STATIONS["kexp"])
+    ts = [threading.Thread(target=out._push_gain) for _ in range(60)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    release.set()
+    assert len(started) == 1
+
+
+def test_returning_to_an_output_does_not_overlap_its_old_volume_write():
+    """Codex round 2, finding 4: A -> B -> A reset the in-flight flag, so a
+    new write could overtake the old one still running on A."""
+    out = SlowOutput(0.3)
+    out.volume_interval_s = 0.02
+
+    async def go():
+        app = make_app(out)
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("minus")                 # 28 in flight on A
+            await asyncio.sleep(0.05)
+            app._reset_volume_state()                  # away to B ...
+            app._reset_volume_state()                  # ... and back to A
+            app.volume = 30
+            app.action_set_volume(20)                  # must wait for the 28
+            await asyncio.sleep(1.0)
+            await pilot.pause()
+            assert out.landed == [28, 20]
+            assert not app._vol_dirty
+    run(go())
+
+
+def test_an_unanswered_command_is_never_followed_by_more():
+    """Codex round 3, finding 1: after a timeout the sender released more
+    commands and rebuilt the backlog. One stays outstanding until answered."""
+    proc = PipeProc()
+
+    def spawn(argv, log):
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.touch()                              # readable, but ffmpeg never replies
+        return proc
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg", spawn=spawn)
+    out.gain_pace_s = 0.01
+    out.tune(STATIONS["kexp"])
+    import time as _t
+    for v in (90, 80, 70, 60, 50):
+        out.set_volume(v)
+        _t.sleep(0.15)
+    out.set_mute(True)
+    _t.sleep(0.3)
+    assert len(proc.written) == 1                # still waiting for the first ack
+    with open(out.log, "ab") as f:               # now it answers
+        f.write(b"Command reply for stream -1: ret:0 res:\n")
+    assert until(lambda: len(proc.written) == 2 and proc.written[-1].endswith("0.0000\n"))
+    out.close()
+
+
+def test_each_process_has_its_own_log_so_replies_are_not_shared(tmp_path):
+    """Codex round 3, finding 3: one shared log let another process's reply
+    release this one's wait."""
+    paths = []
+    out_a = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg",
+                        spawn=lambda argv, log: paths.append(log) or PipeProc())
+    out_b = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg",
+                        spawn=lambda argv, log: paths.append(log) or PipeProc())
+    out_a.tune(STATIONS["kexp"])
+    out_b.tune(STATIONS["kexp"])
+    out_a.tune(STATIONS["kalx"])                 # a respawn
+    assert len(set(paths)) == 3
+    for o in (out_a, out_b):
+        o.close()
+
+
+def test_the_filter_and_the_changed_check_use_one_snapshot():
+    """Codex round 3, finding 2."""
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg", spawn=lambda a, l: PipeProc())
+    out.set_volume(40)
+    out.set_mute(True)
+    args = out.gain_args()
+    assert args[-1] == "volume@v=0.0000" and out._argv_gain == (40, True)
+    out.close()
+
+
+def test_pruning_never_removes_a_log_a_live_process_is_using(tmp_path):
+    """Codex round 4: a pruned live log made the ack unreadable (-1), which
+    ended or wedged the wait, and stale commands could pile up again."""
+    import os
+    from twiddle.dial import state as dstate
+    d = dstate.CACHE_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    import time as _t
+    other_live = d / f"ffmpeg.{os.getppid()}.1.log"      # another session, alive
+    dead = [d / f"ffmpeg.99999{i}.1.log" for i in range(9)]  # pids that are gone
+    for i, p in enumerate([other_live, *dead]):
+        p.write_text("x")
+        os.utime(p, (_t.time() - 1000 + i, _t.time() - 1000 + i))   # all older than new ones
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg", spawn=lambda a, l: PipeProc())
+    out.tune(STATIONS["kexp"])                          # live log of our own
+    mine = out.log
+    for _ in range(10):                                 # churn: respawns prune older logs
+        out.tune(STATIONS["kalx"])
+    live_now = out.log
+    assert other_live.exists()                          # a live session's log survives
+    assert live_now in out._live_logs
+    assert not mine.exists() or mine != live_now        # old own logs may go
+    assert sum(1 for p in dead if p.exists()) < len(dead)   # dead sessions' logs are pruned
+    out.close()
+
+
+def test_a_log_lost_mid_wait_stops_sending_and_reports_instead_of_queueing(tmp_path):
+    """Codex round 5: releasing the outstanding command when the log vanished
+    rebuilt the stale queue (21 commands, 0 acks). Now: stop, report, recover
+    on the next play."""
+    proc = PipeProc()
+    procs = [proc]
+
+    def spawn(argv, log):
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.touch()
+        return procs[-1]
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg", spawn=spawn)
+    out.gain_pace_s = 0.02
+    out.tune(STATIONS["kexp"])
+    out.set_volume(50)
+    assert until(lambda: len(proc.written) == 1)
+    out.log.unlink()                                    # cleanup removes it mid-wait
+    import time as _t
+    assert until(lambda: out._gain_broken is not None)
+    for v in range(40, 20, -1):                         # a held key afterwards
+        try:
+            out.set_volume(v)
+        except spotify_ops.PlaybackError as exc:
+            assert "lost contact" in exc.message and "tune again" in exc.hint
+        _t.sleep(0.01)
+    _t.sleep(0.2)
+    assert len(proc.written) == 1                       # nothing more sent blind
+    assert out.state().volume == 21                     # the level is still kept
+    procs.append(PipeProc())                            # tuning again: fresh process + log
+    out.tune(STATIONS["kalx"])
+    assert out._gain_broken is None
+    out.set_volume(30)
+    assert until(lambda: len(procs[-1].written) >= 1)
+    out.close()
