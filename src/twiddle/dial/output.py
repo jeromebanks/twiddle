@@ -453,6 +453,8 @@ class ProcessOutput(BaseOutput):
         self._gain_start = threading.Lock()
         self._argv_gain: tuple[int, bool] | None = None
         self._log_path: Path | None = None
+        self._acked = False             # this process has a log to read acks from
+        self._gain_broken: tuple | None = None   # (proc, why): acks became unreadable
         self._closed = False
 
     def argv(self, media: Media) -> list[str]:
@@ -496,16 +498,20 @@ class ProcessOutput(BaseOutput):
     def _gain_loop(self) -> None:
         while self._gain_wake.wait() and not self._closed:
             self._gain_wake.clear()
-            proc, log = self._proc, self.log          # read once
+            proc, log, acked = self._proc, self.log, self._acked    # read once
             if proc is None or proc.poll() is not None:
                 continue                # a respawn gets the level via argv
-            before = self._replies(log)
+            if self._gain_broken and self._gain_broken[0] is proc:
+                continue                # no ack can be read: sending blind would queue
+            before = self._replies(log) if acked else -1
+            if acked and before < 0:
+                self._lose_acks(proc)
+                continue
             if not self.gain.push(proc):
                 continue
-            if before < 0:
-                # No log to read an ack from (a fake process in a test, a
-                # sink that doesn't log): the only explicit fallback is a
-                # pause, as long as ffmpeg's slowest observed wake.
+            if not acked:
+                # A process with no log by design (a fake in a test): the
+                # only fallback is a pause, as long as ffmpeg's slowest wake.
                 time.sleep(self.gain_pace_s or 0.55)
                 continue
             # The ack. One command stays outstanding until ffmpeg answers it
@@ -514,23 +520,37 @@ class ProcessOutput(BaseOutput):
             # exactly what builds a backlog.
             while not self._closed and self._proc is proc and proc.poll() is None:
                 n = self._replies(log)
-                if n < 0:               # the log was removed under us: no ack to wait for
-                    time.sleep(self.gain_pace_s or 0.55)
+                if n < 0:
+                    self._lose_acks(proc)
                     break
                 if n > before:
                     break
                 time.sleep(0.01)
 
+    def _lose_acks(self, proc) -> None:
+        """The log we read acks from is gone (cache cleanup): we can no longer
+        tell what ffmpeg has applied, and sending blind would queue stale
+        levels. Stop sending to this process and say so (the next volume or
+        mute key reports it); playing again starts a fresh process and log."""
+        self._gain_broken = (proc, "dial's volume control lost contact with the player "
+                                   "(its log was removed)")
+
+    def _check_gain(self) -> None:
+        if self._gain_broken and self._gain_broken[0] is self._proc:
+            raise PlaybackError(self._gain_broken[1], "press enter to tune again")
+
     def set_volume(self, volume: int) -> int:
         self.gain.volume = _clamp(volume)
         if not self.dry_run:
             self._push_gain()
+            self._check_gain()
         return self.gain.volume
 
     def set_mute(self, muted: bool) -> None:
         self.gain.muted = bool(muted)
         if not self.dry_run:
             self._push_gain()
+            self._check_gain()
 
     def unavailable(self) -> PlaybackError | None:
         """Why this output can't play at all (a missing binary), or None."""
@@ -604,7 +624,9 @@ class ProcessOutput(BaseOutput):
         with self._lock:
             self._kill()
             self._log_path = self._new_log()
+            self._gain_broken = None
             self._proc = self._spawn(self.argv(media), self.log)
+            self._acked = self.log.exists()     # a real spawn always creates it
             self._media = media
             changed = self._argv_gain != (self.gain.volume, self.gain.muted)
         if changed:

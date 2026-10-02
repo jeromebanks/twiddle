@@ -1727,21 +1727,37 @@ def test_pruning_never_removes_a_log_a_live_process_is_using(tmp_path):
     out.close()
 
 
-def test_a_log_removed_under_the_sender_ends_the_wait_not_wedges_it(tmp_path):
+def test_a_log_lost_mid_wait_stops_sending_and_reports_instead_of_queueing(tmp_path):
+    """Codex round 5: releasing the outstanding command when the log vanished
+    rebuilt the stale queue (21 commands, 0 acks). Now: stop, report, recover
+    on the next play."""
     proc = PipeProc()
+    procs = [proc]
 
     def spawn(argv, log):
         log.parent.mkdir(parents=True, exist_ok=True)
         log.touch()
-        return proc
+        return procs[-1]
     out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg", spawn=spawn)
     out.gain_pace_s = 0.02
     out.tune(STATIONS["kexp"])
     out.set_volume(50)
     assert until(lambda: len(proc.written) == 1)
-    out.log.unlink()                                    # removed while waiting for the ack
+    out.log.unlink()                                    # cleanup removes it mid-wait
     import time as _t
-    _t.sleep(0.1)
-    out.set_mute(True)
-    assert until(lambda: len(proc.written) == 2)        # not stuck forever
+    assert until(lambda: out._gain_broken is not None)
+    for v in range(40, 20, -1):                         # a held key afterwards
+        try:
+            out.set_volume(v)
+        except spotify_ops.PlaybackError as exc:
+            assert "lost contact" in exc.message and "tune again" in exc.hint
+        _t.sleep(0.01)
+    _t.sleep(0.2)
+    assert len(proc.written) == 1                       # nothing more sent blind
+    assert out.state().volume == 21                     # the level is still kept
+    procs.append(PipeProc())                            # tuning again: fresh process + log
+    out.tune(STATIONS["kalx"])
+    assert out._gain_broken is None
+    out.set_volume(30)
+    assert until(lambda: len(procs[-1].written) >= 1)
     out.close()
