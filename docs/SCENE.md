@@ -406,13 +406,23 @@ no address, site or description). A band whose lookup *errored* or was
 rate-limited is not a dead letter; the next build retries it. Each band letter
 carries cheap deterministic clues (`several_names_joined`, `looks_like_a_night`,
 `unbalanced_parenthesis`, `show_words`), because much of the tail is not a band
-at all ("Private Event", "Bachata Nightz", "Astrozombies SF , Rusty Chains"
-unsplit).
+at all ("Astrozombies SF , Rusty Chains" unsplit). Before a billing becomes a
+letter, rules clear what is certainly not an act (`bands.non_band`: "Private
+Event", "Membership Meeting", karaoke, "... Nights", "Salsa Crazy Mondays"), and
+a source no longer splits a billing inside a bracket ("Black Flag (Greg Ginn,
+...)" is one band with a note). Rooms are merged by `venue_names.cluster`: one
+letter per room, not per spelling ("Hopmonk, Novato" / "Hopmonk Tavern, Novato"),
+with the city, state and street address read out of the listing and a mistyped
+city ("Memlo Park") corrected. An ambiguous band with exactly one candidate
+described as local ("pop duo from Oakland, CA") is settled by rule
+(`resolved_by: rule`; `reopen` undoes it) and the next build looks that artist up
+by its MusicBrainz id.
 
 A letter stays `pending` until resolved; a later build marks it `resolved`
 (found) or `expired` (no longer billed), and never reopens one a person or an AI
 closed. What a build applies from a resolution: a band's `alias` (searched
-under that name from the next build, and the band is looked up again). A
+under that name from the next build) or `mbid` (that MusicBrainz artist among
+same-named ones); either way the band is looked up again. A
 venue's resolution is stored and exported but **not yet put into the dataset**:
 that needs the client to tell watched rooms from merely known ones.
 
