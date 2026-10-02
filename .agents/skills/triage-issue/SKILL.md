@@ -17,9 +17,16 @@ wrong and what to fix) for a bug, agreed with the poster in issue comments.
 it keeps exactly one `sdlc:*` label, marks every agent comment, and decides
 whether a sign-off counts. You write markdown to a file; it posts.
 
-**Every `transition` is a public post.** Run it with `--dry-run` first, show the
-user the comment, and post only after their OK. This covers questions, PRDs,
-diagnoses, approvals and escalations alike.
+**Post to the issue, not to the chat.** Questions, PRDs and diagnoses are meant for
+whoever filed the issue, who may be a stranger or another agent; the maintainer is
+not the intermediary. So run `transition` for real and let the comment be the
+review step: the poster answers there, and `/approve` or `/changes` is theirs to give.
+Don't ask the user "shall I post?" and don't relay questions in the chat.
+
+The one exception is a preview run: if the user passed `--preview`
+(`/triage-issue 12 --preview`) or `.sdlc/config.json` has `"confirm_before_posting": true`,
+add `--dry-run` to each `transition`, show the output, and post only after an OK.
+Unattended runs never preview.
 
 `/triage-issue [N]`. With no `N`, take the first line of `uv run python tools/sdlc.py next`.
 
@@ -80,13 +87,10 @@ the system are touched; it does not say how to build it. Rules:
 Call `advisor` on the draft first, then:
 
 ```bash
-uv run python tools/sdlc.py transition N prd-review --kind prd --body-file prd.md --dry-run
 uv run python tools/sdlc.py transition N prd-review --kind prd --body-file prd.md
 ```
 
-Show the user the `--dry-run` output and wait for their OK before the real
-post: this is a public issue. The tool numbers the revision itself and
-collapses the previous one.
+The tool numbers the revision itself and collapses the previous one.
 
 ## 5. Bug: reproduce, then diagnose
 
