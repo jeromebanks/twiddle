@@ -46,7 +46,7 @@ from .. import jsonstore
 from ..lookup import norm
 from ..scenespec import dataset
 from ..scenespec import venue as venue_mod
-from . import cache
+from . import cache, venue_names
 from .bands import SHOW_WORDS, non_band
 
 SCHEMA = "twiddle.scene.dead-letters"
@@ -137,32 +137,45 @@ def band_letters(bands: dict[str, dict], shows: list) -> dict[str, dict]:
     return out
 
 
-def _venue_key(listed: str) -> str:
-    return dataset.venue_id(listed)
-
-
 def venue_letters(shows: list, watched) -> dict[str, dict]:
     """Rooms that appear in listings but are on no venue list: no address, site or
-    description. Spelling variants stay separate (an AI can merge them)."""
+    description. The spellings of one room are one letter (`venue_names.cluster`):
+    "Hopmonk, Novato" and "Hopmonk Tavern, Novato" are the same place."""
     rooms: dict[str, list] = defaultdict(list)
     for s in shows:
         if venue_mod.find(watched, s.venue) is None:
             rooms[s.venue].append(s)
-    out = {}
+    by_room = {r: [] for r in venue_names.cluster({k: len(v) for k, v in rooms.items()})}
+    spelled = {v: r for r in by_room for v in r.variants}
     for listed, ss in rooms.items():
+        by_room[spelled[listed]].extend(ss)
+    out = {}
+    for room, ss in by_room.items():
         ss = sorted(ss, key=lambda s: s.day)
-        name, _, city = listed.rpartition(",")
-        out[f"venue:{_venue_key(listed)}"] = {
-            "kind": "venue", "name": listed, "reason": "unwatched_venue",
+        out[f"venue:{room.key}"] = {
+            "kind": "venue", "name": room.label, "reason": "unwatched_venue",
             "detail": "in the listings, on no venue list: no address, site or description",
-            "evidence": {"listed_as": listed, "name": (name or listed).strip(),
-                         "city": city.strip() if name else "",
+            "evidence": {"listed_as": room.variants, "name": room.name, "city": room.city,
+                         "state": room.state, "address": room.address,
                          "sources": sorted({s.source for s in ss}),
                          "headliners": [s.headliner for s in ss[:5] if s.bands]},
             "shows": [{"day": s.day.isoformat(), "venue": s.venue, "billing": s.billing}
                       for s in ss[:SAMPLE_SHOWS]],
             "show_count": len(ss)}
     return out
+
+
+def billed_ids(bands: dict, shows: list, watched) -> set[str]:
+    """Every letter id that is billed right now (see `sync`): each band, each
+    watched room as the source spells it, each unwatched room by its merged key."""
+    ids = {f"band:{k}" for k in bands}
+    unwatched: dict[str, int] = defaultdict(int)
+    for s in shows:
+        if venue_mod.find(watched, s.venue) is None:
+            unwatched[s.venue] += 1
+        else:
+            ids.add(f"venue:{dataset.venue_id(s.venue)}")
+    return ids | {f"venue:{r.key}" for r in venue_names.cluster(unwatched)}
 
 
 # ---- keeping the queue ------------------------------------------------------

@@ -203,3 +203,28 @@ def test_an_event_is_not_a_dead_letter_and_an_old_letter_for_one_is_closed(tmp_p
     dl.sync({}, path, billed={"band:private-event"})
     l = dl.load(path)["letters"]["band:private-event"]
     assert l["status"] == "resolved" and "not_a_band" in l["resolution"]
+
+
+def test_the_spellings_of_one_room_are_one_letter(tmp_path):
+    spellings = ["Hopmonk, Novato", "Hopmonk Tavern, Novato", "Felton Music Hall, 6275 Hwy 9, Felton",
+                 "Felton Music Hall, Felton", "Guild Theater, Memlo Park", "Guild Theater, Meno Park",
+                 "Siesta Valley Bowl, East Bay", "Siesta Valley Bowl, Orinda", "Hopmonk, Sebastopol"]
+    shows = [Show(date(2026, 10, 6 + i), v, ["X"], source="thelist") for i, v in enumerate(spellings)]
+    ls = dl.venue_letters(shows, ())
+    assert len(ls) == 5                        # Hopmonk Novato, Hopmonk Sebastopol, Felton, Guild, Siesta
+    felton = next(l for l in ls.values() if "Felton" in l["name"])
+    assert felton["show_count"] == 2 and felton["evidence"]["address"] == "6275 Hwy 9"
+    assert next(l for l in ls.values() if "Guild" in l["name"])["evidence"]["city"] == "Menlo Park"
+    assert next(l for l in ls.values() if "Siesta" in l["name"])["evidence"]["city"] == "Orinda"
+    hop = next(l for l in ls.values() if l["evidence"]["city"] == "Novato")
+    assert sorted(hop["evidence"]["listed_as"]) == ["Hopmonk Tavern, Novato", "Hopmonk, Novato"]
+
+
+def test_a_city_in_a_listing_is_read_through_typos_and_regions():
+    from twiddle.scenedata.venue_names import parse
+    p = parse("Alliance Francaise, 1345 Bush Street, S.F.")
+    assert (p.name, p.address, p.city) == ("Alliance Francaise", "1345 Bush Street", "San Francisco")
+    assert parse("Hopmonk, Sebastorpl").city == "Sebastopol"
+    assert parse("Hertz Hall, East Bay").city == "" and parse("Castro,").name == "Castro"
+    assert parse("Some Bar, Oakland, CA").state == "CA"
+    assert parse("Frost Amphitheater, Stanford Campus").city == "Stanford"

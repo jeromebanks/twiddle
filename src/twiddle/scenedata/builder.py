@@ -405,7 +405,7 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
     progress.phase("publishing")
     if not dry_run:
         try:
-            billed = {f"band:{k}" for k in bands} | {f"venue:{dataset.venue_id(s.venue)}" for s in shows}
+            billed = deadletters.billed_ids(bands, shows, watched)
             result.dead_letters = deadletters.sync(
                 {**deadletters.band_letters(bands, shows), **deadletters.venue_letters(shows, watched)},
                 path, billed=billed)

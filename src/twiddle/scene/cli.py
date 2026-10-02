@@ -227,8 +227,7 @@ def cmd_dlq(args) -> int:
         if snap is None:
             return code
         watched = venues_mod.from_rows(snap.venues)
-        billed = {f"band:{k}" for k in snap.bands} | \
-            {f"venue:{dataset.venue_id(sh.venue)}" for sh in snap.shows}
+        billed = dl.billed_ids(snap.bands, snap.shows, watched)
         counts = dl.sync({**dl.band_letters(snap.bands, snap.shows),
                           **dl.venue_letters(snap.shows, watched)}, billed=billed)
         return emit(args, counts, "queue updated: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
