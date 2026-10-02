@@ -11,13 +11,16 @@ issue ─► sdlc:triage ─► sdlc:needs-info ◄─► (poster answers)
               └─► sdlc:diagnosis-review  (bug: reproduce, what's wrong, the fix)
                         │  poster: /approve   (or /changes ..., or just comment)
                         ▼
-                  sdlc:approved ─► sdlc:planned ─► sdlc:in-progress ─► sdlc:demo-review ─► sdlc:done
-                                   └──────── later skills (not built yet) ────────┘
+                  sdlc:approved ─► (plan: advisor, then Codex rounds until VERDICT: approve)
+                        │      └─ no consensus ─► sdlc:needs-info (a plain-language question to the poster)
+                        ▼
+                  sdlc:planned ─► sdlc:in-progress ─► sdlc:demo-review ─► sdlc:done
+                                   └──── later skills (not built yet) ────┘
    any stage ─► sdlc:escalated  (a human is needed: no consensus, or the agent is stuck)
 ```
 
-Only the triage half exists so far (`triage-issue`); the labels after
-`approved` are created now so they never need renaming.
+Built so far: `triage-issue` (to `approved`) and `plan-issue` (to `planned`).
+The later labels exist already so they never need renaming.
 
 ## Whose move
 
@@ -25,7 +28,9 @@ Only the triage half exists so far (`triage-issue`); the labels after
 |---|---|
 | none, `sdlc:triage` | the agent |
 | `sdlc:needs-info`, `sdlc:prd-review`, `sdlc:diagnosis-review` | the poster, until they reply; then the agent |
-| `sdlc:approved` | the agent (planning, once that skill exists) |
+| `sdlc:approved` | the agent: `plan-issue` (the poster is not asked to review the plan) |
+| `sdlc:needs-info` after a PRD approval | the poster, answering a planning question; then the agent replans |
+| `sdlc:planned` | `work-slice`, once it exists |
 | `sdlc:escalated` | a human |
 
 `uv run python tools/sdlc.py next` lists issues where it is the agent's move;
@@ -53,6 +58,33 @@ latest revision: when a new revision is posted, earlier approvals no longer coun
 - Each PRD/diagnosis revision is a new comment; the previous one is collapsed and
   linked to its successor. After `max_rounds` (`.sdlc/config.json`) the agent escalates.
 - Reproducing a bug uses read-only commands and `--dry-run` only (see `CLAUDE.md`).
+
+## Planning (`plan-issue`)
+
+The approved issue becomes the **epic**. The planner writes a plan (subtasks,
+one-session slices, milestones only when they buy a demo) and posts it as
+`plan rev K`. The poster is an end user, so they are not asked to sign it off.
+Instead the agents review it:
+
+1. The planner checks it with its `advisor`.
+2. **Codex** reviews it read-only, ending in `VERDICT: approve` or `VERDICT: changes`.
+3. The planner accepts or rebuts each finding, and each round is posted as a
+   `plan-review` comment.
+4. When Codex approves the latest revision, that's consensus, and `plan-create`
+   builds it.
+
+The build makes milestones, then subtasks as **native sub-issues** of the epic,
+then slices as sub-issues of their subtask (labels `plan:subtask` / `plan:slice`).
+Ordering is **native `blocked_by`** links. All of it is created from the
+reviewed comment, so what was reviewed is what was built. A rerun finishes a
+partial creation instead of duplicating it.
+
+No consensus within `max_plan_rounds` means the planner asks the poster one
+plain-language question (`sdlc:needs-info`, marked `phase=plan`). Their answer
+earns a fresh set of rounds. A plan revision never voids the PRD's sign-off.
+
+`uv run python tools/sdlc.py ready --epic N` lists the units of work whose
+blockers have all closed as completed.
 
 ## First-time setup
 

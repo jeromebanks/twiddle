@@ -10,6 +10,11 @@ and every label change and agent comment. Config is `.sdlc/config.json`.
     uv run python tools/sdlc.py next
     uv run python tools/sdlc.py transition 12 prd-review --kind prd --body-file prd.md --dry-run
     uv run python tools/sdlc.py reconcile 12
+    uv run python tools/sdlc.py plan-validate plan.json
+    uv run python tools/sdlc.py plan-post 12 plan.json --dry-run
+    uv run python tools/sdlc.py plan-review 12 --plan plan.json --report codex.md --response response.md
+    uv run python tools/sdlc.py plan-create 12 --dry-run
+    uv run python tools/sdlc.py ready --epic 12
 
 Two rules hold the process together (see SDLC.md):
 
@@ -21,6 +26,12 @@ Two rules hold the process together (see SDLC.md):
 * A sign-off binds to one revision. `/approve` (at the start of a line, outside
   quotes and code, from the issue author or a collaborator) approves the latest
   PRD/diagnosis revision only; posting a newer revision voids it.
+
+Planning (after `approved`) needs no human: a plan revision is reviewed by Codex
+until it says `VERDICT: approve` (consensus), and only then are the epic's
+sub-issues created. A plan revision is not a PRD revision, so it never voids
+the PRD's sign-off. Without consensus in `max_plan_rounds`, the agent asks the
+poster a plain-language question (`kind=question phase=plan`).
 """
 from __future__ import annotations
 
@@ -30,6 +41,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +63,8 @@ KIND_TARGET = {"question": "needs-info", "prd": "prd-review", "diagnosis": "diag
 REVIEW_STATES = {"needs-info", "prd-review", "diagnosis-review"}
 REVIEW_DOC = {"prd-review": "prd", "diagnosis-review": "diagnosis"}
 LATER_STATES = {"planned", "in-progress", "demo-review", "done"}
+# Planning comments: posted by plan-post / plan-review / plan-create, never by `transition`.
+PLAN_KINDS = {"plan", "plan-review", "plan-created"}
 # from-state -> states the triage skill may move to. `escalated` is open from anywhere.
 TRANSITIONS = {
     "untriaged": {"triage", "needs-info", "prd-review", "diagnosis-review"},
@@ -58,7 +72,8 @@ TRANSITIONS = {
     "needs-info": {"needs-info", "prd-review", "diagnosis-review"},
     "prd-review": {"prd-review", "needs-info", "approved"},
     "diagnosis-review": {"diagnosis-review", "needs-info", "approved"},
-    "approved": {"prd-review", "diagnosis-review"},   # a later revision reopens review
+    "approved": {"prd-review", "diagnosis-review",    # a later revision reopens review
+                 "needs-info"},                       # planning can't reach consensus: ask the poster
     "escalated": {"triage"},                           # a human releases it
 }
 
@@ -131,6 +146,9 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     last_marked = -1
     rounds = 0
     marked_ids: set[Any] = set()
+    latest_plan: dict[str, Any] | None = None
+    plan_verdict: str | None = None
+    plan_rounds = 0
     for i, c in enumerate(ordered):
         mk = parse_marker(c.get("body", "")) if c.get("author") in trusted else None
         if not mk:
@@ -139,13 +157,22 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         last_marked = i
         kind = mk.get("kind", "")
         rev = int(mk["rev"]) if mk.get("rev", "").isdigit() else None
-        if kind in ROUND_KINDS:
+        if kind in ROUND_KINDS and mk.get("phase") != "plan":
             rounds += 1
+        if kind == "question" and mk.get("phase") == "plan":
+            plan_rounds, plan_verdict = 0, None   # the poster's answer buys a fresh set of Codex rounds
         if kind in DOC_KINDS and rev is not None:
             latest_doc = {"kind": kind, "rev": rev, "id": c.get("id"), "url": c.get("url")}
             approved_rev = None
         elif kind == "approval" and latest_doc and rev == latest_doc["rev"]:
             approved_rev, approval_by = rev, mk.get("by")
+        elif kind == "plan" and rev is not None:
+            latest_plan = {"rev": rev, "id": c.get("id"), "url": c.get("url")}
+            plan_verdict = None
+        elif kind == "plan-review":
+            plan_rounds += 1
+            if latest_plan and rev == latest_plan["rev"]:
+                plan_verdict = mk.get("verdict")
 
     replies = [c for c in ordered[last_marked + 1:] if c.get("id") not in marked_ids]
     allowed = trusted | {issue.get("author", "")}
@@ -161,6 +188,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         ok_state = REVIEW_DOC.get(state) is not None and latest_doc and latest_doc["kind"] == REVIEW_DOC[state]
         decision["valid"] = bool(ok_state)
 
+    doc_approved = bool(latest_doc) and approved_rev == latest_doc["rev"]
+    max_plan_rounds = config.get("max_plan_rounds", 3)
     reconcile = None
     if state in REVIEW_DOC and latest_doc and latest_doc["kind"] != REVIEW_DOC[state]:
         conflicts.append(f"label {PREFIX}{state} but the latest revision is a {latest_doc['kind']}")
@@ -185,10 +214,25 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     elif state in ("untriaged", "triage"):
         turn, action = "agent", "triage"
     elif state == "approved":
-        turn, action = ("agent", "reconcile_label") if reconcile else ("agent", "plan")
+        turn = "agent"
+        if reconcile:
+            action = "reconcile_label"
+        elif latest_plan is None:
+            action = "plan"
+        elif plan_verdict == "approve":
+            action = "create_plan_issues"
+        elif plan_rounds >= max_plan_rounds:
+            action = "ask_poster"
+        else:
+            action = "continue_plan"
     elif replies:
         turn = "agent"
-        action = "record_approval" if decision and decision["action"] == "approve" and decision.get("valid") else "respond_to_reply"
+        if state == "needs-info" and doc_approved:
+            action = "replan"
+        elif decision and decision["action"] == "approve" and decision.get("valid"):
+            action = "record_approval"
+        else:
+            action = "respond_to_reply"
     else:
         turn, action = "poster", "wait_for_poster"
 
@@ -199,7 +243,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "approval_by": approval_by, "rounds": rounds, "max_rounds": config.get("max_rounds", 5),
         "replies": [{"id": c.get("id"), "by": c.get("author"), "url": c.get("url")} for c in replies],
         "decision": decision, "ignored_keywords": ignored, "reconcile": reconcile, "stale_labels": stale,
-        "conflicts": conflicts,
+        "conflicts": conflicts, "doc_approved": doc_approved, "latest_plan": latest_plan,
+        "plan_verdict": plan_verdict, "plan_rounds": plan_rounds, "max_plan_rounds": max_plan_rounds,
     }
 
 
@@ -224,7 +269,8 @@ def check_transition(st: dict[str, Any], to: str, kind: str, config: dict[str, A
         d = st["decision"]
         if not (d and d["action"] == "approve" and d.get("valid")):
             errs.append("no valid /approve from the issue author or a collaborator on the latest revision")
-    if to not in ("escalated", "approved") and st["rounds"] >= st["max_rounds"] and kind in ROUND_KINDS:
+    if (to not in ("escalated", "approved") and st["rounds"] >= st["max_rounds"] and kind in ROUND_KINDS
+            and not st.get("doc_approved")):   # planning questions have their own budget
         errs.append(f"round budget spent ({st['rounds']}/{st['max_rounds']}): escalate to a human")
     return errs
 
@@ -243,11 +289,16 @@ HEADERS = {
     "approval": "approval recorded",
     "escalation": "needs a human",
     "note": "note",
+    "plan": "plan rev {rev}",
+    "plan-review": "Codex review of plan rev {rev}",
+    "plan-created": "plan created",
 }
 FOOTERS = {
     "question": "Reply in a comment. Anything you leave unanswered, I will assume the stated default.",
     "prd": "Reply `/approve` to sign off on this revision, `/changes <what>` to ask for changes, or just comment.",
     "diagnosis": "Reply `/approve` to sign off on this diagnosis, `/changes <what>` to ask for changes, or just comment.",
+    "plan": ("Nothing for you to sign off: Claude and Codex review this plan until they agree. "
+             "If they can't, I'll ask you here in plain terms."),
 }
 
 
@@ -368,11 +419,14 @@ def print_state(st: dict[str, Any]) -> None:
         print(f"  CONFLICT: {c}")
     if st["reconcile"]:
         print(f"  needs reconcile ({st['reconcile']}): run `reconcile`")
+    if st.get("latest_plan"):
+        print(f"  plan: rev {st['latest_plan']['rev']}   codex: {st['plan_verdict'] or 'not yet'}"
+              f"   plan rounds: {st['plan_rounds']}/{st['max_plan_rounds']}")
 
 
 def command_bootstrap_labels(args: argparse.Namespace, config: dict[str, Any]) -> int:
     repo = repo_of(config)
-    for l in config["labels"]:
+    for l in config["labels"] + config.get("plan_labels", []):
         cmd = ["label", "create", l["name"], "--repo", repo, "--color", l["color"],
                "--description", l["description"], "--force"]
         if args.dry_run:
@@ -432,7 +486,7 @@ def command_transition(args: argparse.Namespace, config: dict[str, Any]) -> int:
         body = Path(args.body_file).read_text()
     elif kind == "approval":
         body = (f"{doc['kind'].upper()} rev {rev} approved by @{st['decision']['by']}. "
-                "Next: planning (`plan-issue`, not built yet).")
+                "Next: planning (`plan-issue`).")
     elif kind == "note" and args.to == "triage":
         body = "Triaging this now: reading the issue and the code it touches."
     elif kind == "escalation":
@@ -440,6 +494,8 @@ def command_transition(args: argparse.Namespace, config: dict[str, Any]) -> int:
     else:
         raise SdlcError("--body-file is required")
     extra = {"by": st["decision"]["by"], "via": "comment"} if kind == "approval" else {}
+    if kind == "question" and st.get("doc_approved"):
+        extra = {"phase": "plan"}
     comment = render_comment(kind, rev, body, config, **extra)
     current = [l for l in bundle["issue"]["labels"]]
     if args.dry_run:
@@ -529,6 +585,582 @@ def command_reconcile(args: argparse.Namespace, config: dict[str, Any]) -> int:
     return 0
 
 
+# --- planning: the plan file ------------------------------------------------
+#
+# A plan is JSON (format: .agents/skills/plan-issue/references/plan-schema.md).
+# Its leaves -- slices, or subtasks without slices -- are the units an agent
+# works in one session; `blocked_by` names leaf keys only.
+
+KEY_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9._-]*\Z")
+LEAF_SECTIONS = {"outcome": "Outcome", "scope": "Scope", "acceptance": "Acceptance criteria",
+                 "validation": "Validation", "demo": "Demo", "non_goals": "Non-goals", "context": "Context"}
+PLAN_JSON_RE = re.compile(r"<!-- plan-json -->\s*(`{3,})json\n(.*?)\n\1", re.DOTALL)
+VERDICT_RE = re.compile(r"\A[*_`]*VERDICT:[*_`\s]*(approve|changes)[*_`.\s]*\Z", re.IGNORECASE)
+COMMENT_LIMIT = 65000   # GitHub refuses comments over 65536 characters
+LEAF_LABEL, CONTAINER_LABEL = "plan:slice", "plan:subtask"
+
+
+def natural_key(key: str) -> list[Any]:
+    return [int(p) if p.isdigit() else p for p in re.split(r"(\d+)", key)]
+
+
+def plan_leaves(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every unit of work, each with `_parent` (its subtask's key, or None when it hangs off the epic)
+    and `_milestone`."""
+    out = []
+    for t in plan.get("subtasks") or []:
+        if t.get("slices"):
+            out += [{**s, "_parent": t.get("key"), "_milestone": t.get("milestone")} for s in t["slices"]]
+        else:
+            out.append({**t, "_parent": None, "_milestone": t.get("milestone")})
+    return out
+
+
+def find_cycle(graph: dict[str, list[str]]) -> list[str] | None:
+    """A dependency cycle as a path (first node repeated at the end), or None."""
+    colour: dict[str, int] = {}
+    stack: list[str] = []
+
+    def visit(node: str) -> list[str] | None:
+        colour[node] = 1
+        stack.append(node)
+        for nxt in graph.get(node, []):
+            if colour.get(nxt) == 1:
+                return stack[stack.index(nxt):] + [nxt]
+            if nxt not in colour and (found := visit(nxt)):
+                return found
+        stack.pop()
+        colour[node] = 2
+        return None
+
+    for node in sorted(graph, key=natural_key):
+        if node not in colour and (found := visit(node)):
+            return found
+    return None
+
+
+def topo_order(leaves: list[dict[str, Any]]) -> list[str]:
+    """Leaf keys with every blocker before what it blocks (ties in natural order). Assumes no cycle."""
+    keys = {l["key"] for l in leaves}
+    deps = {l["key"]: {b for b in l.get("blocked_by") or [] if b in keys} for l in leaves}
+    order: list[str] = []
+    while deps:
+        free = sorted((k for k, d in deps.items() if not d), key=natural_key)
+        if not free:
+            raise SdlcError("dependency cycle")
+        order += free
+        for k in free:
+            del deps[k]
+        for d in deps.values():
+            d.difference_update(free)
+    return order
+
+
+def _text(v: Any) -> bool:
+    return isinstance(v, str) and bool(v.strip())
+
+
+def validate_plan(plan: Any, criteria: set[int] | None = None) -> list[str]:
+    """Reasons a plan can't be posted or created (empty list = fine).
+
+    `criteria` are the PRD's numbered acceptance criteria: each must be covered
+    by some leaf, and no leaf may claim one that doesn't exist.
+    """
+    if not isinstance(plan, dict):
+        return ["the plan is not a JSON object"]
+    errs: list[str] = []
+    if not isinstance(plan.get("issue"), int):
+        errs.append("`issue` must be the epic's issue number")
+    if plan.get("kind") not in ("feature", "bug"):
+        errs.append("`kind` must be feature or bug")
+    subtasks = plan.get("subtasks")
+    if not isinstance(subtasks, list) or not subtasks:
+        return errs + ["the plan has no subtasks"]
+    milestones = plan.get("milestones") or []
+    mkeys = [m.get("key") for m in milestones]
+    keys: list[Any] = list(mkeys)
+    for m in milestones:
+        for f in ("title", "demo"):
+            if not _text(m.get(f)):
+                errs.append(f"milestone {m.get('key')} has no {f}")
+    for t in subtasks:
+        k = t.get("key")
+        keys.append(k)
+        if not _text(t.get("title")):
+            errs.append(f"subtask {k} has no title")
+        if milestones and t.get("milestone") not in mkeys:
+            errs.append(f"subtask {k} needs a milestone (one of {', '.join(map(str, mkeys))})")
+        if not milestones and t.get("milestone"):
+            errs.append(f"subtask {k} names milestone {t['milestone']} but the plan has no milestones")
+        if t.get("slices"):
+            if not _text(t.get("summary")):
+                errs.append(f"subtask {k} has no summary")
+            if t.get("blocked_by"):
+                errs.append(f"subtask {k} has slices: put blocked_by on the slices, not the subtask")
+            keys += [s.get("key") for s in t["slices"]]
+    errs += [f"bad key {k!r} (letters, digits, '.', '-', '_'; starts with a letter)"
+             for k in keys if not (isinstance(k, str) and KEY_RE.match(k))]
+    seen: set[Any] = set()
+    for k in keys:
+        if k in seen and isinstance(k, str):
+            errs.append(f"duplicate key {k}")
+        seen.add(k)
+    leaves = plan_leaves(plan)
+    leaf_keys = {l.get("key") for l in leaves}
+    for l in leaves:
+        k = l.get("key")
+        if not _text(l.get("title")):
+            errs.append(f"{k} has no title")
+        for field, name in LEAF_SECTIONS.items():
+            v = l.get(field)
+            ok = (isinstance(v, list) and v and all(_text(x) for x in v)) if field == "acceptance" else _text(v)
+            if not ok:
+                errs.append(f"{k} has no {name}" + (" (a non-empty list)" if field == "acceptance" else ""))
+        for b in l.get("blocked_by") or []:
+            if b == k:
+                errs.append(f"{k} is blocked by itself")
+            elif b not in leaf_keys:
+                errs.append(f"{k} is blocked by {b}, which is not a slice (or a subtask without slices)")
+        covers = l.get("covers") or []
+        if not all(isinstance(c, int) for c in covers):
+            errs.append(f"{k}: covers must be acceptance-criterion numbers")
+    graph = {l["key"]: [b for b in l.get("blocked_by") or [] if b in leaf_keys] for l in leaves if isinstance(l.get("key"), str)}
+    if cycle := find_cycle(graph):
+        errs.append("dependency cycle (each waits on the next): " + " -> ".join(cycle))
+    if criteria is not None:
+        covered = {c for l in leaves for c in l.get("covers") or [] if isinstance(c, int)}
+        if missing := sorted(criteria - covered):
+            errs.append("acceptance criteria no slice covers: " + ", ".join(map(str, missing)))
+        if unknown := sorted(covered - criteria):
+            errs.append("covers criteria the PRD doesn't have: " + ", ".join(map(str, unknown)))
+    return errs
+
+
+def parse_criteria(text: str) -> set[int]:
+    """The numbered items under `## Acceptance criteria` and any `## Addendum`."""
+    found, take = set(), False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            take = bool(re.search(r"acceptance criteria|addendum", line, re.IGNORECASE))
+        elif take and (m := re.match(r"(\d+)\.\s", line)):
+            found.add(int(m.group(1)))
+    return found
+
+
+def prd_path(n: int) -> Path | None:
+    found = sorted((ROOT / "docs" / "prd").glob(f"{n}-*.md"))
+    return found[0] if found else None
+
+
+def plan_criteria(plan: dict[str, Any]) -> tuple[set[int] | None, list[str]]:
+    """The criteria a plan must cover. A feature needs its merged PRD; a bug's diagnosis may have none."""
+    path = prd_path(plan.get("issue", 0)) if isinstance(plan.get("issue"), int) else None
+    criteria = parse_criteria(path.read_text()) if path else set()
+    if plan.get("kind") == "feature" and not criteria:
+        return None, [f"no numbered acceptance criteria found in docs/prd/{plan.get('issue')}-*.md "
+                      "(merge the approved PRD first)"]
+    return (criteria or None), []
+
+
+def check_plan(plan: Any) -> list[str]:
+    if not isinstance(plan, dict):
+        return ["the plan is not a JSON object"]
+    criteria, errs = plan_criteria(plan)
+    return errs + validate_plan(plan, criteria)
+
+
+def _fence(text: str) -> str:
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+def render_plan(plan: dict[str, Any]) -> str:
+    """The plan comment's body: the tree, the dependency graph, coverage, and the JSON that gets created."""
+    leaves = plan_leaves(plan)
+    milestones = plan.get("milestones") or []
+
+    def leaf_line(l: dict[str, Any]) -> str:
+        bits = [f"`{l['key']}` {l['title']}"]
+        if l.get("covers"):
+            bits.append("AC " + ", ".join(map(str, l["covers"])))
+        if l.get("blocked_by"):
+            bits.append("after " + ", ".join(f"`{b}`" for b in l["blocked_by"]))
+        return " · ".join(bits)
+
+    out = [f"**{len(plan['subtasks'])} subtasks, {len(leaves)} units of work** (each one Claude Code session)"
+           + (f" in {len(milestones)} milestones" if milestones else "") + "."]
+    for m in milestones or [None]:
+        out.append("")
+        out.append(f"### {m['key']} · {m['title']}\nDemo: {m['demo']}\n" if m else "### Work\n")
+        for t in plan["subtasks"]:
+            if (t.get("milestone") if m else None) != (m["key"] if m else None):
+                continue
+            if t.get("slices"):
+                out.append(f"- **`{t['key']}` {t['title']}** — {t['summary']}")
+                out += [f"  - {leaf_line(s)}" for s in t["slices"]]
+            else:
+                out.append(f"- {leaf_line(t)}")
+    node = lambda k: re.sub(r"\W", "_", k)  # noqa: E731
+    out += ["", "### Order", "", "```mermaid", "flowchart LR"]
+    for l in leaves:
+        out.append(f'  {node(l["key"])}["{l["key"]} {l["title"].replace(chr(34), "#quot;")}"]')
+    for l in leaves:
+        out += [f"  {node(b)} --> {node(l['key'])}" for b in l.get("blocked_by") or []]
+    out.append("```")
+    covers: dict[int, list[str]] = {}
+    for l in leaves:
+        for c in l.get("covers") or []:
+            covers.setdefault(c, []).append(l["key"])
+    if covers:
+        out += ["", "### Acceptance criteria coverage", "", "| AC | covered by |", "|---|---|"]
+        out += [f"| {c} | {', '.join(f'`{k}`' for k in ks)} |" for c, ks in sorted(covers.items())]
+    blob = json.dumps(plan, indent=1, ensure_ascii=False)
+    fence = _fence(blob)
+    out += ["", "<details><summary>plan.json (exactly what gets created)</summary>", "",
+            "<!-- plan-json -->", f"{fence}json", blob, fence, "", "</details>"]
+    return "\n".join(out)
+
+
+def extract_plan(body: str) -> dict[str, Any]:
+    m = PLAN_JSON_RE.search(body or "")
+    if not m:
+        raise SdlcError("the plan comment carries no plan JSON")
+    try:
+        return json.loads(m.group(2))
+    except ValueError as exc:
+        raise SdlcError(f"the plan comment's JSON does not parse: {exc}")
+
+
+def parse_verdict(report: str) -> str:
+    """`approve` or `changes` from the last non-empty line of a Codex report. Anything else is a failed run."""
+    lines = [l.strip() for l in (report or "").splitlines() if l.strip()]
+    if not lines:
+        raise SdlcError("the Codex report is empty: the review did not run")
+    m = VERDICT_RE.match(lines[-1])
+    if not m:
+        raise SdlcError("the Codex report does not end in `VERDICT: approve` or `VERDICT: changes`; "
+                        "treat it as a failed run and run the review again")
+    return m.group(1).lower()
+
+
+# --- planning: creating the issues -----------------------------------------
+
+def issue_title(epic: int, item: dict[str, Any]) -> str:
+    return f"#{epic} {item['key']}: {item['title']}"
+
+
+def render_leaf_body(epic: int, leaf: dict[str, Any], parent: int | None, numbers: dict[str, int],
+                     prd_url: str | None) -> str:
+    head = [f"Epic: #{epic}"] + ([f"Parent: #{parent}"] if parent else [])
+    if leaf.get("covers"):
+        ac = "acceptance criteria " + ", ".join(map(str, leaf["covers"]))
+        head.append(f"Covers {ac} of [the PRD]({prd_url})" if prd_url else f"Covers {ac}")
+    out = [marker("slice", epic=str(epic), key=leaf["key"]), " · ".join(head)]
+    for field, name in LEAF_SECTIONS.items():
+        v = leaf[field]
+        out += ["", f"## {name}", "", "\n".join(f"- [ ] {x}" for x in v) if field == "acceptance" else v.strip()]
+    if leaf.get("blocked_by"):
+        refs = ", ".join(f"#{numbers[b]} ({b})" if b in numbers else b for b in leaf["blocked_by"])
+        out += ["", "## Dependencies", "", f"Blocked by {refs}. GitHub's blocked-by links are the authority; "
+                "this line only explains them."]
+    return "\n".join(out) + "\n"
+
+
+def render_container_body(epic: int, task: dict[str, Any]) -> str:
+    return (f"{marker('subtask', epic=str(epic), key=task['key'])}\nEpic: #{epic}\n\n{task['summary'].strip()}\n\n"
+            "Its slices are this issue's sub-issues; each is one session of work.\n")
+
+
+def plan_create_actions(plan: dict[str, Any], existing: dict[str, int], attached: dict[int, set[int]],
+                        blocked: dict[int, set[int]]) -> list[tuple[Any, ...]]:
+    """What is still missing on GitHub, in the order to do it.
+
+    `existing` maps plan keys to issue numbers already created (found by their
+    markers), `attached` parent number -> sub-issue numbers, `blocked` issue
+    number -> blocked_by numbers. A rerun after a failure only finishes the job.
+    """
+    epic = plan["issue"]
+
+    def linked(parent_key: str | None, key: str) -> bool:
+        p = epic if parent_key is None else existing.get(parent_key)
+        k = existing.get(key)
+        return bool(p and k and k in attached.get(p, set()))
+
+    acts: list[tuple[Any, ...]] = [("milestone", m["key"]) for m in plan.get("milestones") or []]
+    for t in plan["subtasks"]:
+        if t.get("slices"):
+            if t["key"] not in existing:
+                acts.append(("create", t["key"]))
+            if not linked(None, t["key"]):
+                acts.append(("attach", None, t["key"]))
+    leaves = {l["key"]: l for l in plan_leaves(plan)}
+    for k in topo_order(list(leaves.values())):
+        l = leaves[k]
+        if k not in existing:
+            acts.append(("create", k))
+        if not linked(l["_parent"], k):
+            acts.append(("attach", l["_parent"], k))
+        for b in l.get("blocked_by") or []:
+            if not (k in existing and b in existing and existing[b] in blocked.get(existing[k], set())):
+                acts.append(("block", k, b))
+    return acts if any(a[0] != "milestone" for a in acts) else []
+
+
+def ready_leaves(leaves: list[dict[str, Any]], blockers: dict[int, list[dict[str, Any]]]
+                 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Open leaves split into (ready, waiting): ready when every blocker closed as completed."""
+    ready, waiting = [], []
+    for l in sorted((l for l in leaves if l.get("state", "open") == "open"), key=lambda l: natural_key(l["key"])):
+        unmet = [b["number"] for b in blockers.get(l["number"], [])
+                 if not (b.get("state") == "closed" and b.get("state_reason") == "completed")]
+        (waiting if unmet else ready).append({**l, "unmet": unmet})
+    return ready, waiting
+
+
+def post_json(path: str, payload: dict[str, Any]) -> Any:
+    with tempfile.NamedTemporaryFile("w", suffix=".json") as fh:
+        json.dump(payload, fh)
+        fh.flush()
+        return gh_json(["api", "-X", "POST", path, "--input", fh.name])
+
+
+def fetch_plan_issues(epic: int | None, config: dict[str, Any], trusted: set[str]) -> list[dict[str, Any]]:
+    """Issues created by plan-create (found by their markers), for one epic or all of them."""
+    repo, out, seen = repo_of(config), [], set()
+    for label in (LEAF_LABEL, CONTAINER_LABEL):
+        for raw in gh_pages(f"repos/{repo}/issues?labels={label.replace(':', '%3A')}&state=all&per_page=100"):
+            if "pull_request" in raw or raw["number"] in seen or (raw.get("user") or {}).get("login") not in trusted:
+                continue
+            mk = parse_marker(raw.get("body") or "") or {}
+            if mk.get("kind") not in ("slice", "subtask") or not mk.get("key") or not mk.get("epic", "").isdigit():
+                continue
+            if epic is not None and int(mk["epic"]) != epic:
+                continue
+            seen.add(raw["number"])
+            out.append({"epic": int(mk["epic"]), "key": mk["key"], "kind": mk["kind"], "number": raw["number"],
+                        "id": raw["id"], "title": raw.get("title", ""), "state": raw.get("state", "open"),
+                        "state_reason": raw.get("state_reason")})
+    return out
+
+
+def fetch_links(epic: int, records: list[dict[str, Any]], config: dict[str, Any]
+                ) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
+    repo = repo_of(config)
+    parents = [epic] + [r["number"] for r in records if r["kind"] == "subtask"]
+    attached = {p: {i["number"] for i in gh_pages(f"repos/{repo}/issues/{p}/sub_issues?per_page=100")} for p in parents}
+    blocked = {r["number"]: {i["number"] for i in gh_pages(f"repos/{repo}/issues/{r['number']}/dependencies/blocked_by?per_page=100")}
+               for r in records if r["kind"] == "slice"}
+    return attached, blocked
+
+
+def latest_plan_of(bundle: dict[str, Any], st: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not st.get("latest_plan"):
+        raise SdlcError(f"#{st['number']} has no plan revision yet")
+    c = next(c for c in bundle["comments"] if c["id"] == st["latest_plan"]["id"])
+    return c, extract_plan(c["body"])
+
+
+def command_plan_validate(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    plan = json.loads(Path(args.file).read_text())
+    errs = check_plan(plan)
+    for e in errs:
+        print(f"  - {e}")
+    if errs:
+        print(f"{args.file}: {len(errs)} problem(s)")
+        return 1
+    leaves = plan_leaves(plan)
+    print(f"{args.file}: ok — {len(plan['subtasks'])} subtasks, {len(leaves)} units of work, "
+          f"can start at once: {', '.join(l['key'] for l in leaves if not l.get('blocked_by'))}")
+    return 0
+
+
+def command_plan_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Post a plan revision (validated) for Codex to review. Collapses the previous one."""
+    bundle = load_bundle(args, config)
+    st = bundle_state(bundle, config)
+    if st["action"] not in ("plan", "continue_plan", "create_plan_issues", "replan"):
+        raise SdlcError(f"#{st['number']} is {st['state']} (action {st['action']}): not the time to post a plan"
+                        + (" — the Codex rounds are spent; ask the poster (`transition N needs-info --kind question`)"
+                           if st["action"] == "ask_poster" else ""))
+    plan = json.loads(Path(args.file).read_text())
+    errs = check_plan(plan)
+    if plan.get("issue") != st["number"]:
+        errs.append(f"the plan is for #{plan.get('issue')}, not #{st['number']}")
+    if errs:
+        raise SdlcError("the plan does not validate (run plan-validate): " + "; ".join(errs))
+    rev = (st["latest_plan"]["rev"] if st["latest_plan"] else 0) + 1
+    comment = render_comment("plan", rev, render_plan(plan), config)
+    if len(comment) > COMMENT_LIMIT:
+        raise SdlcError(f"the plan comment is {len(comment)} characters, over GitHub's limit: tighten the slice text")
+    if args.dry_run:
+        print(f"DRY RUN #{st['number']}: plan rev {rev}" + (" (and needs-info -> approved)" if st["state"] == "needs-info" else ""))
+        print(comment)
+        return 0
+    n = st["number"]
+    posted = post_comment(n, comment, config)
+    if st["latest_plan"]:
+        old, _ = latest_plan_of(bundle, st)
+        patch_comment(old["id"], render_superseded(old["body"], rev, posted.get("html_url", "")), config)
+    if st["state"] == "needs-info":
+        set_state_label(n, bundle["issue"]["labels"], "approved", config)
+    print(f"#{n}: plan rev {rev}  {posted.get('html_url', '')}")
+    return 0
+
+
+def command_plan_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Record one Codex round on the latest plan revision, with Claude's answer to it."""
+    bundle = load_bundle(args, config)
+    st = bundle_state(bundle, config)
+    if st["state"] != "approved" or not st["latest_plan"]:
+        raise SdlcError(f"#{st['number']} has no plan under review (state {st['state']})")
+    if st["plan_rounds"] >= st["max_plan_rounds"]:
+        raise SdlcError(f"Codex rounds spent ({st['plan_rounds']}/{st['max_plan_rounds']}) without consensus: "
+                        "ask the poster (`transition N needs-info --kind question`)")
+    _, posted_plan = latest_plan_of(bundle, st)
+    if json.loads(Path(args.plan).read_text()) != posted_plan:
+        raise SdlcError(f"{args.plan} is not plan rev {st['latest_plan']['rev']} as posted: Codex must review exactly "
+                        "what will be created (plan-post the file first, or point Codex at the posted JSON)")
+    report = Path(args.report).read_text()
+    verdict = parse_verdict(report)
+    response = Path(args.response).read_text().strip() if args.response else ""
+    rnd = st["plan_rounds"] + 1
+    body = (f"**Round {rnd}/{st['max_plan_rounds']} — Codex: `{verdict}`**\n\n"
+            f"<details><summary>Codex's review</summary>\n\n{report.strip()}\n\n</details>")
+    if response:
+        body += f"\n\n### Claude's response\n\n{response}"
+    comment = render_comment("plan-review", st["latest_plan"]["rev"], body, config, verdict=verdict, round=str(rnd))
+    if len(comment) > COMMENT_LIMIT:
+        raise SdlcError(f"the review comment is {len(comment)} characters, over GitHub's limit")
+    if args.dry_run:
+        print(comment)
+        return 0
+    posted = post_comment(st["number"], comment, config)
+    print(f"#{st['number']}: plan rev {st['latest_plan']['rev']} round {rnd}: {verdict}  {posted.get('html_url', '')}")
+    return 0
+
+
+def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Create the epic's milestones, sub-issues and blocked_by links from the reviewed plan. Idempotent."""
+    bundle = load_bundle(args, config)
+    st = bundle_state(bundle, config)
+    if st["action"] != "create_plan_issues":
+        raise SdlcError(f"#{st['number']} is not ready to create: action is {st['action']} "
+                        "(it needs Codex's `approve` on the latest plan revision)")
+    plan_comment, plan = latest_plan_of(bundle, st)
+    epic = st["number"]
+    errs = check_plan(plan) + ([] if plan.get("issue") == epic else [f"the plan is for #{plan.get('issue')}"])
+    if errs:
+        raise SdlcError("the reviewed plan no longer validates: " + "; ".join(errs))
+    repo = repo_of(config)
+    offline = bool(getattr(args, "from_file", None))
+    trusted = set(bundle["trusted"])
+
+    def look() -> tuple[dict[str, dict[str, Any]], list[tuple[Any, ...]]]:
+        records = bundle.get("plan_issues", []) if offline else fetch_plan_issues(epic, config, trusted)
+        attached, blocked = ({}, {}) if offline else fetch_links(epic, records, config)
+        by_key = {r["key"]: r for r in records}
+        return by_key, plan_create_actions(plan, {k: r["number"] for k, r in by_key.items()}, attached, blocked)
+
+    by_key, acts = look()
+    numbers: dict[str, Any] = {k: r["number"] for k, r in by_key.items()}
+    ids: dict[str, Any] = {k: r["id"] for k, r in by_key.items()}
+    items = {t["key"]: t for t in plan["subtasks"]} | {l["key"]: l for l in plan_leaves(plan)}
+    path = prd_path(epic)
+    prd_url = f"https://github.com/{repo}/blob/{config.get('default_branch', 'main')}/{path.relative_to(ROOT)}" if path else None
+    if acts and not offline and not args.dry_run:
+        have = {l["name"] for l in gh_json(["label", "list", "--repo", repo, "--limit", "200", "--json", "name"])}
+        if missing := [l for l in (LEAF_LABEL, CONTAINER_LABEL) if l not in have]:
+            # without them a rerun can't find what it made and would duplicate every issue
+            raise SdlcError(f"labels {missing} do not exist: run `bootstrap-labels` first (nothing was created)")
+    have_ms = {} if offline or not acts else {
+        m["title"]: m["number"] for m in gh_pages(f"repos/{repo}/milestones?state=all&per_page=100")}
+    ms: dict[str, Any] = {}
+    say = (lambda s: print("would " + s)) if args.dry_run else print  # noqa: E731
+    for act in acts:
+        if act[0] == "milestone":
+            m = next(m for m in plan["milestones"] if m["key"] == act[1])
+            title = f"#{epic} {m['key']}: {m['title']}"
+            if title in have_ms:
+                ms[m["key"]] = have_ms[title]
+                continue
+            say(f"create milestone {title!r}")
+            ms[m["key"]] = None if args.dry_run else post_json(
+                f"repos/{repo}/milestones", {"title": title, "description": m["demo"]})["number"]
+        elif act[0] == "create":
+            item = items[act[1]]
+            container = bool(item.get("slices"))
+            body = (render_container_body(epic, item) if container else
+                    render_leaf_body(epic, item, numbers.get(item["_parent"]) if item.get("_parent") else None,
+                                     numbers, prd_url))
+            payload: dict[str, Any] = {"title": issue_title(epic, item), "body": body,
+                                       "labels": [CONTAINER_LABEL if container else LEAF_LABEL]}
+            mkey = item.get("milestone") if container else item.get("_milestone")
+            if mkey and ms.get(mkey):
+                payload["milestone"] = ms[mkey]
+            say(f"create {payload['title']!r} [{payload['labels'][0]}]" + (f" in milestone {mkey}" if mkey else ""))
+            if args.dry_run:
+                numbers[act[1]] = f"new:{act[1]}"
+                continue
+            made = post_json(f"repos/{repo}/issues", payload)
+            numbers[act[1]], ids[act[1]] = made["number"], made["id"]
+            time.sleep(1)   # GitHub's secondary rate limit on content creation
+        elif act[0] == "attach":
+            parent = epic if act[1] is None else numbers[act[1]]
+            say(f"attach #{numbers[act[2]]} as a sub-issue of #{parent}")
+            if not args.dry_run:
+                post_json(f"repos/{repo}/issues/{parent}/sub_issues", {"sub_issue_id": ids[act[2]]})
+                time.sleep(0.5)
+        elif act[0] == "block":
+            say(f"mark #{numbers[act[1]]} ({act[1]}) blocked by #{numbers[act[2]]} ({act[2]})")
+            if not args.dry_run:
+                post_json(f"repos/{repo}/issues/{numbers[act[1]]}/dependencies/blocked_by", {"issue_id": ids[act[2]]})
+                time.sleep(0.5)
+    if not acts:
+        print(f"#{epic}: every issue and link already exists")
+    if args.dry_run:
+        print(f"then post the plan-created table on #{epic} and move it to {PREFIX}planned")
+        return 0
+    if not offline:
+        by_key, left = look()
+        if left:
+            raise SdlcError(f"read-back still finds {len(left)} missing step(s), e.g. {left[0]}: rerun plan-create")
+        numbers = {k: r["number"] for k, r in by_key.items()}
+    rev = st["latest_plan"]["rev"]
+    already = any((parse_marker(c["body"]) or {}).get("kind") == "plan-created" and c["author"] in trusted
+                  and (parse_marker(c["body"]) or {}).get("rev") == str(rev) for c in bundle["comments"])
+    if not already:
+        leaves = plan_leaves(plan)
+        rows = [f"| `{t['key']}` | #{numbers[t['key']]} | {t['title']} |" for t in plan["subtasks"] if t.get("slices")]
+        rows += [f"| `{k}` | #{numbers[k]} | {items[k]['title']} |" for k in topo_order(leaves)]
+        first = [f"#{numbers[l['key']]}" for l in leaves if not l.get("blocked_by")]
+        body = (f"Created from [plan rev {rev}]({plan_comment.get('url', '')}) after Codex approved it.\n\n"
+                "| key | issue | title |\n|---|---|---|\n" + "\n".join(rows) +
+                f"\n\nReady to start: {', '.join(first)}. Each is one session of work (`work-slice`).")
+        post_comment(epic, render_comment("plan-created", rev, body, config), config)
+    set_state_label(epic, bundle["issue"]["labels"], "planned", config)
+    print(f"#{epic}: approved -> planned ({len(numbers)} issues)")
+    return 0
+
+
+def command_ready(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Units of work whose blockers have all closed as completed: what `work-slice` may start."""
+    repo = repo_of(config)
+    leaves = [r for r in fetch_plan_issues(args.epic, config, fetch_trusted(config)) if r["kind"] == "slice"]
+    blockers = {r["number"]: gh_pages(f"repos/{repo}/issues/{r['number']}/dependencies/blocked_by?per_page=100")
+                for r in leaves if r["state"] == "open"}
+    ready, waiting = ready_leaves(leaves, blockers)
+    if args.json:
+        print(json.dumps({"ready": ready, "waiting": waiting}, indent=2))
+        return 0
+    for r in ready:
+        print(f"ready    #{r['number']:<4} {r['title']}")
+    for r in waiting:
+        print(f"waiting  #{r['number']:<4} {r['title']}  (on {', '.join('#%d' % n for n in r['unmet'])})")
+    if not ready and not waiting:
+        print("no open units of work" + (f" under #{args.epic}" if args.epic else ""))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -571,6 +1203,37 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("pr", type=int)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_merge_prd)
+
+    p = sub.add_parser("plan-validate", help="check a plan file: sections, dependencies, PRD coverage")
+    p.add_argument("file")
+    p.set_defaults(fn=command_plan_validate)
+
+    p = sub.add_parser("plan-post", help="post a plan revision for Codex to review")
+    p.add_argument("number", type=int)
+    p.add_argument("file")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--from-file")
+    p.set_defaults(fn=command_plan_post)
+
+    p = sub.add_parser("plan-review", help="record a Codex review round (its verdict) and Claude's response")
+    p.add_argument("number", type=int)
+    p.add_argument("--plan", required=True, help="the plan file Codex reviewed; must equal the posted revision")
+    p.add_argument("--report", required=True, help="Codex's stdout; its last line is the verdict")
+    p.add_argument("--response", help="Claude's answer to each finding (markdown)")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--from-file")
+    p.set_defaults(fn=command_plan_review)
+
+    p = sub.add_parser("plan-create", help="create the reviewed plan's issues and links (idempotent)")
+    p.add_argument("number", type=int)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--from-file")
+    p.set_defaults(fn=command_plan_create)
+
+    p = sub.add_parser("ready", help="units of work whose blockers are all done")
+    p.add_argument("--epic", type=int)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=command_ready)
 
     args = ap.parse_args(argv)
     try:

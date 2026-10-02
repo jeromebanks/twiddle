@@ -3,6 +3,7 @@
   "repository": "jeromebanks/twiddle",
   "default_branch": "main",
   "max_rounds": 5,
+  "max_plan_rounds": 3,
   "confirm_before_posting": false,
   "agent_name": "twiddle triage",
   "labels": [
@@ -11,10 +12,14 @@
     {"name": "sdlc:prd-review", "color": "1D76DB", "description": "SDLC: PRD posted, waiting for the poster's sign-off"},
     {"name": "sdlc:diagnosis-review", "color": "1D76DB", "description": "SDLC: bug diagnosis posted, waiting for sign-off"},
     {"name": "sdlc:approved", "color": "0E8A16", "description": "SDLC: PRD or diagnosis signed off, ready to plan"},
-    {"name": "sdlc:planned", "color": "5319E7", "description": "SDLC: epic, tasks and slices created (reserved)"},
+    {"name": "sdlc:planned", "color": "5319E7", "description": "SDLC: plan reviewed by Claude + Codex; subtasks and slices created"},
     {"name": "sdlc:in-progress", "color": "FBCA04", "description": "SDLC: slices being built (reserved)"},
     {"name": "sdlc:demo-review", "color": "1D76DB", "description": "SDLC: milestone demo posted, waiting for the poster (reserved)"},
     {"name": "sdlc:done", "color": "0E8A16", "description": "SDLC: shipped and accepted (reserved)"},
     {"name": "sdlc:escalated", "color": "B60205", "description": "SDLC: a human is needed (no consensus, or the agent is stuck)"}
+  ],
+  "plan_labels": [
+    {"name": "plan:subtask", "color": "C5DEF5", "description": "SDLC plan: a subtask of an epic; its slices are sub-issues"},
+    {"name": "plan:slice", "color": "BFD4F2", "description": "SDLC plan: one unit of work, one agent session"}
   ]
 }
