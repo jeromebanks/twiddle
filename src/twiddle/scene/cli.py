@@ -156,7 +156,7 @@ def cmd_build(args) -> int:
     """Collect, enrich and publish the dataset. Writes one file; no speaker."""
     from ..scenedata.builder import BuildBusy, BuildError, build
     try:
-        r = build(days=args.days, all_venues=args.all_venues, use_spotify=not args.no_spotify,
+        r = build(days=args.days, all_venues=args.all_venues, use_spotify=not args.no_spotify, geocode_limit=getattr(args, "geocode_limit", None),
                   dry_run=args.dry_run, log=lambda m: print(m, file=sys.stderr, flush=True))
     except BuildBusy as exc:
         fail(args, str(exc), "a scheduled build may be running; its data appears when it finishes")
@@ -305,6 +305,9 @@ def register(sub, parents=None):
                     help="enrich bands playing your venues this many days ahead (default 31)")
     bd.add_argument("--all-venues", action="store_true",
                     help="enrich bands at every venue listed, not just the watched ones")
+    bd.add_argument("--geocode-limit", type=int, default=None, metavar="N",
+                    help="look up at most N unwatched rooms on OpenStreetMap (default 20, "
+                         "4 a minute; 0 = none)")
     bd.add_argument("--no-spotify", action="store_true",
                     help="skip Spotify identity even if this Mac is signed in")
     bd.add_argument("--dry-run", action="store_true",

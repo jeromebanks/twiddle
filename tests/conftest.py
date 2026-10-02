@@ -14,6 +14,7 @@ from twiddle import comedy, lookup, netstats, play, ratelimit, spotify_ops, stat
 from twiddle.dial import state as dial_state
 from twiddle.scene import cache as scene_cache
 from twiddle.scenedata import cache as scenedata_cache
+from twiddle.scenedata import geocode
 from twiddle.scenespec import dataset as scene_dataset
 
 
@@ -32,6 +33,8 @@ def _isolated_state_files(tmp_path, monkeypatch):
     monkeypatch.setattr(scene_cache, "CACHE_DIR", tmp_path / "scene")
     monkeypatch.setattr(scenedata_cache, "CACHE_DIR", tmp_path / "scene")
     monkeypatch.setattr(scene_dataset, "DATASET_PATH", tmp_path / "scene-dataset" / "dataset.json")
+    monkeypatch.setattr(geocode, "MAX_PER_BUILD", 0)     # a build under test asks no map
+    monkeypatch.setattr(geocode, "_fetch", lambda url: (_ for _ in ()).throw(AssertionError("test reached Nominatim")))
     monkeypatch.setattr(dial_state, "CACHE_DIR", tmp_path / "dial")
     monkeypatch.setattr(comedy, "CACHE_FILE", tmp_path / "comedy_artists.json")
     monkeypatch.setattr(comedy, "ALBUMS_CACHE_FILE", tmp_path / "comedy_albums.json")

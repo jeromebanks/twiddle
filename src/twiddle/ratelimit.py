@@ -99,6 +99,10 @@ POLICIES: dict[str, Policy] = {
                       "published by Discogs: 25 a minute without a token (60 with one)"),
     "wikipedia": Policy("wikipedia", (Limit(5, 1), Limit(200, 60)),
                         "our own budget; Wikimedia asks for a descriptive User-Agent and <200 a second"),
+    "nominatim": Policy("nominatim", (Limit(1, 1), Limit(4, 60)),
+                        "published by OpenStreetMap: 1 a second, one thread; we keep to 4 a minute "
+                        "because a build is a script on a timer (usage policy, read 2026-10)",
+                        max_block_s=20.0),
     "spotify": Policy("spotify", (Limit(10, 10), Limit(100, 60), Limit(1500, 86400)),
                       "our own budget; Spotify publishes no number (it meters a rolling 30s "
                       "per client id, and its penalty can be a day)"),

@@ -22,6 +22,7 @@ class VenueInfo:
     state: str = ""
     lat: float | None = None
     lon: float | None = None
+    attribution: str = ""       # a credit the data's source requires (OpenStreetMap)
 
     @property
     def instagram_url(self) -> str:
@@ -63,7 +64,8 @@ def from_rows(rows: list[dict]) -> tuple[Venue, ...]:
         if not r.get("name"):
             continue
         info = VenueInfo(**{f: r.get(f) or "" for f in
-                            ("address", "url", "about", "wikipedia", "instagram", "city", "state")},
+                            ("address", "url", "about", "wikipedia", "instagram", "city", "state",
+                             "attribution")},
                          lat=_num(r.get("lat")), lon=_num(r.get("lon")))
         out.append(Venue(r["name"], tuple(m.lower() for m in r.get("match") or [r["name"]]),
                          r.get("icon") or None, info))

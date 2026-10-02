@@ -431,6 +431,23 @@ unwatched room is there with what its listing says (name, city, address), and
 purpose: older clients ignore it, so they never take a merely known room for a
 watched one.
 
+### Where the unwatched rooms are
+
+A build asks OpenStreetMap's Nominatim about up to 20 unwatched rooms
+(`scene build --geocode-limit N`; `0` = none), busiest first, one search per room
+by name and city, and keeps the answer only if it is plausibly that room (in the
+Bay Area, in the right city, named like it); otherwise it records a miss and does
+not ask again for a month. A hit lasts six months. The policy
+(operations.osmfoundation.org/policies/nominatim) asks for one thread, a named
+User-Agent, cached results and, for a script on a timer, far fewer than the
+one-a-second maximum, so the budget is four a minute (`twiddle limits` shows it,
+`~/.config/twiddle/ratelimits.toml` can change it). The data is OpenStreetMap's,
+under the ODbL: the OSM Foundation's geocoding guideline treats one result as an
+insubstantial extract, so a hundred of them beside our own data carry no
+share-alike duty, but the credit is required, so a row filled this way carries
+`attribution` and the venue screen shows it. What a person or an AI resolved
+always wins over the map; a row keeps the credit only while some OSM value is in it.
+
 ### Watching a build, and being polite
 
 ```bash

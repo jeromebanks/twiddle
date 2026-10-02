@@ -47,7 +47,7 @@ from .. import jsonstore
 from ..lookup import norm
 from ..scenespec import dataset
 from ..scenespec import venue as venue_mod
-from . import cache, venue_names
+from . import cache, geocode, venue_names
 from .bands import SHOW_WORDS, near, non_band
 
 SCHEMA = "twiddle.scene.dead-letters"
@@ -170,6 +170,12 @@ def venue_letters(shows: list, watched) -> dict[str, dict]:
 
 KNOWN_FIELDS = ("name", "city", "state", "address", "url", "about", "wikipedia", "instagram",
                 "icon", "lat", "lon")
+GEOCODED_FIELDS = ("city", "state", "address", "lat", "lon", "attribution", "osm")
+
+
+def unwatched_rooms(shows: list, watched) -> list[venue_names.Room]:
+    """The rooms the listings name that no venue list watches, busiest first."""
+    return sorted((r for r, _ in _rooms(shows, watched)), key=lambda r: (-r.shows, r.key))
 
 
 def known_venue_rows(shows: list, watched, dataset_path: Path | None = None) -> list[dict]:
@@ -180,12 +186,20 @@ def known_venue_rows(shows: list, watched, dataset_path: Path | None = None) -> 
     shows are at the room. Never watched: these rooms do not widen anyone's view."""
     letters = load(dataset_path)["letters"]
     rows = []
+    found = geocode.known([r for r, _ in _rooms(shows, watched)])
     for room, _ in _rooms(shows, watched):
         l = letters.get(f"venue:{room.key}") or {}
         res = l.get("resolution") if l.get("status") == RESOLVED and isinstance(l.get("resolution"), dict) else {}
         row = {"id": room.key, "name": room.name, "city": room.city, "state": room.state,
                "address": room.address, "match": sorted({v.lower() for v in room.variants})}
+        hit = found.get(room.key) or {}
+        row.update({k: hit[k] for k in GEOCODED_FIELDS if hit.get(k) not in (None, "")})
         row.update({k: res[k] for k in KNOWN_FIELDS if res.get(k) not in (None, "")})
+        # what a person or an AI found beats a map's guess; the OSM credit stays only
+        # while some OSM-derived value is still in the row
+        if hit and not any(row.get(k) == hit.get(k) for k in ("address", "lat", "lon") if hit.get(k)):
+            row.pop("attribution", None)
+            row.pop("osm", None)
         rows.append(row)
     return sorted(rows, key=lambda r: r["id"])
 

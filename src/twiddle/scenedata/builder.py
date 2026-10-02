@@ -47,7 +47,7 @@ from . import venues as venues_mod
 from ..scenespec.band import BandProfile
 from .bands import BandcampEnricher, LookupEnricher, SpotifyEnricher, assess, genre_of, near
 from ..scenespec.model import Show
-from . import deadletters
+from . import deadletters, geocode
 from .pacing import Backpressure, Progress
 from .sources import fetch_all
 
@@ -269,7 +269,7 @@ def build(*, path: Path | None = None, days: int = DEFAULT_DAYS, all_venues: boo
           watched=None, today: date | None = None,
           spotify_gap: float = SPOTIFY_GAP_S, pace: Callable[[float], None] = time.sleep,
           log: Callable[[str], None] = lambda _m: None,
-          now: Callable[[], float] = time.time) -> Result:
+          now: Callable[[], float] = time.time, geocode_limit: int | None = None) -> Result:
     path = path or dataset.default_path()
     today = today or date.today()
     with _locked(path):
@@ -279,7 +279,7 @@ def build(*, path: Path | None = None, days: int = DEFAULT_DAYS, all_venues: boo
         pressure.on_wait = progress.waiting
         try:
             result = _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
-                            genre_search, wiki, watched, today, pressure, progress, log, now)
+                            genre_search, wiki, watched, today, pressure, progress, log, now, geocode_limit)
         except BaseException as exc:
             progress.finish("failed", f"{type(exc).__name__}: {exc}")
             raise
@@ -289,7 +289,8 @@ def build(*, path: Path | None = None, days: int = DEFAULT_DAYS, all_venues: boo
 
 
 def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
-           genre_search, wiki, watched, today, pressure, progress, log, now) -> Result:
+           genre_search, wiki, watched, today, pressure, progress, log, now,
+           geocode_limit=None) -> Result:
     try:
         prev = dataset.load(path)
     except dataset.DatasetCorrupt as exc:
@@ -414,6 +415,15 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
             log("dead letters: " + ", ".join(f"{n} {k}" for k, n in result.dead_letters.items() if n))
         except Exception as exc:
             log(f"dead-letter queue: not updated ({exc})")
+    if not dry_run:
+        limit = geocode.MAX_PER_BUILD if geocode_limit is None else geocode_limit
+        if limit > 0:
+            progress.phase("geocoding", "where the unwatched rooms are")
+            try:
+                n = geocode.geocode_rooms(deadletters.unwatched_rooms(shows, watched), limit=limit, log=log)
+                log("geocoding: " + ", ".join(f"{v} {k}" for k, v in n.items() if v))
+            except Exception as exc:        # a map lookup must never fail a build
+                log(f"geocoding: skipped ({exc})")
     result.enrichers = enricher_status
     publish(complete=True)
     log(f"published {path}" if not dry_run else "dry run: nothing written")

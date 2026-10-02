@@ -32,12 +32,13 @@ CAPS = {
     "musicbrainz": Cap(60, "published by MusicBrainz: 1 request a second"),
     "bandcamp": Cap(60, "our own throttle: 1 request a second"),
     "spotify": Cap(120, "our own budget; Spotify publishes no number"),
+    "nominatim": Cap(4, "published by OpenStreetMap: 1 a second; our own 4 a minute for scripts"),
 }
 
 # Services by the host a request goes to, for callers that only have a URL.
 HOSTS = {"musicbrainz.org": "musicbrainz", "wikidata.org": "wikipedia",
          "wikipedia.org": "wikipedia", "discogs.com": "discogs",
-         "bandcamp.com": "bandcamp", "spotify.com": "spotify"}
+         "bandcamp.com": "bandcamp", "nominatim.openstreetmap.org": "nominatim", "spotify.com": "spotify"}
 
 
 def service_for(url: str) -> str:
