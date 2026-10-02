@@ -18,6 +18,10 @@ class VenueInfo:
     about: str = ""
     wikipedia: str = ""         # an article title, only where one is about this room
     instagram: str = ""         # a handle, from INSTAGRAM below
+    city: str = ""              # optional: read out of a listing, or looked up
+    state: str = ""
+    lat: float | None = None
+    lon: float | None = None
 
     @property
     def instagram_url(self) -> str:
@@ -28,7 +32,8 @@ class VenueInfo:
         if not self.address:
             return ""
         return "https://www.google.com/maps/search/?api=1&query=" + \
-            urllib.parse.quote(self.address)
+            urllib.parse.quote(f"{self.address}, {self.city}" if self.city and self.city.lower()
+                               not in self.address.lower() else self.address)
 
     def __bool__(self) -> bool:
         return bool(self.address or self.url or self.about or self.wikipedia)
@@ -46,6 +51,10 @@ class Venue:
         return any(m in low for m in self.match)
 
 
+def _num(v) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
 def from_rows(rows: list[dict]) -> tuple[Venue, ...]:
     """The venues of a dataset's `venues` table. Unknown keys are ignored and a
     row without a name is skipped, as everywhere else in the reader."""
@@ -54,7 +63,8 @@ def from_rows(rows: list[dict]) -> tuple[Venue, ...]:
         if not r.get("name"):
             continue
         info = VenueInfo(**{f: r.get(f) or "" for f in
-                            ("address", "url", "about", "wikipedia", "instagram")})
+                            ("address", "url", "about", "wikipedia", "instagram", "city", "state")},
+                         lat=_num(r.get("lat")), lon=_num(r.get("lon")))
         out.append(Venue(r["name"], tuple(m.lower() for m in r.get("match") or [r["name"]]),
                          r.get("icon") or None, info))
     return tuple(out)

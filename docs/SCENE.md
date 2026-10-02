@@ -423,8 +423,13 @@ A letter stays `pending` until resolved; a later build marks it `resolved`
 closed. What a build applies from a resolution: a band's `alias` (searched
 under that name from the next build) or `mbid` (that MusicBrainz artist among
 same-named ones); either way the band is looked up again. A
-venue's resolution is stored and exported but **not yet put into the dataset**:
-that needs the client to tell watched rooms from merely known ones.
+venue's resolution (`name`, `address`, `url`, `about`, `wikipedia`, `instagram`,
+`icon`, `city`, `state`, `lat`, `lon`) goes into the dataset's `known_venues` at
+the next build: rooms the listings name that the dataset does not *watch*. Every
+unwatched room is there with what its listing says (name, city, address), and
+`i` on one of its shows describes it. It is a separate key from `venues` on
+purpose: older clients ignore it, so they never take a merely known room for a
+watched one.
 
 ### Watching a build, and being polite
 

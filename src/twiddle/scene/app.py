@@ -206,6 +206,8 @@ class VenueScreen(ModalScreen):
                 t.append(f"@{i.instagram} on Instagram\n", style="dim")
             if i.about:
                 t.append("\n" + i.about + "\n")
+            if i.city and i.city not in i.address:
+                t.append(i.city + (f", {i.state}" if i.state else "") + "\n")
             if not i:
                 t.append("Not a watched venue, so no details are kept.\n", style="dim")
             keys = [k for k, ok in (("w website", i.url), ("g map", self.map_url),
@@ -340,6 +342,7 @@ class SceneApp(App):
         self.book = book_factory(self._from_worker_band)
         self._watched_given = watched is not None
         self.watched = watched if watched is not None else ()    # the dataset's, once loaded
+        self.known: tuple[venues_mod.Venue, ...] = ()           # rooms it describes but does not watch
         self.all_venues = all_venues or bool(cache.get_state("all_venues", False))
         self.dry_run = dry_run
         self._today = today            # fixed only in tests; otherwise the real date
@@ -453,6 +456,7 @@ class SceneApp(App):
         self.snapshot = snap
         if not self._watched_given:
             self.watched = venues_mod.from_rows(snap.venues)
+        self.known = venues_mod.from_rows(snap.known_venues)     # described, never watched
         self._seed_bands(snap)
         failed = [f"{n}: {v.get('error')}" for n, v in snap.sources.items() if not v.get("ok", True)]
         if failed and snap.complete and snap.generated_at != self._told_failures_at:
@@ -1007,7 +1011,7 @@ class SceneApp(App):
             return
         self._venue_shown = key
         name = venues_mod.display_name(self.watched, s.venue) if s else ""
-        v = venues_mod.find(self.watched, s.venue) if s else None
+        v = (venues_mod.find(self.watched, s.venue) or venues_mod.find(self.known, s.venue)) if s else None
         card = Text()
         if key:
             card.append(name, style=f"bold {art.hex_of(self._venue_color(key))}")
@@ -1191,6 +1195,8 @@ class SceneApp(App):
             return
         v = next((w for w in self.watched if w.name == key), None)
         listed = next((x.venue for x in self.shows if self._venue_key(x.venue) == key), key)
+        if v is None:               # a room the dataset knows about but does not watch
+            v = venues_mod.find(self.known, listed)
         name = v.name if v else venues_mod.display_name(self.watched, listed)
         rec = self.snapshot.venue(name) if self.snapshot else None
         self.push_screen(VenueScreen(name, v.info if v else VenueInfo(), listed,

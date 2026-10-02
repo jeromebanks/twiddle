@@ -261,3 +261,16 @@ def test_a_chosen_artist_is_what_the_lookup_asks_for(tmp_path, monkeypatch):
                         or lookup.Result(None, []))
     LookupEnricher().enrich(BandProfile(band="Abracadabra"))
     assert seen[0] == ("Abracadabra", "mb-b")
+
+
+def test_the_build_publishes_unwatched_rooms_as_known_venues_and_a_resolution_describes_them(tmp_path):
+    path, _ = build(tmp_path, [NIGHT, FOUND], knows("Girl Chow"))
+    snap = dataset.load(path)
+    (row,) = snap.known_venues
+    assert row["id"] == "hopmonk-novato" and row["city"] == "Novato" and row["match"] == ["hopmonk, novato"]
+    assert not any(v["name"] == "Hopmonk" for v in snap.venues)            # known, not watched
+    dl.resolve("venue:hopmonk-novato", {"address": "224 Vintage Way, Novato", "url": "https://hopmonk.com"},
+               by="ai", dataset_path=path)
+    path, _ = build(tmp_path, [NIGHT, FOUND], knows("Girl Chow"))
+    (row,) = dataset.load(path).known_venues
+    assert row["address"] == "224 Vintage Way, Novato" and row["url"] == "https://hopmonk.com"

@@ -316,3 +316,16 @@ def test_shows_at_finds_an_unwatched_room_with_or_without_an_id(tmp_path):
                                             venue_id=dataset.venue_id("Somewhere Else, S.F."))])
     dataset.publish(new, path)
     assert dataset.load(path).shows_at("Somewhere Else, S.F.") == [away]
+
+
+def test_known_venues_are_a_separate_key_an_old_reader_never_sees_as_watched(tmp_path):
+    path = tmp_path / "d.json"
+    row = {"id": "ritz-san-jose", "name": "Ritz", "city": "San Jose", "match": ["ritz, san jose"]}
+    dataset.publish(doc(known_venues=[row]), path)
+    snap = dataset.load(path)
+    assert snap.known_venues == [row] and snap.venues == []        # not in the watched table
+    assert "known_venues" not in doc()                              # omitted when there are none
+    assert dataset.load(dataset.publish(doc(), tmp_path / "e.json")).known_venues == []
+    from twiddle.scenespec import venue
+    (v,) = venue.from_rows(snap.known_venues)
+    assert v.info.city == "San Jose" and v.matches("Ritz, San Jose")

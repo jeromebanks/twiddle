@@ -19,10 +19,19 @@ needs no lock. Default `~/.local/share/twiddle/scene/dataset.json`, or
      "enrichers": {"lookup": "ok", "spotify": "skipped: not signed in", ...},
      "venues": [{"id", "name", "match", "address", "url", "about", "wikipedia",
                  "wikipedia_summary", "instagram", "map_url"}],
+     "known_venues": [{"id", "name", "match", "city", "state", "address", "url", "about",
+                 "lat", "lon", ...}],   # optional: rooms the listings name that the dataset
+                                        # does not *watch* (see below)
      "shows":  [{"id", "venue_id", ...Show.to_dict(): source, also, source_url,
                  tickets, flyer -- where each fact came from}],
      "bands":  {<lookup.norm(name)>: {"name", "updated_at", "status",
                  "identifiers", "genre", "confidence", "why", ...}}}
+
+`known_venues` is a separate key, not rows in `venues`, on purpose: every row of
+`venues` is a *watched* room (the default view, which bands get enriched), and a
+reader that predates `known_venues` ignores the key, so it never mistakes a room
+that is merely known for a watched one. A reader that understands it uses the rows
+only to describe a room (its address, city, a map link), never to widen the view.
 
 Identities are stable across builds: a show's `id` is a hash of its night,
 room and headliner (or its title), a venue's is its slug, a band's key is its
@@ -141,6 +150,7 @@ class Snapshot:
     sources: dict[str, dict] = field(default_factory=dict)
     enrichers: dict[str, str] = field(default_factory=dict)
     venues: list[dict] = field(default_factory=list)
+    known_venues: list[dict] = field(default_factory=list)   # described, not watched
     shows: list[Show] = field(default_factory=list)
     show_ids: list[str] = field(default_factory=list)      # parallel to `shows`
     venue_ids: list[str | None] = field(default_factory=list)   # ditto: the watched room
@@ -235,6 +245,7 @@ def load(path: Path | None = None) -> Snapshot | None:
         region=str(doc.get("region") or ""), kind=str(doc.get("kind") or ""),
         sources=doc.get("sources") or {}, enrichers=doc.get("enrichers") or {},
         venues=[v for v in doc.get("venues", []) if isinstance(v, dict)],
+        known_venues=[v for v in doc.get("known_venues") or [] if isinstance(v, dict)],
         shows=shows, show_ids=ids, bands=bands, mtime=mtime, venue_ids=venues_of)
 
 
@@ -265,10 +276,13 @@ def mtime(path: Path | None = None) -> float | None:
 def document(*, shows: list[Show], show_rows: list[dict] | None = None, venues: list[dict],
              bands: dict[str, dict], sources: dict[str, dict], enrichers: dict[str, str],
              complete: bool, builder: str, generated_at: float | None = None,
-             identity: dict[str, str] | None = None) -> dict:
-    """`identity`: any of id / name / region / kind, written when given."""
+             identity: dict[str, str] | None = None,
+             known_venues: list[dict] | None = None) -> dict:
+    """`identity`: any of id / name / region / kind, written when given.
+    `known_venues`: written only when there are some."""
     head = {k: v for k, v in (identity or {}).items() if k in IDENTITY_KEYS and v}
-    return {"schema": SCHEMA, "version": VERSION, **head, "generated_at": iso(generated_at),
+    extra = {"known_venues": known_venues} if known_venues else {}
+    return {"schema": SCHEMA, "version": VERSION, **head, **extra, "generated_at": iso(generated_at),
             "builder": builder, "complete": complete, "sources": sources,
             "enrichers": enrichers, "venues": venues,
             "shows": show_rows if show_rows is not None else [s.to_dict() for s in shows],

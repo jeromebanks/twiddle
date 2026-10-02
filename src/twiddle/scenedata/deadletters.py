@@ -138,21 +138,23 @@ def band_letters(bands: dict[str, dict], shows: list) -> dict[str, dict]:
     return out
 
 
+def _rooms(shows: list, watched) -> list[tuple[venue_names.Room, list]]:
+    """Each unwatched room (its spellings merged) with the shows played there."""
+    spelled: dict[str, list] = defaultdict(list)
+    for s in shows:
+        if venue_mod.find(watched, s.venue) is None:
+            spelled[s.venue].append(s)
+    rooms = venue_names.cluster({k: len(v) for k, v in spelled.items()})
+    return [(r, sorted((s for v in r.variants for s in spelled[v]), key=lambda s: s.day))
+            for r in rooms]
+
+
 def venue_letters(shows: list, watched) -> dict[str, dict]:
     """Rooms that appear in listings but are on no venue list: no address, site or
     description. The spellings of one room are one letter (`venue_names.cluster`):
     "Hopmonk, Novato" and "Hopmonk Tavern, Novato" are the same place."""
-    rooms: dict[str, list] = defaultdict(list)
-    for s in shows:
-        if venue_mod.find(watched, s.venue) is None:
-            rooms[s.venue].append(s)
-    by_room = {r: [] for r in venue_names.cluster({k: len(v) for k, v in rooms.items()})}
-    spelled = {v: r for r in by_room for v in r.variants}
-    for listed, ss in rooms.items():
-        by_room[spelled[listed]].extend(ss)
     out = {}
-    for room, ss in by_room.items():
-        ss = sorted(ss, key=lambda s: s.day)
+    for room, ss in _rooms(shows, watched):
         out[f"venue:{room.key}"] = {
             "kind": "venue", "name": room.label, "reason": "unwatched_venue",
             "detail": "in the listings, on no venue list: no address, site or description",
@@ -166,17 +168,35 @@ def venue_letters(shows: list, watched) -> dict[str, dict]:
     return out
 
 
+KNOWN_FIELDS = ("name", "city", "state", "address", "url", "about", "wikipedia", "instagram",
+                "icon", "lat", "lon")
+
+
+def known_venue_rows(shows: list, watched, dataset_path: Path | None = None) -> list[dict]:
+    """The dataset's `known_venues`: every unwatched room the listings name, as
+    far as it is known. What the listing itself says (name, city, state, a street
+    address) is always there; a resolved venue letter adds what someone found
+    (`KNOWN_FIELDS`). `match` holds every spelling, so the client can tell which
+    shows are at the room. Never watched: these rooms do not widen anyone's view."""
+    letters = load(dataset_path)["letters"]
+    rows = []
+    for room, _ in _rooms(shows, watched):
+        l = letters.get(f"venue:{room.key}") or {}
+        res = l.get("resolution") if l.get("status") == RESOLVED and isinstance(l.get("resolution"), dict) else {}
+        row = {"id": room.key, "name": room.name, "city": room.city, "state": room.state,
+               "address": room.address, "match": sorted({v.lower() for v in room.variants})}
+        row.update({k: res[k] for k in KNOWN_FIELDS if res.get(k) not in (None, "")})
+        rows.append(row)
+    return sorted(rows, key=lambda r: r["id"])
+
+
 def billed_ids(bands: dict, shows: list, watched) -> set[str]:
     """Every letter id that is billed right now (see `sync`): each band, each
     watched room as the source spells it, each unwatched room by its merged key."""
     ids = {f"band:{k}" for k in bands}
-    unwatched: dict[str, int] = defaultdict(int)
-    for s in shows:
-        if venue_mod.find(watched, s.venue) is None:
-            unwatched[s.venue] += 1
-        else:
-            ids.add(f"venue:{dataset.venue_id(s.venue)}")
-    return ids | {f"venue:{r.key}" for r in venue_names.cluster(unwatched)}
+    ids |= {f"venue:{dataset.venue_id(s.venue)}" for s in shows
+            if venue_mod.find(watched, s.venue) is not None}
+    return ids | {f"venue:{r.key}" for r, _ in _rooms(shows, watched)}
 
 
 # ---- keeping the queue ------------------------------------------------------

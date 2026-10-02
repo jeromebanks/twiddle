@@ -691,6 +691,25 @@ def test_an_unwatched_venue_still_gets_a_map_search(monkeypatch):
     run(go())
 
 
+def test_a_room_the_dataset_knows_but_does_not_watch_is_described_never_watched():
+    from twiddle.scenespec import venue as venue_mod
+
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(160, 45)) as pilot:
+            await pilot.press("a")
+            await settle(pilot, app, lambda: len(app._rows) == 3)
+            app.known = venue_mod.from_rows([{"id": "somewhere-else", "name": "Somewhere Else",
+                                              "city": "Oakland", "address": "1 Main St",
+                                              "match": [SHOWS[2].venue.lower()]}])
+            app.current_show = SHOWS[2]
+            await pilot.press("i")
+            await settle(pilot, app, lambda: app.screen.__class__.__name__ == "VenueScreen")
+            assert app.screen.info.address == "1 Main St" and "1%20Main%20St" in app.screen.map_url
+            assert not any(w.name == "Somewhere Else" for w in app.watched)    # described, not watched
+    run(go())
+
+
 def test_a_venue_with_an_article_shows_its_stored_summary(monkeypatch):
     """The summary comes out of the dataset: opening the card fetches nothing."""
     import twiddle.scenedata.venue_info as vi

@@ -344,7 +344,8 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
         dataset.publish(dataset.document(
             shows=shows, show_rows=rows, venues=venue_records, bands=bands,
             sources=source_status, enrichers=enricher_status, complete=complete,
-            builder=_builder_name(), generated_at=started, identity=identity), path)
+            builder=_builder_name(), generated_at=started, identity=identity,
+            known_venues=_known(shows, watched, path)), path)
 
     publish(complete=False)
     log(f"{len(shows)} shows, {len(bands)} bands; venue summaries, then enriching…")
@@ -417,6 +418,14 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
     publish(complete=True)
     log(f"published {path}" if not dry_run else "dry run: nothing written")
     return result
+
+
+def _known(shows, watched, path) -> list[dict]:
+    """The dataset's `known_venues`; the queue is garnish, so never a failed publish."""
+    try:
+        return deadletters.known_venue_rows(shows, watched, path)
+    except Exception:
+        return []
 
 
 def _safe(fn, *a, **kw):
