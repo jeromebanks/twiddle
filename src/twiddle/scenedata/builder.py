@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 
-from .. import netstats, spotify, spotify_ops
+from .. import netstats, ratelimit, spotify, spotify_ops
 from . import bandcamp
 from ..scenespec import dataset, genre, profiles
 from ..scenespec import venue as venue_mod
@@ -163,13 +163,17 @@ def _default_enrichers(use_spotify: bool, notes: dict[str, str],
     # MusicBrainz's last resort is a Bandcamp name search: stop it too once Bandcamp is paused.
     enrichers: list = [LookupEnricher(bandcamp_ok=lambda: "bandcamp" not in skip)]
     if use_spotify:
-        try:
-            spotify_ops.session()       # loads an existing sign-in; never opens a browser
-        except Exception as exc:
-            notes["spotify"] = "skipped: " + ("not signed in -- run `twiddle spotify auth`"
-                                              if spotify_ops.not_signed_in(exc) else str(exc))
+        locked = ratelimit.governor("spotify").blocked_for()
+        if locked > 0:      # told to stop: don't send the request that would lengthen it
+            notes["spotify"] = f"skipped: rate-limited (retry after {locked:.0f}s)"
         else:
-            enrichers.append(SpotifyEnricher(spotify_ops.session, tracks=False))
+            try:
+                spotify_ops.session()       # loads an existing sign-in; never opens a browser
+            except Exception as exc:
+                notes["spotify"] = "skipped: " + ("not signed in -- run `twiddle spotify auth`"
+                                                  if spotify_ops.not_signed_in(exc) else str(exc))
+            else:
+                enrichers.append(SpotifyEnricher(spotify_ops.session, tracks=False))
     else:
         notes["spotify"] = "skipped: --no-spotify"
     enrichers.append(BandcampEnricher(fetch_tracks=False))

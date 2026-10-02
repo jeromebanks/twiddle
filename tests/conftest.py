@@ -10,7 +10,7 @@ plays through a fake must never leave a line in the real
 """
 import pytest
 
-from twiddle import comedy, lookup, netstats, play, spotify_ops, stations, streaminfo
+from twiddle import comedy, lookup, netstats, play, ratelimit, spotify_ops, stations, streaminfo
 from twiddle.dial import state as dial_state
 from twiddle.scene import cache as scene_cache
 from twiddle.scenedata import cache as scenedata_cache
@@ -20,6 +20,9 @@ from twiddle.scenespec import dataset as scene_dataset
 @pytest.fixture(autouse=True)
 def _isolated_state_files(tmp_path, monkeypatch):
     netstats.reset()                # request counters are process-global
+    monkeypatch.setattr(ratelimit, "LEDGER_PATH", tmp_path / "ratelimits.json")
+    monkeypatch.setattr(ratelimit, "CONFIG_PATH", tmp_path / "ratelimits.toml")
+    ratelimit.reset(flush=False)    # governors too: and never write a test's requests to the real ledger
     monkeypatch.setattr(stations, "LAST_SOURCE_FILE", tmp_path / "last-station")
     monkeypatch.setattr(lookup, "CACHE_FILE", tmp_path / "lookup.json")
     monkeypatch.setattr(streaminfo, "CACHE_FILE", tmp_path / "streams.json")
@@ -38,3 +41,5 @@ def _isolated_state_files(tmp_path, monkeypatch):
     # relay, so answer as a current one would. test_relay_cover tests the probe.
     monkeypatch.setattr(spotify_ops, "relay_cover_url",
                         lambda url, timeout=1.0: url.replace("/stream.mp3", "/cover.jpg"))
+    yield
+    ratelimit.reset(flush=False)    # before the monkeypatches are undone and the atexit flush could reach the real file

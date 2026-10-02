@@ -9,7 +9,8 @@ never imports the builder, it reads this.
      "phase": "sources" | "venues" | "enriching" | "publishing" | "done",
      "done", "total", "bands_per_min", "eta_s", "waiting": {"service", "remaining_s"} | null,
      "services": {name: {total, rpm, cap_rpm, cap_source, utilisation, limited, ...}},
-     "gaps": {service: seconds between bands}, "message"}
+     "gaps": {service: seconds between bands},
+     "budgets": {service: {"limits": [{label, used, max}], "blocked_for_s"}}, "message"}
 
 Unknown keys are ignored, so a producer may add its own.
 """
@@ -91,6 +92,11 @@ def render(st: dict, now: float | None = None) -> str:
             extra.append(f"{duration(s['waited_s'])} waiting")
         lines.append(f"  {name:<12} {s['total']:>6} requests · {cap}"
                      + (" · " + ", ".join(extra) if extra else ""))
+    for name, b in sorted((st.get("budgets") or {}).items()):
+        used = " · ".join(f"{l['used']}/{l['max']} per {l['label'].split(' per ')[-1]}"
+                          for l in b.get("limits") or [])
+        lock = f" · LOCKED OUT {duration(b['blocked_for_s'])} more" if b.get("blocked_for_s") else ""
+        lines.append(f"  {name} budget: {used}{lock}")
     for name, gap in sorted((st.get("gaps") or {}).items()):
         lines.append(f"  pace: {name} one band every {gap:.1f}s")
     if st.get("message"):

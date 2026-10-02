@@ -88,6 +88,8 @@ scene/             THE CLIENT.
 twiddle/bandcamp.py   what both sides share: the throttle, a release's songs, fresh
                       stream URLs (the client needs those at the moment of playing).
 twiddle/jsonstore.py  atomic JSON files, behind both caches.
+twiddle/ratelimit.py  per-service request budgets + a shared lockout ledger (Spotify goes through it).
+twiddle/netstats.py   per-service request counters, rates and caps, for `scene status`.
 ```
 
 Dependency rule: `scenespec` imports neither `scene` nor `scenedata` (and no

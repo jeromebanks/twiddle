@@ -536,3 +536,38 @@ def test_a_build_says_which_dataset_it_is_and_the_config_can_rename_it(tmp_path,
     snap = read(tmp_path)
     assert (snap.id, snap.name, snap.kind) == ("nyc-comedy", "NYC comedy", "comedy")
     assert "Bay Area" in snap.region                    # a field the file does not give keeps its default
+
+
+def test_a_build_never_sends_a_request_to_a_service_that_has_locked_us_out(tmp_path, monkeypatch):
+    """A lockout from an earlier run (or another tool) is in the shared ledger: the
+    build skips Spotify without so much as loading a session, and says why."""
+    from twiddle import ratelimit, spotify_ops
+    ratelimit.governor("spotify").report(429, retry_after=80_000)
+    monkeypatch.setattr(spotify_ops, "session", lambda: 1 / 0)          # must not be reached
+    PACED.clear()
+    builder.build(path=tmp_path / "d.json", sources=[Src("thelist", [GIRL])], use_spotify=True,
+                  genre_search=lambda n, offline=False: None, wiki=lambda t: None, today=TODAY,
+                  spotify_gap=0, pace=PACED.append, now=lambda: 1_790_000_000.0,
+                  enrichers=None)
+    snap = read(tmp_path)
+    assert snap.enrichers["spotify"].startswith("skipped: rate-limited (retry after 80000s")
+    assert snap.complete
+
+
+def test_our_own_budget_running_out_mid_build_is_waited_for_like_a_429(tmp_path):
+    """The governor raises a 429 carrying the time until there is room; the builder waits
+    that (when short) and retries, exactly as for Spotify's own."""
+    from twiddle import ratelimit, spotify
+    calls = []
+
+    class Budgeted(Enr):
+        def enrich(self, p):
+            self.asked.append(p.band)
+            if not calls:
+                calls.append(1)
+                raise spotify.ApiError(429, "twiddle's own rate limit",
+                                       retry_after=ratelimit.RateLimited("spotify", 40).retry_after)
+            spotify_fill(p)
+
+    r = run(tmp_path, [Src("thelist", [GIRL])], [Budgeted("spotify")])
+    assert 41.0 in PACED and read(tmp_path).enrichers["spotify"] == "ok" and r.enriched >= 1

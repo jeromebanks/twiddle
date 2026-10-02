@@ -28,7 +28,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 
-from .. import bandcamp, netstats, spotify
+from .. import bandcamp, netstats, ratelimit, spotify
 from ..scenespec import buildstatus
 
 
@@ -156,6 +156,8 @@ class Progress:
                 "bands_per_min": None if rate is None else round(rate, 2),
                 "eta_s": None if eta is None else round(eta),
                 "waiting": waiting, "services": netstats.snapshot(),
+                "budgets": {n: b for n, b in ratelimit.status().items()
+                            if b["limits"] and (b["blocked_for_s"] or any(l["used"] for l in b["limits"]))},
                 "gaps": {k: round(v, 2) for k, v in self.gaps().items()}}
 
     def line(self) -> str:

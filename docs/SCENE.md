@@ -403,6 +403,20 @@ request a second is *its* published limit; Bandcamp's is our own throttle;
 Spotify publishes no number, so its 120 a minute is a budget of ours (a 429 is
 the real signal, counted as "told us to slow down").
 
+**Staying under the limit in the first place** is `ratelimit.py`: every
+Spotify request goes through one governor that enforces a budget of several
+windows at once (stock: 10 per 10 s, 100 a minute, 1,500 a day), shared by
+every process on the machine through a small ledger, so the build, the TUI and
+any other Spotify tool spend one allowance. The daily window is the one that
+matters: Spotify answered the first full build with a `Retry-After` of 23
+hours. When it does say stop, the lockout is written to the ledger, and
+neither the next build nor any other tool sends the request that would
+lengthen it (`scene build` records `spotify: skipped: rate-limited (retry
+after Ns)` without loading a session). `twiddle limits` shows the budgets and
+what is used; they are Spotify-unpublished numbers of ours, so calibrate them
+from `scene status` over a few builds and override them in
+`~/.config/twiddle/ratelimits.toml`.
+
 **Backpressure.** A service that says "slow down" *with a time* (Spotify's
 `Retry-After`, Bandcamp's own 15-minute back-off) is waited out in full, once,
 and the band retried, so a long first build finishes unattended; the status
