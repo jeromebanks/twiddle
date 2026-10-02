@@ -34,6 +34,8 @@ from pathlib import Path
 
 import requests
 
+from . import netstats
+
 API = "https://api.spotify.com/v1"
 ACCOUNTS = "https://accounts.spotify.com"
 
@@ -330,6 +332,7 @@ class Session:
                 method, url, timeout=30,
                 headers={"Authorization": f"Bearer {self.tokens.access_token}"},
                 **kw)
+            netstats.record_response("spotify", resp)
             if resp.status_code == 401 and attempt == 0:
                 self.tokens = refresh(self.tokens)
                 self.tokens.save(self.path)

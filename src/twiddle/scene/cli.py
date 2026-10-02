@@ -14,7 +14,7 @@ import sys
 from datetime import date, timedelta
 
 from ..control_cli import emit, fail
-from ..scenespec import dataset
+from ..scenespec import buildstatus, dataset
 from ..scenespec import venue as venues_mod
 
 BUILD_BUSY = 75         # EX_TEMPFAIL: another build holds the lock; try again later
@@ -188,6 +188,15 @@ def schedule_plist(project, hours: float, log) -> dict:
     }
 
 
+def cmd_status(args) -> int:
+    """How a build is going (or how the last one went): phase, bands, ETA, and each
+    service's request rate against its cap. Reads one small file; touches nothing else."""
+    st = buildstatus.read()
+    if st is None:
+        return fail(args, "no build has reported yet", "run `twiddle scene build`")
+    return emit(args, st, buildstatus.render(st))
+
+
 def cmd_schedule(args) -> int:
     """Print the launchd agent that keeps the dataset fresh. Installs nothing."""
     import plistlib
@@ -246,6 +255,10 @@ def register(sub, parents=None):
     bd.add_argument("--dry-run", action="store_true",
                     help="collect and enrich, but publish nothing")
     bd.set_defaults(func=cmd_build)
+    st = ssub.add_parser(**kw, name="status",
+                         help="how `scene build` is going: bands done, ETA, request rates "
+                              "against their caps (read-only)")
+    st.set_defaults(func=cmd_status)
     sc = ssub.add_parser(**kw, name="schedule",
                          help="print a launchd agent that runs `scene build` on a timer "
                               "(read-only; installs nothing)")

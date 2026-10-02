@@ -62,7 +62,12 @@ def spotify_fill(p):
     p.tracks = [{"uri": "spotify:track:1", "name": "One"}]
 
 
+PACED: list[float] = []         # every pause the builder asked for, in order
+
+
 def run(tmp_path, sources, enrichers=None, **kw):
+    PACED.clear()
+    kw.setdefault("pace", PACED.append)        # no real sleeping, however long it asks
     kw.setdefault("genre_search", lambda name, offline=False: None)
     kw.setdefault("wiki", lambda title: None)
     kw.setdefault("today", TODAY)
@@ -251,14 +256,74 @@ def test_a_build_without_spotify_does_not_claim_a_band_is_not_on_spotify(tmp_pat
     assert "spotify" not in rec["status"]
 
 
-def test_a_spotify_429_pauses_spotify_for_the_run_and_the_build_still_publishes(tmp_path):
+def test_a_spotify_429_that_persists_pauses_spotify_for_the_run_and_the_build_still_publishes(tmp_path):
     limited = Enr("spotify", raises=spotify.ApiError(429, "rate limited", retry_after=30))
     other = Enr("bandcamp")
     r = run(tmp_path, [Src("thelist", [GIRL, COUP])], [limited, other])
     snap = read(tmp_path)
-    assert limited.asked == ["Girl Chow"]                     # not asked again after the 429
-    assert snap.enrichers["spotify"] == "paused: rate-limited"
+    # waited the 30s it asked for (+1) once and retried; the 429 came straight back, so: paused
+    assert limited.asked == ["Girl Chow", "Girl Chow"] and 31.0 in PACED
+    assert snap.enrichers["spotify"] == "paused: rate-limited (retry after 30s)"
     assert other.asked and snap.complete and r.enriched == 3
+
+
+def test_a_spotify_429_with_no_stated_time_pauses_at_once(tmp_path):
+    limited = Enr("spotify", raises=spotify.ApiError(429, "rate limited"))
+    run(tmp_path, [Src("thelist", [GIRL, COUP])], [limited])
+    assert limited.asked == ["Girl Chow"] and read(tmp_path).enrichers["spotify"] == "paused: rate-limited"
+
+
+def test_a_429_asking_for_longer_than_the_cap_pauses_instead_of_waiting(tmp_path):
+    limited = Enr("spotify", raises=spotify.ApiError(429, "rate limited", retry_after=3600))
+    run(tmp_path, [Src("thelist", [GIRL, COUP])], [limited])
+    assert limited.asked == ["Girl Chow"] and not [x for x in PACED if x > 100]
+
+
+class FlakyOnce(Enr):
+    """Says slow down for the first call only, then answers."""
+
+    def enrich(self, p):
+        self.asked.append(p.band)
+        if len(self.asked) == 1:
+            raise spotify.ApiError(429, "rate limited", retry_after=120)
+        spotify_fill(p)
+
+
+def test_a_429_that_clears_after_the_wait_lets_the_build_finish_with_spotify(tmp_path):
+    flaky = FlakyOnce("spotify")
+    r = run(tmp_path, [Src("thelist", [GIRL, COUP])], [flaky])
+    snap = read(tmp_path)
+    assert flaky.asked[0] == flaky.asked[1] and len(flaky.asked) == 4      # the first band, retried once
+    assert set(flaky.asked) == {"Girl Chow", "Coup Dville", "Wiseacre"}
+    assert 121.0 in PACED                                      # waited the 120s it named, plus one
+    assert snap.enrichers["spotify"] == "ok"                   # never paused
+    assert r.enriched == 3 and all(
+        snap.band(n)["status"]["spotify"] == "done" for n in ("Girl Chow", "Coup Dville", "Wiseacre"))
+
+
+def test_the_gap_between_bands_widens_after_a_wait_and_relaxes_with_successes():
+    from twiddle.scenedata.pacing import Backpressure
+    waits = []
+    bp = Backpressure({"spotify": 0.5}, pace=waits.append)
+    bp.wait("spotify", 10)
+    assert bp.gap("spotify") == 1.0 and waits == [10]
+    bp.wait("spotify", 10)
+    assert bp.gap("spotify") == 2.0
+    for _ in range(30):
+        bp.ok("spotify")
+    assert bp.gap("spotify") == 0.5                            # back to where it started
+    bp.wait("spotify", 10)
+    assert bp.seconds_to_wait("spotify", spotify.ApiError(429, "x", retry_after=5)) is None   # waits spent
+
+
+def test_a_bandcamp_back_off_is_waited_out_when_short_and_paused_when_long(monkeypatch):
+    from twiddle import bandcamp as site
+    from twiddle.scenedata.pacing import Backpressure
+    bp = Backpressure({}, pace=lambda s: None, max_wait_s=900)
+    monkeypatch.setattr(site, "blocked_for", lambda: 600.0)
+    assert bp.seconds_to_wait("bandcamp", site.BlockedError("resting")) == 601.0
+    monkeypatch.setattr(site, "blocked_for", lambda: 1200.0)
+    assert bp.seconds_to_wait("bandcamp", site.BlockedError("resting")) is None
 
 
 def test_other_spotify_errors_do_not_pause_it(tmp_path):

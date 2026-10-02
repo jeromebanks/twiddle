@@ -44,6 +44,8 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from . import netstats
+
 USER_AGENT = "twiddle/0.1 (+https://github.com/jeromebanks/twiddle)"
 MB = "https://musicbrainz.org/ws/2"
 TIMEOUT = 10
@@ -118,8 +120,17 @@ def _get_json(url: str, headers: dict | None = None) -> dict:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
                                                "Accept": "application/json"}
                                  | (headers or {}))
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        return json.load(resp)
+    service = netstats.service_for(url)
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            netstats.record(service, status=getattr(resp, "status", 200))
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        netstats.record(service, status=exc.code)
+        raise
+    except urllib.error.URLError:
+        netstats.record(service)
+        raise
 
 
 def _mb(path: str, **params) -> dict:
@@ -135,6 +146,7 @@ def _mb(path: str, **params) -> dict:
     for attempt in range(4):
         wait = 1.0 - (time.monotonic() - _last_mb_call)
         if wait > 0:
+            netstats.record_wait("musicbrainz", wait)
             time.sleep(wait)
         _last_mb_call = time.monotonic()
         try:
@@ -142,6 +154,7 @@ def _mb(path: str, **params) -> dict:
         except urllib.error.HTTPError as exc:
             if exc.code != 503 or attempt == 3:
                 raise
+            netstats.record_wait("musicbrainz", 1.5 * (attempt + 1))
             time.sleep(1.5 * (attempt + 1))
     raise AssertionError("unreachable")
 
@@ -360,8 +373,16 @@ def bandcamp_bands(artist: str) -> list[dict]:
     req = urllib.request.Request(BANDCAMP_SEARCH, data=body, method="POST",
                                  headers={"User-Agent": USER_AGENT,
                                           "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        results = json.load(resp).get("auto", {}).get("results", [])
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            netstats.record("bandcamp", status=getattr(resp, "status", 200))
+            results = json.load(resp).get("auto", {}).get("results", [])
+    except urllib.error.HTTPError as exc:
+        netstats.record("bandcamp", status=exc.code)
+        raise
+    except urllib.error.URLError:
+        netstats.record("bandcamp")
+        raise
     return [r for r in results if r.get("type") == "b" and _same(r.get("name"), artist)]
 
 

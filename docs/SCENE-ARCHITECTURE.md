@@ -63,6 +63,7 @@ scenespec/         THE CONTRACT: what a producer writes and a client reads.
                      apply_pin().
   venue.py           Venue, VenueInfo, find/resolve/display_name, from_rows().
   genre.py           tags -> genre families (no AI): a band's guess, a show's.
+  buildstatus.py     the running build's status file and how `scene status` shows it.
                      No Textual, no network, no scene/scenedata (a test enforces it).
 
 scenedata/         ONE PRODUCER: everything bespoke.
@@ -73,6 +74,8 @@ scenedata/         ONE PRODUCER: everything bespoke.
   venues.py          the stock watched venues (+ ~/.config/twiddle/scene.toml).
   venue_info.py      hand-kept address/site/description per venue; Wikipedia summary.
   cache.py           aliases and the producer's stores.
+  pacing.py          Backpressure (wait out a stated rate limit once, else pause) and
+                     Progress (ETA, the status file).
 
 scene/             THE CLIENT.
   book.py            BandBook: profiles seeded from the dataset; the only background

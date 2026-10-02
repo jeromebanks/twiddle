@@ -384,6 +384,37 @@ compiled only if this Mac is already signed in (`twiddle spotify auth`),
 otherwise the dataset says `spotify: skipped: not signed in` and those bands
 show as unlooked until a signed-in build.
 
+### Watching a build, and being polite
+
+```bash
+uv run twiddle scene status          # phase, bands done, bands/min, ETA, request rates vs caps
+```
+
+A running build writes `build-status.json` next to the dataset every couple of
+seconds (read-only to read, safe any time; a build that stopped reporting says
+*stalled*), and prints one line per checkpoint to its log:
+`150/723 bands · 38.0/min · eta 15m · musicbrainz 52/60rpm · spotify 41/120rpm`.
+The ETA is measured seconds per band over the last 50, times the bands left,
+waits included: request counts would mislead, since reused and cached bands cost
+almost nothing.
+
+Each service has a cap, and they are not all the same kind: MusicBrainz's 1
+request a second is *its* published limit; Bandcamp's is our own throttle;
+Spotify publishes no number, so its 120 a minute is a budget of ours (a 429 is
+the real signal, counted as "told us to slow down").
+
+**Backpressure.** A service that says "slow down" *with a time* (Spotify's
+`Retry-After`, Bandcamp's own 15-minute back-off) is waited out in full, once,
+and the band retried, so a long first build finishes unattended; the status
+shows the wait and adds it to the ETA. It is never retried early (Spotify has
+lengthened `Retry-After` for every early retry). It is paused for the rest of
+the run, as before, when no time is given, the time is over 15 minutes, the
+limit returns right after waiting, or three waits are spent; the dataset then
+says `spotify: paused: rate-limited (retry after 600s)` and the next build
+retries. Every wait also doubles the gap between bands for that service, and
+every success narrows it back. A wait holds `build.lock`, so a scheduled build
+that fires meanwhile exits 75 ("already running"), which is fine.
+
 ### What a build does
 
 1. Takes `build.lock` next to the dataset, so a scheduled run and `r` never

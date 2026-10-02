@@ -31,6 +31,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import netstats
+
 MIN_INTERVAL_S = 1.0
 BLOCK_S = 15 * 60
 MAX_ERRORS = 3              # in a row, then back off as if blocked
@@ -54,8 +56,14 @@ def _gate() -> None:
     with _throttle:
         wait = _last + MIN_INTERVAL_S - time.monotonic()
         if wait > 0:
+            netstats.record_wait("bandcamp", wait)
             time.sleep(wait)
         _last = time.monotonic()
+
+
+def blocked_for() -> float:
+    """Seconds until a back-off ends (0 when Bandcamp isn't resting)."""
+    return max(0.0, _blocked_until - time.monotonic())
 
 
 def _outcome(ok: bool, exc: Exception | None = None) -> None:
@@ -87,8 +95,16 @@ def _guarded(fn):
 def _get(url: str) -> str:
     def go():
         req = urllib.request.Request(url, headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            return resp.read().decode("utf-8", "replace")
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                netstats.record("bandcamp", status=getattr(resp, "status", 200))
+                return resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            netstats.record("bandcamp", status=exc.code)
+            raise
+        except urllib.error.URLError:
+            netstats.record("bandcamp")
+            raise
     return _guarded(go)
 
 

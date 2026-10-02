@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 
-from .. import spotify, spotify_ops
+from .. import netstats, spotify, spotify_ops
 from . import bandcamp
 from ..scenespec import dataset, genre, profiles
 from ..scenespec import venue as venue_mod
@@ -47,6 +47,7 @@ from . import venues as venues_mod
 from ..scenespec.band import BandProfile
 from .bands import BandcampEnricher, LookupEnricher, SpotifyEnricher, assess, genre_of, near
 from ..scenespec.model import Show
+from .pacing import Backpressure, Progress
 from .sources import fetch_all
 
 DEFAULT_DAYS = 31           # how far ahead bands are enriched (and asked of Bandcamp)
@@ -192,8 +193,28 @@ def _keep_prior_answers(p: BandProfile, old: dict | None) -> None:
         assess(p)
 
 
+def _attempt(e, p: BandProfile, pressure: Backpressure | None) -> Exception | None:
+    """Run one enricher. A rate limit that names a time worth waiting is waited
+    out in full and the band retried once; the exception that stands (or None)
+    comes back, so the caller can pause the service."""
+    try:
+        e.enrich(p)
+        return None
+    except Exception as exc:
+        seconds = pressure.seconds_to_wait(e.name, exc) if pressure else None
+        if seconds is None:
+            return exc
+    pressure.wait(e.name, seconds)
+    try:
+        e.enrich(p)
+        return None
+    except Exception as exc:
+        return exc
+
+
 def enrich_one(band: str, enrichers: list, skip: set[str],
-               prior: BandProfile | None = None) -> BandProfile:
+               prior: BandProfile | None = None, pressure: Backpressure | None = None,
+               reasons: dict[str, str] | None = None) -> BandProfile:
     """One band through every enricher, lookup first, as `BandBook` does but in
     order and to completion. `skip` names enrichers switched off for the run.
     `prior` is last build's profile: if the lookup fails, its answer stands in
@@ -207,12 +228,14 @@ def enrich_one(band: str, enrichers: list, skip: set[str],
         if e.name in skip:
             p.status[e.name] = "error: paused"
         else:
-            try:
-                e.enrich(p)
+            exc = _attempt(e, p, pressure)
+            if exc is None:
                 p.status[e.name] = "done"
-            except Exception as exc:
+            else:
                 if _rate_limited(exc):
                     skip.add(e.name)
+                    if reasons is not None:
+                        reasons[e.name] = Backpressure.reason(exc)
                 p.status[e.name] = f"error: {getattr(exc, 'message', None) or exc}"
         if e.name == "lookup" and p.status["lookup"] != "done" and prior is not None \
                 and prior.status.get("lookup") == "done":
@@ -221,11 +244,12 @@ def enrich_one(band: str, enrichers: list, skip: set[str],
         rerun = getattr(e, "wants_rerun", None)
         if e.name in skip or p.status.get(e.name) != "done" or not (rerun and rerun(p)):
             continue
-        try:
-            e.enrich(p)
-        except Exception as exc:
+        exc = _attempt(e, p, pressure)
+        if exc is not None:
             if _rate_limited(exc):
                 skip.add(e.name)
+                if reasons is not None:
+                    reasons[e.name] = Backpressure.reason(exc)
             p.status[e.name] = f"error: {getattr(exc, 'message', None) or exc}"
     assess(p)
     return p
@@ -243,12 +267,23 @@ def build(*, path: Path | None = None, days: int = DEFAULT_DAYS, all_venues: boo
     path = path or dataset.default_path()
     today = today or date.today()
     with _locked(path):
-        return _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
-                      genre_search, wiki, watched, today, spotify_gap, pace, log, now)
+        netstats.reset()            # the counts are this run's
+        pressure = Backpressure({"spotify": spotify_gap}, pace=pace)
+        progress = Progress(path, log, gaps=lambda: pressure.gaps, write=not dry_run)
+        pressure.on_wait = progress.waiting
+        try:
+            result = _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
+                            genre_search, wiki, watched, today, pressure, progress, log, now)
+        except BaseException as exc:
+            progress.finish("failed", f"{type(exc).__name__}: {exc}")
+            raise
+        progress.finish("done", f"{result.shows} shows, {result.bands} bands "
+                                f"({result.enriched} looked up, {result.reused} reused)")
+        return result
 
 
 def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
-           genre_search, wiki, watched, today, spotify_gap, pace, log, now) -> Result:
+           genre_search, wiki, watched, today, pressure, progress, log, now) -> Result:
     try:
         prev = dataset.load(path)
     except dataset.DatasetCorrupt as exc:
@@ -266,6 +301,7 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
     from .sources import sources as all_sources
     chosen = sources if sources is not None else list(all_sources().values())
     log(f"fetching {len(chosen)} sources…")
+    progress.phase("sources", f"fetching {len(chosen)} sources")
     shows, errors = fetch_all(chosen, stale=prev.shows if prev else None)
     result.errors = errors
     for e in errors:
@@ -306,6 +342,7 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
 
     publish(complete=False)
     log(f"{len(shows)} shows, {len(bands)} bands; venue summaries, then enriching…")
+    progress.phase("venues", f"{len(shows)} shows, {len(bands)} bands; venue summaries")
     # Wikipedia can take seconds a venue when cold: after the listings are out.
     venue_records[:] = _venue_records(watched, prev, wiki)
 
@@ -328,22 +365,29 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
             result.reused += 1
         else:
             todo.append((key, name))
+    progress.begin(len(todo))
+    log(f"{len(todo)} bands to look up ({result.reused} reused)")
+    reasons: dict[str, str] = {}
     for i, (key, name) in enumerate(todo, 1):
         old = bands.get(key)
         prior = profiles.from_record(old, names=profiles.ENRICHERS) if old else None
-        p = enrich_one(name, active, skip, prior)
+        p = enrich_one(name, active, skip, prior, pressure, reasons)
         _keep_prior_answers(p, old)
         hits = None if "bandcamp" in skip else _safe(genre_search, name, offline=True)
         guess = genre_of(p) or guess_from(hits)
         bands[key] = profiles.to_record(p, updated_at=now(), guess=guess)
         result.enriched += 1
-        if "spotify" in names and "spotify" not in skip and spotify_gap:
-            pace(spotify_gap)
+        if p.status.get("spotify") == "done":
+            pressure.ok("spotify")
+        if "spotify" in names and "spotify" not in skip and pressure.gap("spotify"):
+            pressure.pace(pressure.gap("spotify"))
+        progress.band_done()
         if i % CHECKPOINT == 0:
             publish(complete=False)
-            log(f"  {i}/{len(todo)} bands")
+            log(progress.line())
     for n in skip:
-        enricher_status[n] = "paused: rate-limited"
+        enricher_status[n] = "paused: " + reasons.get(n, "rate-limited")
+    progress.phase("publishing")
     result.enrichers = enricher_status
     publish(complete=True)
     log(f"published {path}" if not dry_run else "dry run: nothing written")
