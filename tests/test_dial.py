@@ -1699,3 +1699,49 @@ def test_the_filter_and_the_changed_check_use_one_snapshot():
     args = out.gain_args()
     assert args[-1] == "volume@v=0.0000" and out._argv_gain == (40, True)
     out.close()
+
+
+def test_pruning_never_removes_a_log_a_live_process_is_using(tmp_path):
+    """Codex round 4: a pruned live log made the ack unreadable (-1), which
+    ended or wedged the wait, and stale commands could pile up again."""
+    import os
+    from twiddle.dial import state as dstate
+    d = dstate.CACHE_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    import time as _t
+    other_live = d / f"ffmpeg.{os.getppid()}.1.log"      # another session, alive
+    dead = [d / f"ffmpeg.99999{i}.1.log" for i in range(9)]  # pids that are gone
+    for i, p in enumerate([other_live, *dead]):
+        p.write_text("x")
+        os.utime(p, (_t.time() - 1000 + i, _t.time() - 1000 + i))   # all older than new ones
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg", spawn=lambda a, l: PipeProc())
+    out.tune(STATIONS["kexp"])                          # live log of our own
+    mine = out.log
+    for _ in range(10):                                 # churn: respawns prune older logs
+        out.tune(STATIONS["kalx"])
+    live_now = out.log
+    assert other_live.exists()                          # a live session's log survives
+    assert live_now in out._live_logs
+    assert not mine.exists() or mine != live_now        # old own logs may go
+    assert sum(1 for p in dead if p.exists()) < len(dead)   # dead sessions' logs are pruned
+    out.close()
+
+
+def test_a_log_removed_under_the_sender_ends_the_wait_not_wedges_it(tmp_path):
+    proc = PipeProc()
+
+    def spawn(argv, log):
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.touch()
+        return proc
+    out = LocalOutput(sink="audiotoolbox", ffmpeg="/bin/ffmpeg", spawn=spawn)
+    out.gain_pace_s = 0.02
+    out.tune(STATIONS["kexp"])
+    out.set_volume(50)
+    assert until(lambda: len(proc.written) == 1)
+    out.log.unlink()                                    # removed while waiting for the ack
+    import time as _t
+    _t.sleep(0.1)
+    out.set_mute(True)
+    assert until(lambda: len(proc.written) == 2)        # not stuck forever
+    out.close()

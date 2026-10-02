@@ -512,8 +512,13 @@ class ProcessOutput(BaseOutput):
             # -- however long that takes (it may be busy opening the input) --
             # or the process is gone/replaced. Timing out and sending more is
             # exactly what builds a backlog.
-            while (not self._closed and self._proc is proc and proc.poll() is None
-                   and self._replies(log) <= before):
+            while not self._closed and self._proc is proc and proc.poll() is None:
+                n = self._replies(log)
+                if n < 0:               # the log was removed under us: no ack to wait for
+                    time.sleep(self.gain_pace_s or 0.55)
+                    break
+                if n > before:
+                    break
                 time.sleep(0.01)
 
     def set_volume(self, volume: int) -> int:
@@ -536,17 +541,40 @@ class ProcessOutput(BaseOutput):
         return self._log_path or dial_state.CACHE_DIR / self.log_name
 
     _log_seq = itertools.count(1)
+    _live_logs: set[Path] = set()       # in use by a process of ours, this session
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True                 # exists, but isn't ours to signal
+        return True
 
     def _new_log(self) -> Path:
         """A log of this process's own: acks are read from it, so another
         process (a second dial, the next respawn) must not write to it. The
-        newest few are kept for debugging."""
+        newest few of *finished* processes' logs are kept for debugging: one a
+        live process still writes to (ours, or another session's) is never
+        removed, or its acks could not be read."""
         d = dial_state.CACHE_DIR
         stem = self.log_name.removesuffix(".log")
         path = d / f"{stem}.{os.getpid()}.{next(self._log_seq)}.log"
+        ProcessOutput._live_logs.add(path)
         try:
-            old = sorted(d.glob(f"{stem}.*.log"), key=lambda p: p.stat().st_mtime)
-            for p in old[:-7]:
+            finished = []
+            for p in d.glob(f"{stem}.*.log"):
+                try:
+                    pid = int(p.name.split(".")[-3])
+                except (ValueError, IndexError):
+                    continue
+                live = p in ProcessOutput._live_logs if pid == os.getpid() else self._pid_alive(pid)
+                if not live:
+                    finished.append(p)
+            finished.sort(key=lambda p: p.stat().st_mtime)
+            for p in finished[:-7]:
                 p.unlink(missing_ok=True)
         except OSError:
             pass
@@ -585,6 +613,7 @@ class ProcessOutput(BaseOutput):
 
     def _kill(self) -> None:
         proc, self._proc, self._media = self._proc, None, None
+        ProcessOutput._live_logs.discard(self._log_path)    # its log is now history
         if proc is None or proc.poll() is not None:
             return
         proc.terminate()
