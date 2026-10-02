@@ -47,7 +47,7 @@ from ..lookup import norm
 from ..scenespec import dataset
 from ..scenespec import venue as venue_mod
 from . import cache
-from .bands import SHOW_WORDS
+from .bands import SHOW_WORDS, non_band
 
 SCHEMA = "twiddle.scene.dead-letters"
 VERSION = 1
@@ -97,6 +97,8 @@ def classify_band(rec: dict) -> tuple[str, str, dict] | None:
         return None                                  # not attempted, or will be retried
     if st.get("lookup") != "done" or st.get("bandcamp") != "done":
         return None
+    if non_band(rec.get("name", "")):
+        return None                                  # an event, not an act: nothing to find
     found = rec.get("info") or rec.get("bandcamp") or rec.get("spotify_artist")
     if found:
         return None
@@ -195,8 +197,10 @@ def sync(current: dict[str, dict], dataset_path: Path | None = None, *,
             old["status"], old["last_seen"] = EXPIRED, stamp
             counts["expired"] += 1
         else:                                                # billed, and no longer unresolved
+            why = {"not_a_band": "reads as an event, not an act"} \
+                if old["kind"] == "band" and non_band(old["name"]) else {"found": "by a later build"}
             old.update(status=RESOLVED, resolved_by="build", last_seen=stamp,
-                       resolution=old.get("resolution") or {"found": "by a later build"})
+                       resolution=old.get("resolution") or why)
             counts["resolved"] += 1
     save(doc, dataset_path)
     return counts

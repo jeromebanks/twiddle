@@ -101,6 +101,20 @@ SHOW_WORDS = {"christmas", "xmas", "holiday", "holidays", "show", "tour", "live"
               "trio", "quartet", "quintet", "sextet", "concert", "anniversary"}
 _ABOUT = re.compile(r"^(?:an?\s+)?(?:tribute\s+to|salute\s+to|celebration\s+of|"
                     r"celebrating|the\s+music\s+of|the\s+songs\s+of)\s+(.+)$", re.IGNORECASE)
+# Billings that are an event, not an act: nothing to look up, so never a dead letter.
+# Measured against the real queue (2026-10): "Private Event", "Membership Meeting",
+# "Karaoke Tuesday", "Bachata Nightz", "Salsa Crazy Mondays". Only consulted for a
+# billing that found nothing, so a band really called "Open Mic" costs us nothing.
+EVENT = re.compile(r"\b(?:private (?:event|party)|closed for|membership meeting|open mic|karaoke|"
+                   r"trivia|bingo|jam session|storytelling|workshop|nights?|nightz|nite|"
+                   r"(?:mon|tues|wednes|thurs|fri|satur|sun)days)\b|\bvs\.?\s", re.IGNORECASE)
+
+
+def non_band(name: str) -> bool:
+    """True when this billing reads as an event (a night, a meeting), not a band."""
+    return bool(EVENT.search(name))
+
+
 MAX_CANDIDATES = 3      # each is up to three database searches on the lookup lane
 
 

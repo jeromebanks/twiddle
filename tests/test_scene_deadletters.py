@@ -12,7 +12,7 @@ TODAY = date(2026, 10, 1)
 STORK = "Thee Stork Club, Oakland"
 HOPMONK = "Hopmonk, Novato"             # on no venue list
 GHOST = Show(date(2026, 10, 5), STORK, ["Ghost Band", "Wiseacre"], source="thelist")
-NIGHT = Show(date(2026, 10, 6), HOPMONK, ["Bachata Nightz"], source="thelist")
+NIGHT = Show(date(2026, 10, 6), HOPMONK, ["Girl Chow Showcase"], source="thelist")
 FOUND = Show(date(2026, 10, 7), STORK, ["Girl Chow"], source="thelist")
 
 
@@ -73,11 +73,11 @@ def test_a_band_nobody_knows_is_queued_with_what_was_tried_and_a_found_one_is_no
 
 
 def test_clues_about_a_billing_that_is_not_a_band_travel_with_it(tmp_path):
-    path, _ = build(tmp_path, [Show(date(2026, 10, 6), STORK, ["Bachata Nightz"]),
+    path, _ = build(tmp_path, [Show(date(2026, 10, 6), STORK, ["Girl Chow Showcase"]),
                                Show(date(2026, 10, 8), STORK, ["Astrozombies SF , Rusty Chains"]),
                                Show(date(2026, 10, 9), STORK, ["AFROBASHMENT(afrobeats"])])
     ls = letters(path)
-    assert ls["band:bachata nightz"]["evidence"]["hints"]["looks_like_a_night"] is True
+    assert ls["band:girl chow showcase"]["evidence"]["hints"]["looks_like_a_night"] is True
     assert ls["band:astrozombies sf rusty chains"]["evidence"]["hints"]["several_names_joined"] is True
     assert ls["band:afrobashment afrobeats"]["evidence"]["hints"]["unbalanced_parenthesis"] is True
 
@@ -183,3 +183,23 @@ def test_scene_dlq_scan_rebuilds_the_queue_from_a_dataset_without_a_build(tmp_pa
     assert "3 new" in capsys.readouterr().out
     assert set(dl.load(default)["letters"]) == {"band:ghost band", "band:wiseacre",
                                                 "venue:hopmonk-novato"}
+
+
+def test_an_event_is_not_a_dead_letter_and_an_old_letter_for_one_is_closed(tmp_path):
+    from twiddle.scenedata import deadletters as dl
+    from twiddle.scenedata.bands import non_band
+    for name in ("Private Event", "Membership Meeting", "Karaoke Tuesday", "Bachata Nightz",
+                 "Salsa Crazy Mondays", "Hamdi FC vs. San Francisco"):
+        assert non_band(name), name
+    for name in ("Mindi Abair", "Heavens To Betsey", "The Avengers", "Sunday Driver"):
+        assert not non_band(name), name
+    rec = {"name": "Private Event", "updated_at": "x", "status": {"lookup": "done", "bandcamp": "done"}}
+    assert dl.classify_band(rec) is None
+    path = tmp_path / "dataset.json"
+    doc = dl.load(path)
+    doc["letters"]["band:private-event"] = {"kind": "band", "name": "Private Event", "status": "pending",
+                                            "reason": "unfound", "show_count": 6}
+    dl.save(doc, path)
+    dl.sync({}, path, billed={"band:private-event"})
+    l = dl.load(path)["letters"]["band:private-event"]
+    assert l["status"] == "resolved" and "not_a_band" in l["resolution"]
