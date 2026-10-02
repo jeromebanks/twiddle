@@ -41,6 +41,9 @@ own: listeners falls to 0 (so `dropped_chunks` cannot climb).
 """
 from __future__ import annotations
 
+import functools
+import itertools
+import os
 import re
 import shutil
 import subprocess
@@ -53,6 +56,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .. import here, play, spotify_ops, stations
+from ..gain import LiveGain
 from ..scene.players import NeedsConfirmation
 from ..stations import Station
 from . import state as dial_state
@@ -135,6 +139,9 @@ class BaseOutput:
     id = ""
     label = ""
     dry_run = False
+    # How often a held volume key may reach `set_volume`: a Sonos write is a
+    # journalled SOAP call, so it is paced; a pipe write is free.
+    volume_interval_s = 0.3
 
     def tune(self, station: Station, *, confirmed: bool = False) -> str:
         return self.play(Media.of(station), confirmed=confirmed)
@@ -154,6 +161,12 @@ class BaseOutput:
 
     def back_to_relay(self) -> str:
         raise PlaybackError("R is for a Sonos room", "press d and pick the Roam first")
+
+    def disconnect(self) -> str:
+        """Let go of this output when you say so (`D`): a plain stop, unless
+        the output can leave nothing behind (`SonosOutput`). A handoff never
+        calls this: it stops, and the speaker keeps its resume point."""
+        return self.stop()
 
     def close(self) -> None:
         pass
@@ -327,6 +340,20 @@ class SonosOutput(BaseOutput):
         g.stop()
         return f"■ {g.name} stopped"
 
+    def disconnect(self) -> str:
+        """Stop, then clear the transport URI, so the Sonos app shows nothing
+        instead of the station sitting there paused. Refuses the relay, like
+        `stop`. The clear is best effort: a speaker that refuses an empty URI
+        is left stopped, and we say so."""
+        msg = self.stop()
+        if self.dry_run:
+            return msg.replace("would stop", "would disconnect")
+        try:
+            play.set_uri(self.group.ip, "")
+        except Exception:
+            return f"■ {self.group.name} stopped (the speaker kept its station)"
+        return f"⏏ {self.group.name} disconnected"
+
     def set_volume(self, volume: int) -> int:
         volume = _clamp(volume)
         if not self.dry_run:
@@ -367,23 +394,49 @@ def _pactl(*args: str) -> str:
 
 
 def _spawn(argv: list[str], log: Path) -> subprocess.Popen:
-    # A log file, never the terminal: anything ffplay prints would draw over the TUI.
+    # A log file, never the terminal: anything ffmpeg prints would draw over the TUI.
+    # stdin is a pipe: it is how `ProcessOutput.set_volume` reaches the running process.
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "ab") as out:
-        return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out,
+        return subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=out,
                                 stderr=subprocess.STDOUT)
+
+
+@functools.lru_cache(maxsize=8)
+def _fast_commands(ffmpeg: str | None) -> bool:
+    """Does this ffmpeg take `-stats_period`? ffmpeg reads one interactive
+    command per wake of its main loop, which is every stats period (0.5s by
+    default): a held volume key would queue up stale levels. At 0.05s it
+    applies about one every 70ms."""
+    if not ffmpeg:
+        return False
+    try:
+        r = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "quiet", "-stats_period", "0.05",
+                            "-f", "lavfi", "-i", "anullsrc", "-t", "0.01", "-f", "null", "-"],
+                           capture_output=True, timeout=10, check=False)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 class ProcessOutput(BaseOutput):
     """An output that is a local process fed the stream's URL.
 
-    Subclasses give `argv` (and, if they have them, volume and mute). The
-    process is ours: it stops when the app quits. `ffplay` to this Mac is
-    the one that exists; `ffmpeg -f audiotoolbox -audio_device_index N`
-    (a Bluetooth speaker) or `ffmpeg -f mp3 tcp://host:port` (a socket)
-    would each be another `argv`.
+    Subclasses give `argv`. The process is ours: it stops when the app quits.
+    `ffmpeg -f audiotoolbox` is the one for this Mac, with
+    `-audio_device_index N` for a Bluetooth speaker; `ffmpeg -f mp3
+    tcp://host:port` (a socket) would be another `argv`.
+
+    ## Volume and mute are twiddle's own
+
+    A `gain.LiveGain`: an ffmpeg filter that `set_volume` retunes on the
+    running process, never the system volume. Build `argv` with
+    `gain_args()`; the process is spawned with a stdin pipe. The level is
+    kept here, so every respawn (next station, `d`, a Bluetooth reconnect)
+    starts at it.
     """
     log_name = "output.log"
+    volume_interval_s = 0.03
 
     def __init__(self, *, dry_run: bool = False, spawn=_spawn):
         self.dry_run = dry_run
@@ -393,9 +446,111 @@ class ProcessOutput(BaseOutput):
         self._lock = threading.Lock()
         self._sleep: threading.Timer | None = None
         self._sleep_at: float | None = None      # monotonic deadline
+        self.gain = LiveGain()
+        self.gain_pace_s: float | None = None     # set from ffmpeg's rate by gain_args
+        self._gain_wake = threading.Event()
+        self._gain_thread: threading.Thread | None = None
+        self._gain_start = threading.Lock()
+        self._argv_gain: tuple[int, bool] | None = None
+        self._log_path: Path | None = None
+        self._acked = False             # this process has a log to read acks from
+        self._gain_broken: tuple | None = None   # (proc, why): acks became unreadable
+        self._closed = False
 
     def argv(self, media: Media) -> list[str]:
         raise NotImplementedError
+
+    def gain_args(self) -> list[str]:
+        """The filter `set_volume` later retunes; put it in every `argv`."""
+        fast = _fast_commands(getattr(self, "_ffmpeg", None))
+        if self.gain_pace_s is None:
+            self.gain_pace_s = 0.08 if fast else 0.55    # one command per ffmpeg wake
+        # One snapshot for both the filter and the later "did it change?"
+        # comparison: reading the live state twice could disagree.
+        snap = (self.gain.volume, self.gain.muted)
+        self._argv_gain = snap
+        return (["-stats_period", "0.05"] if fast else []) + LiveGain(*snap).args()
+
+    def _push_gain(self) -> None:
+        """Ask for the current level to reach the process. One sender thread
+        sends only the latest level and waits for ffmpeg to acknowledge it
+        before the next, so a held key never queues stale commands, and a
+        stalled pipe can block only that thread -- never stop, respawn or
+        close. Nothing running is fine: the level is kept for the next `argv`
+        (and `play` re-asks if it changed while the process was starting)."""
+        self._gain_wake.set()
+        with self._gain_start:          # never blocks on a pipe, so cheap
+            if self._gain_thread is None or not self._gain_thread.is_alive():
+                self._gain_thread = threading.Thread(target=self._gain_loop, daemon=True,
+                                                     name="gain-sender")
+                self._gain_thread.start()
+
+    @staticmethod
+    def _replies(log: Path) -> int:
+        """Commands ffmpeg has answered, counted in its own log (one per
+        process, so nothing else's replies are counted): it prints "Command
+        reply" for each one it applies. -1: no readable log."""
+        try:
+            return log.read_bytes().count(b"Command reply")
+        except OSError:
+            return -1
+
+    def _gain_loop(self) -> None:
+        while self._gain_wake.wait() and not self._closed:
+            self._gain_wake.clear()
+            proc, log, acked = self._proc, self.log, self._acked    # read once
+            if proc is None or proc.poll() is not None:
+                continue                # a respawn gets the level via argv
+            if self._gain_broken and self._gain_broken[0] is proc:
+                continue                # no ack can be read: sending blind would queue
+            before = self._replies(log) if acked else -1
+            if acked and before < 0:
+                self._lose_acks(proc)
+                continue
+            if not self.gain.push(proc):
+                continue
+            if not acked:
+                # A process with no log by design (a fake in a test): the
+                # only fallback is a pause, as long as ffmpeg's slowest wake.
+                time.sleep(self.gain_pace_s or 0.55)
+                continue
+            # The ack. One command stays outstanding until ffmpeg answers it
+            # -- however long that takes (it may be busy opening the input) --
+            # or the process is gone/replaced. Timing out and sending more is
+            # exactly what builds a backlog.
+            while not self._closed and self._proc is proc and proc.poll() is None:
+                n = self._replies(log)
+                if n < 0:
+                    self._lose_acks(proc)
+                    break
+                if n > before:
+                    break
+                time.sleep(0.01)
+
+    def _lose_acks(self, proc) -> None:
+        """The log we read acks from is gone (cache cleanup): we can no longer
+        tell what ffmpeg has applied, and sending blind would queue stale
+        levels. Stop sending to this process and say so (the next volume or
+        mute key reports it); playing again starts a fresh process and log."""
+        self._gain_broken = (proc, "dial's volume control lost contact with the player "
+                                   "(its log was removed)")
+
+    def _check_gain(self) -> None:
+        if self._gain_broken and self._gain_broken[0] is self._proc:
+            raise PlaybackError(self._gain_broken[1], "press enter to tune again")
+
+    def set_volume(self, volume: int) -> int:
+        self.gain.volume = _clamp(volume)
+        if not self.dry_run:
+            self._push_gain()
+            self._check_gain()
+        return self.gain.volume
+
+    def set_mute(self, muted: bool) -> None:
+        self.gain.muted = bool(muted)
+        if not self.dry_run:
+            self._push_gain()
+            self._check_gain()
 
     def unavailable(self) -> PlaybackError | None:
         """Why this output can't play at all (a missing binary), or None."""
@@ -403,13 +558,53 @@ class ProcessOutput(BaseOutput):
 
     @property
     def log(self) -> Path:
-        return dial_state.CACHE_DIR / self.log_name
+        return self._log_path or dial_state.CACHE_DIR / self.log_name
+
+    _log_seq = itertools.count(1)
+    _live_logs: set[Path] = set()       # in use by a process of ours, this session
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True                 # exists, but isn't ours to signal
+        return True
+
+    def _new_log(self) -> Path:
+        """A log of this process's own: acks are read from it, so another
+        process (a second dial, the next respawn) must not write to it. The
+        newest few of *finished* processes' logs are kept for debugging: one a
+        live process still writes to (ours, or another session's) is never
+        removed, or its acks could not be read."""
+        d = dial_state.CACHE_DIR
+        stem = self.log_name.removesuffix(".log")
+        path = d / f"{stem}.{os.getpid()}.{next(self._log_seq)}.log"
+        ProcessOutput._live_logs.add(path)
+        try:
+            finished = []
+            for p in d.glob(f"{stem}.*.log"):
+                try:
+                    pid = int(p.name.split(".")[-3])
+                except (ValueError, IndexError):
+                    continue
+                live = p in ProcessOutput._live_logs if pid == os.getpid() else self._pid_alive(pid)
+                if not live:
+                    finished.append(p)
+            finished.sort(key=lambda p: p.stat().st_mtime)
+            for p in finished[:-7]:
+                p.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return path
 
     def _alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
     def _volume(self) -> tuple[int | None, bool]:
-        return None, False
+        return self.gain.volume, self.gain.muted
 
     def state(self) -> OutputState:
         vol, muted = self._volume()
@@ -428,12 +623,19 @@ class ProcessOutput(BaseOutput):
             return f"[dry-run] would play {media.name} on {self.label}"
         with self._lock:
             self._kill()
+            self._log_path = self._new_log()
+            self._gain_broken = None
             self._proc = self._spawn(self.argv(media), self.log)
+            self._acked = self.log.exists()     # a real spawn always creates it
             self._media = media
+            changed = self._argv_gain != (self.gain.volume, self.gain.muted)
+        if changed:
+            self._push_gain()           # set while the process was starting
         return f"▶ {media.name} on {self.label}"
 
     def _kill(self) -> None:
         proc, self._proc, self._media = self._proc, None, None
+        ProcessOutput._live_logs.discard(self._log_path)    # its log is now history
         if proc is None or proc.poll() is not None:
             return
         proc.terminate()
@@ -469,66 +671,99 @@ class ProcessOutput(BaseOutput):
     def close(self) -> None:
         self.set_sleep_timer(0)
         self.stop()
+        self._closed = True
+        self._gain_wake.set()           # let the sender thread end
+
+
+def _ffmpeg_sink(ffmpeg: str | None) -> str:
+    """How this computer's speakers are reached: "audiotoolbox" (macOS) or
+    "pulse" (PulseAudio, or PipeWire's server -- a Chromebook's Linux
+    container) when this ffmpeg was built with it; else "ffplay", which can't
+    take twiddle's own volume and falls back on the system's."""
+    if sys.platform == "darwin":
+        return "audiotoolbox"
+    if ffmpeg:
+        try:
+            out = subprocess.run([ffmpeg, "-hide_banner", "-devices"], capture_output=True,
+                                 text=True, timeout=5, check=False).stdout
+            if re.search(r"^\s*\S*E\S*\s+pulse\b", out, re.M):
+                return "pulse"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return "ffplay"
 
 
 class LocalOutput(ProcessOutput):
-    """`ffplay` for the stream; the Mac's own output volume for volume and mute.
+    """This computer's speakers, through `ffmpeg` to the default output
+    (`audiotoolbox` on a Mac, `pulse` on Linux), with twiddle's own volume and
+    mute (`ProcessOutput`): the system volume and other apps are untouched.
 
     Nothing here touches a speaker or Spotify. The stream stops when the app
     quits, the same as `scene`'s "This Mac".
+
+    A Linux whose ffmpeg has no PulseAudio support falls back to `ffplay`
+    and the default sink's volume via `pactl` (the old behaviour), since
+    `ffplay` can't be retuned while it runs. `sink` forces one.
     """
     id = MAC
     label = MAC_LABEL
-    log_name = "ffplay.log"
 
-    def __init__(self, *, dry_run: bool = False, spawn=_spawn, osascript=None, pactl=None,
-                 ffplay: str | None = None):
+    def __init__(self, *, dry_run: bool = False, spawn=_spawn, pactl=None,
+                 ffplay: str | None = None, ffmpeg: str | None = None,
+                 sink: str | None = None):
         super().__init__(dry_run=dry_run, spawn=spawn)
-        # The system volume: AppleScript on macOS, `pactl` anywhere else.
-        if osascript is None and pactl is None:
-            osascript, pactl = (_osascript, None) if sys.platform == "darwin" else (None, _pactl)
-        self._osa, self._pactl = osascript, pactl
         self._ffplay = ffplay or shutil.which("ffplay")
+        self._ffmpeg = ffmpeg or shutil.which("ffmpeg")
+        self.sink = sink or _ffmpeg_sink(self._ffmpeg)
+        self._pactl = (pactl or _pactl) if self.sink == "ffplay" else None
+        if self.sink == "ffplay":
+            self.log_name = "ffplay.log"
+            self.volume_interval_s = 0.3    # a subprocess per write
+        else:
+            self.log_name = "ffmpeg.log"
 
     def unavailable(self) -> PlaybackError | None:
         hint = "brew install ffmpeg" if here.KIND == "Mac" else "sudo apt install ffmpeg"
-        return None if self._ffplay else PlaybackError("ffplay isn't installed", hint)
+        name = "ffplay" if self.sink == "ffplay" else "ffmpeg"
+        return None if (self._ffplay if self.sink == "ffplay" else self._ffmpeg) \
+            else PlaybackError(f"{name} isn't installed", hint)
 
     def argv(self, media: Media) -> list[str]:
+        if self.sink != "ffplay":
+            # ffmpeg ends at the end of a track by itself; a station never ends.
+            return [self._ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostats",
+                    "-i", media.url, "-vn", *self.gain_args(), "-f", self.sink,
+                    "-" if self.sink == "audiotoolbox" else "default"]
         # A track ends, unlike a station: -autoexit, or ffplay would sit
         # there silent and look alive. Stations keep their old flags.
         flags = ["-nodisp"] + (["-autoexit"] if media.station is None else [])
         return [self._ffplay, *flags, "-loglevel", "warning", media.url]
 
     def _volume(self) -> tuple[int | None, bool]:
+        if self._pactl is None:
+            return super()._volume()
         try:
-            if self._pactl is not None:
-                # "Volume: front-left: 65536 / 100% / 0.00 dB, ..." -- the first channel's %.
-                m = re.search(r"(\d+)%", self._pactl("get-sink-volume", "@DEFAULT_SINK@"))
-                vol = int(m.group(1)) if m else -1
-                muted = self._pactl("get-sink-mute", "@DEFAULT_SINK@").endswith("yes")
-            else:
-                vol = int(self._osa("output volume of (get volume settings)") or -1)
-                muted = self._osa("output muted of (get volume settings)") == "true"
+            # "Volume: front-left: 65536 / 100% / 0.00 dB, ..." -- the first channel's %.
+            m = re.search(r"(\d+)%", self._pactl("get-sink-volume", "@DEFAULT_SINK@"))
+            vol = int(m.group(1)) if m else -1
+            muted = self._pactl("get-sink-mute", "@DEFAULT_SINK@").endswith("yes")
         except (ValueError, OSError, subprocess.SubprocessError):
             vol, muted = -1, False
         return (vol if vol >= 0 else None), muted
 
     def set_volume(self, volume: int) -> int:
+        if self._pactl is None:
+            return super().set_volume(volume)
         volume = _clamp(volume)
         if not self.dry_run:
-            if self._pactl is not None:
-                self._pactl("set-sink-volume", "@DEFAULT_SINK@", f"{volume}%")
-            else:
-                self._osa(f"set volume output volume {volume}")
+            self._pactl("set-sink-volume", "@DEFAULT_SINK@", f"{volume}%")
         return volume
 
     def set_mute(self, muted: bool) -> None:
+        if self._pactl is None:
+            return super().set_mute(muted)
         if not self.dry_run:
-            if self._pactl is not None:
-                self._pactl("set-sink-mute", "@DEFAULT_SINK@", "1" if muted else "0")
-            else:
-                self._osa(f"set volume output muted {'true' if muted else 'false'}")
+            self._pactl("set-sink-mute", "@DEFAULT_SINK@", "1" if muted else "0")
 
 
 # ---- choosing one --------------------------------------------------------------
@@ -677,6 +912,14 @@ class Outputs:
         """Stop `oid` because you said so: unconditionally, and forget it."""
         with self._switch:
             msg = self.get(oid).stop()
+            self._owned.pop(oid, None)
+            return msg
+
+    def disconnect(self, oid: str) -> str:
+        """`D`: let go of `oid` unconditionally, leaving nothing on it, and
+        forget it."""
+        with self._switch:
+            msg = self.get(oid).disconnect()
             self._owned.pop(oid, None)
             return msg
 

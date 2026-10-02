@@ -1,6 +1,7 @@
 """`dial`'s Bluetooth output: finding the headphones by name, connecting
 them, and the ffmpeg line that plays to them. No Bluetooth, no ffmpeg."""
 import json
+import time
 
 import pytest
 
@@ -89,7 +90,7 @@ def test_plays_to_the_headphones_index_without_touching_the_macs_output():
     assert argv[argv.index("-audio_device_index") + 1] == "3"
     assert STATIONS["kexp"].url in argv
     assert out.state() == OutputState(tuned="kexp", playing=True,
-                                      uri=bare(STATIONS["kexp"].url))
+                                      volume=100, uri=bare(STATIONS["kexp"].url))
     out.stop()
     assert not out.state().playing
 
@@ -117,11 +118,40 @@ def test_blueutil_connects_then_it_plays():
     assert spawned and "3" in spawned[0]
 
 
-def test_no_volume_control_says_so():
-    out = BluetoothOutput("Bose QC45", run=fake_run(), ffmpeg="/bin/ffmpeg")
-    with pytest.raises(PlaybackError):
-        out.set_volume(40)
-    assert out.state().volume is None
+def test_bluetooth_has_its_own_live_volume_and_mute():
+    """Issue #1 asked for the fix on every sink, not only the Mac's speakers."""
+    class Pipe(Proc):
+        def __init__(self):
+            super().__init__()
+            self.stdin = self
+            self.written = []
+
+        def write(self, data):
+            self.written.append(data.decode())
+
+        def flush(self):
+            pass
+    spawned, procs = [], []
+
+    def spawn(argv, log):
+        spawned.append(argv)
+        procs.append(Pipe())
+        return procs[-1]
+    out = BluetoothOutput("Bose QC45", run=fake_run(), spawn=spawn, ffmpeg="/bin/ffmpeg")
+    out.gain_pace_s = 0.01
+    out.set_volume(40)                                  # before it plays: kept
+    out.play(Media.of(STATIONS["kexp"]))
+    assert "-nostdin" not in spawned[0]
+    assert spawned[0][spawned[0].index("-af") + 1] == "volume@v=0.1600"
+    out.set_volume(100)
+    time.sleep(0.1)
+    out.set_mute(True)
+    deadline = time.monotonic() + 2
+    while len(procs[0].written) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert procs[0].written == ["cvolume@v -1 volume 1.0000\n",
+                                "cvolume@v -1 volume 0.0000\n"]
+    assert out.state().volume == 100 and out.state().muted
 
 
 def test_bluetooth_shows_up_in_the_picker_with_its_address():
@@ -131,3 +161,26 @@ def test_bluetooth_shows_up_in_the_picker_with_its_address():
     assert ids == ["mac", "bt:Bose QC45", "bt:Sam’s AirPods Pro"]
     bt = outs.get("bt:Bose QC45")
     assert isinstance(bt, BluetoothOutput) and bt.address == "02:00:5E:00:00:04"
+
+
+def test_a_headset_listed_as_input_and_output_plays_to_the_output():
+    """Seen on the author's Mac 2026-10-01: the Bose is two CoreAudio devices,
+    and the microphone's index (first) made AudioQueueStart fail with -66637,
+    so nothing ever played on the Bluetooth output."""
+    devices = (
+        "[AudioToolbox @ 0x1] CoreAudio devices:\n"
+        "[AudioToolbox @ 0x1] [2]              Mac mini Speakers, BuiltInSpeakerDevice\n"
+        "[AudioToolbox @ 0x1] [3]             Bose QC Headphones, E4-58-BC-77-5F-A8:input\n"
+        "[AudioToolbox @ 0x1] [4]             Bose QC Headphones, E4-58-BC-77-5F-A8:output\n")
+    assert bluetooth.coreaudio_devices("ffmpeg", fake_run(devices))["bose qc headphones"] == 4
+
+
+def test_closing_and_the_sleep_timer_work_on_bluetooth():
+    """BluetoothOutput's injected `sleep` once shadowed ProcessOutput's sleep
+    timer, so close() raised AttributeError on real hardware."""
+    out = BluetoothOutput("Bose QC45", run=fake_run(), spawn=lambda *a: Proc(),
+                          ffmpeg="/bin/ffmpeg")
+    out.play(Media.of(STATIONS["kexp"]))
+    assert out.set_sleep_timer(600) == 600
+    out.close()
+    assert not out.state().playing and out.state().sleep_s is None

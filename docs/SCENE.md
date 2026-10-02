@@ -286,7 +286,7 @@ bands that is in the Bay Area or California; else none. Labels never count.
 
 A Bandcamp track plays without Spotify, on:
 
-- **This Mac (speakers):** through `ffplay`. If the Mac's own Spotify player
+- **This Mac (speakers):** through `ffmpeg`. If the Mac's own Spotify player
   was playing, it's paused first. It stops when the app quits.
 - **The Roams (relay):** the Roam fetches the track itself, as a file at its
   https URL. Not as a radio stream: Sonos fetches those over plain http,
