@@ -79,11 +79,26 @@ def _city_of(addr: dict) -> str:
                  if addr.get(k)), "")
 
 
+# What a venue can be on a map. A result with no street number is accepted only as one of
+# these: a path, a station or a street that shares the room's name is not the room.
+PLACE_CATEGORIES = {"amenity", "leisure", "tourism", "building", "shop", "historic", "craft", "office"}
+NOT_A_ROOM = {"footway", "path", "cycleway", "bus_stop", "station", "platform", "residential",
+              "service", "pedestrian", "bus_station", "parking", "bicycle_parking"}
+
+
 def choose(room: Room, results: list) -> dict | None:
-    """The result that is this room, as the fields a `known_venues` row takes, or None."""
+    """The result that is this room, as the fields a `known_venues` row takes, or None.
+
+    A room listed with no city is not looked up at all (the box is the whole Bay Area, so
+    "Fireside Lounge" would match whichever one is nearest the middle)."""
+    if not room.city:
+        return None
     for r in results or []:
-        if r.get("category") == "highway" or r.get("addresstype") == "road":
+        if r.get("category") == "highway" or r.get("addresstype") == "road" \
+                or r.get("type") in NOT_A_ROOM:
             continue            # a street named like the room ("Ritz Court") is not the room
+        if not (r.get("address") or {}).get("house_number") and r.get("category") not in PLACE_CATEGORIES:
+            continue
         addr = r.get("address") or {}
         name = r.get("name") or (r.get("display_name") or "").split(",")[0]
         city = _city_of(addr)
@@ -101,7 +116,8 @@ def choose(room: Room, results: list) -> dict | None:
                                       " ".join(p for p in ("CA", addr.get("postcode")) if p)) if p)
         return {"address": place if street else "", "city": city or room.city, "state": "CA",
                 "lat": lat, "lon": lon, "attribution": ATTRIBUTION,
-                "osm": f"{r.get('osm_type', '')}/{r.get('osm_id', '')}"}
+                "osm": f"{r.get('osm_type', '')}/{r.get('osm_id', '')}",
+                "matched": f"{name} ({r.get('category')}/{r.get('type')})"}
     return None
 
 

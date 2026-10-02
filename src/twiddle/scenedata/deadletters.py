@@ -170,7 +170,7 @@ def venue_letters(shows: list, watched) -> dict[str, dict]:
 
 KNOWN_FIELDS = ("name", "city", "state", "address", "url", "about", "wikipedia", "instagram",
                 "icon", "lat", "lon")
-GEOCODED_FIELDS = ("city", "state", "address", "lat", "lon", "attribution", "osm")
+GEOCODED_FIELDS = ("city", "state", "address", "lat", "lon", "attribution", "osm", "matched")
 
 
 def unwatched_rooms(shows: list, watched) -> list[venue_names.Room]:

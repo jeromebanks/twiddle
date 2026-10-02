@@ -36,6 +36,20 @@ def test_a_street_named_like_the_room_is_not_the_room():
     assert geocode.choose(ritz, [road, result(name="The Ritz", city="San Jose", category="amenity")])["state"] == "CA"
 
 
+def test_a_result_with_no_street_number_must_be_a_place_and_a_room_with_no_city_is_not_asked_about():
+    arlene = cluster({"Arlene Francis Center, Santa Rosa": 1})[0]
+    path = result(name="Arlene Francis Center", city="Santa Rosa", category="highway", type="cycleway")
+    path["address"] = {"road": "SMART Multi-Use Path", "city": "Santa Rosa"}
+    assert geocode.choose(arlene, [path]) is None
+    plaza = result(name="Arlene Francis Center", city="Santa Rosa", category="railway", type="station")
+    plaza["address"] = {"road": "Some Way", "city": "Santa Rosa"}
+    assert geocode.choose(arlene, [plaza]) is None
+    hall = result(name="Arlene Francis Center", city="Santa Rosa", category="amenity", type="arts_centre")
+    hall["address"] = {"road": "6th Street", "city": "Santa Rosa"}
+    assert geocode.choose(arlene, [hall])["matched"].startswith("Arlene Francis Center")
+    assert geocode.choose(cluster({"Fireside Lounge": 1})[0], [result(name="Fireside Lounge")]) is None
+
+
 def test_the_query_names_the_room_stays_in_the_bay_area_and_asks_for_few():
     url = geocode.query_url(ROOM)
     assert "q=Hopmonk%2C+Novato%2C+California" in url and "bounded=1" in url and "limit=5" in url
