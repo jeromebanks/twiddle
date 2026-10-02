@@ -114,7 +114,7 @@ def choose(room: Room, results: list) -> dict | None:
         street = " ".join(p for p in (addr.get("house_number"), addr.get("road")) if p)
         place = ", ".join(p for p in (street, city or room.city,
                                       " ".join(p for p in ("CA", addr.get("postcode")) if p)) if p)
-        return {"address": place if street else "", "city": city or room.city, "state": "CA",
+        return {"address": place if addr.get("house_number") and addr.get("road") else "", "city": city or room.city, "state": "CA",
                 "lat": lat, "lon": lon, "attribution": ATTRIBUTION,
                 "osm": f"{r.get('osm_type', '')}/{r.get('osm_id', '')}",
                 "matched": f"{name} ({r.get('category')}/{r.get('type')})"}
@@ -136,8 +136,14 @@ def known(rooms: list[Room]) -> dict[str, dict]:
     """Every cached hit, by room key: what a build publishes without asking anyone."""
     store = cache._read(FILE)
     now = time.time()
-    return {r.key: store[r.key]["hit"] for r in rooms
-            if store.get(r.key, {}).get("hit") and now - store[r.key].get("at", 0) < HIT_TTL_S}
+    out = {}
+    for r in rooms:
+        hit = store.get(r.key, {}).get("hit")
+        if hit and now - store[r.key].get("at", 0) < HIT_TTL_S:
+            # a street name with no number ("Ocean Street") is not an address: keep the
+            # coordinates, drop the text (earlier hits were cached before this rule)
+            out[r.key] = dict(hit, address=hit["address"] if hit.get("address", "")[:1].isdigit() else "")
+    return out
 
 
 def geocode_rooms(rooms: list[Room], *, limit: int = MAX_PER_BUILD,

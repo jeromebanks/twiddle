@@ -50,6 +50,16 @@ def test_a_result_with_no_street_number_must_be_a_place_and_a_room_with_no_city_
     assert geocode.choose(cluster({"Fireside Lounge": 1})[0], [result(name="Fireside Lounge")]) is None
 
 
+def test_a_place_with_no_street_number_keeps_its_coordinates_but_has_no_address(tmp_path):
+    bare = result(name="Jury Room", city="Santa Cruz", category="amenity", type="bar")
+    bare["address"] = {"road": "Ocean Street", "city": "Santa Cruz"}
+    room = cluster({"Jury Room, Santa Cruz": 1})[0]
+    hit = geocode.choose(room, [bare])
+    assert hit["address"] == "" and hit["lat"] == 38.11
+    geocode.cache._write(geocode.FILE, {room.key: {"at": time.time(), "hit": dict(hit, address="Ocean Street, Santa Cruz, CA")}})
+    assert geocode.known([room])[room.key]["address"] == ""          # an older cached hit too
+
+
 def test_the_query_names_the_room_stays_in_the_bay_area_and_asks_for_few():
     url = geocode.query_url(ROOM)
     assert "q=Hopmonk%2C+Novato%2C+California" in url and "bounded=1" in url and "limit=5" in url
