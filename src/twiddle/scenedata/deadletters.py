@@ -344,7 +344,7 @@ def _apply(dataset_path) -> list[str]:
             keys.append(dataset.band_id(l["name"]))
     if keys:
         save(doc, dataset_path)
-    return keys
+    return list(dict.fromkeys(keys))
 
 
 # ---- what people and AIs do with it ----------------------------------------
@@ -356,8 +356,11 @@ def resolve(lid: str, resolution: dict, by: str = "human", dataset_path: Path | 
         l = doc["letters"].get(lid)
         if l is None:
             raise KeyError(lid)
+        old = l.get("resolution") or {}
+        if l["kind"] == "band" and l.get("applied"):      # a replaced answer must not linger in the cache
+            cache.drop_override(l["name"], mbid=str(old.get("mbid") or ""), alias=str(old.get("alias") or ""))
         l.update(status=RESOLVED, resolution=resolution, resolved_by=by,
-                 attempts=l.get("attempts", 0) + 1, applied=False)
+                 attempts=l.get("attempts", 0) + 1, applied=False, relookup=l["kind"] == "band" and bool(l.get("applied")))
         save(doc, dataset_path)
         return l
 

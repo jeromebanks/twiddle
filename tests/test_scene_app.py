@@ -1756,3 +1756,49 @@ def test_a_different_paused_spotify_track_on_the_relay_is_not_ours():
             await settle(pilot, app, lambda: not app._before)
             assert outs.roam.restored == []
     run(go())
+
+
+def test_the_next_track_of_scene_s_own_spotify_preview_is_still_ours():
+    # Codex: only the first URI was remembered, so `n` or the queue advancing made R give up the room
+    from twiddle.dial.output import RELAY, OutputState
+
+    async def go():
+        outs = FakeUrlOutputs()
+        outs.roam.found = STATION
+        app = _bandcamp_app(RELAY_DEV, outs, None)
+
+        class Player(FakePlayer):
+            def now(self):
+                return {"playing": True, "uri": "spotify:track:1"}           # the second of ours
+        app.player = Player()
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().tracks)
+            tracks = app.query_one("#tracks")
+            tracks.focus()
+            tracks.highlighted = tracks.get_option_index("sp:0")
+            await pilot.press("p")
+            await settle(pilot, app, lambda: app.player.played)
+            assert {"spotify:track:0", "spotify:track:1", "spotify:track:2"} <= app._last_preview["spotify"]
+            outs.roam.state = lambda: OutputState(tuned=RELAY, playing=True, uri="relay", other="Spotify (relay)")
+            await pilot.press("R")
+            await settle(pilot, app, lambda: outs.roam.restored)
+            assert outs.roam.restored == [(STATION, False)]
+    run(go())
+
+
+def test_R_after_switching_away_still_restores_the_volume_of_a_room_that_was_on_the_relay():
+    async def go():
+        outs = FakeUrlOutputs()
+        outs.roam.found = ON_RELAY
+        player = FakePlayer()
+        app = _preview_on_the_roam(outs, player)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")
+            await settle(pilot, app, lambda: outs.roam.played)
+            app.bc_now = None
+            app.device = Device(id="mac", name="Mac", local=True)
+            await pilot.press("R")
+            await settle(pilot, app, lambda: outs.roam.restored)
+            assert outs.roam.restored == [(ON_RELAY, True)] and "back" in player.played
+    run(go())

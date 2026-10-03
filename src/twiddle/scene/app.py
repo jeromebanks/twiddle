@@ -389,7 +389,7 @@ class SceneApp(App):
         self.viz_options: dict = {}     # VizScreen keywords; the tests' fakes
         self._scan_guesses: dict[str, genre_mod.Guess | None] = {}   # by band key
         self._before: dict[str, dict] = {}  # per output: the room as scene found it before its first preview
-        self._last_preview = {"spotify": "", "bandcamp": ""}   # exactly what scene last started
+        self._last_preview = {"spotify": set(), "bandcamp": ""}   # exactly what scene last started: the queue, and the stream
         self.volume: int | None = None      # of `_vol_oid`; None until read
         self.muted = False
         self._vol_oid: str | None = None
@@ -1474,7 +1474,7 @@ class SceneApp(App):
             self.call_from_thread(self._error, exc)
             return
         if device.relay and uris:
-            self._last_preview["spotify"] = uris[off]
+            self._last_preview["spotify"] = set(uris)       # the whole queue: `n` and the next track are ours too
         bc = self.bc_now
         if bc and device.relay and bc["output"] == self._bandcamp_output(device):
             self.bc_now = None          # re-pointed at the relay: already replaced
@@ -1664,7 +1664,7 @@ class SceneApp(App):
         oid = self._volume_oid()
         if oid in self._before:
             return oid
-        owed = [(b["at"], o) for o, b in self._before.items() if b["token"] and not b["token"]["relay"]]
+        owed = [(b["at"], o) for o, b in self._before.items() if b["token"]]    # a relay one owes its volume
         return max(owed)[1] if owed else oid
 
     def _restore_room(self, oid: str, before: dict) -> None:
@@ -1715,7 +1715,7 @@ class SceneApp(App):
                 return False                # cannot tell: leave it alone
             # Paused is not idle: Spotify keeps the paused track's URI, so someone else's
             # paused selection still differs from ours. Idle means no current item at all.
-            return not np.get("uri") or np.get("uri") == self._last_preview["spotify"]
+            return not np.get("uri") or np.get("uri") in self._last_preview["spotify"]
         started = self._last_preview["bandcamp"]
         return bool(started) and _stream_key(started) == _stream_key(st.other or st.uri)
 

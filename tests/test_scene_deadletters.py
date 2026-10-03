@@ -377,3 +377,16 @@ def test_an_alias_is_the_search_name_even_when_the_lookup_databases_do_not_know_
     p = BandProfile(band="Ghost Band")
     LookupEnricher().enrich(p)
     assert p.search_name == "Ghosts"
+
+
+def test_replacing_an_applied_resolution_removes_what_the_old_one_left(tmp_path):
+    # Codex: a wrong MBID survived a later alias resolution and kept winning in the lookup
+    from twiddle.scenedata import cache
+    path = tmp_path / "dataset.json"
+    _pending(path)
+    dl.resolve("band:ghost band", {"mbid": "wrong-id"}, "ai", path)
+    assert dl.apply_resolutions(path) == ["ghost band"] and cache.pick("Ghost Band") == "wrong-id"
+    dl.resolve("band:ghost band", {"alias": "Ghosts"}, "human", path)       # corrects it
+    assert cache.pick("Ghost Band") == ""                                    # the wrong artist is gone
+    assert dl.apply_resolutions(path) == ["ghost band"]                      # looked up afresh, once
+    assert cache.override("Ghost Band") == {"billed": "Ghost Band", "alias": "Ghosts", "at": cache.override("Ghost Band")["at"]}
