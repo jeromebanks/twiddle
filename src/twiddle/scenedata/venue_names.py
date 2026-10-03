@@ -112,10 +112,11 @@ class Room:
     address: str = ""
     variants: list[str] = field(default_factory=list)
     shows: int = 0
+    key_name: str = ""              # what the key is built from: independent of how many shows each spelling has
 
     @property
     def key(self) -> str:
-        return dataset.venue_id(f"{self.name} {self.city}".strip())
+        return dataset.venue_id(f"{self.key_name or self.name} {self.city}".strip())
 
     @property
     def label(self) -> str:
@@ -141,4 +142,8 @@ def cluster(listed: dict[str, int]) -> list[Room]:
         home.address = home.address or p.address
         home.variants.append(text)
         home.shows += n
+    for r in rooms:
+        # The room's identity must not move when the spellings' show counts do (the count
+        # decides only the display name): the plainest spelling, fewest words then alphabetical.
+        r.key_name = min((parse(v).name for v in r.variants), key=lambda n: (len(_tokens(n)), n.lower()))
     return rooms

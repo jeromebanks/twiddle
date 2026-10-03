@@ -197,11 +197,11 @@ class Ledger:
             others = [t for pid, ts in events.items() if pid != self.pid for t in ts]
             wait = decide(float(svc.get("blocked_until") or 0.0), others)
             if wait <= 0:
-                mine.append(now)
-                while mine and now - mine[0] > self.HORIZON_S:
-                    mine.popleft()
-                events[self.pid] = list(mine)
-                self._write(doc)
+                trial = [t for t in (*mine, now) if now - t <= self.HORIZON_S]
+                events[self.pid] = trial
+                self._write(doc)                    # if this fails, `mine` is untouched: the
+                mine.clear()                        # local fallback then counts the request once
+                mine.extend(trial)
             return wait
         except OSError:
             return None

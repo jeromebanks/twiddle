@@ -69,6 +69,7 @@ THEMES = ("tokyo-night", "gruvbox", "nord", "catppuccin-mocha", "dracula",
 LINK_ORDER = ("bandcamp", "official", "wikipedia", "spotify", "discogs", "musicbrainz")
 CONFIRM_WINDOW_S = 20
 GENRE_WIDTH = 13
+VOLUME_STALE_S = 10.0         # how long a volume we read is trusted before the next key reads it again
 NARROW_BELOW = 160          # columns: stack the panes, or the lineup column starves
 MAC_OUTPUT = "mac"          # dial.output.MAC, without importing dial's outputs here
 
@@ -393,6 +394,7 @@ class SceneApp(App):
         self.volume: int | None = None      # of `_vol_oid`; None until read
         self.muted = False
         self._vol_oid: str | None = None
+        self._vol_read_at = 0.0             # when `volume` was last known to be true
         self._vol_timer = None
         self._vol_pushed_at = 0.0
         self._vol_dirty = self._vol_again = False
@@ -1653,6 +1655,7 @@ class SceneApp(App):
             except Exception:
                 pass                    # the stream is back; a stubborn volume is not worth an error
         self._before.pop(oid, None)
+        self.volume = None                  # the snapshot may have changed it: read it fresh next time
         self._pending = None
         self.call_from_thread(self._status, msg)
         self.call_from_thread(self.poll_now)
@@ -1695,6 +1698,7 @@ class SceneApp(App):
             self.call_from_thread(self._error, exc)
             return
         self._before.pop(oid, None)
+        self.volume = None                  # the snapshot may have changed it: read it fresh next time
         self._pending = None
         self.call_from_thread(self._status, msg)
         self.call_from_thread(self.poll_now)
@@ -1713,6 +1717,10 @@ class SceneApp(App):
                 np = self.player.now()
             except Exception:
                 return False                # cannot tell: leave it alone
+            relay = (getattr(self.player, "relay_name", "") or "").lower()
+            playing_on = (np.get("device") or "").lower()
+            if relay and playing_on and playing_on != relay:
+                return True                 # scene moved Spotify to this Mac or a phone: the relay is nobody's
             # Paused is not idle: Spotify keeps the paused track's URI, so someone else's
             # paused selection still differs from ours. Idle means no current item at all.
             return not np.get("uri") or np.get("uri") in self._last_preview["spotify"]
@@ -1760,7 +1768,9 @@ class SceneApp(App):
             self.notify("volume: scene steers the Roams and Bandcamp tracks; Spotify on this "
                         "Mac or a phone has its own", severity="warning", timeout=4)
             return
-        if self._vol_oid != oid or self.volume is None:
+        stale = not self._vol_dirty and time.monotonic() - self._vol_read_at > VOLUME_STALE_S
+        if self._vol_oid != oid or self.volume is None or stale:
+            # Read it again: the Sonos app, a phone or `R` may have changed it since.
             self._vol_oid, self.volume = oid, None
             self._vol_dirty = False
             self._first_volume(oid, delta)
@@ -1784,6 +1794,7 @@ class SceneApp(App):
         if oid != self._volume_oid() or self._vol_dirty:
             return              # not the output on screen, or a newer press is in flight
         self._vol_oid, self.volume, self.muted = oid, volume, muted
+        self._vol_read_at = time.monotonic()
         if delta:
             self.action_set_volume(volume + delta)
         else:
@@ -1840,6 +1851,7 @@ class SceneApp(App):
                 return
         if self._vol_timer is None and volume == self.volume:
             self._vol_dirty = False
+            self._vol_read_at = time.monotonic()        # we just wrote it: that is the truth
 
     def action_mute(self) -> None:
         if self.volume is None or self._vol_oid is None or self.outputs is None:

@@ -1802,3 +1802,49 @@ def test_R_after_switching_away_still_restores_the_volume_of_a_room_that_was_on_
             await settle(pilot, app, lambda: outs.roam.restored)
             assert outs.roam.restored == [(ON_RELAY, True)] and "back" in player.played
     run(go())
+
+
+def test_the_volume_is_read_again_when_it_may_have_changed_underneath_us():
+    # Codex: a cached 20 followed by R restoring 43 made `+` write 22 instead of 45
+    import twiddle.scene.app as scene_app
+
+    async def go():
+        outs = FakeUrlOutputs()
+        app = _preview_on_the_roam(outs)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")
+            await settle(pilot, app, lambda: outs.roam.played)
+            outs.roam.volume = 20
+            await pilot.press("plus")
+            await settle(pilot, app, lambda: outs.roam.volumes == [22])
+            outs.roam.volume = 43                       # R, or the Sonos app, changed it
+            app._vol_read_at -= scene_app.VOLUME_STALE_S + 1
+            await pilot.press("plus")
+            await settle(pilot, app, lambda: len(outs.roam.volumes) == 2)
+            assert outs.roam.volumes[-1] == 45          # from what it is now, not from the stale 22
+    run(go())
+
+
+def test_R_leaves_the_room_ours_when_scene_moved_Spotify_to_the_mac_after_previewing_on_the_roam():
+    from twiddle.dial.output import RELAY, OutputState
+
+    async def go():
+        outs = FakeUrlOutputs()
+        outs.roam.found = STATION
+
+        class Player(FakePlayer):
+            relay_name = "Sonos Roam Relay"
+
+            def now(self):
+                return {"playing": True, "uri": "spotify:track:MAC", "device": "Kenny's MacBook"}
+        app = _preview_on_the_roam(outs, Player())
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")
+            await settle(pilot, app, lambda: outs.roam.played)
+            outs.roam.state = lambda: OutputState(tuned=RELAY, playing=False, uri="relay", other="Spotify (relay)")
+            await pilot.press("R")
+            await settle(pilot, app, lambda: outs.roam.restored)
+            assert outs.roam.restored == [(STATION, False)]
+    run(go())

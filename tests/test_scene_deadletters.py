@@ -390,3 +390,13 @@ def test_replacing_an_applied_resolution_removes_what_the_old_one_left(tmp_path)
     assert cache.pick("Ghost Band") == ""                                    # the wrong artist is gone
     assert dl.apply_resolutions(path) == ["ghost band"]                      # looked up afresh, once
     assert cache.override("Ghost Band") == {"billed": "Ghost Band", "alias": "Ghosts", "at": cache.override("Ghost Band")["at"]}
+
+
+def test_a_rooms_key_does_not_move_when_its_spellings_swap_show_counts():
+    # Codex: the key came from the most-played spelling, so a rebuild with different counts
+    # re-keyed the room and orphaned its resolutions and its cached map answer
+    from twiddle.scenedata.venue_names import cluster
+    a = cluster({"Hopmonk, Novato": 20, "Hopmonk Tavern, Novato": 3})
+    b = cluster({"Hopmonk, Novato": 3, "Hopmonk Tavern, Novato": 20})
+    assert [r.key for r in a] == [r.key for r in b] == ["hopmonk-novato"]
+    assert a[0].name == "Hopmonk" and b[0].name == "Hopmonk Tavern"     # only the display name follows the counts

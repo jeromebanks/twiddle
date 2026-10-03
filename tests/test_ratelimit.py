@@ -180,3 +180,17 @@ def test_a_reservation_prunes_what_has_aged_out_of_the_shared_ledger(tmp_path):
     g.acquire()
     events = json.loads(path.read_text())["svc"]["events"]
     assert "7" not in events and events["8"] == [c.t - 5] and len(events["1"]) == 1
+
+
+def test_a_failed_ledger_write_costs_one_slot_not_two(tmp_path, monkeypatch):
+    # Codex: reserve() appended to the local list, then the write failed and the local
+    # fallback appended the same request again
+    c = Time()
+    ledger = Ledger(tmp_path / "ledger.json", wall=c.wall, pid=1)
+    monkeypatch.setattr(ledger, "_write", lambda doc: (_ for _ in ()).throw(OSError("disk full")))
+    g = gov([Limit(2, 60)], c, ledger, max_block_s=0)
+    g.acquire()
+    assert len(g._mine) == 1
+    g.acquire()                                     # the second of two: must not be refused
+    with pytest.raises(RateLimited):
+        g.acquire()
