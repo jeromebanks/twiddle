@@ -1284,6 +1284,10 @@ def pr_records(comments: list[dict[str, Any]], trusted: set[str]) -> tuple[list[
     return tests, reviews
 
 
+def changes_rounds(reviews: list[dict[str, Any]]) -> int:
+    return sum(1 for r in reviews if r.get("verdict") == "changes")
+
+
 def head_records(pr: dict[str, Any], tests: list[dict[str, Any]], reviews: list[dict[str, Any]]
                  ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """The latest test run and Codex review of the PR's *current* head (None when there is none)."""
@@ -1355,12 +1359,18 @@ def derive_slice(issue: dict[str, Any], comments: list[dict[str, Any]], trusted:
     return {"number": n, "title": issue.get("title"), "epic": epic, "key": mk.get("key"), "state": state,
             "claim": claim, "unmet": unmet, "pr": (pr or {}).get("number"), "pr_state": (pr or {}).get("state"),
             "head": (pr or {}).get("headRefOid"), "tests_on_head": t, "review_on_head": r,
-            "pr_rounds": len(reviews), "next": nxt}
+            "pr_rounds": changes_rounds(reviews), "next": nxt}
 
 
 def merge_gate_errors(pr: dict[str, Any], slice_issue: dict[str, Any] | None, tests: list[dict[str, Any]],
-                      reviews: list[dict[str, Any]], default_branch: str) -> list[str]:
-    """Why the agent may not merge this pull request (empty list = merge)."""
+                      reviews: list[dict[str, Any]], default_branch: str, behind_by: int | None = 0) -> list[str]:
+    """Why the agent may not merge this pull request (empty list = merge).
+
+    `behind_by` is how many commits the head lacks from the default branch. Being
+    behind is refused even when GitHub could squash cleanly: the tests and the
+    review saw the head without those commits, and with parallel slices that
+    combination was never tested (there is no CI to catch it).
+    """
     errs = []
     if pr.get("state") != "OPEN":
         errs.append(f"PR is {pr.get('state')}, not OPEN")
@@ -1385,8 +1395,16 @@ def merge_gate_errors(pr: dict[str, Any], slice_issue: dict[str, Any] | None, te
         errs.append(f"no recorded test run on the current head {head} (`test-record`)")
     elif t["result"] != "pass":
         errs.append(f"the tests failed on {head}")
-    if pr.get("mergeable") != "MERGEABLE":
-        errs.append(f"GitHub says the PR is not mergeable ({pr.get('mergeable')}): rebase onto origin/main")
+    if behind_by is None:
+        errs.append(f"could not tell whether the head is up to date with {default_branch}")
+    elif behind_by:
+        errs.append(f"the head is {behind_by} commit(s) behind {default_branch}: rebase onto origin/{default_branch}, "
+                    "push, then `test-record` and a Codex round on the new head")
+    mergeable = pr.get("mergeable")
+    if mergeable == "UNKNOWN":
+        errs.append("GitHub is still computing mergeability (UNKNOWN): wait a few seconds and run `merge` again")
+    elif mergeable != "MERGEABLE":
+        errs.append(f"GitHub says the PR conflicts ({mergeable}): rebase onto origin/{default_branch}")
     return errs
 
 
@@ -1541,7 +1559,7 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if f"{PREFIX}planned" in ep["labels"]:
         set_state_label(epic, ep["labels"], "in-progress", config)
         print(f"#{epic}: planned -> in-progress")
-    print(f"WORKTREE={wt}\nBRANCH={branch}\nBASE=origin/main")
+    print(f"WORKTREE={wt}\nPRIMARY={root}\nBRANCH={branch}\nBASE=origin/main")
     return 0
 
 
@@ -1560,8 +1578,10 @@ def command_release(args: argparse.Namespace, config: dict[str, Any]) -> int:
 def command_test_record(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Run the full test suite on the PR's head, here, and record the result on the PR."""
     pr, _ = fetch_pr(args.pr, config)
-    if git(["status", "--porcelain"]):
-        raise SdlcError("the working tree is not clean: commit (and push) first, so the run is of a real head")
+    if dirty := git(["status", "--porcelain"]):
+        raise SdlcError("the working tree is not clean, so the run would not be of the pushed head: "
+                        + ", ".join(l[3:] for l in dirty.splitlines()[:8])
+                        + " (commit and push, or keep scratch files outside the worktree)")
     head = git(["rev-parse", "HEAD"])
     if head != pr["headRefOid"]:
         raise SdlcError(f"HEAD {head[:12]} is not PR #{args.pr}'s head {pr['headRefOid'][:12]}: push, or check out the branch")
@@ -1593,8 +1613,9 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     limit = config.get("max_pr_rounds", 5)
     if pr.get("state") != "OPEN":
         raise SdlcError(f"PR #{pr['number']} is {pr.get('state')}")
-    if len(reviews) >= limit:
-        raise SdlcError(f"Codex rounds spent ({len(reviews)}/{limit}) without approval: `escalate-slice N --reason ...`")
+    # only rounds that asked for changes spend the budget: re-reviewing a rebased head is routine
+    if (spent := changes_rounds(reviews)) >= limit:
+        raise SdlcError(f"Codex rounds spent ({spent}/{limit} asked for changes): `escalate-slice N --reason ...`")
     report = Path(args.report).read_text()
     verdict = parse_verdict(report)
     m = HEAD_RE.search(report)
@@ -1604,7 +1625,8 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
         raise SdlcError(f"Codex reviewed {m.group(1)[:12]} but the PR head is {pr['headRefOid'][:12]}: review the current head")
     response = Path(args.response).read_text().strip() if args.response else ""
     rnd = len(reviews) + 1
-    body = (f"**Round {rnd}/{limit} — Codex on `{pr['headRefOid'][:12]}`: `{verdict}`**\n\n"
+    body = (f"**Review {rnd} — Codex on `{pr['headRefOid'][:12]}`: `{verdict}`** "
+            f"({changes_rounds(reviews) + (verdict == 'changes')}/{limit} change rounds used)\n\n"
             f"<details><summary>Codex's review</summary>\n\n{report.strip()}\n\n</details>")
     if response:
         body += f"\n\n### Claude's response\n\n{response}"
@@ -1627,7 +1649,12 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     tests, reviews = pr_records(comments, trusted)
     refs = closes_refs(pr.get("body", ""))
     slice_issue = fetch_slice(refs[0], config)[0] if len(refs) == 1 else None
-    if errs := merge_gate_errors(pr, slice_issue, tests, reviews, config.get("default_branch", "main")):
+    branch = config.get("default_branch", "main")
+    try:
+        behind = gh_json(["api", f"repos/{repo}/compare/{branch}...{pr['headRefOid']}"]).get("behind_by")
+    except SdlcError:
+        behind = None
+    if errs := merge_gate_errors(pr, slice_issue, tests, reviews, branch, behind):
         raise SdlcError("; ".join(errs))
     n = refs[0]
     if args.dry_run:

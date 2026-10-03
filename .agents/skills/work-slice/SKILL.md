@@ -43,19 +43,27 @@ uv run python tools/sdlc.py slice-check N          # add --resume when it says c
 ## 2. Claim and move into the worktree
 
 ```bash
-PRIMARY=$(git rev-parse --show-toplevel)           # cleanup must run from here
 uv run python tools/sdlc.py claim N                # or: claim N --resume
 ```
 
-It prints `WORKTREE=`, `BRANCH=slice/N` and `BASE=origin/main`. Its other effects:
+It prints `WORKTREE=`, `PRIMARY=`, `BRANCH=slice/N` and `BASE=origin/main`. Its other effects:
 
 - the claim is posted on the slice, and you're assigned to it;
 - on the first claim, the epic moves from `planned` to `in-progress`.
 
-**Do every edit, test, commit and git command inside `WORKTREE`.** Use `cd` into it,
-or `git -C`. The shell's working directory can reset between calls, so check
-`git rev-parse --abbrev-ref HEAD` is `slice/N` before committing. Diff and rebase
-against `origin/main`, never your local `main`.
+**Write `WORKTREE` and `PRIMARY` down as literal absolute paths.** Shell variables
+don't survive between tool calls, so type the paths out every time:
+
+- **Every file you Read, Edit or Write must have a path that starts with `WORKTREE`.**
+  The same file under `PRIMARY` is the main checkout, on `main`. Editing it changes
+  the wrong tree, and `test-record` then tests code that doesn't have your change.
+- **Every shell command that touches the code runs in `WORKTREE`**: `cd <WORKTREE> && ...`, or `git -C <WORKTREE>`.
+  Check `git rev-parse --abbrev-ref HEAD` says `slice/N` before you commit. Diff
+  and rebase against `origin/main`, never your local `main`.
+- **Scratch files never go in the worktree.** This means the PR body, the slice
+  brief, the Codex prompt, its report and stderr, and your response. Put them in
+  your session's scratchpad directory (or a `mktemp -d`), called `<SCRATCH>` below, by absolute path. Untracked
+  files make the tree dirty, and `test-record` then refuses. Never commit them.
 
 ## 3. Plan
 
@@ -100,30 +108,33 @@ The PR body must contain **exactly one** `Closes #N`. Include:
 - any adjacent issues you noticed but left alone.
 
 ```bash
-gh pr create --base main --head slice/N --title "<key>: <slice title>" --body-file pr.md
-uv run python tools/sdlc.py test-record PR         # from WORKTREE: runs the full suite itself
+gh pr create --base main --head slice/N --title "<key>: <slice title>" --body-file <SCRATCH>/pr.md
+cd <WORKTREE> && uv run python tools/sdlc.py test-record PR    # runs the full suite itself
 ```
 
 `test-record` refuses if the tree is dirty or `HEAD` isn't the PR's head. It runs
 `uv run pytest -q` itself and records the result on the PR, so you never report a
-test run by hand. Run it again after every new commit.
+test run by hand. Run it again after every new commit. **Give the Bash call
+`timeout: 600000`**: a fresh worktree does a first `uv sync`, and the suite takes
+about a minute and a half.
 
 ## 8. Codex rounds
 
 Save the slice brief where Codex can read it, since its sandbox has no network:
-`gh issue view N --json title,body -q '.title + "\n\n" + .body' > slice.md`. Fill
-`references/codex-pr-prompt.md` and run Codex **from `WORKTREE`**:
+`gh issue view N --json title,body -q '.title + "\n\n" + .body' > <SCRATCH>/slice.md`. Fill
+`references/codex-pr-prompt.md` into `<SCRATCH>/prompt.md` and run Codex **from
+`WORKTREE`**, with `timeout: 600000` on the Bash call:
 
 ```bash
-codex exec --sandbox read-only --skip-git-repo-check "$(cat prompt.md)" \
-  < /dev/null > codex.md 2> codex.err
+cd <WORKTREE> && codex exec --sandbox read-only --skip-git-repo-check "$(cat <SCRATCH>/prompt.md)" \
+  < /dev/null > <SCRATCH>/codex.md 2> <SCRATCH>/codex.err
 ```
 
 `< /dev/null` stops `codex exec` waiting on stdin forever. stderr is progress
-noise. If `codex.md` is empty, or has no verdict, the run failed: read
-`codex.err` and run it again.
+noise. If `codex.md` is empty, or has no `HEAD:` line or verdict, the run failed:
+read `codex.err` and run it again.
 
-Answer every finding in `response.md`:
+Answer every finding in `<SCRATCH>/response.md`:
 
 - **Fix it**: commit, push, then `test-record` again.
 - **Rebut it**: give the evidence (a test, a line of code, the slice's Non-goals).
@@ -131,14 +142,15 @@ Answer every finding in `response.md`:
 Then record the round:
 
 ```bash
-uv run python tools/sdlc.py pr-review PR --report codex.md --response response.md
+uv run python tools/sdlc.py pr-review PR --report <SCRATCH>/codex.md --response <SCRATCH>/response.md
 ```
 
 `pr-review` refuses a report whose `HEAD:` line isn't the PR's current head. If you
 pushed a fix, Codex reviews again: that's a new round on the new head.
 
-Repeat until Codex says `VERDICT: approve` **on the current head**. If you still
-have no approval after `max_pr_rounds` (5):
+Repeat until Codex says `VERDICT: approve` **on the current head**. Only reviews
+that ask for changes spend the budget; re-approving a rebased head is free. After
+`max_pr_rounds` (5) reviews asking for changes:
 
 ```bash
 uv run python tools/sdlc.py escalate-slice N --reason "<what is disputed, in a sentence>"
@@ -150,7 +162,7 @@ Then report and stop.
 
 ```bash
 uv run python tools/sdlc.py merge PR               # the gate; --dry-run to see it first
-cd "$PRIMARY" && uv run python tools/sdlc.py cleanup N
+cd <PRIMARY> && uv run python tools/sdlc.py cleanup N
 ```
 
 `merge` refuses unless all of these hold:
@@ -158,11 +170,19 @@ cd "$PRIMARY" && uv run python tools/sdlc.py cleanup N
 - the PR closes exactly this one slice;
 - Codex's latest review of the **current head** approves;
 - a passing test run is recorded on that head;
+- the head is **not behind `main`**;
 - GitHub says the PR is mergeable.
 
-If it says `not mergeable`, run `git fetch origin main && git rebase origin/main`,
-force-push with `--force-with-lease`, then `test-record` and run a Codex round
-again: a rebase changes the head, and that voids both records.
+How to clear each refusal:
+
+- **The head is behind `main`.** Another slice merged first, and nobody has tested
+  this branch with it. Rebase:
+  `git -C <WORKTREE> fetch origin main && git -C <WORKTREE> rebase origin/main`,
+  then push with `--force-with-lease`. Then `test-record`, then a Codex round on
+  the new head. A rebase changes the head, which voids both records.
+- **Conflicts.** The same rebase, and resolve them.
+- **UNKNOWN.** GitHub is still computing mergeability after a push. Wait a few
+  seconds and run `merge` again. Don't rebase.
 
 `merge` squash-merges, deletes the remote branch, checks the slice closed, and
 prints the epic's `next`. `cleanup` must run from the primary checkout, not from

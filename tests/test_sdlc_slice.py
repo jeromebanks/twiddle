@@ -77,7 +77,7 @@ def test_release_ends_a_claim_and_strangers_cannot_claim():
 
 def test_records_of_an_older_head_do_not_count():
     st = derive(the_pr=pr(), pr_comments=[ran_on(OLD), review_on(OLD, "approve", 6)])
-    assert st["tests_on_head"] is None and st["review_on_head"] is None and st["pr_rounds"] == 1
+    assert st["tests_on_head"] is None and st["review_on_head"] is None and st["pr_rounds"] == 0  # an approval spends no budget
 
 
 # --- slice-check -----------------------------------------------------------
@@ -97,11 +97,11 @@ def test_slice_check():
 
 # --- merge gate ------------------------------------------------------------
 
-def gate(the_pr=None, issue=None, tests=None, reviews=None):
+def gate(the_pr=None, issue=None, tests=None, reviews=None, behind=0):
     the_pr = the_pr or pr()
     t = tests if tests is not None else [{"sha": HEAD, "result": "pass"}]
     r = reviews if reviews is not None else [{"sha": HEAD, "verdict": "approve"}]
-    return sdlc.merge_gate_errors(the_pr, issue or slice_issue(), t, r, "main")
+    return sdlc.merge_gate_errors(the_pr, issue or slice_issue(), t, r, "main", behind)
 
 
 def test_merge_gate_passes_with_approved_and_tested_head():
@@ -118,7 +118,10 @@ def test_merge_gate_passes_with_approved_and_tested_head():
     ({"the_pr": pr(body="Closes #28 and closes #29")}, "exactly one slice"),
     ({"the_pr": pr(body="no reference")}, "exactly one slice"),
     ({"issue": slice_issue(labels=())}, "not an open plan:slice"),
-    ({"the_pr": pr(mergeable="CONFLICTING")}, "not mergeable"),
+    ({"the_pr": pr(mergeable="CONFLICTING")}, "conflicts"),
+    ({"the_pr": pr(mergeable="UNKNOWN")}, "wait a few seconds"),
+    ({"behind": 2}, "2 commit(s) behind main"),     # mergeable, but this combination was never tested
+    ({"behind": None}, "could not tell"),
     ({"the_pr": pr(baseRefName="dev")}, "targets dev"),
     ({"the_pr": pr(isDraft=True)}, "draft"),
 ])
@@ -160,6 +163,11 @@ def test_pr_review_budget(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("must not call gh"))
     r = tmp_path / "r.md"
     r.write_text(f"HEAD: {HEAD}\nVERDICT: changes")
+    # approvals of rebased heads don't spend the budget; rounds that asked for changes do
+    reapproved = [review_on(OLD, "approve", i, i) for i in range(1, 8)]
+    assert sdlc.main(["pr-review", "50", "--report", str(r), "--from-file", _review_bundle(tmp_path, reapproved),
+                      "--dry-run"]) == 0
+    capsys.readouterr()
     spent = [review_on(OLD, "changes", i, i) for i in range(1, CONFIG["max_pr_rounds"] + 1)]
     assert sdlc.main(["pr-review", "50", "--report", str(r), "--from-file", _review_bundle(tmp_path, spent),
                       "--dry-run"]) == 1
