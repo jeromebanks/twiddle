@@ -177,6 +177,7 @@ def test_days_text(text, shown):
 
 @pytest.mark.parametrize("d, shown", [
     ("02:00:00", "2h00"), ("00:30:00", "30m"), ("01:15:00", "1h15"), ("", "no auto-stop"),
+    ("01:00:30", "1h00m30s"), ("00:30:15", "30m15s"), ("00:00:45", "0m45s"),
 ])
 def test_duration_text(d, shown):
     assert alarm_cli.duration_text(d) == shown

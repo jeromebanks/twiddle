@@ -98,7 +98,10 @@ def duration_text(duration: str) -> str:
         h, m, s = (int(x) for x in duration.split(":"))
     except ValueError:
         return duration
-    return f"{h}h{m:02d}" if h else f"{m}m" + (f"{s:02d}s" if s else "")
+    secs = f"{s:02d}s" if s else ""
+    if h:
+        return f"{h}h{m:02d}m{secs}" if secs else f"{h}h{m:02d}"
+    return f"{m}m{secs}"
 
 
 def _start(alarm: Alarm) -> time | None:
