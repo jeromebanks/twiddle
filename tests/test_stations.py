@@ -320,10 +320,13 @@ def test_every_icy_station_reads_its_title_as_before(monkeypatch, key, data, tit
     assert (np.artist, np.song, np.raw_title) == _old_icy(title, music)
 
 
-@pytest.mark.parametrize("shape", [None, *titles.SHAPES])
-def test_music_false_never_yields_an_artist_whatever_the_shape(monkeypatch, shape):
-    monkeypatch.setattr(stations.icy, "icy_title", lambda url: IHEART)
+@pytest.mark.parametrize("shape,title", [
+    (None, IHEART), ("iheart-attrs", IHEART), ("artist-song", "Band - Song")])
+def test_music_false_never_yields_an_artist_whatever_the_shape(monkeypatch, shape, title):
+    assert set(titles.SHAPES) == {"artist-song", "iheart-attrs"}   # a new shape joins this list
+    monkeypatch.setattr(stations.icy, "icy_title", lambda url: title)
     s = stations.Station("x", "X", "http://x", "Town -- x")
+    assert icy_fetch.icy(s, titles=shape).artist                 # the shape does match
     np = icy_fetch.icy(s, music=False, titles=shape)
     assert np.artist is None and np.song is None and np.raw_title
 

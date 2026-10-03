@@ -56,12 +56,14 @@ def test_a_bad_file_is_skipped_with_a_warning_not_raised(tmp_path, capsys):
     _write(tmp_path, "badtag", GOOD.replace('"news"', '"polka"'))
     _write(tmp_path, "badfetch", GOOD + 'fetch = "nope"\n')
     _write(tmp_path, "badtitles", GOOD + 'fetch_args = { titles = "nope" }\n')
+    _write(tmp_path, "listargs", GOOD + 'fetch_args = ["artist-song"]\n')
     _write(tmp_path, "half", 'name = "Half\n')                  # a half-written file
     _write(tmp_path, "nourl", 'name = "X"\nblurb = "Town -- x"\n')
     got = model.load_catalog(tmp_path)
     assert list(got) == ["good"]
     err = capsys.readouterr().err
-    for name in ("badtag.toml", "badfetch.toml", "badtitles.toml", "half.toml", "nourl.toml"):
+    for name in ("badtag.toml", "badfetch.toml", "badtitles.toml", "listargs.toml",
+                 "half.toml", "nourl.toml"):
         assert name in err
     with pytest.raises(model.CatalogError, match="badfetch.toml"):
         model.load_catalog(tmp_path, strict=True)
@@ -83,3 +85,6 @@ def test_an_unknown_title_shape_fails_strictly(tmp_path):
         model.load_catalog(tmp_path, strict=True)
     _write(tmp_path, "badtitles", GOOD + 'fetch_args = { titles = "iheart-attrs" }\n')
     assert list(model.load_catalog(tmp_path, strict=True)) == ["badtitles"]
+    _write(tmp_path, "badtitles", GOOD + 'fetch_args = ["artist-song"]\n')
+    with pytest.raises(model.CatalogError, match="badtitles.toml.*table"):
+        model.load_catalog(tmp_path, strict=True)
