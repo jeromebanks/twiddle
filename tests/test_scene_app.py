@@ -380,12 +380,37 @@ def test_a_venue_logo_that_failed_once_is_tried_again():
 
 
 class FakeUrlOutput:
+    volume_interval_s = 0.0
+
     def __init__(self, label, confirm_first=False):
         self.label = label
         self.played = []
         self.stopped = 0
         self.playing = False
         self.confirm_first = confirm_first
+        self.volume = 30
+        self.volumes = []           # what set_volume was asked for
+        self.found = None           # what `capture` reports the room was doing: a token, or None
+        self.captured = 0
+        self.restored = []          # (token, volume_only)
+        self.elsewhere = ""         # a uri someone else put on the room
+
+    def capture(self):
+        self.captured += 1
+        return self.found
+
+    def restore(self, token, *, volume_only=False):
+        self.restored.append((token, volume_only))
+        self.playing = False
+        return f"▶ {self.label} back as it was"
+
+    def set_volume(self, volume):
+        self.volumes.append(volume)
+        self.volume = volume
+        return volume
+
+    def set_mute(self, muted):
+        pass
 
     def play(self, media, *, confirmed=False, source="dial"):
         if self.confirm_first and not confirmed:
@@ -401,8 +426,9 @@ class FakeUrlOutput:
 
     def state(self):
         from twiddle.dial.output import OutputState
-        return OutputState(playing=self.playing,
-                           uri=self.played[-1][0] if self.played else "")
+        uri = self.elsewhere or (self.played[-1][0] if self.played else "")
+        return OutputState(playing=self.playing or bool(self.elsewhere), volume=self.volume,
+                           uri=uri, other=uri)
 
     def close(self):
         pass
@@ -1469,4 +1495,99 @@ def test_a_checkpoint_that_changes_genres_updates_which_shows_a_genre_filter_mat
             os.utime(dataset.default_path(), (1, 1_900_000_004))
             app._watch_dataset()
             await settle(pilot, app, lambda: len(app._rows) == 1)     # Girl Chow is reggae now
+    run(go())
+
+
+# ---- volume, and back to what was playing -------------------------------------
+
+RELAY_DEV = {"id": "rid", "name": "relay", "relay": True, "local": False}
+STATION = {"relay": False, "snapshot": "radio, 43"}          # what a room on a station captures
+ON_RELAY = {"relay": True, "snapshot": "spotify via the relay, 43"}
+
+
+def _preview_on_the_roam(outs, player=None):
+    """An app on the relay device with a Bandcamp track playing on the Roam."""
+    return _bandcamp_app(RELAY_DEV, outs, player)
+
+
+def test_volume_keys_steer_the_output_a_bandcamp_track_plays_on():
+    async def go():
+        outs = FakeUrlOutputs()
+        app = _preview_on_the_roam(outs)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")
+            await settle(pilot, app, lambda: outs.roam.played)
+            await pilot.press("plus")
+            await settle(pilot, app, lambda: outs.roam.volumes)
+            assert outs.roam.volumes == [32]                       # read 30, then +2
+            await pilot.press("right_square_bracket")
+            await settle(pilot, app, lambda: len(outs.roam.volumes) == 2)
+            assert outs.roam.volumes[-1] == 37 and app.volume == 37
+            await settle(pilot, app, lambda: "37" in app.query_one("#nowbar").render().plain)
+    run(go())
+
+
+def test_the_volume_keys_say_so_when_spotify_plays_on_this_mac():
+    async def go():
+        outs = FakeUrlOutputs()
+        app = _bandcamp_app(MAC_DEV, outs, FakePlayer())
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("minus")
+            await pilot.pause(0.2)
+            assert outs.mac.volumes == [] and outs.roam.volumes == [] and app.volume is None
+    run(go())
+
+
+def test_R_puts_the_roam_back_on_the_station_it_was_on_and_stops_the_preview():
+    async def go():
+        outs = FakeUrlOutputs()
+        outs.roam.found = STATION
+        app = _preview_on_the_roam(outs, FakePlayer())
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")
+            await settle(pilot, app, lambda: outs.roam.played)
+            assert outs.roam.captured == 1
+            await pilot.press("n")                              # a second preview: not "before"
+            await settle(pilot, app, lambda: len(outs.roam.played) == 2)
+            assert outs.roam.captured == 1 and app._before["token"] is STATION
+            await pilot.press("R")
+            await settle(pilot, app, lambda: outs.roam.restored)
+            assert outs.roam.restored == [(STATION, False)] and outs.roam.stopped >= 1
+            assert app._before is None and app.bc_now is None
+    run(go())
+
+
+def test_R_leaves_a_room_alone_that_someone_retuned_meanwhile():
+    async def go():
+        outs = FakeUrlOutputs()
+        outs.roam.found = STATION
+        app = _preview_on_the_roam(outs, FakePlayer())
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")
+            await settle(pilot, app, lambda: outs.roam.played)
+            outs.roam.playing, outs.roam.elsewhere = True, "http://kexp.example/stream"
+            await pilot.press("R")
+            await settle(pilot, app, lambda: app._before is None)
+            assert outs.roam.restored == []
+    run(go())
+
+
+def test_R_on_a_relay_room_still_hands_back_through_spotify_and_restores_the_volume():
+    async def go():
+        outs = FakeUrlOutputs()
+        outs.roam.found = ON_RELAY
+        player = FakePlayer()
+        app = _preview_on_the_roam(outs, player)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")
+            await settle(pilot, app, lambda: outs.roam.played)
+            await pilot.press("R")
+            await settle(pilot, app, lambda: outs.roam.restored)
+            assert outs.roam.restored == [(ON_RELAY, True)]       # volume only
+            assert "back" in player.played                         # Spotify's handback did the stream
     run(go())

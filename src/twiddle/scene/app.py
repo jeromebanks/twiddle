@@ -42,6 +42,7 @@ from textual_image import widget as _images
 
 from .. import here, spotify_ops
 from ..dial import art
+from ..dial.gauge import gauge
 from ..scenespec import dataset, genre as genre_mod, profiles
 from .. import bandcamp
 from . import cache, instagram, pictures
@@ -50,7 +51,7 @@ from ..scenespec.band import CORROBORATED, NAME_ONLY, NONE, PENDING, UNCERTAIN, 
 from .book import BandBook
 from ..scenespec.model import Show
 from ..scenespec.venue import VenueInfo
-from .players import Device, NeedsConfirmation, Player
+from .players import HANDBACK_MAX_AGE_S, Device, NeedsConfirmation, Player
 
 BUILD_BUSY = 75             # `scene build`'s exit status when another build holds the lock
 BUILD_CANCELLED = -1        # the app quit while a build ran: it was left to finish on its own
@@ -245,7 +246,10 @@ HELP = """\
   p        play the highlighted track (or the band's first)
            Bandcamp tracks play on This Mac or the Roams, no Spotify needed
   space    pause / resume (stops a Bandcamp track)    n   next track
-  d        choose a device     R   put the Roams back on what they were playing
+  d        choose a device
+  R        back: stop the preview and put the Roam back on what it was playing
+           (a radio station, or Spotify through the relay), at its old volume
+  + / -    volume ±2 (] / [ ±5) of the Roams or the Bandcamp track; click the bar
 [b]Bands[/b]
   m        choose which Spotify artist this band is (remembered)
   o        open the band's Bandcamp / site / Wikipedia in a browser
@@ -298,7 +302,11 @@ class SceneApp(App):
         Binding("space", "toggle_pause", "Pause"),
         Binding("n", "next_track", "Next", show=False),
         Binding("d", "device", "Device"),
-        Binding("R", "back_to_relay", "→Roams"),
+        Binding("R", "back_to_relay", "Back"),
+        Binding("plus,equals_sign", "volume(2)", "Vol+"),
+        Binding("minus,underscore", "volume(-2)", "Vol−"),
+        Binding("right_square_bracket", "volume(5)", show=False),
+        Binding("left_square_bracket", "volume(-5)", show=False),
         Binding("m", "match", "Match"),
         Binding("o", "open_link", "Open"),
         Binding("i", "venue_info", "Venue"),
@@ -372,6 +380,14 @@ class SceneApp(App):
         self.outputs = outputs          # dial's Outputs: where Bandcamp tracks play
         self.viz_options: dict = {}     # VizScreen keywords; the tests' fakes
         self._scan_guesses: dict[str, genre_mod.Guess | None] = {}   # by band key
+        self._before: dict | None = None    # the room as scene found it, before its first preview
+        self.volume: int | None = None      # of `_vol_oid`; None until read
+        self.muted = False
+        self._vol_oid: str | None = None
+        self._vol_timer = None
+        self._vol_pushed_at = 0.0
+        self._vol_dirty = self._vol_again = False
+        self._vol_busy: set = set()
         self.bc_now: dict | None = None  # the Bandcamp track playing, if one is
 
     @property
@@ -1318,6 +1334,9 @@ class SceneApp(App):
             t.append("nothing playing", style="dim")
         t.append("    device: ", style="dim")
         t.append(self.device.label if self.device else "none — press d", style="")
+        if self.volume is not None and self._vol_oid and self._vol_oid == self._volume_oid():
+            t.append("   ")
+            t.append_text(gauge(self.volume, self.muted))
         if msg:
             t.append("\n")
             t.append(msg, style=style or "italic")
@@ -1330,6 +1349,8 @@ class SceneApp(App):
             # Ended, or something else took the output: the bar says so.
             try:
                 st = self.outputs.get(bc["output"]).state()
+                if st.volume is not None:
+                    self.call_from_thread(self._volume_seen, bc["output"], st.volume, st.muted)
                 ours = bc["output"] == MAC_OUTPUT or "bcbits.com" in (st.other or "")
                 if not (st.playing and ours) and self.bc_now is bc:
                     self.bc_now = None
@@ -1428,6 +1449,8 @@ class SceneApp(App):
     @work(thread=True, exclusive=True, group="play")
     def do_play(self, uris, off, device, label, confirmed) -> None:
         self.call_from_thread(self._status, f"starting {label}…")
+        if device.relay:
+            self._remember_before(self._bandcamp_output(device))
         try:
             msg = self.player.play(uris, device, offset=off, confirmed=confirmed, label=label)
         except NeedsConfirmation as exc:
@@ -1481,6 +1504,7 @@ class SceneApp(App):
                 f"couldn't get {tr.get('title')!r} from Bandcamp: {exc}"))
             return
         out = self.outputs.get(oid)
+        self._remember_before(oid)
         try:
             # Through `outputs`: it stops a track we left on another output.
             from ..dial.output import Media     # not at the top: see MAC_OUTPUT
@@ -1580,6 +1604,18 @@ class SceneApp(App):
 
     @work(thread=True, exclusive=True, group="play")
     def action_back_to_relay(self) -> None:
+        """R: stop previewing and put the room back as scene found it.
+
+        A radio station (or anything else that was not the relay) is put back
+        through the room's own snapshot, volume included. The relay goes back
+        through Spotify's handback, as it always did; its volume is restored too."""
+        before = self._before
+        if before and time.time() - before["at"] > HANDBACK_MAX_AGE_S:
+            before = self._before = None
+        token = before["token"] if before else None
+        if token and not token["relay"]:
+            self._restore_room(before)
+            return
         if self.bc_now and self.bc_now["output"] == MAC_OUTPUT:
             self._stop_bandcamp()
         try:
@@ -1589,9 +1625,177 @@ class SceneApp(App):
         except spotify_ops.PlaybackError as exc:
             self.call_from_thread(self._error, exc)
             return
+        if token:
+            try:
+                self.outputs.get(before["oid"]).restore(token, volume_only=True)
+            except Exception:
+                pass                    # the stream is back; a stubborn volume is not worth an error
+        self._before = None
         self._pending = None
         self.call_from_thread(self._status, msg)
         self.call_from_thread(self.poll_now)
+
+    def _restore_room(self, before: dict) -> None:
+        """Worker thread only: stop our preview and put the room back, unless
+        someone has put something else there since -- then it is left alone."""
+        from ..dial.output import RELAY
+        oid, token = before["oid"], before["token"]
+        out = self.outputs.get(oid)
+        try:
+            st = out.state()
+        except spotify_ops.PlaybackError as exc:
+            self.call_from_thread(self._error, exc)
+            return
+        ours = not st.playing or st.tuned == RELAY or "bcbits.com" in (st.other or "")
+        if not ours:
+            self._before = None
+            self.call_from_thread(self._status,
+                                  f"{out.label} is playing something else now -- left alone", "italic")
+            return
+        self._stop_bandcamp()
+        try:                    # a Spotify preview on the relay would play on to nobody
+            if getattr(self.player, "relay_is_live", None) and self.player.relay_is_live():
+                self.player.pause()
+        except spotify_ops.PlaybackError:
+            pass
+        try:
+            msg = out.restore(token)
+        except spotify_ops.PlaybackError as exc:
+            self.call_from_thread(self._error, exc)
+            return
+        self._before = None
+        self._pending = None
+        self.call_from_thread(self._status, msg)
+        self.call_from_thread(self.poll_now)
+
+    def _remember_before(self, oid: str | None) -> None:
+        """Worker thread only: the first preview in a session records what the
+        room was doing, for `R`. Later previews keep that, not the first one."""
+        if self.dry_run or self.outputs is None or oid is None:
+            return
+        b = self._before
+        if (b and time.time() - b["at"] < HANDBACK_MAX_AGE_S) or self.bc_now is not None:
+            return
+        try:
+            token = self.outputs.get(oid).capture()
+        except Exception:
+            token = None
+        self._before = {"oid": oid, "token": token, "at": time.time()}
+
+    # ---- volume ------------------------------------------------------------
+
+    def _volume_oid(self) -> str | None:
+        """The output the volume keys steer: where the Bandcamp track plays, or
+        the Roams when Spotify is on the relay. Spotify on this Mac or a phone has
+        its own volume, which scene does not touch."""
+        if self.bc_now:
+            return self.bc_now["output"]
+        d = self.device
+        return self._bandcamp_output(d) if d and d.relay else None
+
+    def action_volume(self, delta: int) -> None:
+        oid = self._volume_oid()
+        if oid is None or self.outputs is None:
+            self.notify("volume: scene steers the Roams and Bandcamp tracks; Spotify on this "
+                        "Mac or a phone has its own", severity="warning", timeout=4)
+            return
+        if self._vol_oid != oid or self.volume is None:
+            self._vol_oid, self.volume = oid, None
+            self._vol_dirty = False
+            self._first_volume(oid, delta)
+            return
+        self.action_set_volume(self.volume + delta)
+
+    @work(thread=True, group="volume-read")
+    def _first_volume(self, oid: str, delta: int) -> None:
+        try:
+            st = self.outputs.get(oid).state()
+        except spotify_ops.PlaybackError as exc:
+            self.call_from_thread(self._error, exc)
+            return
+        if st.volume is None:
+            self.call_from_thread(self.notify, "the volume isn't known for this output",
+                                  severity="warning", timeout=3)
+            return
+        self.call_from_thread(self._volume_seen, oid, st.volume, st.muted, delta)
+
+    def _volume_seen(self, oid: str, volume: int, muted: bool, delta: int = 0) -> None:
+        if oid != self._volume_oid() or self._vol_dirty:
+            return              # not the output on screen, or a newer press is in flight
+        self._vol_oid, self.volume, self.muted = oid, volume, muted
+        if delta:
+            self.action_set_volume(volume + delta)
+        else:
+            self._render_nowbar()
+
+    def action_set_volume(self, volume: int) -> None:
+        """Keys and clicks on the gauge land here. The first press is written at
+        once; a held key is written every `volume_interval_s` of the output (a
+        Sonos write is journalled, so paced) and once more when it stops. One
+        write is in flight per output; the latest waits behind it."""
+        if self.volume is None or self.outputs is None:
+            return
+        self.volume = max(0, min(100, volume))
+        self._vol_dirty = True
+        self._render_nowbar()
+        gap = getattr(self.outputs.get(self._vol_oid), "volume_interval_s", 0.3)
+        if self._vol_timer is not None:
+            return              # the trailing write carries the latest
+        wait = self._vol_pushed_at + gap - time.monotonic()
+        if wait <= 0:
+            self._push_volume()
+        else:
+            self._vol_timer = self.set_timer(wait, self._push_volume)
+
+    def _push_volume(self) -> None:
+        self._vol_timer = None
+        oid = self._vol_oid
+        if oid in self._vol_busy:
+            self._vol_again = True
+            return
+        self._vol_busy.add(oid)
+        self._vol_pushed_at = time.monotonic()
+        self.push_volume(oid, self.volume)
+
+    @work(thread=True, group="volume")
+    def push_volume(self, oid: str, volume: int) -> None:
+        try:
+            self.outputs.get(oid).set_volume(volume)
+        except spotify_ops.PlaybackError as exc:
+            self.call_from_thread(self._error, exc)
+        except Exception as exc:
+            self.call_from_thread(self._error, spotify_ops.PlaybackError(
+                f"volume: {type(exc).__name__}: {exc}"))
+        self.call_from_thread(self._volume_landed, volume, oid)
+
+    def _volume_landed(self, volume: int, oid: str) -> None:
+        self._vol_busy.discard(oid)
+        if oid != self._vol_oid:
+            return
+        if self._vol_again:
+            self._vol_again = False
+            if self._vol_timer is None and self.volume is not None:
+                self._push_volume()
+                return
+        if self._vol_timer is None and volume == self.volume:
+            self._vol_dirty = False
+
+    def action_mute(self) -> None:
+        if self.volume is None or self._vol_oid is None or self.outputs is None:
+            return
+        self.muted = not self.muted
+        self._render_nowbar()
+        self.push_mute(self._vol_oid, self.muted)
+
+    @work(thread=True, exclusive=True, group="mute")
+    def push_mute(self, oid: str, muted: bool) -> None:
+        try:
+            self.outputs.get(oid).set_mute(muted)
+        except spotify_ops.PlaybackError as exc:
+            self.call_from_thread(self._error, exc)
+        except Exception as exc:
+            self.call_from_thread(self._error, spotify_ops.PlaybackError(
+                f"mute: {type(exc).__name__}: {exc}"))
 
     def on_resize(self, _event) -> None:
         # A narrow tmux pane: drop the venue column, stack shows over the band.

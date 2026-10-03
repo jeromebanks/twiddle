@@ -1761,3 +1761,54 @@ def test_a_log_lost_mid_wait_stops_sending_and_reports_instead_of_queueing(tmp_p
     out.set_volume(30)
     assert until(lambda: len(procs[-1].written) >= 1)
     out.close()
+
+
+# ---- a room's capture/restore (what scene's R uses) --------------------------
+
+
+class _Snap:
+    restored = []               # the uri each restore was asked to put back
+
+    def __init__(self, uri):
+        self.uri = uri
+        _Snap.restored = []
+
+    def restore(self, group):
+        _Snap.restored.append(self.uri)
+        return {"restored": ["x"], "problems": []}
+
+
+def _roam(monkeypatch, tuned, uri="x-rincon-mp3radio://kexp"):
+    from twiddle import household
+    from twiddle.dial.output import OutputState, SonosOutput
+    out = SonosOutput("roam", lambda: type("G", (), {"name": "Roam", "ip": "1.2.3.4"})())
+    monkeypatch.setattr(SonosOutput, "state", lambda self: OutputState(tuned=tuned, playing=True))
+    snap = _Snap(uri)
+    monkeypatch.setattr(household.Snapshot, "capture", classmethod(lambda cls, g: snap))
+    return out, snap
+
+
+def test_a_room_captured_on_a_station_is_restored_whole(monkeypatch):
+    out, snap = _roam(monkeypatch, tuned="kexp")
+    token = out.capture()
+    assert token["relay"] is False and token["snapshot"] is snap
+    assert "back as it was" in out.restore(token) and _Snap.restored == ["x-rincon-mp3radio://kexp"]
+
+
+def test_a_relay_room_is_restored_for_volume_only_and_its_snapshot_is_not_touched(monkeypatch):
+    from twiddle.dial.output import RELAY
+    out, snap = _roam(monkeypatch, tuned=RELAY, uri="x-rincon-mp3radio://relay")
+    token = out.capture()
+    assert token["relay"] is True
+    out.restore(token, volume_only=True)
+    assert _Snap.restored == [""]               # no uri: the stream comes back through Spotify
+    assert snap.uri == "x-rincon-mp3radio://relay"
+
+
+def test_an_output_that_cannot_say_what_it_was_playing_returns_nothing_and_cannot_restore():
+    from twiddle.dial.output import BaseOutput, PlaybackError
+    out = BaseOutput()
+    assert out.capture() is None
+    import pytest
+    with pytest.raises(PlaybackError):
+        out.restore({})

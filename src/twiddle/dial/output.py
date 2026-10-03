@@ -105,6 +105,8 @@ class Output(Protocol):
     def set_mute(self, muted: bool) -> None: ...
     def set_sleep_timer(self, seconds: int) -> int | None: ...
     def back_to_relay(self) -> str: ...
+    def capture(self): ...
+    def restore(self, token, *, volume_only: bool = False) -> str: ...
     def close(self) -> None: ...
 
 
@@ -161,6 +163,14 @@ class BaseOutput:
 
     def back_to_relay(self) -> str:
         raise PlaybackError("R is for a Sonos room", "press d and pick the Roam first")
+
+    def capture(self):
+        """What is playing here now, to put back later (`restore`); None when this
+        output can't say. Only a Sonos room can: another process's ffmpeg is not ours."""
+        return None
+
+    def restore(self, token, *, volume_only: bool = False) -> str:
+        raise PlaybackError(f"{self.label} can't put back what was playing")
 
     def disconnect(self) -> str:
         """Let go of this output when you say so (`D`): a plain stop, unless
@@ -329,6 +339,35 @@ class SonosOutput(BaseOutput):
             raise spotify_ops.as_playback_error(exc) from exc
         dial_state.set_state("left_relay", None)
         return f"▶ {g.name} back on the relay"
+
+    def capture(self):
+        """The room as found: what it plays, where, how loud (`household.Snapshot`).
+        `relay`: it was on the relay, which Spotify's own handback puts back."""
+        from ..household import Snapshot
+        if self.dry_run:
+            return None
+        try:
+            on_relay = self.state().tuned == RELAY
+            return {"snapshot": Snapshot.capture(self.group), "relay": on_relay}
+        except Exception:
+            return None                 # unreadable: nothing to promise to put back
+
+    def restore(self, token, *, volume_only: bool = False) -> str:
+        """Put the room back as `capture` found it. `volume_only`: only the volume
+        and mute (a relay room's stream comes back through Spotify, not here).
+        The writes are journalled by `play.*`, like every other."""
+        snap = token["snapshot"]
+        if self.dry_run:
+            return f"[dry-run] would put {self.label} back"
+        g = self.group
+        if volume_only:
+            import copy
+            snap = copy.copy(snap)
+            snap.uri = ""
+        done = snap.restore(g)
+        if done["problems"]:
+            raise PlaybackError(f"couldn't fully put {g.name} back: " + ", ".join(done["problems"]))
+        return f"▶ {g.name} back as it was" if snap.uri else f"{g.name} volume back"
 
     def stop(self) -> str:
         g = self.group

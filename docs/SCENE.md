@@ -84,7 +84,8 @@ shows --dry-run               # everything works, but nothing plays
 | `space` | pause / resume Spotify; stops a Bandcamp track |
 | `n` | next track (the band's next Bandcamp song, when one is playing) |
 | `d` | choose where to play; a Bandcamp track playing moves there (and stops where it was) |
-| `R` | put the Roams back on what they were playing before you previewed something |
+| `R` | stop previewing and put the Roam back on what it was playing: a radio station (volume too), or Spotify through the relay |
+| `+` `-` / `]` `[` | volume ±2 / ±5 of the Roams or the Bandcamp track (the bar in the now-playing line is clickable); not Spotify on a Mac or phone |
 | `m` | choose which Spotify artist this band is; your choice is remembered |
 | `o` | open the band's Bandcamp, website or Wikipedia page |
 | `c` | copy the show to send someone: bands, date and time, venue and street, price, and the listing, ticket and flyer links (`pbcopy`; elsewhere the terminal's clipboard) |
@@ -277,7 +278,11 @@ a warning in the bottom bar, and a second `p` (within 20s) goes ahead.
   That way `analyse` doesn't mistake the silence that follows for a
   dropout. The app also remembers the album or playlist,
   track and position the Roams were on, so **`R` puts them back** exactly
-  there. `R` is journalled too.
+  there. `R` is journalled too. If the Roam was on **a station** instead (from
+  `dial`), the first preview captures it with the room's snapshot and `R` restores
+  that, volume included; if something else was put on the room since, `R` leaves it
+  alone. (This Mac: a station playing in `dial` is another process's, and `R` can't
+  put it back.)
 - **Playing to the Roams (relay).** The app checks that the room is actually
   pointed at the relay, and re-points it only if it has drifted (to a radio
   station, say). This is the same code path as `twiddle spotify play --room
