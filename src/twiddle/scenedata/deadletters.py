@@ -339,10 +339,7 @@ def _apply(dataset_path) -> list[str]:
         res = l.get("resolution") or {}
         if l["kind"] == "band" and l["status"] == RESOLVED and l.get("resolved_by") != "build" \
                 and (res.get("alias") or res.get("mbid")) and not l.get("applied"):
-            if res.get("alias"):
-                cache.save_alias(l["name"], str(res["alias"]))
-            if res.get("mbid"):
-                cache.save_pick(l["name"], str(res["mbid"]))
+            cache.save_override(l["name"], mbid=str(res.get("mbid") or ""), alias=str(res.get("alias") or ""))
             l["applied"] = True
             keys.append(dataset.band_id(l["name"]))
     if keys:
@@ -388,10 +385,7 @@ def reopen(lid: str, dataset_path: Path | None = None) -> dict:
             raise KeyError(lid)
         res = l.get("resolution") or {}
         if l["kind"] == "band" and l.get("applied"):
-            if res.get("alias"):
-                cache.drop_alias(l["name"], only=str(res["alias"]))
-            if res.get("mbid"):
-                cache.drop_pick(l["name"], only=str(res["mbid"]))
+            cache.drop_override(l["name"], mbid=str(res.get("mbid") or ""), alias=str(res.get("alias") or ""))
             l["relookup"] = True
         l.update(status=PENDING, resolution=None, resolved_by=None, applied=False)
         save(doc, dataset_path)

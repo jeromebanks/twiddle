@@ -364,6 +364,7 @@ class SonosOutput(BaseOutput):
             import copy
             snap = copy.copy(snap)
             snap.uri = ""
+            snap.bass, snap.treble, snap.loudness, snap.balance = {}, {}, {}, {}   # only volume and mute
         done = snap.restore(g)
         if done["problems"]:
             raise PlaybackError(f"couldn't fully put {g.name} back: " + ", ".join(done["problems"]))

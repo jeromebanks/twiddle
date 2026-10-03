@@ -473,7 +473,10 @@ class SceneApp(App):
         before = self._profile_sig()
         self.snapshot = snap
         if not self._watched_given:
+            was = self.watched
             self.watched = venues_mod.from_rows(snap.venues)
+            if self.watched != was:
+                same_shows = False      # a changed venue table needs the sidebar rebuilt too
         self.known = venues_mod.from_rows(snap.known_venues)     # described, never watched
         self._seed_bands(snap)
         failed = [f"{n}: {v.get('error')}" for n, v in snap.sources.items() if not v.get("ok", True)]
@@ -1451,15 +1454,16 @@ class SceneApp(App):
     @work(thread=True, exclusive=True, group="play")
     def do_play(self, uris, off, device, label, confirmed) -> None:
         self.call_from_thread(self._status, f"starting {label}…")
-        if device.relay:
-            self._remember_before(self._bandcamp_output(device))
+        staged = self._remember_before(self._bandcamp_output(device)) if device.relay else None
         try:
             msg = self.player.play(uris, device, offset=off, confirmed=confirmed, label=label)
         except NeedsConfirmation as exc:
+            self._unstage(staged)
             self._pending = (uris, off, device, label, time.time())
             self.call_from_thread(self._status, f"⚠ {exc}", "bold yellow")
             return
         except spotify_ops.PlaybackError as exc:
+            self._unstage(staged)
             self.call_from_thread(self._error, exc)
             return
         bc = self.bc_now
@@ -1478,7 +1482,9 @@ class SceneApp(App):
         if device.local:
             return MAC_OUTPUT
         if device.relay:
-            return f"room:{getattr(self.player, 'room', 'roam')}"
+            # The room the running relay really feeds (it may have been started with
+            # --room "Living Room"), the same one playback and its snapshot target.
+            return f"room:{getattr(self.player, 'relay_room', None) or getattr(self.player, 'room', 'roam')}"
         return None
 
     def _play_bandcamp(self, p: BandProfile, i: int, confirmed: bool | None = None) -> None:
@@ -1506,7 +1512,7 @@ class SceneApp(App):
                 f"couldn't get {tr.get('title')!r} from Bandcamp: {exc}"))
             return
         out = self.outputs.get(oid)
-        self._remember_before(oid)
+        staged = self._remember_before(oid)
         try:
             # Through `outputs`: it stops a track we left on another output.
             from ..dial.output import Media     # not at the top: see MAC_OUTPUT
@@ -1514,10 +1520,12 @@ class SceneApp(App):
                                     confirmed=confirmed, source="scene")
             self._pause_local_spotify()
         except NeedsConfirmation as exc:
+            self._unstage(staged)
             self._pending = (("bc", p.band, i, oid), None, None, label, time.time())
             self.call_from_thread(self._status, f"⚠ {exc}", "bold yellow")
             return
         except spotify_ops.PlaybackError as exc:
+            self._unstage(staged)
             self.call_from_thread(self._error, exc)
             return
         if not self.dry_run:
@@ -1675,22 +1683,29 @@ class SceneApp(App):
         self.call_from_thread(self._status, msg)
         self.call_from_thread(self.poll_now)
 
-    def _remember_before(self, oid: str | None) -> None:
+    def _unstage(self, oid: str | None) -> None:
+        """A preview that did not start leaves the room as it was, so what was captured for it
+        is dropped: the next successful preview captures afresh."""
+        if oid:
+            self._before.pop(oid, None)
+
+    def _remember_before(self, oid: str | None) -> str | None:
         """Worker thread only: the first preview on an output in a session records what
         it was doing, for `R`. Later previews keep that, not the first one. Each output
         has its own (a preview on the Mac must not stop the Roam being remembered), and
         a track already ours on this output means the room is not as it was found."""
         if self.dry_run or self.outputs is None or oid is None:
-            return
+            return None
         b = self._before.get(oid)
         if (b and time.time() - b["at"] < HANDBACK_MAX_AGE_S) \
                 or (self.bc_now is not None and self.bc_now["output"] == oid):
-            return
+            return None
         try:
             token = self.outputs.get(oid).capture()
         except Exception:
             token = None
         self._before[oid] = {"token": token, "at": time.time()}
+        return oid                  # staged: kept only if the preview then starts
 
     # ---- volume ------------------------------------------------------------
 

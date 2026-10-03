@@ -44,23 +44,51 @@ def alias(billed: str) -> str | None:
     return hit.get("alias", "")
 
 
+def override(billed: str) -> dict:
+    """What a person, an AI or a rule decided for this billing: `{"mbid": ..., "alias": ...}`.
+    Unlike `alias` below (a build's own guess at a trimmed name, which expires), these never
+    expire and are consulted before the billing is searched."""
+    return _read("picks.json").get(norm(billed)) or {}
+
+
 def pick(billed: str) -> str:
     """The MusicBrainz id someone (or a rule) chose for this billing, else ""."""
-    return (_read("picks.json").get(norm(billed)) or {}).get("mbid", "")
+    return override(billed).get("mbid", "")
+
+
+def save_override(billed: str, *, mbid: str = "", alias: str = "") -> None:
+    picks = _read("picks.json")
+    entry = picks.setdefault(norm(billed), {})
+    entry.update(billed=billed, at=time.time())
+    if mbid:
+        entry["mbid"] = mbid
+    if alias:
+        entry["alias"] = alias
+    _write("picks.json", picks)
 
 
 def save_pick(billed: str, mbid: str) -> None:
+    save_override(billed, mbid=mbid)
+
+
+def drop_override(billed: str, *, mbid: str = "", alias: str = "") -> None:
+    """Forget an override, each field only if it is the one named (so a later choice by
+    someone else is not undone by reopening an older letter)."""
     picks = _read("picks.json")
-    picks[norm(billed)] = {"mbid": mbid, "billed": billed, "at": time.time()}
+    entry = picks.get(norm(billed))
+    if not entry:
+        return
+    if mbid and entry.get("mbid") == mbid:
+        del entry["mbid"]
+    if alias and entry.get("alias") == alias:
+        del entry["alias"]
+    if not (entry.get("mbid") or entry.get("alias")):
+        del picks[norm(billed)]
     _write("picks.json", picks)
 
 
 def drop_pick(billed: str, only: str = "") -> None:
-    """Forget a chosen MusicBrainz id (`only`: just if it is that one)."""
-    picks = _read("picks.json")
-    if norm(billed) in picks and (not only or picks[norm(billed)].get("mbid") == only):
-        del picks[norm(billed)]
-        _write("picks.json", picks)
+    drop_override(billed, mbid=only)
 
 
 def drop_alias(billed: str, only: str = "") -> None:

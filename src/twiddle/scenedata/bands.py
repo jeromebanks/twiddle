@@ -242,13 +242,16 @@ class LookupEnricher:
         ok = self._bandcamp_ok() if self._bandcamp_ok else True
         identify = self._identify or (
             lambda name: lookup.identify(name, bandcamp_fallback=ok))
-        chosen = cache.pick(p.band)      # several same-named artists, and one was chosen
-        r = lookup.identify(p.band, mb_artist_id=chosen, bandcamp_fallback=ok) \
-            if chosen and self._identify is None else identify(p.band)
+        ov = cache.override(p.band)      # someone decided: a chosen artist and/or the name to search
+        chosen, alias = ov.get("mbid", ""), ov.get("alias", "")
+        r = lookup.identify(alias or p.band, mb_artist_id=chosen, bandcamp_fallback=ok) \
+            if chosen and self._identify is None else identify(alias or p.band)
         if not r.artist and not r.candidates:
             r = self._trimmed(p, identify, record_miss=ok) or r
         p.info = r.artist
         p.lookup_candidates = r.candidates
+        if alias and r.artist:
+            p.alias = alias              # Spotify and Bandcamp search by it too
 
     @staticmethod
     def _trimmed(p: BandProfile, identify, record_miss: bool = True) -> lookup.Result | None:

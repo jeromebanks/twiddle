@@ -123,7 +123,7 @@ def test_resolving_with_an_alias_sends_the_band_back_through_the_lookup_under_th
     build(tmp_path, [GHOST], fill)
     # the record was marked for a fresh lookup, and the alias is now the billing's alias
     from twiddle.scenedata import cache
-    assert cache.alias("Ghost Band") == "Girl Chow"
+    assert cache.override("Ghost Band")["alias"] == "Girl Chow"     # an override, not the expiring guess
     assert seen and seen[0][0] == "Ghost Band"
     l = letters(path)["band:ghost band"]
     assert l["applied"] is True and l["resolved_by"] == "ai" and l["attempts"] == 1
@@ -304,13 +304,13 @@ def test_reopening_an_applied_resolution_removes_what_it_left_in_the_cache(tmp_p
     _pending(path)
     dl.resolve("band:ghost band", {"mbid": "wrong-id", "alias": "Ghosts"}, "ai", path)
     assert dl.apply_resolutions(path) == ["ghost band"]
-    assert cache.pick("Ghost Band") == "wrong-id" and cache.alias("Ghost Band") == "Ghosts"
+    assert cache.pick("Ghost Band") == "wrong-id" and cache.override("Ghost Band")["alias"] == "Ghosts"
     dl.reopen("band:ghost band", path)
-    assert cache.pick("Ghost Band") == "" and cache.alias("Ghost Band") is None
+    assert cache.override("Ghost Band") == {}
     assert dl.apply_resolutions(path) == ["ghost band"]          # looked up afresh, once
     assert dl.apply_resolutions(path) == []
     cache.save_alias("Ghost Band", "A Build's Own")              # a build's alias is not ours to drop
-    cache.drop_alias("Ghost Band", only="Ghosts")
+    cache.drop_override("Ghost Band", alias="Ghosts")
     assert cache.alias("Ghost Band") == "A Build's Own"
 
 
@@ -326,3 +326,24 @@ def test_two_writers_of_the_queue_cannot_undo_each_other(tmp_path):
         assert not done.wait(0.3)             # the person's `resolve` waits its turn
     t.join(2)
     assert done.is_set() and dl.load(path)["letters"]["band:ghost band"]["status"] == "resolved"
+
+
+def test_an_explicit_alias_is_searched_even_when_the_billing_has_candidates(monkeypatch):
+    # Codex: the alias cache was only read after a miss, so a resolution for an ambiguous
+    # band (which has candidates) was ignored while its letter said "applied"
+    from twiddle import lookup
+    from twiddle.scenedata import cache
+    from twiddle.scenedata.bands import LookupEnricher
+    from twiddle.scenespec.band import BandProfile
+    cache.save_override("Abracadabra", alias="Abracadabra (Oakland duo)")
+    seen = []
+
+    def identify(name, **kw):
+        seen.append(name)
+        art = lookup.ArtistInfo(name="Abracadabra", mbid="m") if "Oakland" in name else None
+        return lookup.Result(art, [] if art else [{"name": "Abracadabra", "mbid": "a"}, {"name": "Abracadabra", "mbid": "b"}])
+    monkeypatch.setattr(lookup, "identify", identify)
+    p = BandProfile(band="Abracadabra")
+    LookupEnricher().enrich(p)
+    assert seen[0] == "Abracadabra (Oakland duo)" and p.info and p.alias == "Abracadabra (Oakland duo)"
+    assert p.search_name == "Abracadabra (Oakland duo)"          # Spotify and Bandcamp use it too

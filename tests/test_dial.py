@@ -1768,13 +1768,16 @@ def test_a_log_lost_mid_wait_stops_sending_and_reports_instead_of_queueing(tmp_p
 
 class _Snap:
     restored = []               # the uri each restore was asked to put back
+    eq = []                     # the EQ settings each restore carried
 
     def __init__(self, uri):
         self.uri = uri
-        _Snap.restored = []
+        self.bass, self.treble, self.loudness, self.balance = {"1.2.3.4": 3}, {"1.2.3.4": 1}, {"1.2.3.4": True}, {"1.2.3.4": 0}
+        _Snap.restored, _Snap.eq = [], []
 
     def restore(self, group):
         _Snap.restored.append(self.uri)
+        _Snap.eq.append((self.bass, self.treble, self.loudness, self.balance))
         return {"restored": ["x"], "problems": []}
 
 
@@ -1802,6 +1805,7 @@ def test_a_relay_room_is_restored_for_volume_only_and_its_snapshot_is_not_touche
     assert token["relay"] is True
     out.restore(token, volume_only=True)
     assert _Snap.restored == [""]               # no uri: the stream comes back through Spotify
+    assert _Snap.eq == [({}, {}, {}, {})]       # and EQ changes made meanwhile are not undone
     assert snap.uri == "x-rincon-mp3radio://relay"
 
 

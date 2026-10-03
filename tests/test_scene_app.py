@@ -1626,3 +1626,65 @@ def test_a_known_room_s_map_credit_is_shown_with_its_address():
             text = " ".join(str(w.render()) for w in app.screen.query(Static))
             assert "224 Vintage Way" in text and "OpenStreetMap contributors" in text
     run(go())
+
+
+def test_a_preview_that_was_refused_leaves_nothing_captured_for_the_next_one():
+    # Codex: the capture outlived a cancelled first preview, so after the user re-tuned the
+    # room, `R` put back the old station instead of what the real preview interrupted
+    async def go():
+        outs = FakeUrlOutputs(confirm_first=True)
+        outs.roam.found = STATION
+        app = _preview_on_the_roam(outs, FakePlayer())
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")                             # asks first (Spotify on the relay)
+            await settle(pilot, app, lambda: app._pending)
+            assert outs.roam.captured == 1 and not app._before    # refused: not kept
+            outs.roam.found = {"relay": False, "snapshot": "the station it is on now"}
+            await pilot.press("p")                             # confirmed
+            await settle(pilot, app, lambda: outs.roam.played)
+            assert outs.roam.captured == 2
+            assert app._before["room:roam"]["token"]["snapshot"] == "the station it is on now"
+    run(go())
+
+
+def test_the_volume_keys_and_the_snapshot_target_the_room_the_relay_really_feeds():
+    # Codex: a relay started with --room "Living Room" while scene's default room is roam
+    class LivingRoomPlayer(FakePlayer):
+        relay_room = "Living Room"
+        room = "roam"
+
+    async def go():
+        outs = FakeUrlOutputs()
+        app = _bandcamp_app(RELAY_DEV, outs, LivingRoomPlayer())
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            assert app._bandcamp_output(app.device) == "room:Living Room"
+    run(go())
+
+
+def test_a_rebuild_that_changes_the_venue_table_but_not_the_shows_rebuilds_the_sidebar():
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(160, 45)) as pilot:
+            await pilot.pause(0.3)
+            app._watched_given = False
+            snap = app.snapshot
+            same = dataset.Snapshot(path=snap.path, version=snap.version, generated_at=snap.generated_at,
+                                    shows=list(app.shows), show_ids=snap.show_ids, bands=snap.bands,
+                                    venues=[{"id": "a", "name": "Room A", "match": ["room a"]}])
+            calls = []
+            real = app._set_shows
+            app._set_shows = lambda *a, **k: calls.append(a) or real(*a, **k)
+            app.load_dataset = lambda: same
+            app._reload()                       # a first, different table: the sidebar is rebuilt
+            assert len(calls) == 1
+            app._reload()                       # nothing changed: only band records are refreshed
+            assert len(calls) == 1
+            app.load_dataset = lambda: dataset.Snapshot(
+                path=snap.path, version=snap.version, generated_at=snap.generated_at, shows=list(app.shows),
+                show_ids=snap.show_ids, bands=snap.bands,
+                venues=[{"id": "b", "name": "Room B", "match": ["room b"]}])
+            app._reload()                       # A replaced by B with identical shows
+            assert len(calls) == 2
+    run(go())
