@@ -59,5 +59,8 @@ def parse(shape: str | None, title: str | None) -> dict:
     if not title:
         return {}
     if shape is None:
-        return iheart_attrs(title) or artist_song(title)
+        # Not `iheart_attrs or artist_song`: an iHeart title whose attributes
+        # split to nothing must stay nothing, not fall back to a split of the
+        # attribute text itself (a url="Promo - Break").
+        return artist_song(iheart_rewrite(title))
     return SHAPES[shape](title)

@@ -309,6 +309,8 @@ ICY_STATIONS = list(_icy_stations())
     IHEART,
     # An iHeart artist with a dash in it has always split at the first dash.
     'title="Song",artist="A - B",url=""',
+    # Blank attributes split to nothing, never to a split of the url.
+    'title=" ",artist=" ",url="Promo - Break"',
     'Your DJ speaks over "X" on Bucci\'s show on WFMU',
     None,
 ])
