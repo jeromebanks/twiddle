@@ -67,6 +67,17 @@ def test_diag_namespace_reaches_the_same_functions(argv, expected):
     assert parse(argv).func.__name__ == expected
 
 
+@pytest.mark.parametrize("argv", [
+    ["alarm", "list", "--json"],
+    ["--json", "alarm", "list"],
+    ["alarm", "--json", "list"],
+])
+def test_alarm_list_takes_json_anywhere(argv):
+    args = parse(argv)
+    assert args.json is True and args.func.__name__ == "cmd_list"
+    assert args.func.__module__ == "twiddle.alarm_cli"
+
+
 def test_control_commands_accept_json_after_the_subcommand():
     """Agents write `status --json`, not `--json status`. Both must work."""
     assert parse(["status", "--json"]).json is True

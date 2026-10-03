@@ -98,6 +98,25 @@ Four things make this usable by an agent rather than only by a person:
 | redirect reporting | see below |
 | `snapshot` / `restore` | put a room back exactly as it was found |
 
+### Alarms: every alarm in the household
+
+```bash
+uv run twiddle alarm list           # every alarm, grouped by room (read-only)
+uv run twiddle alarm list --json    # the same, in the ok/error envelope
+```
+
+Alarms are household-wide, so any speaker answers for all of them: one
+`ListAlarms`, plus `GetTimeNow` and `GetFormat` for the household's own time
+and how it writes it (a format of `INV`, i.e. unset, prints 24-hour). Each
+alarm shows its time, days, on/off, volume, duration (the auto-stop), play
+mode, the source's title from the alarm's own metadata, and when it next goes
+off in the household's local time.
+
+An alarm aimed at a bonded follower (the right Roam, a surround), at a speaker
+that has vanished from the household, or at a UUID no speaker owns is listed
+with a `!` line saying so, never hidden. `alarm list` writes nothing: no
+`AlarmClock` or `AVTransport` write, no journal entry.
+
 ### Relay: play anything on this Mac, including Spotify
 
 `serve` plays files off disk. `relay` widens the same pipe to *live* audio and
@@ -641,6 +660,8 @@ you add analysis.
 | `report.py` | Findings, severities, hardware-vs-setup discriminators |
 | `household.py` | Speakers, groups, name resolution, snapshot/restore |
 | `control_cli.py` | The room-naming control commands |
+| `alarms/` | Sonos alarms: `model.py` (an `Alarm` that round-trips ListAlarms, its `Recurrence`), `clock.py` (the `AlarmClock` reads) |
+| `alarm_cli.py` | `alarm list` (read-only) |
 | `play.py` | HTTP file server and transport control (writes) |
 | `tone.py` | Soak-test signal generator |
 | `spotify_ops.py` | Spotify playback logic with no CLI attached (shared by `spotify_cli` and `scene`) |
