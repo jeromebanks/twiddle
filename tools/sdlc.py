@@ -15,6 +15,9 @@ and every label change and agent comment. Config is `.sdlc/config.json`.
     uv run python tools/sdlc.py plan-review 12 --plan plan.json --report codex.md --response response.md
     uv run python tools/sdlc.py plan-create 12 --dry-run
     uv run python tools/sdlc.py ready --epic 12
+    uv run python tools/sdlc.py slice-check 28 && uv run python tools/sdlc.py claim 28
+    uv run python tools/sdlc.py test-record 50 && uv run python tools/sdlc.py pr-review 50 --report codex.md
+    uv run python tools/sdlc.py merge 50 && uv run python tools/sdlc.py cleanup 28
 
 Two rules hold the process together (see SDLC.md):
 
@@ -62,7 +65,10 @@ KIND_TARGET = {"question": "needs-info", "prd": "prd-review", "diagnosis": "diag
                "approval": "approved", "escalation": "escalated", "note": None}
 REVIEW_STATES = {"needs-info", "prd-review", "diagnosis-review"}
 REVIEW_DOC = {"prd-review": "prd", "diagnosis-review": "diagnosis"}
-LATER_STATES = {"planned", "in-progress", "demo-review", "done"}
+LATER_STATES = {"demo-review", "done"}
+BUILD_STATES = {"planned", "in-progress"}     # the epic's slices are being built (`work-slice`)
+TRIAGE_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label"}
+PLAN_ACTIONS = {"plan", "continue_plan", "create_plan_issues", "ask_poster", "replan"}
 # Planning comments: posted by plan-post / plan-review / plan-create, never by `transition`.
 PLAN_KINDS = {"plan", "plan-review", "plan-created"}
 # from-state -> states the triage skill may move to. `escalated` is open from anywhere.
@@ -124,6 +130,12 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     `trusted` is who can write to the repo: their markers count, and (with the
     issue author) their keywords count.
     """
+    plan_kind = next((k for l, k in (("plan:slice", "slice"), ("plan:subtask", "subtask"))
+                      if l in issue.get("labels", [])), None)
+    if plan_kind:
+        # made by plan-create: built by work-slice (`slice-status`), never triaged
+        return {"number": issue.get("number"), "title": issue.get("title"), "state": plan_kind, "turn": "none",
+                "action": "none", "plan_kind": plan_kind, "conflicts": []}
     all_labels = state_labels(config)
     found = [l for l in issue.get("labels", []) if l in all_labels]
     conflicts: list[str] = []
@@ -211,6 +223,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         turn, action = "human", "human"
     elif state in LATER_STATES:
         turn, action = "later", "none"
+    elif state in BUILD_STATES:
+        turn, action = "agent", "work_slices"   # whether a slice is ready needs GitHub: see epic_progress
     elif state in ("untriaged", "triage"):
         turn, action = "agent", "triage"
     elif state == "approved":
@@ -248,9 +262,45 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     }
 
 
+def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> str:
+    """The one thing to run next for this issue, so no session has to remember the workflow.
+
+    `progress` (from epic_progress) is needed for an epic whose slices are being built.
+    """
+    n, a = st["number"], st["action"]
+    if st.get("plan_kind"):
+        return f"`uv run python tools/sdlc.py slice-status {n}`"
+    if a in TRIAGE_ACTIONS:
+        return f"/triage-issue {n}"
+    if a in PLAN_ACTIONS:
+        return f"/plan-issue {n}"
+    if a == "wait_for_poster":
+        return f"nothing: waiting on the poster to reply on #{n}"
+    if a in ("human", "fix_conflict"):
+        return f"nothing for an agent: #{n} needs a human" + (f" ({'; '.join(st['conflicts'])})" if st["conflicts"] else "")
+    if a == "work_slices":
+        if progress is None:
+            return f"`uv run python tools/sdlc.py state {n}` (needs the slices' progress)"
+        if progress["ready"]:
+            return f"/work-slice {progress['ready'][0]}"
+        if progress["in_flight"]:
+            return ("nothing new to start: in progress " + ", ".join(f"#{x}" for x in progress["in_flight"])
+                    + f" (`/work-slice {progress['in_flight'][0]}` resumes one)")
+        if progress["open"] == 0:
+            return f"/milestone-demo {n} (not built yet): every unit of work is merged"
+        if progress["escalated"]:
+            return "nothing for an agent: escalated " + ", ".join(f"#{x}" for x in progress["escalated"])
+        return f"nothing ready: the open units of work on #{n} are all blocked"
+    if st["state"] in LATER_STATES:
+        return f"nothing yet: #{n} is {st['state']} (that stage's skill isn't built yet)"
+    return "nothing: the issue is closed" if a == "none" else f"? (action {a})"
+
+
 def check_transition(st: dict[str, Any], to: str, kind: str, config: dict[str, Any]) -> list[str]:
     """Reasons a transition is not allowed (empty list = fine)."""
     errs: list[str] = []
+    if st.get("plan_kind"):
+        return [f"#{st['number']} is a plan:{st['plan_kind']} issue: work-slice drives it, not transition"]
     if f"{PREFIX}{to}" not in state_labels(config):
         errs.append(f"unknown state {to!r}")
         return errs
@@ -292,6 +342,10 @@ HEADERS = {
     "plan": "plan rev {rev}",
     "plan-review": "Codex review of plan rev {rev}",
     "plan-created": "plan created",
+    "claim": "claimed",
+    "release": "released",
+    "tests": "test run",
+    "pr-review": "Codex review",
 }
 FOOTERS = {
     "question": "Reply in a comment. Anything you leave unanswered, I will assume the stated default.",
@@ -402,6 +456,9 @@ def set_state_label(n: int, current: list[str], to: str, config: dict[str, Any])
 # --- commands --------------------------------------------------------------
 
 def print_state(st: dict[str, Any]) -> None:
+    if st.get("plan_kind"):
+        print(f"#{st['number']} {st['title']}\n  a plan:{st['plan_kind']} issue\n  next: {st.get('next')}")
+        return
     doc = st["latest_doc"]
     print(f"#{st['number']} {st['title']}")
     print(f"  state: {st['state']}   turn: {st['turn']}   action: {st['action']}   type: {st['type'] or '?'}")
@@ -422,6 +479,9 @@ def print_state(st: dict[str, Any]) -> None:
     if st.get("latest_plan"):
         print(f"  plan: rev {st['latest_plan']['rev']}   codex: {st['plan_verdict'] or 'not yet'}"
               f"   plan rounds: {st['plan_rounds']}/{st['max_plan_rounds']}")
+    for m in (st.get("progress") or {}).get("milestones", []):
+        print(f"  milestone {m['title']}: {m['done']}/{m['total']} merged" + ("  (complete)" if m["done"] == m["total"] else ""))
+    print(f"  next: {st.get('next')}")
 
 
 def command_bootstrap_labels(args: argparse.Namespace, config: dict[str, Any]) -> int:
@@ -437,8 +497,21 @@ def command_bootstrap_labels(args: argparse.Namespace, config: dict[str, Any]) -
     return 0
 
 
+def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
+              trusted: set[str] | None = None) -> dict[str, Any]:
+    """`state` plus the command to run next (an epic being built looks at its slices on GitHub)."""
+    progress = None
+    if st["action"] == "work_slices" and not offline:
+        progress = epic_progress(st["number"], config, trusted if trusted is not None else fetch_trusted(config))
+    return {**st, "progress": progress, "next": next_command(st, progress)}
+
+
 def command_state(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    st = bundle_state(load_bundle(args, config), config)
+    bundle = load_bundle(args, config)
+    st = bundle_state(bundle, config)
+    if st.get("plan_kind") == "slice" and not getattr(args, "from_file", None):
+        return command_slice_status(argparse.Namespace(number=st["number"], json=args.json, from_file=None), config)
+    st = with_next(st, config, offline=bool(getattr(args, "from_file", None)), trusted=set(bundle["trusted"]))
     if args.json:
         print(json.dumps(st, indent=2))
     else:
@@ -453,16 +526,18 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
     trusted = fetch_trusted(config)
     out = []
     for raw in sorted(issues, key=lambda i: i["number"]):
+        if any(l["name"] in ("plan:slice", "plan:subtask") for l in raw.get("labels", [])):
+            continue   # an epic's units of work: reached through the epic's `next`
         st = bundle_state(fetch_bundle(raw["number"], config, trusted), config)
         if st["turn"] == "agent":
-            out.append(st)
+            out.append(with_next(st, config, trusted=trusted))
     if args.json:
         print(json.dumps(out, indent=2))
     elif not out:
         print("nothing waiting on the agent")
     else:
         for st in out:
-            print(f"#{st['number']:<4} {st['state']:<17} {st['action']:<16} {st['title']}")
+            print(f"#{st['number']:<4} {st['state']:<17} {st['title']}\n      next: {st['next']}")
     return 0
 
 
@@ -939,7 +1014,9 @@ def fetch_plan_issues(epic: int | None, config: dict[str, Any], trusted: set[str
             seen.add(raw["number"])
             out.append({"epic": int(mk["epic"]), "key": mk["key"], "kind": mk["kind"], "number": raw["number"],
                         "id": raw["id"], "title": raw.get("title", ""), "state": raw.get("state", "open"),
-                        "state_reason": raw.get("state_reason")})
+                        "state_reason": raw.get("state_reason"), "labels": [l["name"] for l in raw.get("labels", [])],
+                        "assignees": [a["login"] for a in raw.get("assignees") or []],
+                        "milestone": (raw.get("milestone") or {}).get("title")})
     return out
 
 
@@ -1144,20 +1221,460 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
 
 def command_ready(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Units of work whose blockers have all closed as completed: what `work-slice` may start."""
-    repo = repo_of(config)
     leaves = [r for r in fetch_plan_issues(args.epic, config, fetch_trusted(config)) if r["kind"] == "slice"]
-    blockers = {r["number"]: gh_pages(f"repos/{repo}/issues/{r['number']}/dependencies/blocked_by?per_page=100")
-                for r in leaves if r["state"] == "open"}
+    blockers = {r["number"]: fetch_blockers(r["number"], config) for r in leaves if r["state"] == "open"}
     ready, waiting = ready_leaves(leaves, blockers)
+    progress = summarise_progress(leaves, blockers)
     if args.json:
-        print(json.dumps({"ready": ready, "waiting": waiting}, indent=2))
+        print(json.dumps({"ready": ready, "waiting": waiting, "progress": progress}, indent=2))
         return 0
-    for r in ready:
-        print(f"ready    #{r['number']:<4} {r['title']}")
-    for r in waiting:
-        print(f"waiting  #{r['number']:<4} {r['title']}  (on {', '.join('#%d' % n for n in r['unmet'])})")
+    for r in ready + waiting:
+        tag = ("escalated" if r["number"] in progress["escalated"] else "claimed" if r["number"] in progress["in_flight"]
+               else "ready" if not r["unmet"] else "waiting")
+        print(f"{tag:<9} #{r['number']:<4} {r['title']}" + (f"  (on {', '.join('#%d' % n for n in r['unmet'])})" if r["unmet"] else ""))
     if not ready and not waiting:
         print("no open units of work" + (f" under #{args.epic}" if args.epic else ""))
+    return 0
+
+
+# --- building: one slice per session (work-slice) ---------------------------
+#
+# A slice's state lives on GitHub: open/closed, its blocked_by, marked comments
+# on the slice (`claim`, `release`, `escalation`) and on its pull request
+# (`tests`, `pr-review`). Test runs and Codex reviews are bound to a head SHA,
+# so a new commit voids both and the merge gate sees it.
+
+HEAD_RE = re.compile(r"^\s*[*_`]*HEAD:[*_`\s]*([0-9a-f]{40})\b", re.MULTILINE | re.IGNORECASE)
+CLOSES_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b", re.IGNORECASE)
+ESCALATED_LABEL = f"{PREFIX}escalated"
+
+
+def slice_branch(n: int) -> str:
+    return f"slice/{n}"
+
+
+def closes_refs(body: str) -> list[int]:
+    return sorted({int(m) for m in CLOSES_RE.findall(body or "")})
+
+
+def _marked(comments: list[dict[str, Any]], trusted: set[str]) -> list[tuple[dict[str, str], dict[str, Any]]]:
+    ordered = sorted(comments, key=lambda c: (c.get("created_at", ""), c.get("id", 0)))
+    return [(mk, c) for c in ordered if c.get("author") in trusted and (mk := parse_marker(c.get("body", "")))]
+
+
+def claim_status(comments: list[dict[str, Any]], trusted: set[str]) -> dict[str, Any] | None:
+    """The active claim on a slice: the latest `claim` not followed by a `release`."""
+    active = None
+    for mk, c in _marked(comments, trusted):
+        if mk.get("kind") == "claim":
+            active = {"branch": mk.get("branch"), "url": c.get("url"), "at": c.get("created_at")}
+        elif mk.get("kind") == "release":
+            active = None
+    return active
+
+
+def pr_records(comments: list[dict[str, Any]], trusted: set[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(test runs, Codex reviews) recorded on a pull request, oldest first."""
+    tests, reviews = [], []
+    for mk, c in _marked(comments, trusted):
+        if mk.get("kind") == "tests":
+            tests.append({"sha": mk.get("sha"), "result": mk.get("result"), "passed": mk.get("passed"), "url": c.get("url")})
+        elif mk.get("kind") == "pr-review":
+            reviews.append({"sha": mk.get("sha"), "verdict": mk.get("verdict"), "round": mk.get("round"), "url": c.get("url")})
+    return tests, reviews
+
+
+def head_records(pr: dict[str, Any], tests: list[dict[str, Any]], reviews: list[dict[str, Any]]
+                 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """The latest test run and Codex review of the PR's *current* head (None when there is none)."""
+    head = pr.get("headRefOid")
+    t = [x for x in tests if x["sha"] == head]
+    r = [x for x in reviews if x["sha"] == head]
+    return (t[-1] if t else None), (r[-1] if r else None)
+
+
+def unmet_blockers(blockers: list[dict[str, Any]]) -> list[int]:
+    return [b["number"] for b in blockers if not (b.get("state") == "closed" and b.get("state_reason") == "completed")]
+
+
+def slice_check_errors(issue: dict[str, Any], blockers: list[dict[str, Any]], claim: dict[str, Any] | None,
+                       resume: bool = False) -> list[str]:
+    """Why a slice may not be started (or resumed) now (empty list = go)."""
+    n = issue["number"]
+    mk = parse_marker(issue.get("body", "")) or {}
+    if LEAF_LABEL not in issue.get("labels", []) or mk.get("kind") != "slice":
+        return [f"#{n} is not a plan:slice issue made by plan-create"]
+    errs = []
+    if issue.get("state") != "open":
+        errs.append(f"#{n} is closed")
+    if ESCALATED_LABEL in issue.get("labels", []):
+        errs.append(f"#{n} is escalated to a human")
+    missing = [name for name in LEAF_SECTIONS.values() if f"## {name}" not in issue.get("body", "")]
+    if missing:
+        errs.append(f"#{n} lacks sections: {', '.join(missing)} (fix the issue or replan; don't guess)")
+    if unmet := unmet_blockers(blockers):
+        errs.append(f"#{n} is blocked by {', '.join(f'#{b}' for b in unmet)} (not closed as completed)")
+    if claim and not resume:
+        errs.append(f"#{n} is already claimed ({claim['url']}): `claim {n} --resume` to continue it")
+    if resume and not claim:
+        errs.append(f"#{n} has no claim to resume: `claim {n}`")
+    return errs
+
+
+def derive_slice(issue: dict[str, Any], comments: list[dict[str, Any]], trusted: set[str],
+                 blockers: list[dict[str, Any]], pr: dict[str, Any] | None,
+                 pr_comments: list[dict[str, Any]]) -> dict[str, Any]:
+    """A slice's build state and the command to run next, from fetched JSON alone."""
+    n = issue["number"]
+    mk = parse_marker(issue.get("body", "")) or {}
+    claim = claim_status(comments, trusted)
+    tests, reviews = pr_records(pr_comments, trusted) if pr else ([], [])
+    t, r = head_records(pr, tests, reviews) if pr else (None, None)
+    unmet = unmet_blockers(blockers)
+    epic = int(mk["epic"]) if mk.get("epic", "").isdigit() else None
+    if issue.get("state") == "closed":
+        state = "merged" if issue.get("state_reason") == "completed" else "closed"
+    elif ESCALATED_LABEL in issue.get("labels", []):
+        state = "escalated"
+    elif pr and pr.get("state") == "OPEN":
+        state = "in-review"
+    elif claim:
+        state = "claimed"
+    elif unmet:
+        state = "blocked"
+    else:
+        state = "ready"
+    if state in ("ready", "claimed", "in-review"):
+        nxt = f"/work-slice {n}"
+    elif state == "blocked":
+        nxt = "nothing yet: waiting on " + ", ".join(f"#{b}" for b in unmet)
+    elif state == "escalated":
+        nxt = f"nothing for an agent: #{n} needs a human"
+    else:
+        nxt = f"`uv run python tools/sdlc.py state {epic}` (the epic's next)" if epic else "nothing"
+    return {"number": n, "title": issue.get("title"), "epic": epic, "key": mk.get("key"), "state": state,
+            "claim": claim, "unmet": unmet, "pr": (pr or {}).get("number"), "pr_state": (pr or {}).get("state"),
+            "head": (pr or {}).get("headRefOid"), "tests_on_head": t, "review_on_head": r,
+            "pr_rounds": len(reviews), "next": nxt}
+
+
+def merge_gate_errors(pr: dict[str, Any], slice_issue: dict[str, Any] | None, tests: list[dict[str, Any]],
+                      reviews: list[dict[str, Any]], default_branch: str) -> list[str]:
+    """Why the agent may not merge this pull request (empty list = merge)."""
+    errs = []
+    if pr.get("state") != "OPEN":
+        errs.append(f"PR is {pr.get('state')}, not OPEN")
+    if pr.get("isDraft"):
+        errs.append("PR is a draft")
+    if pr.get("baseRefName") != default_branch:
+        errs.append(f"PR targets {pr.get('baseRefName')}, not {default_branch}")
+    refs = closes_refs(pr.get("body", ""))
+    if len(refs) != 1:
+        errs.append(f"PR must close exactly one slice (`Closes #N`); it closes {refs or 'none'}")
+    elif not slice_issue or slice_issue["number"] != refs[0]:
+        errs.append(f"#{refs[0]} could not be read")
+    elif LEAF_LABEL not in slice_issue.get("labels", []) or slice_issue.get("state") != "open":
+        errs.append(f"#{refs[0]} is not an open plan:slice issue")
+    t, r = head_records(pr, tests, reviews)
+    head = (pr.get("headRefOid") or "")[:12]
+    if not r:
+        errs.append(f"no Codex review of the current head {head}")
+    elif r["verdict"] != "approve":
+        errs.append(f"Codex's latest review of {head} asks for changes")
+    if not t:
+        errs.append(f"no recorded test run on the current head {head} (`test-record`)")
+    elif t["result"] != "pass":
+        errs.append(f"the tests failed on {head}")
+    if pr.get("mergeable") != "MERGEABLE":
+        errs.append(f"GitHub says the PR is not mergeable ({pr.get('mergeable')}): rebase onto origin/main")
+    return errs
+
+
+def parse_pytest_summary(text: str) -> tuple[int, int]:
+    """(passed, failed + errors) from pytest's summary line."""
+    tail = "\n".join((text or "").strip().splitlines()[-3:])
+    num = lambda word: sum(int(x) for x in re.findall(rf"(\d+) {word}", tail))  # noqa: E731
+    return num("passed"), num("failed") + num("errors?")
+
+
+def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[dict[str, Any]]]) -> dict[str, Any]:
+    """An epic's units of work: what can start, what is in flight, and each milestone's count."""
+    ready, waiting = ready_leaves(leaves, blockers)
+    escalated = [l["number"] for l in leaves if l.get("state") == "open" and ESCALATED_LABEL in l.get("labels", [])]
+    free = [l["number"] for l in ready if not l.get("assignees") and l["number"] not in escalated]
+    in_flight = [l["number"] for l in ready + waiting if l.get("assignees") and l["number"] not in escalated]
+    by_ms: dict[str, list[dict[str, Any]]] = {}
+    for l in leaves:
+        by_ms.setdefault(l.get("milestone") or "(no milestone)", []).append(l)
+    milestones = [{"title": t, "total": len(ls),
+                   "done": sum(1 for l in ls if l.get("state") == "closed" and l.get("state_reason") == "completed")}
+                  for t, ls in sorted(by_ms.items())]
+    return {"ready": free, "in_flight": in_flight, "escalated": escalated,
+            "waiting": [l["number"] for l in waiting if l["number"] not in in_flight],
+            "open": sum(1 for l in leaves if l.get("state") == "open"), "milestones": milestones}
+
+
+def git(args: list[str], cwd: Path | None = None, check: bool = True) -> str:
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if check and proc.returncode != 0:
+        raise SdlcError(f"git {' '.join(args[:3])} failed: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def primary_root() -> Path:
+    """The main checkout, even when run from inside a slice's worktree."""
+    return Path(git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).parent
+
+
+def worktree_path(n: int, config: dict[str, Any]) -> Path:
+    return primary_root() / config.get("worktree_dir", ".worktrees") / f"slice-{n}"
+
+
+def fetch_slice(n: int, config: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    repo = repo_of(config)
+    raw = gh_json(["api", f"repos/{repo}/issues/{n}"])
+    issue = {"number": raw["number"], "title": raw.get("title", ""), "state": raw.get("state", "open"),
+             "state_reason": raw.get("state_reason"), "body": raw.get("body") or "",
+             "labels": [l["name"] for l in raw.get("labels", [])],
+             "assignees": [a["login"] for a in raw.get("assignees") or []]}
+    return issue, [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{n}/comments")]
+
+
+def fetch_blockers(n: int, config: dict[str, Any]) -> list[dict[str, Any]]:
+    return gh_pages(f"repos/{repo_of(config)}/issues/{n}/dependencies/blocked_by?per_page=100")
+
+
+PR_FIELDS = "number,state,isDraft,baseRefName,headRefName,headRefOid,mergeable,body,url"
+
+
+def fetch_pr(number: int, config: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    repo = repo_of(config)
+    pr = gh_json(["pr", "view", str(number), "--repo", repo, "--json", PR_FIELDS])
+    return pr, [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{number}/comments")]
+
+
+def find_slice_pr(n: int, config: dict[str, Any]) -> dict[str, Any] | None:
+    """The slice's pull request (branch slice/N): the open one, else the latest."""
+    prs = gh_json(["pr", "list", "--repo", repo_of(config), "--head", slice_branch(n), "--state", "all",
+                   "--json", PR_FIELDS]) or []
+    prs.sort(key=lambda p: (p["state"] == "OPEN", p["number"]))
+    return prs[-1] if prs else None
+
+
+def epic_progress(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str, Any]:
+    leaves = [r for r in fetch_plan_issues(epic, config, trusted) if r["kind"] == "slice"]
+    blockers = {r["number"]: fetch_blockers(r["number"], config) for r in leaves if r["state"] == "open"}
+    return summarise_progress(leaves, blockers)
+
+
+def slice_bundle(n: int, config: dict[str, Any]) -> dict[str, Any]:
+    trusted = fetch_trusted(config)
+    issue, comments = fetch_slice(n, config)
+    pr = find_slice_pr(n, config)
+    pr_comments = fetch_pr(pr["number"], config)[1] if pr else []
+    return {"issue": issue, "comments": comments, "trusted": sorted(trusted),
+            "blockers": fetch_blockers(n, config) if issue["state"] == "open" else [],
+            "pr": pr, "pr_comments": pr_comments}
+
+
+def bundle_slice(b: dict[str, Any]) -> dict[str, Any]:
+    return derive_slice(b["issue"], b["comments"], set(b["trusted"]), b["blockers"], b["pr"], b["pr_comments"])
+
+
+def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(args.number, config)
+    st = bundle_slice(b)
+    if args.json:
+        print(json.dumps(st, indent=2))
+        return 0
+    print(f"#{st['number']} {st['title']}\n  state: {st['state']}   epic: #{st['epic']}   key: {st['key']}")
+    if st["claim"]:
+        print(f"  claimed: {st['claim']['url']} (branch {st['claim']['branch']})")
+    if st["pr"]:
+        t, r = st["tests_on_head"], st["review_on_head"]
+        print(f"  PR #{st['pr']} ({st['pr_state']}) head {(st['head'] or '')[:12]}: tests {t['result'] if t else 'not run'}, "
+              f"Codex {r['verdict'] if r else 'not yet'}, rounds {st['pr_rounds']}/{config.get('max_pr_rounds', 5)}")
+    print(f"  next: {st['next']}")
+    return 0
+
+
+def command_slice_check(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(args.number, config)
+    errs = slice_check_errors(b["issue"], b["blockers"], claim_status(b["comments"], set(b["trusted"])), args.resume)
+    for e in errs:
+        print(f"  - {e}")
+    print(f"#{args.number}: " + ("not workable" if errs else "ok to " + ("resume" if args.resume else "start")))
+    return 1 if errs else 0
+
+
+def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Claim a ready slice and give it its own worktree on branch slice/N, from origin/main."""
+    n = args.number
+    b = slice_bundle(n, config)
+    claim = claim_status(b["comments"], set(b["trusted"]))
+    if errs := slice_check_errors(b["issue"], b["blockers"], claim, args.resume):
+        raise SdlcError("; ".join(errs))
+    root, wt, branch = primary_root(), worktree_path(n, config), slice_branch(n)
+    epic = int((parse_marker(b["issue"]["body"]) or {})["epic"])
+    if args.dry_run:
+        print(f"would {'resume' if args.resume else 'claim'} #{n}: worktree {wt} on {branch} from origin/main; epic #{epic}")
+        return 0
+    git(["fetch", "origin", "main"], cwd=root)
+    local = bool(git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root, check=False))
+    remote = bool(git(["ls-remote", "--heads", "origin", branch], cwd=root, check=False))
+    if wt.exists():
+        if not args.resume:
+            raise SdlcError(f"{wt} already exists: `claim {n} --resume`, or `cleanup {n} --force` to discard it")
+    elif local:
+        if not args.resume:
+            raise SdlcError(f"branch {branch} already exists: `claim {n} --resume`")
+        git(["worktree", "add", str(wt), branch], cwd=root)
+    elif remote and args.resume:
+        git(["fetch", "origin", branch], cwd=root)
+        git(["worktree", "add", "-b", branch, str(wt), f"origin/{branch}"], cwd=root)
+    else:
+        git(["worktree", "add", "-b", branch, str(wt), "origin/main"], cwd=root)
+    if not claim:
+        post_comment(n, render_comment("claim", None, f"Working on this in `{branch}`.", config, branch=branch), config)
+        gh(["issue", "edit", str(n), "--repo", repo_of(config), "--add-assignee", "@me"])
+    ep = fetch_bundle(epic, config, set(b["trusted"]))["issue"]
+    if f"{PREFIX}planned" in ep["labels"]:
+        set_state_label(epic, ep["labels"], "in-progress", config)
+        print(f"#{epic}: planned -> in-progress")
+    print(f"WORKTREE={wt}\nBRANCH={branch}\nBASE=origin/main")
+    return 0
+
+
+def command_release(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Give up a claim (the slice becomes ready again). The branch and worktree are left for `cleanup`."""
+    body = "Releasing this slice" + (f": {args.reason}" if args.reason else ".")
+    if args.dry_run:
+        print(render_comment("release", None, body, config))
+        return 0
+    post_comment(args.number, render_comment("release", None, body, config), config)
+    gh(["issue", "edit", str(args.number), "--repo", repo_of(config), "--remove-assignee", "@me"], check=False)
+    print(f"#{args.number}: released")
+    return 0
+
+
+def command_test_record(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Run the full test suite on the PR's head, here, and record the result on the PR."""
+    pr, _ = fetch_pr(args.pr, config)
+    if git(["status", "--porcelain"]):
+        raise SdlcError("the working tree is not clean: commit (and push) first, so the run is of a real head")
+    head = git(["rev-parse", "HEAD"])
+    if head != pr["headRefOid"]:
+        raise SdlcError(f"HEAD {head[:12]} is not PR #{args.pr}'s head {pr['headRefOid'][:12]}: push, or check out the branch")
+    proc = subprocess.run(["uv", "run", "pytest", "-q"], capture_output=True, text=True)
+    out = proc.stdout + proc.stderr
+    passed, failed = parse_pytest_summary(out)
+    result = "pass" if proc.returncode == 0 else "fail"
+    tail = "\n".join(out.strip().splitlines()[-12:])
+    fence = _fence(tail)
+    body = (f"`uv run pytest -q` on `{head[:12]}`: **{result}** ({passed} passed" + (f", {failed} failed" if failed else "")
+            + f").\n\n<details><summary>last lines</summary>\n\n{fence}\n{tail}\n{fence}\n\n</details>")
+    comment = render_comment("tests", None, body, config, sha=head, result=result, passed=str(passed))
+    if args.dry_run:
+        print(comment)
+    else:
+        posted = post_comment(args.pr, comment, config)
+        print(f"PR #{args.pr}: tests {result} on {head[:12]} ({passed} passed)  {posted.get('html_url', '')}")
+    return 0 if result == "pass" else 1
+
+
+def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Record one Codex round on the PR's current head, with Claude's answer to it."""
+    if args.from_file:
+        b = json.loads(Path(args.from_file).read_text())
+        pr, comments, trusted = b["pr"], b["pr_comments"], set(b["trusted"])
+    else:
+        (pr, comments), trusted = fetch_pr(args.pr, config), fetch_trusted(config)
+    _, reviews = pr_records(comments, trusted)
+    limit = config.get("max_pr_rounds", 5)
+    if pr.get("state") != "OPEN":
+        raise SdlcError(f"PR #{pr['number']} is {pr.get('state')}")
+    if len(reviews) >= limit:
+        raise SdlcError(f"Codex rounds spent ({len(reviews)}/{limit}) without approval: `escalate-slice N --reason ...`")
+    report = Path(args.report).read_text()
+    verdict = parse_verdict(report)
+    m = HEAD_RE.search(report)
+    if not m:
+        raise SdlcError("the Codex report has no `HEAD: <40-hex sha>` line: it can't show what it reviewed; run it again")
+    if m.group(1) != pr["headRefOid"]:
+        raise SdlcError(f"Codex reviewed {m.group(1)[:12]} but the PR head is {pr['headRefOid'][:12]}: review the current head")
+    response = Path(args.response).read_text().strip() if args.response else ""
+    rnd = len(reviews) + 1
+    body = (f"**Round {rnd}/{limit} — Codex on `{pr['headRefOid'][:12]}`: `{verdict}`**\n\n"
+            f"<details><summary>Codex's review</summary>\n\n{report.strip()}\n\n</details>")
+    if response:
+        body += f"\n\n### Claude's response\n\n{response}"
+    comment = render_comment("pr-review", None, body, config, sha=pr["headRefOid"], verdict=verdict, round=str(rnd))
+    if len(comment) > COMMENT_LIMIT:
+        raise SdlcError(f"the review comment is {len(comment)} characters, over GitHub's limit")
+    if args.dry_run:
+        print(comment)
+        return 0
+    posted = post_comment(pr["number"], comment, config)
+    print(f"PR #{pr['number']} round {rnd}: {verdict}  {posted.get('html_url', '')}")
+    return 0
+
+
+def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """The merge gate: Codex approved this head, the tests passed on it, it closes one slice. Then squash-merge."""
+    repo = repo_of(config)
+    pr, comments = fetch_pr(args.pr, config)
+    trusted = fetch_trusted(config)
+    tests, reviews = pr_records(comments, trusted)
+    refs = closes_refs(pr.get("body", ""))
+    slice_issue = fetch_slice(refs[0], config)[0] if len(refs) == 1 else None
+    if errs := merge_gate_errors(pr, slice_issue, tests, reviews, config.get("default_branch", "main")):
+        raise SdlcError("; ".join(errs))
+    n = refs[0]
+    if args.dry_run:
+        print(f"would squash-merge PR #{args.pr} (closes #{n}) at {pr['headRefOid'][:12]}")
+        return 0
+    gh(["pr", "merge", str(args.pr), "--repo", repo, "--squash", "--match-head-commit", pr["headRefOid"]])
+    gh(["api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{pr['headRefName']}"], check=False)
+    issue = fetch_slice(n, config)[0]
+    if issue["state"] != "closed":
+        gh(["issue", "close", str(n), "--repo", repo, "--reason", "completed", "--comment", f"Merged in #{args.pr}."])
+    print(f"merged PR #{args.pr}; #{n} closed")
+    epic = (parse_marker(issue["body"]) or {}).get("epic", "")
+    if epic.isdigit():
+        st = with_next(bundle_state(fetch_bundle(int(epic), config, trusted), config), config, trusted=trusted)
+        for m in (st.get("progress") or {}).get("milestones", []):
+            if m["done"] == m["total"]:
+                print(f"milestone {m['title']} is complete")
+        print(f"next: {st['next']}")
+    return 0
+
+
+def command_escalate_slice(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    body = "Handing this slice to a human: " + args.reason
+    if args.dry_run:
+        print(render_comment("escalation", None, body, config))
+        return 0
+    post_comment(args.number, render_comment("escalation", None, body, config), config)
+    gh(["issue", "edit", str(args.number), "--repo", repo_of(config), "--add-label", ESCALATED_LABEL])
+    print(f"#{args.number}: escalated")
+    return 0
+
+
+def command_cleanup(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Remove a slice's worktree and local branch, from the primary checkout. Safe to rerun."""
+    n, root = args.number, primary_root()
+    wt, branch = worktree_path(n, config), slice_branch(n)
+    if Path.cwd().resolve() == wt.resolve() or wt.resolve() in Path.cwd().resolve().parents:
+        raise SdlcError(f"run cleanup from the primary checkout ({root}), not from inside {wt}")
+    pr = find_slice_pr(n, config)
+    if not args.force and not (pr and pr["state"] == "MERGED"):
+        raise SdlcError(f"slice/{n}'s PR is not merged: `--force` discards the work")
+    if wt.exists():
+        git(["worktree", "remove", str(wt)] + (["--force"] if args.force else []), cwd=root)
+    git(["worktree", "prune"], cwd=root)
+    if git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root, check=False):
+        git(["branch", "-D", branch], cwd=root)
+    print(f"#{n}: removed {wt} and {branch}")
     return 0
 
 
@@ -1229,6 +1746,59 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--from-file")
     p.set_defaults(fn=command_plan_create)
+
+    p = sub.add_parser("slice-status", help="a slice's build state and what to run next")
+    p.add_argument("number", type=int)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--from-file")
+    p.set_defaults(fn=command_slice_status)
+
+    p = sub.add_parser("slice-check", help="may this slice be started (or resumed) now?")
+    p.add_argument("number", type=int)
+    p.add_argument("--resume", action="store_true")
+    p.add_argument("--from-file")
+    p.set_defaults(fn=command_slice_check)
+
+    p = sub.add_parser("claim", help="claim a ready slice and make its worktree")
+    p.add_argument("number", type=int)
+    p.add_argument("--resume", action="store_true", help="reattach to this slice's existing claim and branch")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=command_claim)
+
+    p = sub.add_parser("release", help="give up a claim (the slice becomes ready again)")
+    p.add_argument("number", type=int)
+    p.add_argument("--reason")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=command_release)
+
+    p = sub.add_parser("test-record", help="run the full suite on the PR head here and record it on the PR")
+    p.add_argument("pr", type=int)
+    p.add_argument("--dry-run", action="store_true", help="run the tests, print the record, post nothing")
+    p.set_defaults(fn=command_test_record)
+
+    p = sub.add_parser("pr-review", help="record a Codex review round of the PR's current head")
+    p.add_argument("pr", type=int)
+    p.add_argument("--report", required=True, help="Codex's stdout: a `HEAD: <sha>` line, last line the verdict")
+    p.add_argument("--response", help="Claude's answer to each finding (markdown)")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--from-file")
+    p.set_defaults(fn=command_pr_review)
+
+    p = sub.add_parser("merge", help="the merge gate, then squash-merge a slice's PR")
+    p.add_argument("pr", type=int)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=command_merge)
+
+    p = sub.add_parser("escalate-slice", help="hand a slice to a human")
+    p.add_argument("number", type=int)
+    p.add_argument("--reason", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=command_escalate_slice)
+
+    p = sub.add_parser("cleanup", help="remove a merged slice's worktree and local branch")
+    p.add_argument("number", type=int)
+    p.add_argument("--force", action="store_true", help="also when the PR is not merged (discards the work)")
+    p.set_defaults(fn=command_cleanup)
 
     p = sub.add_parser("ready", help="units of work whose blockers are all done")
     p.add_argument("--epic", type=int)

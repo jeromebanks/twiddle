@@ -17,3 +17,6 @@ logs/
 
 # Playwright MCP browser scratch (page snapshots, console logs)
 .playwright-mcp/
+
+# work-slice: one git worktree per slice (tools/sdlc.py claim)
+.worktrees/

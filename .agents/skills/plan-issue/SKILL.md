@@ -190,4 +190,6 @@ End with:
 - the issue number and its new state;
 - the plan revision and the Codex verdict;
 - the link to what you posted;
-- once `planned`, the units of work ready now (`uv run python tools/sdlc.py ready --epic N`) and the first milestone's demo.
+- once `planned`, the units of work ready now (`uv run python tools/sdlc.py ready --epic N`) and the first milestone's demo;
+- **Next:** the `next:` line of `uv run python tools/sdlc.py state N`. Copy it; don't work it out.
+  Once planned, that's `/work-slice <first ready slice>`, best run in a fresh session.

@@ -1,31 +1,24 @@
-# Handoff: build `work-slice` and `milestone-demo` (next SDLC skills)
+# Handoff: build `milestone-demo` (the last SDLC skill)
 
-Read `SDLC.md`, `tools/sdlc.py`, `.agents/skills/plan-issue/SKILL.md` and
-`references/plan-schema.md` first. Start in **plan mode on Opus**.
+Read `SDLC.md`, `tools/sdlc.py` and `.agents/skills/work-slice/SKILL.md` first. Start in **plan mode on Opus**.
 
 ## State
-- `triage-issue` takes an issue to `sdlc:approved`, with a PRD merged to `docs/prd/N-*.md`.
-- `plan-issue` takes it to `sdlc:planned`:
-  - the issue is the **epic**;
-  - subtasks (`plan:subtask`) and one-session units of work (`plan:slice`) are native sub-issues;
-  - order is native `blocked_by`;
-  - optional GitHub milestones each name a demo.
-- The plan is reviewed by the advisor, then by Codex rounds (`codex exec --sandbox read-only`,
-  `VERDICT:` line), until they agree. The poster is not asked unless there's no consensus.
-- `uv run python tools/sdlc.py ready --epic N` lists the units of work whose blockers all closed as completed.
-  That is `work-slice`'s queue.
-- Each unit's body has the marker `<!-- sdlc:v1 kind=slice epic=N key=K -->` and the sections
-  Outcome, Scope, Acceptance criteria, Validation, Demo, Non-goals, Context and Dependencies.
-
-## `work-slice` (one unit per session)
-- Pick from `ready`, claim it, branch, implement only what its sections say, test offline, and open a PR that closes the unit.
-- Review rounds: advisor, then Codex on the PR head, posted to the PR. Escalate after N rounds.
-  Reuse `parse_verdict` and the round-budget pattern from planning.
-- Move the epic `planned -> in-progress` on the first claim.
+- `triage-issue` takes an issue to `approved`; `plan-issue` to `planned`; `work-slice` builds one slice per session:
+  - each slice gets its own worktree and claim;
+  - the PR's test run and Codex review are recorded against its head SHA;
+  - the agent merges once the gate passes.
+- `uv run python tools/sdlc.py state <epic>` shows each milestone's merged count. When every unit is merged, its
+  `next:` says `/milestone-demo N (not built yet)`.
+- Issue #44 (milestone-at-a-time creation) changes when later milestones get their issues. The demo is the natural hook
+  for replanning the next milestone.
 
 ## `milestone-demo`
-- When every unit in a milestone is closed as completed, write the demo + implementation doc and post it to the poster
-  (`sdlc:demo-review`). Their `/approve` closes the milestone. The last one moves the epic to `sdlc:done`.
+- When a milestone's units are all merged:
+  - write the demo and implementation doc (what was built, how to see it, what changed from the plan);
+  - run the milestone's demo steps with the user present. Real speaker fires belong here, between
+    `alarm snapshot`/`restore` and `twiddle snapshot`/`restore` for #12;
+  - post it to the poster and move to `sdlc:demo-review`.
+- The poster's `/approve` accepts the milestone. The last one moves the epic to `sdlc:done`. `/changes` becomes new slices
+  through `plan-issue`.
 
-Prior art: cubism-rs `.agents/skills/{work-slice,codex-review,review-milestone}` and `scripts/sdlc.py`
-(claims, SHA-bound review receipts, `check-slice`).
+Prior art: cubism-rs `.agents/skills/review-milestone`.

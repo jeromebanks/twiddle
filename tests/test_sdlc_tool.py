@@ -133,7 +133,9 @@ def test_label_mismatching_the_latest_doc_is_a_conflict():
 def test_escalated_and_closed_and_later_states():
     assert derive(["sdlc:escalated"], [])["turn"] == "human"
     assert derive([], [], state="closed")["turn"] == "none"
-    assert derive(["sdlc:planned"], [])["turn"] == "later"
+    assert derive(["sdlc:demo-review"], [])["turn"] == "later"
+    planned = derive(["sdlc:planned"], [])
+    assert (planned["turn"], planned["action"]) == ("agent", "work_slices")
 
 
 def test_rounds_count_questions_and_revisions():
