@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import (comedy_cli, control_cli, radio_cli, relay_cli, report, spotify_cli,
+from . import (alarm_cli, comedy_cli, control_cli, radio_cli, relay_cli, report, spotify_cli,
                stations_cli, topology)
 from .devices import discover, link_stats, load_device, sample_phy_rate
 from .monitor import Monitor, http_alive, ping_stats
@@ -741,6 +741,7 @@ def build_parser() -> argparse.ArgumentParser:
     scene_cli.register(sub, parents=[base])
     dial_cli.register(sub, parents=[base])
     viz_cli.register(sub, parents=[base])
+    alarm_cli.register(sub, parents=[base])
 
     d = sub.add_parser("diag", help="speaker and network diagnostics")
     dsub = d.add_subparsers(dest="diag_cmd", required=True, metavar="<command>")
