@@ -134,4 +134,10 @@ uv run python tools/sdlc.py transition N diagnosis-review --kind diagnosis --bod
 
 ## 7. Report
 
-End by saying the issue number, its new state, whose move it is, and the link to what you posted.
+End with:
+
+- the issue number and its new state;
+- whose move it is;
+- the link to what you posted;
+- **Next:** the `next:` line of `uv run python tools/sdlc.py state N`. Copy it; don't work it out. After
+  an approval that's `/plan-issue N`; while the poster is to answer, it says so.

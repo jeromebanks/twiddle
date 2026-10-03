@@ -15,11 +15,15 @@ issue ─► sdlc:triage ─► sdlc:needs-info ◄─► (poster answers)
                         │      └─ no consensus ─► sdlc:needs-info (a plain-language question to the poster)
                         ▼
                   sdlc:planned ─► sdlc:in-progress ─► sdlc:demo-review ─► sdlc:done
-                                   └──── later skills (not built yet) ────┘
+                     (work-slice: one slice per session) └─ milestone-demo (not built yet) ┘
    any stage ─► sdlc:escalated  (a human is needed: no consensus, or the agent is stuck)
 ```
 
-Built so far: `triage-issue` (to `approved`) and `plan-issue` (to `planned`).
+Built so far: `triage-issue` (to `approved`), `plan-issue` (to `planned`) and `work-slice`
+(builds the slices; the epic is `in-progress` from the first claim).
+
+**What to run next is always printed:** `uv run python tools/sdlc.py state N` (or `next`)
+ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every skill ends its report with it.
 The later labels exist already so they never need renaming.
 
 ## Whose move
@@ -30,7 +34,8 @@ The later labels exist already so they never need renaming.
 | `sdlc:needs-info`, `sdlc:prd-review`, `sdlc:diagnosis-review` | the poster, until they reply; then the agent |
 | `sdlc:approved` | the agent: `plan-issue` (the poster is not asked to review the plan) |
 | `sdlc:needs-info` after a PRD approval | the poster, answering a planning question; then the agent replans |
-| `sdlc:planned` | `work-slice`, once it exists |
+| `sdlc:planned`, `sdlc:in-progress` | the agent: `/work-slice <ready slice>` (state's `next:`) |
+| `plan:slice` / `plan:subtask` issues | never triaged; a slice's state is `slice-status N` |
 | `sdlc:escalated` | a human |
 
 `uv run python tools/sdlc.py next` lists issues where it is the agent's move;
@@ -85,6 +90,28 @@ earns a fresh set of rounds. A plan revision never voids the PRD's sign-off.
 
 `uv run python tools/sdlc.py ready --epic N` lists the units of work whose
 blockers have all closed as completed.
+
+## Building (`work-slice`)
+
+One slice per session, in its own git worktree (`.worktrees/slice-N`, branch `slice/N`), so
+several can run at once. A slice's state is read off GitHub:
+
+`blocked → ready → claimed → in-review → merged`, plus `escalated`.
+
+1. `claim N` posts a claim on the slice, assigns it, creates the worktree from `origin/main`,
+   and moves the epic to `in-progress`.
+2. The implementer builds only the slice, with offline tests. Real speaker fires belong to
+   milestone demos.
+3. The PR closes exactly that slice. `test-record` runs the full `pytest` itself and records the
+   result on the PR for the head SHA. The repo has no CI, so this is the test gate.
+4. **Codex** reviews the head read-only. Its report must name the `HEAD:` it reviewed. The
+   implementer fixes or rebuts each finding, and each round is posted with `pr-review`. After
+   `max_pr_rounds` (5) without approval: `escalate-slice`, and the slice goes to a human.
+5. `merge` is the gate: Codex's latest review approves the **current head**, a passing test run is
+   recorded on the current head, the PR closes one open `plan:slice`, and it is mergeable. Then
+   the agent squash-merges. A new commit voids both records. Humans review at milestone demos,
+   not per PR.
+6. `cleanup N`, run from the primary checkout, removes the worktree and the branch.
 
 ## First-time setup
 
