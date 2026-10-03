@@ -155,9 +155,12 @@ def geocode_rooms(rooms: list[Room], *, limit: int = MAX_PER_BUILD,
     Stops, without raising, on a stated limit or a 429; what was found so far
     stays cached."""
     fetch = fetch or _fetch          # looked up late, so a test can replace it
-    counts = {"found": 0, "missed": 0, "left": 0, "cached": 0}
+    counts = {"found": 0, "missed": 0, "left": 0, "cached": 0, "no city": 0}
     todo = []
     for room in rooms:
+        if not room.city:
+            counts["no city"] += 1      # `choose` would reject every answer: do not spend a request
+            continue
         asked, _ = cached(room)
         if asked:
             counts["cached"] += 1

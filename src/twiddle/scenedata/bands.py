@@ -149,9 +149,23 @@ def name_candidates(billed: str) -> list[str]:
     return keep[:MAX_CANDIDATES]
 
 
+_CA = re.compile(r",\s*ca\b")           # ", CA" but not ", Canada"
+
+
 def near(place: str | None) -> bool:
     place = (place or "").lower()
-    return any(r in place for r in REGION)
+    return any(r in place for r in REGION if r != ", ca") or bool(_CA.search(place))
+
+
+# Stricter, for choosing an artist automatically and for good: names that are Bay Area
+# only (not Albany NY, Richmond VA), on word boundaries.
+_BAY_ONLY = re.compile(r"\b(?:bay area|east bay|north bay|san francisco|oakland|berkeley|san jose|"
+                       r"santa cruz|san leandro|emeryville|vallejo|hayward|alameda|marin|"
+                       r"california)\b|,\s*ca\b")
+
+
+def bay_area_only(place: str | None) -> bool:
+    return bool(_BAY_ONLY.search((place or "").lower()))
 
 
 def local(info: lookup.ArtistInfo | None) -> bool:
@@ -250,8 +264,8 @@ class LookupEnricher:
             r = self._trimmed(p, identify, record_miss=ok) or r
         p.info = r.artist
         p.lookup_candidates = r.candidates
-        if alias and r.artist:
-            p.alias = alias              # Spotify and Bandcamp search by it too
+        if alias:
+            p.alias = alias              # Spotify and Bandcamp search by it too, found here or not
 
     @staticmethod
     def _trimmed(p: BandProfile, identify, record_miss: bool = True) -> lookup.Result | None:

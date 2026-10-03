@@ -297,3 +297,15 @@ def test_the_hook_records_stopped_and_keeps_the_track(tmp_path):
     assert stopped["state_ts"] > 0
     assert _event(tmp_path, PLAYER_EVENT="playing")["state"] == "playing"
     assert _event(tmp_path, PLAYER_EVENT="volume_changed")["state"] == "playing"
+
+
+def test_a_title_that_will_not_write_does_not_end_the_relay():
+    # Codex: an exception from the retitle write escaped follow_track and cmd_start's cleanup
+    # then restored the room and stopped the relay, over a cosmetic failure
+    class Failing(_Room):
+        def play_radio(self, url, title, art=None):
+            raise OSError("speaker did not answer")
+    seen = []
+    last = relay_cli.follow_track(Failing(), _Relay(TRACK), URL, "OLD",
+                                  lambda kind, **kw: seen.append(kind))
+    assert last == "OLD" and seen == []                  # kept, so the next tick retries

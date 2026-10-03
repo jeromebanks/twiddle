@@ -346,9 +346,12 @@ def follow_track(group, rly: relay.Relay, url: str, last: str | None,
     if (now.get("uri") or "").removeprefix(play.RADIO_SCHEME) != url.removeprefix("http://") \
             or now.get("state") not in _LIVE:
         return last
-    if key != IDLE:
-        art = rly.cover_url_for(group.ip, key)
-    group.play_radio(url, title, art=art)
+    try:
+        if key != IDLE:
+            art = rly.cover_url_for(group.ip, key)
+        group.play_radio(url, title, art=art)
+    except Exception:
+        return last         # a title that would not write is not worth the audio: try next tick
     record("relay_retitle", track=track.get("name"), key=key, title=title)
     return key
 

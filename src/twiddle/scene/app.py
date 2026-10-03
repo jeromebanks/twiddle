@@ -20,6 +20,7 @@ coloured half-blocks.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -285,6 +286,11 @@ ShowSlinger page; a night listed in both keeps The List's bands and prices.
 """
 
 
+def _stream_key(url: str) -> str:
+    """A stream URL without its scheme or its (expiring) query, for "is this the same one"."""
+    return re.sub(r"^[A-Za-z0-9+.\-]*://", "", url or "").split("?")[0]
+
+
 class HelpScreen(ModalScreen):
     BINDINGS = [Binding("escape,q,question_mark", "app.pop_screen", "Close")]
 
@@ -383,6 +389,7 @@ class SceneApp(App):
         self.viz_options: dict = {}     # VizScreen keywords; the tests' fakes
         self._scan_guesses: dict[str, genre_mod.Guess | None] = {}   # by band key
         self._before: dict[str, dict] = {}  # per output: the room as scene found it before its first preview
+        self._last_preview = {"spotify": "", "bandcamp": ""}   # exactly what scene last started
         self.volume: int | None = None      # of `_vol_oid`; None until read
         self.muted = False
         self._vol_oid: str | None = None
@@ -1466,6 +1473,8 @@ class SceneApp(App):
             self._unstage(staged)
             self.call_from_thread(self._error, exc)
             return
+        if device.relay and uris:
+            self._last_preview["spotify"] = uris[off]
         bc = self.bc_now
         if bc and device.relay and bc["output"] == self._bandcamp_output(device):
             self.bc_now = None          # re-pointed at the relay: already replaced
@@ -1528,6 +1537,7 @@ class SceneApp(App):
             self._unstage(staged)
             self.call_from_thread(self._error, exc)
             return
+        self._last_preview["bandcamp"] = url
         if not self.dry_run:
             self.bc_now = {"band": p.band, "profile": p, "index": i, "output": oid,
                            "track": tr.get("title", "?"), "label": out.label}
@@ -1658,11 +1668,7 @@ class SceneApp(App):
         except spotify_ops.PlaybackError as exc:
             self.call_from_thread(self._error, exc)
             return
-        # Whose is it? By what the room is pointed at, not whether it is playing: someone
-        # else's station, paused, is still theirs. Ours: the relay (a Spotify preview), a
-        # Bandcamp stream, or nothing at all.
-        ours = st.tuned == RELAY or "bcbits.com" in (st.other or "") or not st.uri
-        if not ours:
+        if not self._preview_is_ours(st):
             self._before.pop(oid, None)
             self.call_from_thread(self._status,
                                   f"{out.label} is playing something else now -- left alone", "italic")
@@ -1682,6 +1688,24 @@ class SceneApp(App):
         self._pending = None
         self.call_from_thread(self._status, msg)
         self.call_from_thread(self.poll_now)
+
+    def _preview_is_ours(self, st) -> bool:
+        """Is what the room plays the preview scene started, not just the same kind of thing?
+        Judged by what it is pointed at, not whether it is playing: someone else's station,
+        paused, is still theirs; so is another Spotify track on the relay, or another
+        Bandcamp URL. Ours: nothing at all, a relay whose Spotify is idle or still on the
+        track we started, or the very stream we started."""
+        from ..dial.output import RELAY
+        if not st.uri:
+            return True
+        if st.tuned == RELAY:
+            try:
+                np = self.player.now()
+            except Exception:
+                return False                # cannot tell: leave it alone
+            return not np.get("playing") or np.get("uri", "") == self._last_preview["spotify"]
+        started = self._last_preview["bandcamp"]
+        return bool(started) and _stream_key(started) == _stream_key(st.other or st.uri)
 
     def _unstage(self, oid: str | None) -> None:
         """A preview that did not start leaves the room as it was, so what was captured for it

@@ -65,7 +65,9 @@ def render(st: dict, now: float | None = None) -> str:
     """The status as a few plain lines."""
     now = time.time() if now is None else now
     state = st.get("state", "?")
-    if state == "running" and (now - st.get("updated_at", 0) > STALE_S
+    w = st.get("waiting")
+    waiting_on_purpose = bool(w and w.get("until", 0) > now)    # a stated Retry-After is being waited out
+    if state == "running" and ((now - st.get("updated_at", 0) > STALE_S and not waiting_on_purpose)
                                or not _alive(st.get("pid"))):
         state = "stalled (no report for a while, or the process is gone)"
     lines = [f"build: {state}  ·  phase: {st.get('phase', '?')}"]
@@ -77,9 +79,9 @@ def render(st: dict, now: float | None = None) -> str:
         if st.get("state") == "running":
             bits.append(f"eta {duration(st.get('eta_s'))}")
         lines.append("  " + " · ".join(bits))
-    w = st.get("waiting")
     if w:
-        lines.append(f"  waiting on {w['service']}: {duration(w.get('remaining_s'))} left "
+        left = w["until"] - now if w.get("until") else w.get("remaining_s")
+        lines.append(f"  waiting on {w['service']}: {duration(max(0, left))} left "
                      "(it asked us to slow down)")
     for name, s in sorted((st.get("services") or {}).items()):
         cap = f"{s['rpm']}/{s['cap_rpm']} per min" if s.get("cap_rpm") else f"{s['rpm']} per min"

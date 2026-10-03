@@ -1688,3 +1688,29 @@ def test_a_rebuild_that_changes_the_venue_table_but_not_the_shows_rebuilds_the_s
             app._reload()                       # A replaced by B with identical shows
             assert len(calls) == 2
     run(go())
+
+
+def test_R_leaves_alone_a_different_spotify_track_or_bandcamp_url_on_the_room():
+    # Codex: "the relay" or "a bcbits URL" is not "the preview scene started"
+    from twiddle.dial.output import RELAY, OutputState
+
+    def left_alone(tuned, other, np_playing, np_uri):
+        async def go():
+            outs = FakeUrlOutputs()
+            outs.roam.found = STATION
+
+            class Player(FakePlayer):
+                def now(self):
+                    return {"playing": np_playing, "uri": np_uri}
+            app = _preview_on_the_roam(outs, Player())
+            async with app.run_test(size=(160, 45)) as pilot:
+                await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+                await pilot.press("p")
+                await settle(pilot, app, lambda: outs.roam.played)
+                outs.roam.state = lambda: OutputState(tuned=tuned, playing=True, uri=other or "x", other=other)
+                await pilot.press("R")
+                await settle(pilot, app, lambda: not app._before)
+                assert outs.roam.restored == []
+        run(go())
+    left_alone(RELAY, "Spotify (relay)", True, "spotify:track:THEIRS")          # someone else's Spotify track
+    left_alone(None, "https://t4.bcbits.com/stream/someone-elses", False, "")   # another Bandcamp stream

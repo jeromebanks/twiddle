@@ -1,4 +1,7 @@
 """Request counters, caps, progress, ETA and the status file `scene status` reads."""
+import os
+
+import pytest
 import json
 
 from twiddle import cli, lookup, netstats
@@ -93,7 +96,8 @@ def test_the_eta_is_measured_seconds_a_band_times_the_bands_left_waits_included(
     p.waiting("spotify", 600)
     assert p.rate_and_eta()[1] == 97 * 3 + 600               # a wait in progress is added
     snap = p.snapshot()
-    assert snap["waiting"] == {"service": "spotify", "remaining_s": 600}
+    assert snap["waiting"]["service"] == "spotify" and snap["waiting"]["remaining_s"] == 600
+    assert snap["waiting"]["until"] == pytest.approx(p.wall() + 600)
     c.tick(600)
     assert p.snapshot()["waiting"] is None
 
@@ -140,3 +144,14 @@ def test_a_running_build_that_stopped_reporting_is_called_stalled():
     st = {"state": "running", "pid": 2 ** 30, "updated_at": 1000.0, "phase": "enriching"}
     assert "stalled" in buildstatus.render(st, now=1000.0 + buildstatus.STALE_S + 1)
     assert "stalled" in buildstatus.render(st, now=1001.0)      # the process is gone either way
+
+
+def test_a_build_deliberately_waiting_out_a_long_retry_after_is_not_called_stalled():
+    # Codex: one status write, then a 20-minute sleep, then "stalled" on every reader
+    pid = os.getpid()
+    st = {"state": "running", "pid": pid, "updated_at": 1000.0, "phase": "enriching",
+          "waiting": {"service": "spotify", "remaining_s": 1200, "until": 2200.0}}
+    text = buildstatus.render(st, now=1000.0 + 600)             # far past STALE_S, still inside the wait
+    assert "stalled" not in text and "waiting on spotify: 10m left" in text
+    assert "stalled" in buildstatus.render(st, now=2300.0)      # the wait is over and it still said nothing
+    assert "stalled" in buildstatus.render(dict(st, pid=2 ** 30), now=1100.0)   # or the process is gone

@@ -347,3 +347,33 @@ def test_an_explicit_alias_is_searched_even_when_the_billing_has_candidates(monk
     LookupEnricher().enrich(p)
     assert seen[0] == "Abracadabra (Oakland duo)" and p.info and p.alias == "Abracadabra (Oakland duo)"
     assert p.search_name == "Abracadabra (Oakland duo)"          # Spotify and Bandcamp use it too
+
+
+def test_a_canadian_candidate_is_not_local_and_only_bay_area_places_settle_an_identity(tmp_path):
+    # Codex: ", ca" matched ", Canada"
+    from twiddle.scenedata.bands import bay_area_only, near
+    assert not near("rock band from Toronto, Canada") and near("metal from San Jose, CA")
+    assert not bay_area_only("rock band from Toronto, Canada")
+    assert not bay_area_only("band from Albany, New York") and not bay_area_only("Richmond, Virginia")
+    assert bay_area_only("pop duo from Oakland, CA") and bay_area_only("Bay Area post-hardcore band")
+    path = tmp_path / "dataset.json"
+    doc = dl.load(path)
+    doc["letters"]["band:x"] = {"kind": "band", "name": "X", "reason": "ambiguous", "status": "pending", "show_count": 1,
+                                "evidence": {"lookup_candidates": [
+                                    {"name": "X", "mbid": "ca", "disambiguation": "rock band from Toronto, Canada"},
+                                    {"name": "X", "mbid": "uk", "disambiguation": "English band"}]}}
+    dl.save(doc, path)
+    assert dl.settle_ambiguous(path) == 0
+
+
+def test_an_alias_is_the_search_name_even_when_the_lookup_databases_do_not_know_it(monkeypatch):
+    # Codex: Spotify and Bandcamp kept searching the billing unless MusicBrainz found the alias
+    from twiddle import lookup
+    from twiddle.scenedata import cache
+    from twiddle.scenedata.bands import LookupEnricher
+    from twiddle.scenespec.band import BandProfile
+    cache.save_override("Ghost Band", alias="Ghosts")
+    monkeypatch.setattr(lookup, "identify", lambda name, **kw: lookup.Result(None, []))
+    p = BandProfile(band="Ghost Band")
+    LookupEnricher().enrich(p)
+    assert p.search_name == "Ghosts"

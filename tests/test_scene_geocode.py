@@ -123,3 +123,11 @@ def test_nominatim_has_its_own_policy_and_its_host_is_counted_under_it():
     p = ratelimit.POLICIES["nominatim"]
     assert {(l.count, l.per_s) for l in p.limits} == {(1, 1), (4, 60)} and "published" in p.source
     assert netstats.service_for("https://nominatim.openstreetmap.org/search?q=x") == "nominatim"
+
+
+def test_a_room_with_no_city_costs_no_request():
+    # Codex: they consumed the per-build allowance and the 4-a-minute budget for a guaranteed miss
+    asked = []
+    rooms = cluster({"Mystery Hall, East Bay": 5, "Hopmonk, Novato": 1})
+    n = geocode.geocode_rooms(rooms, limit=1, fetch=lambda u: asked.append(u) or [], sleep=lambda s: None)
+    assert len(asked) == 1 and "Hopmonk" in asked[0] and n["no city"] == 1 and n["left"] == 0

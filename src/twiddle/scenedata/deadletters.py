@@ -50,7 +50,7 @@ from ..lookup import norm
 from ..scenespec import dataset
 from ..scenespec import venue as venue_mod
 from . import cache, geocode, venue_names
-from .bands import SHOW_WORDS, near, non_band
+from .bands import SHOW_WORDS, bay_area_only, non_band
 
 SCHEMA = "twiddle.scene.dead-letters"
 VERSION = 1
@@ -308,7 +308,7 @@ def _settle(dataset_path) -> int:
         if l["kind"] != "band" or l["reason"] != "ambiguous" or l["status"] != PENDING:
             continue
         local = [c for c in l["evidence"].get("lookup_candidates", [])
-                 if c.get("mbid") and near(c.get("disambiguation"))]
+                 if c.get("mbid") and bay_area_only(c.get("disambiguation"))]
         if len(local) == 1:
             l.update(status=RESOLVED, resolved_by="rule", applied=False, attempts=l.get("attempts", 0) + 1,
                      resolution={"mbid": local[0]["mbid"], "why": "the only candidate described as local: "

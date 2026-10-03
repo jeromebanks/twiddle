@@ -148,8 +148,9 @@ class Progress:
         rate, eta = self.rate_and_eta()
         waiting = None
         if self._waiting and self._waiting[1] > self.clock():
-            waiting = {"service": self._waiting[0],
-                       "remaining_s": round(self._waiting[1] - self.clock())}
+            left = self._waiting[1] - self.clock()
+            waiting = {"service": self._waiting[0], "remaining_s": round(left),
+                       "until": self.wall() + left}     # so a reader can tell a wait from a hang
         return {"state": state, "pid": self.pid, "started_at": self.started_wall,
                 "updated_at": self.wall(), "phase": self.phase_name, "message": self.message,
                 "done": self.done, "total": self.total,
