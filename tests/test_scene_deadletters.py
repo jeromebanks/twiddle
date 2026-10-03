@@ -275,6 +275,19 @@ def test_the_build_publishes_unwatched_rooms_as_known_venues_and_a_resolution_de
     assert row["address"] == "224 Vintage Way, Novato" and row["url"] == "https://hopmonk.com"
 
 
+def test_a_room_with_no_listed_address_borrows_the_one_a_resolution_found_for_the_map_search(tmp_path):
+    path, _ = build(tmp_path, [NIGHT, FOUND], knows("Girl Chow"))
+
+    def hopmonk():
+        return next(r for r in dl.unwatched_rooms([NIGHT, FOUND], [], path) if r.key == "hopmonk-novato")
+    assert hopmonk().address == ""
+    dl.resolve("venue:hopmonk-novato", {"address": "224 Vintage Way", "url": "https://hopmonk.com"},
+               by="ai", dataset_path=path)
+    assert hopmonk().address == "224 Vintage Way"
+    dl.resolve("venue:hopmonk-novato", {"about": "a tavern"}, by="ai", dataset_path=path)   # no address: nothing borrowed
+    assert hopmonk().address == ""
+
+
 def _pending(path, lid="band:ghost band", name="Ghost Band"):
     doc = dl.load(path)
     doc["letters"][lid] = {"kind": "band", "name": name, "reason": "unfound", "status": "pending",

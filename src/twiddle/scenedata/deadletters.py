@@ -200,9 +200,20 @@ KNOWN_FIELDS = ("name", "city", "state", "address", "url", "about", "wikipedia",
 GEOCODED_FIELDS = ("city", "state", "address", "lat", "lon", "attribution", "osm", "matched")
 
 
-def unwatched_rooms(shows: list, watched) -> list[venue_names.Room]:
-    """The rooms the listings name that no venue list watches, busiest first."""
-    return sorted((r for r, _ in _rooms(shows, watched)), key=lambda r: (-r.shows, r.key))
+def unwatched_rooms(shows: list, watched, dataset_path: Path | None = None) -> list[venue_names.Room]:
+    """The rooms the listings name that no venue list watches, busiest first.
+
+    A room whose listing gave no street address borrows the one a person or an AI
+    resolved for it, so the map search can place it by that."""
+    letters = load(dataset_path)["letters"]
+    rooms = []
+    for r, _ in _rooms(shows, watched):
+        l = letters.get(f"venue:{r.key}") or {}
+        res = l.get("resolution") if l.get("status") == RESOLVED and isinstance(l.get("resolution"), dict) else {}
+        if not geocode.street_of(r.address) and geocode.street_of(str(res.get("address") or "")):
+            r.address = str(res["address"])
+        rooms.append(r)
+    return sorted(rooms, key=lambda r: (-r.shows, r.key))
 
 
 def known_venue_rows(shows: list, watched, dataset_path: Path | None = None) -> list[dict]:

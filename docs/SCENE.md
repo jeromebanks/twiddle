@@ -447,7 +447,9 @@ is searched by name and city, and the answer counts only if it is plausibly that
 room (in the Bay Area, in the right city, named like it). At most two requests a
 room; a miss is remembered (and which searches it tried) and not asked again for a
 month, except that a miss from before addresses were tried is asked once more by
-address. A hit lasts six months. The policy
+address. A room whose listing gave
+no street address borrows the one a resolution found for it (`dlq resolve ... --resolution '{"address": "201 Van Ness Avenue"}'`),
+so the same search places it and the credit stays on the row. A hit lasts six months. The policy
 (operations.osmfoundation.org/policies/nominatim) asks for one thread, a named
 User-Agent, cached results and, for a script on a timer, far fewer than the
 one-a-second maximum, so the budget is four a minute (`twiddle limits` shows it,
