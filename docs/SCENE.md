@@ -885,10 +885,9 @@ src/twiddle/bandcamp.py  shared: the throttle, a release's songs, fresh stream U
 
 **New band knowledge** (Last.fm similar artists, YouTube, setlists) is one
 class in `scenedata/bands.py`:
-- Give it a `name`, a `serial` flag, and `enrich(profile)`.
-- Set `serial = True` if it uses a rate-limited or non-thread-safe library.
-  It then runs on the single lookup lane, one request at a time; the band
-  on screen goes to the front of the queue.
+- Give it a `name` and `enrich(profile)`. The builder runs every enricher
+  one band at a time, in order, so a rate-limited or non-thread-safe library
+  needs no lock of its own.
 - Implement `wants_rerun(profile)` if it should redo its work after another
   enricher lands. Spotify does this when MusicBrainz names a different
   artist.

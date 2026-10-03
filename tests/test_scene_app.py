@@ -5,7 +5,11 @@ help screen says, and that playing sends the right tracks to the right
 device.
 """
 import asyncio
+import time
 from datetime import date
+from pathlib import Path
+
+import pytest
 
 from twiddle import lookup, spotify, spotify_ops
 from twiddle.dial.output import Outputs
@@ -60,7 +64,6 @@ def publish_dataset(shows=None, bands=None, venues=None, complete=True, generate
 
 class FakeSpotify:
     name = "spotify"
-    serial = False
 
     def enrich(self, p):
         p.spotify_artist = {"id": "a", "name": p.band}
@@ -982,6 +985,68 @@ def test_with_the_network_dead_scene_browses_a_compiled_dataset(monkeypatch):
             assert app.current_band == "Wiseacre"
             await settle(pilot, app, lambda: app._profile().status.get("tracks", "")
                          .startswith("error"))
+            assert app.is_running
+    run(go())
+
+
+def test_the_production_book_fetches_song_lists_for_the_band_on_screen(monkeypatch):
+    """The other half of the dead-network test above: with the network up, the
+    book `cli.tui_book` builds fills in Spotify's and Bandcamp's songs for an
+    identity-only record, and only for the band asked for."""
+    from twiddle import discover_cli
+    from twiddle.scene.cli import tui_book
+    monkeypatch.setattr(discover_cli, "_artist_tracks",
+                        lambda sess, a: [{"uri": "spotify:track:1", "name": "Song"}])
+    asked = []
+    rec = dict(_identity_only("Girl Chow"), spotify_artist={"id": "a1", "name": "Girl Chow"},
+               bandcamp=GIRL_CHOW_BC[0])
+    updated = []
+    book = tui_book(updated.append, session_factory=lambda: object(),
+                    bc_tracks=lambda url: asked.append(url) or [{"title": "BC Song"}])
+    try:
+        book.seed([profiles.from_record(rec), profiles.from_record(_identity_only("Wiseacre"))])
+        p = book.get("Girl Chow")
+        deadline = time.time() + 3
+        while p.status.get("tracks") != "done" and time.time() < deadline:
+            time.sleep(0.01)
+        assert p.status.get("tracks") == "done"
+        assert p.tracks[0]["uri"] == "spotify:track:1" and p.bc_tracks == [{"title": "BC Song"}]
+        assert asked == [GIRL_CHOW_BC[0]["item_url_root"]]
+        assert not book.profiles["wiseacre"].tracks          # not on screen: not asked
+    finally:
+        book.close()
+
+
+REAL_DATASET = Path.home() / ".local/share/twiddle/scene/dataset.json"
+
+
+@pytest.mark.skipif(not REAL_DATASET.exists(), reason="no built dataset on this machine")
+def test_the_tui_browses_a_real_built_dataset(monkeypatch, tmp_path):
+    """Smoke: a dataset `scene build` really wrote (a copy, never the original),
+    the production book, the network dead. Steps through the shows and opens a
+    venue card; nothing may crash or hang."""
+    _no_collection(monkeypatch)
+    copy = tmp_path / "real-dataset.json"
+    copy.write_bytes(REAL_DATASET.read_bytes())
+    monkeypatch.setattr(dataset, "DATASET_PATH", copy)
+    snap = dataset.load(copy)
+    assert snap is not None and snap.shows
+    day = min(s.day for s in snap.shows)
+
+    async def go():
+        app = SceneApp(book_factory=_production_book, player=FakePlayer(), today=day,
+                       load_image=lambda url: None, band_photo=lambda p: (None, ""),
+                       instagram_picture=lambda handle: None, bootstrap=False,
+                       run_build=lambda cancelled: (0, ""))
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: len(app._rows) > 0)
+            assert app._rows
+            for _ in range(5):
+                await pilot.press("down")
+                await pilot.pause(0.05)
+            await pilot.press("i")
+            await pilot.pause(0.2)
+            await pilot.press("escape")
             assert app.is_running
     run(go())
 

@@ -119,56 +119,6 @@ def test_search_asks_for_a_page():
     assert sess.calls[0][2] >= 5
 
 
-def test_lookups_never_overlap():
-    """lookup.py's MusicBrainz throttle and cache are not thread-safe, so a
-    lineup prefetch must run its identify calls one at a time."""
-    active, peak, lock = [0], [0], threading.Lock()
-
-    def identify(name):
-        with lock:
-            active[0] += 1
-            peak[0] = max(peak[0], active[0])
-        time.sleep(0.03)
-        with lock:
-            active[0] -= 1
-        return lookup.Result()
-
-    updated = []
-    book = BandBook([LookupEnricher(identify)], on_update=lambda p: updated.append(p.band))
-    for b in ["A", "B", "C", "D"]:
-        book.get(b, urgent=False)
-    deadline = time.time() + 3
-    while len(updated) < 4 and time.time() < deadline:
-        time.sleep(0.01)
-    book.close()
-    assert sorted(updated) == ["A", "B", "C", "D"]
-    assert peak[0] == 1
-
-
-def test_the_band_on_screen_jumps_the_lookup_queue():
-    order = []
-    gate = threading.Event()
-
-    def identify(name):
-        if name == "first":
-            gate.wait(1)
-        order.append(name)
-        return lookup.Result()
-
-    book = BandBook([LookupEnricher(identify)])
-    book.get("first", urgent=False)          # occupies the lane
-    time.sleep(0.05)
-    for b in ["p1", "p2", "p3"]:
-        book.get(b, urgent=False)
-    book.get("onscreen", urgent=True)
-    gate.set()
-    deadline = time.time() + 3
-    while len(order) < 5 and time.time() < deadline:
-        time.sleep(0.01)
-    book.close()
-    assert order[:2] == ["first", "onscreen"]
-
-
 def test_a_failing_enricher_is_reported_not_raised():
     def identify(name):
         raise lookup.LookupFailed("music databases unreachable")
@@ -322,7 +272,7 @@ def test_track_enricher_waits_out_an_identity_that_lands_later(monkeypatch):
     gate = threading.Event()
 
     class SlowIdentity:
-        name, serial = "spotify", False
+        name = "spotify"
 
         def session(self):
             return object()
@@ -358,7 +308,7 @@ def test_track_enricher_checks_again_when_identity_lands_while_it_runs(monkeypat
         return [{"title": "t"}]
 
     class SlowSpotifySide:
-        name, serial = "spotify", False
+        name = "spotify"
 
         def session(self):
             started.set()
@@ -369,7 +319,7 @@ def test_track_enricher_checks_again_when_identity_lands_while_it_runs(monkeypat
             p.spotify_artist = {"id": "s1"}
 
     class Bandcamp:
-        name, serial = "bandcamp", False
+        name = "bandcamp"
 
         def enrich(self, p):
             started.wait(2)          # ... when Bandcamp identifies the band
@@ -394,7 +344,7 @@ def test_a_record_that_arrives_mid_lookup_is_applied_when_the_lookup_ends():
     gate = threading.Event()
 
     class Slow:
-        name, serial = "spotify", False
+        name = "spotify"
 
         def enrich(self, p):
             gate.wait(2)
@@ -424,7 +374,7 @@ def test_changing_a_pin_discards_a_record_that_was_waiting_for_the_old_lookup():
     gate = threading.Event()
 
     class Slow:
-        name, serial = "spotify", False
+        name = "spotify"
 
         def enrich(self, p):
             gate.wait(2)
@@ -461,7 +411,7 @@ def test_a_deferred_record_that_corrects_the_artist_wakes_its_song_lists(monkeyp
     monkeypatch.setattr(discover_cli, "_artist_tracks", artist_tracks)
 
     class Ident:
-        name, serial = "spotify", False
+        name = "spotify"
 
         def session(self):
             return object()
@@ -503,7 +453,7 @@ def test_song_lists_fetched_for_an_artist_that_changed_meanwhile_are_dropped(mon
     monkeypatch.setattr(discover_cli, "_artist_tracks", artist_tracks)
 
     class Ident:
-        name, serial = "spotify", False
+        name = "spotify"
 
         def session(self):
             return object()
@@ -533,13 +483,13 @@ def test_a_failed_song_list_fetch_is_retried_when_a_new_identity_arrives(monkeyp
     gate = threading.Event()
 
     class Ident:
-        name, serial = "spotify", False
+        name = "spotify"
 
         def session(self):
             return object()
 
     class SlowBandcamp:
-        name, serial = "bandcamp", False
+        name = "bandcamp"
 
         def enrich(self, p):
             gate.wait(2)                                  # tracks runs (and fails) first

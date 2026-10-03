@@ -333,8 +333,9 @@ idle ──(band selected: get(urgent=True))──► pending ──► running 
 Textual's loop never blocks. Network work runs in worker threads and reports
 back with `call_from_thread`. `lookup.py` isn't thread-safe (a module-level
 throttle, a read-modify-write cache), so the builder runs every MusicBrainz call
-one at a time. `BandBook` still has a single-thread priority lane for any
-enricher that declares `serial`; the client's two enrichers don't.
+one at a time (the builder runs its enrichers in order, so no lane is needed);
+the client's `BandBook` has only a small thread pool, for your pin and the song
+lists of the band on screen.
 
 ---
 

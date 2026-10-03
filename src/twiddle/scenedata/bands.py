@@ -115,7 +115,7 @@ def non_band(name: str) -> bool:
     return bool(EVENT.search(name))
 
 
-MAX_CANDIDATES = 3      # each is up to three database searches on the lookup lane
+MAX_CANDIDATES = 3      # each is up to three database searches
 
 
 def name_candidates(billed: str) -> list[str]:
@@ -237,7 +237,6 @@ def genre_of(p: BandProfile) -> genre.Guess:
 
 class Enricher(Protocol):
     name: str
-    serial: bool    # True: must run on the single lookup lane
 
     def enrich(self, p: BandProfile) -> None:
         """Fill in this enricher's fields on `p`. Raise on failure."""
@@ -246,7 +245,6 @@ class Enricher(Protocol):
 
 class LookupEnricher:
     name = "lookup"
-    serial = True
 
     def __init__(self, identify=None, bandcamp_ok: Callable[[], bool] | None = None):
         self._identify = identify
@@ -299,7 +297,6 @@ class SpotifyEnricher:
     *id*: a plain search for a common word returns other artists' songs.
     """
     name = "spotify"
-    serial = False
 
     def __init__(self, session_factory: Callable[[], object], tracks: bool = True):
         self._session_factory = session_factory
@@ -365,7 +362,6 @@ class BandcampEnricher:
     runs again if the lookup lands later with a different one.
     """
     name = "bandcamp"
-    serial = False
 
     def __init__(self, search=bandcamp.search, tracks=site.tracks,
                  fetch_tracks: bool = True):

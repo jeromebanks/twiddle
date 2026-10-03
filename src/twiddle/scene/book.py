@@ -11,8 +11,6 @@ its own thread (Textual: `app.call_from_thread`).
 """
 from __future__ import annotations
 
-import itertools
-import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
@@ -31,7 +29,6 @@ SEARCH_LIMIT = 10   # see spotify_cli.RESOLVE_LIMIT: small limits rank badly
 
 class Enricher(Protocol):
     name: str
-    serial: bool    # True: must run on the single lookup lane
 
     def enrich(self, p: BandProfile) -> None:
         """Fill in this enricher's fields on `p`. Raise on failure."""
@@ -56,7 +53,6 @@ class PinEnricher:
     `search`. A band with no pin is left exactly as the dataset has it.
     """
     name = "spotify"
-    serial = False
 
     def __init__(self, session_factory: Callable[[], object]):
         self._session_factory = session_factory
@@ -107,7 +103,6 @@ class TrackEnricher:
     before the dataset existed. Reruns when identity lands later.
     """
     name = "tracks"
-    serial = False
     self_rerun = True   # identity can land while this runs: check again when done
 
     def __init__(self, spotify: PinEnricher, bc_tracks=bandcamp.tracks):
@@ -170,11 +165,6 @@ class BandBook:
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=spotify_workers,
                                         thread_name_prefix="scene-spotify")
-        self._lane: queue.PriorityQueue = queue.PriorityQueue()
-        self._seq = itertools.count()
-        self._lane_thread = threading.Thread(target=self._run_lane, daemon=True,
-                                             name="scene-lookup")
-        self._lane_thread.start()
 
     def seed(self, profiles: list[BandProfile]) -> None:
         """Register profiles already known (the dataset's) without scheduling
@@ -223,9 +213,8 @@ class BandBook:
     def get(self, band: str, urgent: bool = True) -> BandProfile:
         """The profile as known now; missing enrichments are scheduled.
 
-        `urgent` is for the band on screen: it jumps the lookup lane ahead of
-        prefetched lineup members, and wakes any `idle` enricher on a seeded
-        profile.
+        `urgent` is for the band on screen: it wakes any `idle` enricher on a
+        seeded profile (a prefetched lineup member stays as the dataset has it).
         """
         key = lookup.norm(band)
         with self._lock:
@@ -240,10 +229,9 @@ class BandBook:
             p.confidence, p.why = UNLOOKED, "not in the dataset yet"
             regrade(p)
             for e in self.enrichers:
-                self._schedule(e, p, urgent)
+                self._schedule(e, p)
         elif urgent:
             self._wake(p)
-            self._bump(p)
         return p
 
     def refresh(self, band: str) -> BandProfile:
@@ -270,26 +258,10 @@ class BandBook:
                     continue
                 p.status[e.name] = "pending"
             regrade(p)
-            self._schedule(e, p, urgent=True)
+            self._schedule(e, p)
 
-    def _schedule(self, e: Enricher, p: BandProfile, urgent: bool) -> None:
-        if e.serial:
-            self._lane.put((0 if urgent else 1, next(self._seq), e, p))
-        else:
-            self._pool.submit(self._run, e, p)
-
-    def _bump(self, p: BandProfile) -> None:
-        # Re-queue at high priority; `_run` skips work already done.
-        for e in self.enrichers:
-            if e.serial and p.status.get(e.name) == "pending":
-                self._lane.put((0, next(self._seq), e, p))
-
-    def _run_lane(self) -> None:
-        while True:
-            _prio, _n, e, p = self._lane.get()
-            if e is None:
-                return
-            self._run(e, p)
+    def _schedule(self, e: Enricher, p: BandProfile) -> None:
+        self._pool.submit(self._run, e, p)
 
     def _run(self, e: Enricher, p: BandProfile) -> None:
         with self._lock:
@@ -315,7 +287,7 @@ class BandBook:
                         or (state != "done" and not retry_failed) or not (rerun and rerun(p)):
                     continue
                 p.status[other.name] = "pending"
-            self._schedule(other, p, urgent=True)
+            self._schedule(other, p)
         regrade(p)
         newer = self._take_deferred(p)
         try:
@@ -340,5 +312,4 @@ class BandBook:
         return fresh
 
     def close(self) -> None:
-        self._lane.put((-1, -1, None, None))
         self._pool.shutdown(wait=False, cancel_futures=True)

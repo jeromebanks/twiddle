@@ -43,7 +43,6 @@ class Src:
 
 class Enr:
     """An enricher that counts who it was asked about."""
-    serial = False
 
     def __init__(self, name, fill=None, raises=None):
         self.name, self.fill, self.raises = name, fill, raises

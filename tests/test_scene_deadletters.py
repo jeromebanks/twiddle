@@ -27,7 +27,6 @@ class Src:
 
 
 class Enr:
-    serial = False
 
     def __init__(self, name, fill=None, raises=None):
         self.name, self.fill, self.raises = name, fill, raises
