@@ -1652,6 +1652,7 @@ class SceneApp(App):
             self.call_from_thread(self._error, exc)
             return
         if token:
+            self._quiesce_volume(oid)
             try:
                 self.outputs.get(oid).restore(token, volume_only=True)
             except Exception:
@@ -1671,6 +1672,21 @@ class SceneApp(App):
             return oid                  # (a tokenless entry, a preview on the Mac, owes nothing)
         owed = [(b["at"], o) for o, b in self._before.items() if b["token"]]    # a relay one owes its volume
         return max(owed)[1] if owed else oid
+
+    def _quiesce_volume(self, oid: str) -> None:
+        """Worker thread only: before a restore writes the old volume, no volume write may
+        still be queued or running, or it would land after and undo the restore."""
+        self.call_from_thread(self._cancel_volume_timer)
+        deadline = time.monotonic() + 3
+        while oid in self._vol_busy and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    def _cancel_volume_timer(self) -> None:
+        if self._vol_timer is not None:
+            self._vol_timer.stop()
+        self._vol_timer = None
+        self._vol_again = self._vol_dirty = False
+        self._vol_pending = 0
 
     def _restore_room(self, oid: str, before: dict) -> None:
         """Worker thread only: stop our preview and put the room back, unless
@@ -1694,6 +1710,7 @@ class SceneApp(App):
                 self.player.pause()
         except spotify_ops.PlaybackError:
             pass
+        self._quiesce_volume(oid)
         try:
             msg = out.restore(token)
         except spotify_ops.PlaybackError as exc:

@@ -195,8 +195,12 @@ class BandBook:
                     # Keep what was looked up here that the record lacks, but
                     # take the record's other answers: a partial checkpoint
                     # with a corrected Spotify artist still corrects it.
+                    pin = cache.pinned(p.band)
                     for n in identity:
                         if old.status.get(n) == "done" and p.status.get(n) != "done":
+                            if n == "spotify" and pin is not None and \
+                                    (pin.get("spotify_id") or "") != (old.spotify_artist or {}).get("id", ""):
+                                continue    # the pin changed since (another scene instance): that artist is stale
                             p.adopt(n, old)
                     regrade(p)
                     self._carry_tracks(old, p)

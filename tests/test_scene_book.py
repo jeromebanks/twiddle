@@ -92,3 +92,19 @@ def test_a_band_not_in_the_dataset_is_never_searched_for():
     book.close()
     assert not sess.calls
     assert p.confidence == UNLOOKED and "dataset" in p.why
+
+
+def test_a_pin_changed_by_another_instance_is_not_overruled_by_this_ones_old_artist():
+    # Codex: seed() re-adopted this instance's old Spotify answer over a record that had just dropped it
+    book = BandBook(enrichers=[])
+    old = BandProfile("Shape", spotify_artist={"id": "old"}, status={"spotify": "done"})
+    book.profiles["shape"] = old
+    cache.pin("Shape", "new")                                    # another scene instance chose a different artist
+    fresh = BandProfile("Shape", status={"spotify": "idle"})     # from_record dropped the disagreeing one
+    book.seed([fresh])
+    assert book.profiles["shape"].spotify_artist is None and book.profiles["shape"].status["spotify"] == "idle"
+    cache.pin("Shape", "old")                                    # but a pin that agrees keeps what was fetched here
+    book.profiles["shape"] = old
+    fresh2 = BandProfile("Shape", status={"spotify": "idle"})
+    book.seed([fresh2])
+    assert book.profiles["shape"].spotify_artist == {"id": "old"}

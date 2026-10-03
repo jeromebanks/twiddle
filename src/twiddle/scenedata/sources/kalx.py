@@ -34,7 +34,7 @@ from datetime import date, datetime, timedelta
 import requests
 
 from ...scenespec.model import Show
-from .base import SourceError
+from .base import SourceError, split_outside_parens
 
 API = "https://kalx.berkeley.edu/wp-json/wp/v2/event"
 PARAMS = {"per_page": 4, "orderby": "date", "order": "desc",
@@ -85,7 +85,7 @@ def room(name: str, region: str) -> str:
 def lineup(text: str) -> tuple[list[str], str]:
     """(bands, title) for what follows a room's name. See the module docstring."""
     head, sep, tail = text.partition(": ")
-    if sep and "," in tail:                     # "KALW's Birthday: Rozzi, DEATHX_XHEAD, DJ X"
+    if sep and len(split_outside_parens(tail, ",")) > 1:    # "KALW's Birthday: Rozzi, DEATHX_XHEAD, DJ X"
         return _acts(tail), head.strip()
     if NOT_BANDS.search(text) or sep:           # "Open Mic", "Critic to Critic: a conversation"
         return [], text
@@ -93,7 +93,8 @@ def lineup(text: str) -> tuple[list[str], str]:
 
 
 def _acts(text: str) -> list[str]:
-    acts = [re.sub(r"^featuring\s+", "", a.strip(), flags=re.IGNORECASE) for a in text.split(",")]
+    acts = [re.sub(r"^featuring\s+", "", a.strip(), flags=re.IGNORECASE)
+            for a in split_outside_parens(text, ",")]      # not the commas inside "(film, live music)"
     return [a for a in acts if a]
 
 

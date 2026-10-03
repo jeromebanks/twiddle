@@ -1907,3 +1907,35 @@ def test_what_plays_on_the_mac_does_not_make_the_roams_preview_look_foreign():
             await settle(pilot, app, lambda: outs.roam.restored)
             assert outs.roam.restored == [(STATION, False)]
     run(go())
+
+
+def test_a_volume_write_still_in_flight_cannot_land_after_R_restores_the_volume():
+    # Codex: a queued or running volume worker could finish after the restore and set 32 over 43
+    async def go():
+        import threading
+        outs = FakeUrlOutputs()
+        outs.roam.found = STATION
+        order = []
+        gate = threading.Event()
+        real = outs.roam.set_volume
+
+        def slow_set(v):
+            gate.wait(2)                                       # the write is still running when R is pressed
+            order.append(("volume", v))
+            return real(v)
+        outs.roam.set_volume = slow_set
+        real_restore = outs.roam.restore
+        outs.roam.restore = lambda token, volume_only=False: order.append(("restore", None)) or real_restore(token, volume_only=volume_only)
+        app = _preview_on_the_roam(outs, FakePlayer())
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")
+            await settle(pilot, app, lambda: outs.roam.played)
+            await pilot.press("plus")
+            await settle(pilot, app, lambda: app._vol_busy)    # the write is out
+            await pilot.press("R")
+            await pilot.pause(0.2)
+            gate.set()                                         # now it finishes
+            await settle(pilot, app, lambda: outs.roam.restored)
+            assert [k for k, _ in order] == ["volume", "restore"]      # the restore is the last word
+    run(go())

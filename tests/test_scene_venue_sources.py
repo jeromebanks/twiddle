@@ -583,3 +583,12 @@ def test_kalx_keeps_the_last_section_of_a_post_that_leaves_its_paragraph_unclose
             "SF Jazz Center, S.F."} <= venues                 # all in the unclosed paragraph
     assert any("Rickshaw" in s.venue and s.bands == ["Ecca Vandal", "Speed of Light"] for s in shows)
     assert any("SF Jazz" in s.venue for s in shows)
+
+
+def test_kalx_commas_inside_a_bracket_are_not_a_lineup():
+    # Codex: "Brotherhood: Love Your Neighbor (film, live music, storytelling)" came out as three bands
+    from twiddle.scenedata.sources import kalx
+    assert kalx.lineup("Brotherhood: Love Your Neighbor (film, live music, storytelling)") == \
+        ([], "Brotherhood: Love Your Neighbor (film, live music, storytelling)")
+    assert kalx.lineup("KALW's Birthday: Rozzi, DEATHX_XHEAD, DJ X") == (["Rozzi", "DEATHX_XHEAD", "DJ X"], "KALW's Birthday")
+    assert kalx.lineup("Rozzi (live, loud), Other")[0] == ["Rozzi (live, loud)", "Other"]
