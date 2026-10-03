@@ -439,10 +439,15 @@ watched one.
 ### Where the unwatched rooms are
 
 A build asks OpenStreetMap's Nominatim about up to 20 unwatched rooms
-(`scene build --geocode-limit N`; `0` = none), busiest first, one search per room
-by name and city, and keeps the answer only if it is plausibly that room (in the
-Bay Area, in the right city, named like it); otherwise it records a miss and does
-not ask again for a month. A hit lasts six months. The policy
+(`scene build --geocode-limit N`; `0` = none), busiest first. A room whose listing
+gave a street address ("401 Mason Street") is searched by it first: the answer
+counts if it is on that house number in the right city (an address names the
+building, so the room's name is not compared). Otherwise, or if that misses, it
+is searched by name and city, and the answer counts only if it is plausibly that
+room (in the Bay Area, in the right city, named like it). At most two requests a
+room; a miss is remembered (and which searches it tried) and not asked again for a
+month, except that a miss from before addresses were tried is asked once more by
+address. A hit lasts six months. The policy
 (operations.osmfoundation.org/policies/nominatim) asks for one thread, a named
 User-Agent, cached results and, for a script on a timer, far fewer than the
 one-a-second maximum, so the budget is four a minute (`twiddle limits` shows it,

@@ -6,8 +6,9 @@ read 2026-10) asks for: at most one request a second, from one thread, and far
 fewer for a script that runs on a schedule (we hold ourselves to four a minute);
 a User-Agent that names the application; results cached on our side, misses
 included, and no identical query repeated; no autocomplete, no systematic or bulk
-queries, no scraping of details pages. One search per room, by name and city, is
-inside that.
+queries, no scraping of details pages. A room is searched by its listed street
+address when it has one (one request), and by name and city when that misses or
+there is none: at most two requests a room, each remembered.
 
 The data is OpenStreetMap's, under the ODbL. The OSM Foundation's geocoding
 guideline treats one geocoding result as an insubstantial extract, so storing
@@ -16,7 +17,8 @@ attribution to OpenStreetMap is required: every row filled from here carries
 `attribution` and the client shows it.
 
 A result is kept only if it plausibly *is* the room: inside the Bay Area, in the
-right city, and named like it. Anything else is recorded as a miss (and not asked
+right city, and named like it -- or, for a search by street address, on the same
+house number in the right city (an address names the building, not the room). Anything else is recorded as a miss (and not asked
 again for a month), never a guess. What a person or an AI resolved always wins
 over what is found here (`deadletters.known_venue_rows`).
 
@@ -26,6 +28,7 @@ process; a 429 stops the whole step.
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -72,6 +75,52 @@ def query_url(room: Room) -> str:
     return URL + "?" + urllib.parse.urlencode({
         "q": q, "format": "jsonv2", "limit": 5, "addressdetails": 1, "countrycodes": "us",
         "viewbox": f"{west},{north},{east},{south}", "bounded": 1})
+
+
+def street_of(address: str) -> str:
+    """The street part of a listed address ("3920 Geary Blvd. at 3rd Ave." ->
+    "3920 Geary Blvd."), or "" if it does not start with a house number."""
+    first = re.split(r",|\bat\b|\bnear\b|@", address or "", maxsplit=1, flags=re.I)[0].strip()
+    return first if re.match(r"\d+[A-Za-z]?(-\d+)?\s+\S", first) else ""
+
+
+def address_url(room: Room, street: str) -> str:
+    west, south, east, north = BAY_AREA
+    return URL + "?" + urllib.parse.urlencode({
+        "street": street, "city": room.city, "state": "California", "format": "jsonv2", "limit": 3,
+        "addressdetails": 1, "countrycodes": "us",
+        "viewbox": f"{west},{north},{east},{south}", "bounded": 1})
+
+
+def _number(text: str) -> str:
+    m = re.match(r"\d+", text or "")
+    return m.group(0) if m else ""
+
+
+def choose_address(room: Room, street: str, results: list) -> dict | None:
+    """The result on the room's own house number, in its city: the listing's address
+    with coordinates. An address names a building, not a room, so the name is not
+    compared -- the listing's claim that the room is *there* is what is being placed."""
+    if not room.city or not street:
+        return None
+    for r in results or []:
+        addr = r.get("address") or {}
+        if not addr.get("house_number") or _number(addr["house_number"]) != _number(street):
+            continue
+        city = _city_of(addr)
+        if city and city.lower() != room.city.lower() \
+                and room.city.lower() not in (r.get("display_name") or "").lower():
+            continue
+        try:
+            lat, lon = round(float(r["lat"]), 6), round(float(r["lon"]), 6)
+        except (KeyError, TypeError, ValueError):
+            continue
+        place = ", ".join(p for p in (street, city or room.city,
+                                      " ".join(p for p in ("CA", addr.get("postcode")) if p)) if p)
+        return {"address": place, "city": city or room.city, "state": "CA", "lat": lat, "lon": lon,
+                "attribution": ATTRIBUTION, "osm": f"{r.get('osm_type', '')}/{r.get('osm_id', '')}",
+                "matched": f"address {street} ({r.get('category')}/{r.get('type')})"}
+    return None
 
 
 def _city_of(addr: dict) -> str:
@@ -122,12 +171,16 @@ def choose(room: Room, results: list) -> dict | None:
 
 
 def cached(room: Room, now: float | None = None) -> tuple[bool, dict | None]:
-    """(asked recently?, what was found). A hit lasts half a year, a miss a month."""
+    """(asked recently?, what was found). A hit lasts half a year, a miss a month --
+    unless the miss never tried the room's street address (older entries, or an
+    address the listing gained since): that is asked once more."""
     entry = cache._read(FILE).get(room.key)
     if not entry:
         return False, None
     age = (time.time() if now is None else now) - entry.get("at", 0)
     if age < (HIT_TTL_S if entry.get("hit") else MISS_TTL_S):
+        if not entry.get("hit") and street_of(room.address) and "address" not in entry.get("tried", ["name"]):
+            return False, None
         return True, entry.get("hit")
     return False, None
 
@@ -168,21 +221,37 @@ def geocode_rooms(rooms: list[Room], *, limit: int = MAX_PER_BUILD,
         else:
             todo.append(room)
     gov = ratelimit.governor("nominatim")
+
+    def ask(url: str) -> list:
+        while True:
+            try:
+                gov.acquire(max_block_s=_MAX_WAIT_S)
+                break
+            except ratelimit.RateLimited as exc:
+                if exc.retry_after > 60:        # a lockout, not a pause: leave it to a later build
+                    raise GeocodeStopped(str(exc)) from exc
+                sleep(exc.retry_after)
+        return fetch(url)
+
     for i, room in enumerate(todo):
         if i >= limit:
             counts["left"] = len(todo) - i
             break
         progress(i, min(limit, len(todo)))      # a heartbeat: the 4-a-minute budget makes this step minutes long
+        street = street_of(room.address)
+        prior = cache._read(FILE).get(room.key) or {}
+        # a name search that missed lately (a build before addresses were tried) is not repeated
+        name_missed = bool(prior) and not prior.get("hit") and "name" in prior.get("tried", ["name"]) \
+            and time.time() - prior.get("at", 0) < MISS_TTL_S
+        tried = []
         try:
-            while True:
-                try:
-                    gov.acquire(max_block_s=_MAX_WAIT_S)
-                    break
-                except ratelimit.RateLimited as exc:
-                    if exc.retry_after > 60:        # a lockout, not a pause: leave it to a later build
-                        raise GeocodeStopped(str(exc)) from exc
-                    sleep(exc.retry_after)
-            hit = choose(room, fetch(query_url(room)))
+            hit = None
+            if street:
+                tried.append("address")
+                hit = choose_address(room, street, ask(address_url(room, street)))
+            if hit is None and not name_missed:
+                tried.append("name")
+                hit = choose(room, ask(query_url(room)))
         except GeocodeStopped as exc:
             log(f"geocoding stopped: {exc}")
             counts["left"] = len(todo) - i
@@ -192,7 +261,8 @@ def geocode_rooms(rooms: list[Room], *, limit: int = MAX_PER_BUILD,
             counts["left"] = len(todo) - i
             break
         store = cache._read(FILE)
-        store[room.key] = {"at": time.time(), "query": room.label, "hit": hit}
+        store[room.key] = {"at": time.time(), "query": room.label, "hit": hit,
+                           "tried": sorted(set(tried) | (set(prior.get("tried", ["name"])) if name_missed else set()))}
         cache._write(FILE, store)
         counts["found" if hit else "missed"] += 1
     return counts

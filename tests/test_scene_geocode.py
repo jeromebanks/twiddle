@@ -5,7 +5,7 @@ import pytest
 
 from twiddle import ratelimit
 from twiddle.scenedata import deadletters as dl, geocode
-from twiddle.scenedata.venue_names import cluster
+from twiddle.scenedata.venue_names import Room, cluster
 
 ROOM = cluster({"Hopmonk, Novato": 3})[0]
 
@@ -139,3 +139,72 @@ def test_geocoding_reports_progress_so_a_long_wait_never_looks_like_a_hang():
     rooms = cluster({f"Room {c}, Napa": 1 for c in "ABC"})
     geocode.geocode_rooms(rooms, fetch=lambda u: [], sleep=lambda s: None, progress=lambda i, n: beats.append((i, n)))
     assert beats == [(0, 3), (1, 3), (2, 3)]
+
+
+# ---- by the listing's own street address ------------------------------------------------
+
+BISCUITS = Room(name="Biscuits and Blues", city="San Francisco", address="401 Mason Street",
+                variants=["Biscuits and Blues"])
+
+
+def at_address(number="401", road="Mason Street", city="San Francisco", **kw):
+    return {"name": "Hotel Union Square", "lat": "37.7882", "lon": "-122.4098", "osm_type": "way",
+            "osm_id": 7, "category": "building", "type": "yes",
+            "display_name": f"{number} {road}, {city}, California, United States",
+            "address": {"house_number": number, "road": road, "city": city, "postcode": "94102"}, **kw}
+
+
+@pytest.mark.parametrize("listed,street", [
+    ("401 Mason Street", "401 Mason Street"),
+    ("3920 Geary Blvd. at 3rd Ave.", "3920 Geary Blvd."),
+    ("1345 Bush Street, San Francisco", "1345 Bush Street"),
+    ("320-2 Cedar St", "320-2 Cedar St"),
+    ("Pier 39", ""), ("", ""), ("Mason Street", "")])
+def test_the_street_part_of_a_listed_address(listed, street):
+    assert geocode.street_of(listed) == street
+
+
+def test_an_address_hit_needs_the_house_number_and_the_city_not_the_venues_name():
+    hit = geocode.choose_address(BISCUITS, "401 Mason Street", [at_address()])
+    assert hit["address"] == "401 Mason Street, San Francisco, CA 94102" and hit["lat"] == 37.7882
+    assert hit["attribution"] == geocode.ATTRIBUTION and hit["matched"].startswith("address 401 Mason")
+    assert geocode.choose_address(BISCUITS, "401 Mason Street", [at_address(number="410")]) is None
+    assert geocode.choose_address(BISCUITS, "401 Mason Street", [at_address(city="Oakland")]) is None
+    assert geocode.choose_address(BISCUITS, "401 Mason Street", [{"lat": "1", "lon": "2"}]) is None
+    assert geocode.choose_address(cluster({"Fireside Lounge": 1})[0], "1 A St", [at_address(number="1")]) is None
+
+
+def test_the_address_query_is_structured_and_stays_in_the_bay_area():
+    url = geocode.address_url(BISCUITS, "401 Mason Street")
+    assert "street=401+Mason+Street" in url and "city=San+Francisco" in url and "bounded=1" in url
+
+
+def test_a_room_with_an_address_is_asked_by_it_first_and_the_name_only_if_that_misses():
+    urls = []
+
+    def by_address(url):
+        urls.append(url)
+        return [at_address()] if "street=" in url else []
+    n = geocode.geocode_rooms([BISCUITS], fetch=by_address, sleep=lambda s: None)
+    assert n["found"] == 1 and len(urls) == 1 and "street=" in urls[0]       # one request
+    cold = Room(name="Rain Dog Records", city="Petaluma", address="1010 Petaluma Blvd. N")
+    urls.clear()
+    n = geocode.geocode_rooms([cold], fetch=lambda u: urls.append(u) or [], sleep=lambda s: None)
+    assert n["missed"] == 1 and ["street=" in u for u in urls] == [True, False]   # then the name
+    assert geocode.cached(cold) == (True, None)
+
+
+def test_a_name_only_miss_from_before_is_asked_again_by_address_but_not_by_name():
+    geocode.cache._write(geocode.FILE, {BISCUITS.key: {"at": time.time(), "query": "x", "hit": None}})   # an older build's miss
+    assert geocode.cached(BISCUITS) == (False, None)
+    urls = []
+    n = geocode.geocode_rooms([BISCUITS], fetch=lambda u: urls.append(u) or [at_address()], sleep=lambda s: None)
+    assert n["found"] == 1 and len(urls) == 1 and "street=" in urls[0]
+    entry = geocode.cache._read(geocode.FILE)[BISCUITS.key]
+    assert entry["hit"]["lat"] == 37.7882 and "address" in entry["tried"]
+    miss = Room(name="Nowhere Hall", city="Napa", address="1 Main Street")
+    geocode.cache._write(geocode.FILE, {miss.key: {"at": time.time(), "hit": None}})
+    urls.clear()
+    n = geocode.geocode_rooms([miss], fetch=lambda u: urls.append(u) or [], sleep=lambda s: None)
+    assert n["missed"] == 1 and len(urls) == 1 and "street=" in urls[0]        # the name was already tried
+    assert geocode.cached(miss) == (True, None)                               # and now both have been
