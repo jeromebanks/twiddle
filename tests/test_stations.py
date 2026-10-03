@@ -292,12 +292,19 @@ def _old_icy(title, music):
     return artist, song, title
 
 
+# Fetchers that read the ICY title when their own feed has nothing, and the
+# ones of them (with talk) that never take it for an artist. Every other
+# fetcher never looks at ICY.
+ICY_FALLBACKS = ("talk", "wfmu", "spinitron", "wmbr", "kqed")
+NEVER_MUSIC = ("talk", "wmbr", "kqed")
+
+
 def _icy_stations():
     from pathlib import Path
     import tomllib
     for path in sorted((Path(stations.__file__).parent / "catalog").glob("*.toml")):
         data = tomllib.loads(path.read_text())
-        if data.get("fetch", "icy") in ("icy", "talk"):
+        if data.get("fetch", "icy") in ("icy", *ICY_FALLBACKS):
             yield path.stem, data
 
 
@@ -317,8 +324,12 @@ ICY_STATIONS = list(_icy_stations())
 @pytest.mark.parametrize("key,data", ICY_STATIONS, ids=[k for k, _ in ICY_STATIONS])
 def test_every_icy_station_reads_its_title_as_before(monkeypatch, key, data, title):
     monkeypatch.setattr(stations.icy, "icy_title", lambda url, encoding="utf-8": title)
+    # Their own feeds come back empty, so each falls back to the ICY title.
+    monkeypatch.setattr(stations.net, "get", lambda url, headers=None: b"")
+    monkeypatch.setattr(kqed_mod, "_cache", {"at": 0.0, "slots": []})
     np = stations.STATIONS[key].now_playing()
-    music = data.get("fetch") != "talk" and (data.get("fetch_args") or {}).get("music", True)
+    music = (data.get("fetch") not in NEVER_MUSIC
+             and (data.get("fetch_args") or {}).get("music", True))
     assert (np.artist, np.song, np.raw_title) == _old_icy(title, music)
 
 
