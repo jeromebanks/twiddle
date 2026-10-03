@@ -194,3 +194,24 @@ def test_a_failed_ledger_write_costs_one_slot_not_two(tmp_path, monkeypatch):
     g.acquire()                                     # the second of two: must not be refused
     with pytest.raises(RateLimited):
         g.acquire()
+
+
+def test_peaks_are_the_most_requests_seen_inside_any_one_window():
+    c = Time()
+    g = gov([Limit(100, 1), Limit(100, 60)], c)
+    for _ in range(3):              # a burst of three at t=0
+        g.acquire()
+    c.t += 30
+    for _ in range(2):              # two more half a minute later
+        g.acquire()
+    peaks = {p["label"]: p["peak"] for p in g.peaks()}
+    assert peaks == {"100 per second": 3, "100 per minute": 5}
+    c.t += 61                       # a minute on, the minute window has nothing newer to add
+    g.acquire()
+    assert {p["label"]: p["peak"] for p in g.peaks()}["100 per minute"] == 5
+
+
+def test_the_spotify_policy_cites_what_was_measured_and_keeps_the_override():
+    p = ratelimit.POLICIES["spotify"]
+    assert [lim.label for lim in p.limits] == ["10 per 10s", "60 per minute", "1500 per day"]
+    assert "Measured" in p.source and "429" in p.source

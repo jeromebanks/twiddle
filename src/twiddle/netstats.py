@@ -31,7 +31,7 @@ class Cap:
 CAPS = {
     "musicbrainz": Cap(60, "published by MusicBrainz: 1 request a second"),
     "bandcamp": Cap(60, "our own throttle: 1 request a second"),
-    "spotify": Cap(120, "our own budget; Spotify publishes no number"),
+    "spotify": Cap(60, "our own budget (the most a build was seen to send without a 429); Spotify publishes no number"),
     "nominatim": Cap(4, "published by OpenStreetMap: 1 a second; our own 4 a minute for scripts"),
 }
 

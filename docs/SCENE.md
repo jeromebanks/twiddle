@@ -476,12 +476,12 @@ almost nothing.
 
 Each service has a cap, and they are not all the same kind: MusicBrainz's 1
 request a second is *its* published limit; Bandcamp's is our own throttle;
-Spotify publishes no number, so its 120 a minute is a budget of ours (a 429 is
+Spotify publishes no number, so its 60 a minute is a budget of ours (a 429 is
 the real signal, counted as "told us to slow down").
 
 **Staying under the limit in the first place** is `ratelimit.py`: every
 Spotify request goes through one governor that enforces a budget of several
-windows at once (stock: 10 per 10 s, 100 a minute, 1,500 a day), shared by
+windows at once (stock: 10 per 10 s, 60 a minute, 1,500 a day: what a full build was seen to send without a 429), shared by
 every process on the machine through a small ledger, so the build, the TUI and
 any other Spotify tool spend one allowance. The daily window is the one that
 matters: Spotify answered the first full build with a `Retry-After` of 23
@@ -492,6 +492,15 @@ after Ns)` without loading a session). `twiddle limits` shows the budgets and
 what is used; they are Spotify-unpublished numbers of ours, so calibrate them
 from `scene status` over a few builds and override them in
 `~/.config/twiddle/ratelimits.toml`.
+
+Each build appends one line to `build-stats.jsonl` next to the dataset: per
+service, the requests sent, the 429s, the `Retry-After`, and the most requests
+seen inside each window of its budget (`peaks`, over the ledger's last 24
+hours). That is what a budget is raised or lowered from: raise one only while
+no 429 appears, lower it and widen the gap on one. Stock Spotify numbers are
+what the first full build after the lockout was measured to send without a 429
+(1,500 requests in 5.7 hours; at most 13 in 10 s, 59 in a minute, 358 in an
+hour).
 
 **Backpressure.** A service that says "slow down" *with a time* (Spotify's
 `Retry-After`, Bandcamp's own 15-minute back-off) is waited out in full, once,

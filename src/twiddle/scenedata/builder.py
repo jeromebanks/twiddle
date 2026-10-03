@@ -30,6 +30,7 @@ from an existing sign-in -- so launchd can run it.
 from __future__ import annotations
 
 import fcntl
+import json
 import time
 import zlib
 from collections.abc import Callable, Iterator
@@ -285,7 +286,33 @@ def build(*, path: Path | None = None, days: int = DEFAULT_DAYS, all_venues: boo
             raise
         progress.finish("done", f"{result.shows} shows, {result.bands} bands "
                                 f"({result.enriched} looked up, {result.reused} reused)")
+        if not dry_run:
+            record_request_stats(path, now())
         return result
+
+
+STATS_FILE = "build-stats.jsonl"
+
+
+def record_request_stats(path: Path, at: float) -> None:
+    """One line a build, next to the dataset: what each service was asked and said, and
+    the most it has been asked inside each window of its budget (over the ledger's last
+    24 hours, so it spans builds). The evidence a budget is set from -- never an error."""
+    try:
+        services = {}
+        for name, st in netstats.snapshot().items():
+            if not st["total"]:
+                continue
+            row = {"requests": st["total"], "limited": st["limited"], "errors": st["errors"],
+                   "waited_s": st["waited_s"], "retry_after_s": st["retry_after_s"]}
+            peaks = ratelimit.governor(name).peaks()
+            if peaks:
+                row["peaks"] = {p["label"]: p["peak"] for p in peaks}
+            services[name] = row
+        with open(path.parent / STATS_FILE, "a") as f:
+            f.write(json.dumps({"at": dataset.iso(at), "services": services}) + "\n")
+    except Exception:
+        pass
 
 
 def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,

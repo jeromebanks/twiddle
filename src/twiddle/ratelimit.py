@@ -23,7 +23,7 @@ a budget of ours, conservative and meant to be calibrated from `twiddle limits`
 and `scene status`. Override any of them in `~/.config/twiddle/ratelimits.toml`:
 
     [spotify]
-    limits = [[10, 10], [100, 60], [1500, 86400]]    # [requests, seconds] ...
+    limits = [[10, 10], [60, 60], [1500, 86400]]    # [requests, seconds] ...
 
 **It remembers across processes.** Requests are kept in a small ledger file
 (per process, merged on read), and a 429's `Retry-After` is kept as
@@ -103,9 +103,12 @@ POLICIES: dict[str, Policy] = {
                         "published by OpenStreetMap: 1 a second, one thread; we keep to 4 a minute "
                         "because a build is a script on a timer (usage policy, read 2026-10)",
                         max_block_s=20.0),
-    "spotify": Policy("spotify", (Limit(10, 10), Limit(100, 60), Limit(1500, 86400)),
+    "spotify": Policy("spotify", (Limit(10, 10), Limit(60, 60), Limit(1500, 86400)),
                       "our own budget; Spotify publishes no number (it meters a rolling 30s "
-                      "per client id, and its penalty can be a day)"),
+                      "per client id, and its penalty can be a day). Measured 2026-10-02 (the "
+                      "first build after the lockout): 1,500 requests in 5.7 h, at most 13 in "
+                      "10 s, 59 in a minute and 358 in an hour, and no 429; the minute and day "
+                      "caps stay at what was seen, not above it"),
 }
 
 
@@ -359,6 +362,24 @@ class Governor:
         self.report(status, after)
 
     # -- for display --
+
+    def peaks(self) -> list[dict]:
+        """The most requests seen inside any one window of each limit's length, over
+        every request the ledger still holds (about the last 24 hours, all processes):
+        what the service has actually been asked, to set a budget from."""
+        now = self.wall()
+        with self._lock:
+            self._refresh(now)
+            events = sorted([*self._mine, *self._others])
+        out = []
+        for lim in self.policy.limits:
+            best, lo = 0, 0
+            for hi, t in enumerate(events):
+                while t - events[lo] >= lim.per_s:
+                    lo += 1
+                best = max(best, hi - lo + 1)
+            out.append({"label": lim.label, "max": lim.count, "peak": best})
+        return out
 
     def usage(self) -> list[dict]:
         now = self.wall()

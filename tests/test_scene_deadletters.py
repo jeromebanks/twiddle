@@ -288,6 +288,20 @@ def test_a_room_with_no_listed_address_borrows_the_one_a_resolution_found_for_th
     assert hopmonk().address == ""
 
 
+def test_a_build_appends_what_each_service_was_asked_for_calibrating_budgets(tmp_path):
+    import json
+    from twiddle import netstats
+    path, _ = build(tmp_path, [NIGHT, FOUND], knows("Girl Chow"))
+    first = (tmp_path / builder.STATS_FILE).read_text().splitlines()
+    assert len(first) == 1 and "at" in json.loads(first[0]) and isinstance(json.loads(first[0])["services"], dict)
+    build(tmp_path, [NIGHT, FOUND], knows("Girl Chow"))
+    assert len((tmp_path / builder.STATS_FILE).read_text().splitlines()) == 2        # appended, never rewritten
+    netstats.record("spotify", status=200)
+    builder.record_request_stats(path, 1_790_000_000.0)
+    last = json.loads((tmp_path / builder.STATS_FILE).read_text().splitlines()[-1])
+    assert last["services"]["spotify"]["requests"] == 1 and "peaks" in last["services"]["spotify"]
+
+
 def _pending(path, lid="band:ghost band", name="Ghost Band"):
     doc = dl.load(path)
     doc["letters"][lid] = {"kind": "band", "name": name, "reason": "unfound", "status": "pending",
