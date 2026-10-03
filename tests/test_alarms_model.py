@@ -36,7 +36,7 @@ def test_fixture_covers_every_kind_of_source():
     assert any(u.startswith("x-sonosapi-stream:ihr%3a") for u in uris)     # iHeart
     assert any(u.startswith("x-sonosapi-radio:sonos%3a") for u in uris)    # Sonos Radio
     assert any("spotify%3aplaylist" in u and "sid=12&" in u for u in uris)  # Sonos Spotify
-    assert any(a.children for a in ALARMS)                                  # newer <Content>
+    assert any(a.children for a in ALARMS)                                  # a <Content> child
 
 
 def test_fixture_has_an_alarm_on_a_bonded_follower():
@@ -210,7 +210,7 @@ def test_fixture_has_only_fake_account_serials():
 
 
 def test_fixture_has_only_fake_playlist_ids():
-    ids = re.findall(r"spotify(?::|%3a)playlist(?::|%3a)(\w+)", TEXT)
+    ids = re.findall(r"spotify(?::|%3a)playlist(?::|%3a)(\w+)", TEXT, re.I)
     assert ids and all(FAKE_PLAYLIST.fullmatch(i) for i in ids), ids
 
 

@@ -11,9 +11,11 @@ gives back what the speaker said:
   sends them, so an escaped value here would be escaped twice on the wire.
   The DIDL can itself carry escaped text (`&amp;apos;` in a title, `&amp;amp;`
   in an art URL), which has to survive exactly.
-- Attributes the model doesn't know go in `extra`, and child elements (newer
-  firmware adds `<Content>` to a music-service alarm) in `children`, both
-  untouched. They aren't CreateAlarm arguments, so the speaker rebuilds them.
+- Attributes the model doesn't know go in `extra`, and child elements in
+  `children`, both untouched. Some music-service alarms carry a `<Content>`
+  child (one of three Spotify alarms in the recorded fixture, same speaker and
+  firmware). Neither is a CreateAlarm/UpdateAlarm argument, and whether an
+  update keeps, drops or regenerates an existing `<Content>` is unverified.
 
 No soco and no speaker here: `clock.py` does the calls.
 """
@@ -31,7 +33,6 @@ NAMED = {
     "WEEKENDS": frozenset({0, 6}),
 }
 _ON = re.compile(r"ON_[0-6]{1,7}")
-DAY_NAMES = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")  # Sunday is 0
 FORMS = "ONCE, DAILY, WEEKDAYS, WEEKENDS or ON_<days> (1-7 digits 0-6, Sunday 0)"
 
 
@@ -98,7 +99,7 @@ class Alarm:
     enabled: bool = True
     program_uri: str = CHIME_URI
     program_metadata: str = ""
-    play_mode: str = "NORMAL"           # NORMAL / SHUFFLE / REPEAT_ALL / SHUFFLE_NOREPEAT
+    play_mode: str = "NORMAL"           # the speaker's own value, e.g. SHUFFLE, REPEAT_ALL
     volume: int = 25
     include_linked_zones: bool = False
     extra: dict[str, str] = field(default_factory=dict)
