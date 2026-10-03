@@ -274,3 +274,55 @@ def test_the_build_publishes_unwatched_rooms_as_known_venues_and_a_resolution_de
     path, _ = build(tmp_path, [NIGHT, FOUND], knows("Girl Chow"))
     (row,) = dataset.load(path).known_venues
     assert row["address"] == "224 Vintage Way, Novato" and row["url"] == "https://hopmonk.com"
+
+
+def _pending(path, lid="band:ghost band", name="Ghost Band"):
+    doc = dl.load(path)
+    doc["letters"][lid] = {"kind": "band", "name": name, "reason": "unfound", "status": "pending",
+                           "evidence": {}, "show_count": 1}
+    dl.save(doc, path)
+
+
+def test_a_lookup_that_failed_leaves_the_letter_pending_not_resolved(tmp_path):
+    # Codex: an errored or rate-limited record is not "found by a later build"
+    path = tmp_path / "dataset.json"
+    _pending(path)
+    bands = {"ghost band": {"name": "Ghost Band", "updated_at": "x",
+                            "status": {"lookup": "error: unreachable", "bandcamp": "done"}}}
+    assert dl.unanswered_ids(bands) == {"band:ghost band"}
+    dl.sync({}, path, billed={"band:ghost band"}, unanswered=dl.unanswered_ids(bands))
+    assert dl.load(path)["letters"]["band:ghost band"]["status"] == "pending"
+    answered = {"ghost band": {"name": "Ghost Band", "updated_at": "x", "info": {"name": "Ghost Band"},
+                               "status": {"lookup": "done", "bandcamp": "done"}}}
+    dl.sync({}, path, billed={"band:ghost band"}, unanswered=dl.unanswered_ids(answered))
+    assert dl.load(path)["letters"]["band:ghost band"]["status"] == "resolved"      # a real answer
+
+
+def test_reopening_an_applied_resolution_removes_what_it_left_in_the_cache(tmp_path):
+    from twiddle.scenedata import cache
+    path = tmp_path / "dataset.json"
+    _pending(path)
+    dl.resolve("band:ghost band", {"mbid": "wrong-id", "alias": "Ghosts"}, "ai", path)
+    assert dl.apply_resolutions(path) == ["ghost band"]
+    assert cache.pick("Ghost Band") == "wrong-id" and cache.alias("Ghost Band") == "Ghosts"
+    dl.reopen("band:ghost band", path)
+    assert cache.pick("Ghost Band") == "" and cache.alias("Ghost Band") is None
+    assert dl.apply_resolutions(path) == ["ghost band"]          # looked up afresh, once
+    assert dl.apply_resolutions(path) == []
+    cache.save_alias("Ghost Band", "A Build's Own")              # a build's alias is not ours to drop
+    cache.drop_alias("Ghost Band", only="Ghosts")
+    assert cache.alias("Ghost Band") == "A Build's Own"
+
+
+def test_two_writers_of_the_queue_cannot_undo_each_other(tmp_path):
+    import threading
+    path = tmp_path / "dataset.json"
+    _pending(path)
+    done = threading.Event()
+    with dl._txn(path):                       # a build is in the middle of its read-modify-write
+        t = threading.Thread(target=lambda: (dl.resolve("band:ghost band", {"alias": "G"}, "human", path),
+                                             done.set()))
+        t.start()
+        assert not done.wait(0.3)             # the person's `resolve` waits its turn
+    t.join(2)
+    assert done.is_set() and dl.load(path)["letters"]["band:ghost band"]["status"] == "resolved"

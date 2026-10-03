@@ -55,6 +55,22 @@ def save_pick(billed: str, mbid: str) -> None:
     _write("picks.json", picks)
 
 
+def drop_pick(billed: str, only: str = "") -> None:
+    """Forget a chosen MusicBrainz id (`only`: just if it is that one)."""
+    picks = _read("picks.json")
+    if norm(billed) in picks and (not only or picks[norm(billed)].get("mbid") == only):
+        del picks[norm(billed)]
+        _write("picks.json", picks)
+
+
+def drop_alias(billed: str, only: str = "") -> None:
+    """Forget an alias (`only`: just if it is that name; a build's own are left alone)."""
+    aliases = _read("aliases.json")
+    if norm(billed) in aliases and (not only or aliases[norm(billed)].get("alias") == only):
+        del aliases[norm(billed)]
+        _write("aliases.json", aliases)
+
+
 def save_alias(billed: str, name: str) -> None:
     aliases = _read("aliases.json")
     aliases[norm(billed)] = {"alias": name, "billed": billed, "at": time.time()}

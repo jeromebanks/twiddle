@@ -174,6 +174,36 @@ class Ledger:
                   for t in ts]
         return float(svc.get("blocked_until") or 0.0), others
 
+    def reserve(self, service: str, mine: "deque[float]", now: float, decide) -> float | None:
+        """Check the shared budget and take a request from it in ONE step, under the
+        file lock, so two processes cannot both see room for the same slot.
+
+        `decide(blocked_until, others)` says how long to wait (0 = go ahead, which
+        records `now` as ours before the lock is released; `inf` = locked out, nothing
+        is recorded). Returns that wait, or None when the ledger cannot be used (the
+        caller then counts locally)."""
+        try:
+            lock = self._locked()
+        except OSError:
+            return None
+        try:
+            doc = self._read()
+            svc = doc.setdefault(service, {})
+            events = svc.setdefault("events", {})
+            others = [t for pid, ts in events.items() if pid != self.pid for t in ts]
+            wait = decide(float(svc.get("blocked_until") or 0.0), others)
+            if wait <= 0:
+                mine.append(now)
+                while mine and now - mine[0] > self.HORIZON_S:
+                    mine.popleft()
+                events[self.pid] = list(mine)
+                self._write(doc)
+            return wait
+        except OSError:
+            return None
+        finally:
+            lock.close()
+
     def merge(self, service: str, mine: list[float], blocked_until: float | None = None) -> None:
         """Write this process's request times, and a lockout if there is one."""
         now = self.wall()
@@ -259,6 +289,19 @@ class Governor:
                 wait = max(wait, recent[-lim.count] + lim.per_s - now)
         return wait
 
+    def _reserve_shared(self, now: float) -> float | None:
+        """Ask the ledger for a slot atomically (see `Ledger.reserve`). Caller holds `_lock`."""
+        if self.ledger is None:
+            return None
+
+        def decide(blocked: float, others: list[float]) -> float:
+            self._ledger_blocked, self._others = blocked, others
+            self._read_at = now
+            if max(self._blocked_until, blocked) - now > 0:
+                return float("inf")             # locked out: take nothing
+            return self._wait_needed(now)
+        return self.ledger.reserve(self.policy.service, self._mine, now, decide)
+
     def acquire(self, max_block_s: float | None = None) -> float:
         """Reserve one request. Sleeps (at most `max_block_s`) until the budget has
         room and returns the seconds it slept; raises `RateLimited` instead of sleeping
@@ -268,16 +311,23 @@ class Governor:
         while True:
             now = self.wall()
             with self._lock:
-                self._refresh(now)
-                locked = max(self._blocked_until, self._ledger_blocked) - now
-                if locked > 0:
-                    raise RateLimited(self.policy.service, locked, "locked out by the service")
-                wait = self._wait_needed(now)
+                wait = self._reserve_shared(now)
+                if wait is None:                    # no ledger (or unusable): count locally
+                    self._refresh(now)
+                    locked = max(self._blocked_until, self._ledger_blocked) - now
+                    if locked > 0:
+                        raise RateLimited(self.policy.service, locked, "locked out by the service")
+                    wait = self._wait_needed(now)
+                    if wait <= 0:
+                        self._mine.append(now)
+                        while self._mine and now - self._mine[0] > Ledger.HORIZON_S:
+                            self._mine.popleft()
+                        self._dirty = True
+                else:
+                    locked = max(self._blocked_until, self._ledger_blocked) - now
+                    if locked > 0:
+                        raise RateLimited(self.policy.service, locked, "locked out by the service")
                 if wait <= 0:
-                    self._mine.append(now)
-                    while self._mine and now - self._mine[0] > Ledger.HORIZON_S:
-                        self._mine.popleft()
-                    self._dirty = True
                     break
             if slept + wait > cap:
                 raise RateLimited(self.policy.service, wait)

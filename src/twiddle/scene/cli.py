@@ -229,7 +229,7 @@ def cmd_dlq(args) -> int:
         watched = venues_mod.from_rows(snap.venues)
         billed = dl.billed_ids(snap.bands, snap.shows, watched)
         counts = dl.sync({**dl.band_letters(snap.bands, snap.shows),
-                          **dl.venue_letters(snap.shows, watched)}, billed=billed)
+                          **dl.venue_letters(snap.shows, watched)}, billed=billed, unanswered=dl.unanswered_ids(snap.bands))
         counts["settled_by_rule"] = dl.settle_ambiguous()
         return emit(args, counts, "queue updated: " + ", ".join(f"{n} {k}" for k, n in counts.items()))
     doc = dl.load()

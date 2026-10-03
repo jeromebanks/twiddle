@@ -411,7 +411,7 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
             billed = deadletters.billed_ids(bands, shows, watched)
             result.dead_letters = deadletters.sync(
                 {**deadletters.band_letters(bands, shows), **deadletters.venue_letters(shows, watched)},
-                path, billed=billed)
+                path, billed=billed, unanswered=deadletters.unanswered_ids(bands))
             log("dead letters: " + ", ".join(f"{n} {k}" for k, n in result.dead_letters.items() if n))
         except Exception as exc:
             log(f"dead-letter queue: not updated ({exc})")

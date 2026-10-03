@@ -427,7 +427,7 @@ class FakeUrlOutput:
     def state(self):
         from twiddle.dial.output import OutputState
         uri = self.elsewhere or (self.played[-1][0] if self.played else "")
-        return OutputState(playing=self.playing or bool(self.elsewhere), volume=self.volume,
+        return OutputState(playing=self.playing, volume=self.volume,
                            uri=uri, other=uri)
 
     def close(self):
@@ -1552,11 +1552,11 @@ def test_R_puts_the_roam_back_on_the_station_it_was_on_and_stops_the_preview():
             assert outs.roam.captured == 1
             await pilot.press("n")                              # a second preview: not "before"
             await settle(pilot, app, lambda: len(outs.roam.played) == 2)
-            assert outs.roam.captured == 1 and app._before["token"] is STATION
+            assert outs.roam.captured == 1 and app._before["room:roam"]["token"] is STATION
             await pilot.press("R")
             await settle(pilot, app, lambda: outs.roam.restored)
             assert outs.roam.restored == [(STATION, False)] and outs.roam.stopped >= 1
-            assert app._before is None and app.bc_now is None
+            assert not app._before and app.bc_now is None
     run(go())
 
 
@@ -1569,9 +1569,9 @@ def test_R_leaves_a_room_alone_that_someone_retuned_meanwhile():
             await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
             await pilot.press("p")
             await settle(pilot, app, lambda: outs.roam.played)
-            outs.roam.playing, outs.roam.elsewhere = True, "http://kexp.example/stream"
+            outs.roam.playing, outs.roam.elsewhere = False, "http://kexp.example/stream"   # theirs, paused
             await pilot.press("R")
-            await settle(pilot, app, lambda: app._before is None)
+            await settle(pilot, app, lambda: not app._before)
             assert outs.roam.restored == []
     run(go())
 
@@ -1590,4 +1590,39 @@ def test_R_on_a_relay_room_still_hands_back_through_spotify_and_restores_the_vol
             await settle(pilot, app, lambda: outs.roam.restored)
             assert outs.roam.restored == [(ON_RELAY, True)]       # volume only
             assert "back" in player.played                         # Spotify's handback did the stream
+    run(go())
+
+
+def test_a_preview_on_the_mac_does_not_stop_the_roam_being_remembered():
+    # Codex: one session-wide "before" meant a Mac preview hid the Roam's station
+    async def go():
+        outs = FakeUrlOutputs()
+        outs.roam.found = STATION
+        app = _bandcamp_app(MAC_DEV, outs, FakePlayer())
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")                                  # a preview on this Mac
+            await settle(pilot, app, lambda: outs.mac.played)
+            assert outs.roam.captured == 0 and app._before["mac"]["token"] is None
+            app.device = Device(id="rid", name="relay", relay=True)  # now the Roam
+            app._play_bandcamp(app._profile(), 1, confirmed=True)   # a handoff while a track plays
+            await settle(pilot, app, lambda: outs.roam.played)
+            assert outs.roam.captured == 1 and app._before["room:roam"]["token"] is STATION
+    run(go())
+
+
+def test_a_known_room_s_map_credit_is_shown_with_its_address():
+    from twiddle.scene.app import VenueScreen
+    from twiddle.scenespec import venue as venue_mod
+    from textual.widgets import Static
+    (v,) = venue_mod.from_rows([{"id": "x", "name": "Hopmonk", "address": "224 Vintage Way, Novato",
+                                 "city": "Novato", "attribution": "Location © OpenStreetMap contributors (ODbL)"}])
+
+    async def go():
+        app = make_app()
+        async with app.run_test(size=(160, 45)) as pilot:
+            app.push_screen(VenueScreen("Hopmonk", v.info))
+            await settle(pilot, app, lambda: app.screen.__class__.__name__ == "VenueScreen")
+            text = " ".join(str(w.render()) for w in app.screen.query(Static))
+            assert "224 Vintage Way" in text and "OpenStreetMap contributors" in text
     run(go())

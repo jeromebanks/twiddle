@@ -149,3 +149,20 @@ def test_limits_command_shows_budgets_and_a_lockout(capsys):
     out = capsys.readouterr().out
     assert "spotify" in out and "1/10 per 10s" in out and "LOCKED OUT" in out
     assert "published by MusicBrainz" in out
+
+
+def test_two_processes_cannot_both_take_the_last_slot_of_a_shared_window(tmp_path):
+    # Codex: a governor checked its cached copy of the ledger and published its
+    # reservation seconds later, so two processes could both admit the same slot.
+    c = Time()
+    path = tmp_path / "ledger.json"
+    a = gov([Limit(3, 10)], c, Ledger(path, wall=c.wall, pid=1), max_block_s=0)
+    b = gov([Limit(3, 10)], c, Ledger(path, wall=c.wall, pid=2), max_block_s=0)
+    a.acquire(); a.acquire()            # two of three, and `a` has not flushed or been refreshed
+    b.acquire()                         # b takes the third: it saw a's two at once
+    with pytest.raises(RateLimited):
+        a.acquire()                     # a's own cached view is stale; the ledger is not
+    with pytest.raises(RateLimited):
+        b.acquire()
+    c.t += 11
+    a.acquire()                         # the window moved on

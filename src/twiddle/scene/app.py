@@ -207,6 +207,8 @@ class VenueScreen(ModalScreen):
                 t.append(f"@{i.instagram} on Instagram\n", style="dim")
             if i.about:
                 t.append("\n" + i.about + "\n")
+            if i.attribution:
+                t.append(i.attribution + "\n", style="dim italic")
             if i.city and i.city not in i.address:
                 t.append(i.city + (f", {i.state}" if i.state else "") + "\n")
             if not i:
@@ -380,7 +382,7 @@ class SceneApp(App):
         self.outputs = outputs          # dial's Outputs: where Bandcamp tracks play
         self.viz_options: dict = {}     # VizScreen keywords; the tests' fakes
         self._scan_guesses: dict[str, genre_mod.Guess | None] = {}   # by band key
-        self._before: dict | None = None    # the room as scene found it, before its first preview
+        self._before: dict[str, dict] = {}  # per output: the room as scene found it before its first preview
         self.volume: int | None = None      # of `_vol_oid`; None until read
         self.muted = False
         self._vol_oid: str | None = None
@@ -1609,12 +1611,14 @@ class SceneApp(App):
         A radio station (or anything else that was not the relay) is put back
         through the room's own snapshot, volume included. The relay goes back
         through Spotify's handback, as it always did; its volume is restored too."""
-        before = self._before
+        oid = self._volume_oid()            # the output we are previewing on
+        before = self._before.get(oid) if oid else None
         if before and time.time() - before["at"] > HANDBACK_MAX_AGE_S:
-            before = self._before = None
+            before = self._before.pop(oid)
+            before = None
         token = before["token"] if before else None
         if token and not token["relay"]:
-            self._restore_room(before)
+            self._restore_room(oid, before)
             return
         if self.bc_now and self.bc_now["output"] == MAC_OUTPUT:
             self._stop_bandcamp()
@@ -1627,28 +1631,31 @@ class SceneApp(App):
             return
         if token:
             try:
-                self.outputs.get(before["oid"]).restore(token, volume_only=True)
+                self.outputs.get(oid).restore(token, volume_only=True)
             except Exception:
                 pass                    # the stream is back; a stubborn volume is not worth an error
-        self._before = None
+        self._before.pop(oid, None)
         self._pending = None
         self.call_from_thread(self._status, msg)
         self.call_from_thread(self.poll_now)
 
-    def _restore_room(self, before: dict) -> None:
+    def _restore_room(self, oid: str, before: dict) -> None:
         """Worker thread only: stop our preview and put the room back, unless
         someone has put something else there since -- then it is left alone."""
         from ..dial.output import RELAY
-        oid, token = before["oid"], before["token"]
+        token = before["token"]
         out = self.outputs.get(oid)
         try:
             st = out.state()
         except spotify_ops.PlaybackError as exc:
             self.call_from_thread(self._error, exc)
             return
-        ours = not st.playing or st.tuned == RELAY or "bcbits.com" in (st.other or "")
+        # Whose is it? By what the room is pointed at, not whether it is playing: someone
+        # else's station, paused, is still theirs. Ours: the relay (a Spotify preview), a
+        # Bandcamp stream, or nothing at all.
+        ours = st.tuned == RELAY or "bcbits.com" in (st.other or "") or not st.uri
         if not ours:
-            self._before = None
+            self._before.pop(oid, None)
             self.call_from_thread(self._status,
                                   f"{out.label} is playing something else now -- left alone", "italic")
             return
@@ -1663,24 +1670,27 @@ class SceneApp(App):
         except spotify_ops.PlaybackError as exc:
             self.call_from_thread(self._error, exc)
             return
-        self._before = None
+        self._before.pop(oid, None)
         self._pending = None
         self.call_from_thread(self._status, msg)
         self.call_from_thread(self.poll_now)
 
     def _remember_before(self, oid: str | None) -> None:
-        """Worker thread only: the first preview in a session records what the
-        room was doing, for `R`. Later previews keep that, not the first one."""
+        """Worker thread only: the first preview on an output in a session records what
+        it was doing, for `R`. Later previews keep that, not the first one. Each output
+        has its own (a preview on the Mac must not stop the Roam being remembered), and
+        a track already ours on this output means the room is not as it was found."""
         if self.dry_run or self.outputs is None or oid is None:
             return
-        b = self._before
-        if (b and time.time() - b["at"] < HANDBACK_MAX_AGE_S) or self.bc_now is not None:
+        b = self._before.get(oid)
+        if (b and time.time() - b["at"] < HANDBACK_MAX_AGE_S) \
+                or (self.bc_now is not None and self.bc_now["output"] == oid):
             return
         try:
             token = self.outputs.get(oid).capture()
         except Exception:
             token = None
-        self._before = {"oid": oid, "token": token, "at": time.time()}
+        self._before[oid] = {"token": token, "at": time.time()}
 
     # ---- volume ------------------------------------------------------------
 
