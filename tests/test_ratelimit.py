@@ -166,3 +166,17 @@ def test_two_processes_cannot_both_take_the_last_slot_of_a_shared_window(tmp_pat
         b.acquire()
     c.t += 11
     a.acquire()                         # the window moved on
+
+
+def test_a_reservation_prunes_what_has_aged_out_of_the_shared_ledger(tmp_path):
+    # Codex: only `merge` pruned, and a shared reservation never calls it, so every scheduled
+    # build left its timestamps behind for every later request to read, sort and rewrite
+    import json
+    c = Time()
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps({"svc": {"events": {"7": [c.t - 2 * Ledger.HORIZON_S, c.t - 1.5 * Ledger.HORIZON_S],
+                                                    "8": [c.t - 5]}}}))
+    g = gov([Limit(5, 10)], c, Ledger(path, wall=c.wall, pid=1))
+    g.acquire()
+    events = json.loads(path.read_text())["svc"]["events"]
+    assert "7" not in events and events["8"] == [c.t - 5] and len(events["1"]) == 1

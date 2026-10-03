@@ -1714,3 +1714,45 @@ def test_R_leaves_alone_a_different_spotify_track_or_bandcamp_url_on_the_room():
         run(go())
     left_alone(RELAY, "Spotify (relay)", True, "spotify:track:THEIRS")          # someone else's Spotify track
     left_alone(None, "https://t4.bcbits.com/stream/someone-elses", False, "")   # another Bandcamp stream
+
+
+def test_R_after_switching_the_device_away_still_restores_the_room_that_was_previewed():
+    # Codex: with This Mac or a phone chosen, `_volume_oid` is None and R fell back to Spotify's handback
+    async def go():
+        outs = FakeUrlOutputs()
+        outs.roam.found = STATION
+        app = _preview_on_the_roam(outs, FakePlayer())
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")
+            await settle(pilot, app, lambda: outs.roam.played)
+            app.bc_now = None
+            app.device = Device(id="mac", name="Mac", local=True)      # the user picked This Mac
+            assert app._volume_oid() is None
+            await pilot.press("R")
+            await settle(pilot, app, lambda: outs.roam.restored)
+            assert outs.roam.restored == [(STATION, False)]
+    run(go())
+
+
+def test_a_different_paused_spotify_track_on_the_relay_is_not_ours():
+    # Codex: "not playing" was read as idle; Spotify keeps the paused track's URI
+    from twiddle.dial.output import RELAY, OutputState
+
+    async def go():
+        outs = FakeUrlOutputs()
+        outs.roam.found = STATION
+
+        class Player(FakePlayer):
+            def now(self):
+                return {"playing": False, "uri": "spotify:track:THEIRS"}     # paused, and not ours
+        app = _preview_on_the_roam(outs, Player())
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")
+            await settle(pilot, app, lambda: outs.roam.played)
+            outs.roam.state = lambda: OutputState(tuned=RELAY, playing=False, uri="relay", other="Spotify (relay)")
+            await pilot.press("R")
+            await settle(pilot, app, lambda: not app._before)
+            assert outs.roam.restored == []
+    run(go())

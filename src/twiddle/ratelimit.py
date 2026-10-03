@@ -190,6 +190,10 @@ class Ledger:
             doc = self._read()
             svc = doc.setdefault(service, {})
             events = svc.setdefault("events", {})
+            for pid in list(events):                # drop what has aged out, and processes long gone
+                events[pid] = [t for t in events[pid] if now - t < self.HORIZON_S]
+                if not events[pid] and pid != self.pid:
+                    del events[pid]
             others = [t for pid, ts in events.items() if pid != self.pid for t in ts]
             wait = decide(float(svc.get("blocked_until") or 0.0), others)
             if wait <= 0:

@@ -1629,7 +1629,7 @@ class SceneApp(App):
         A radio station (or anything else that was not the relay) is put back
         through the room's own snapshot, volume included. The relay goes back
         through Spotify's handback, as it always did; its volume is restored too."""
-        oid = self._volume_oid()            # the output we are previewing on
+        oid = self._restore_target()
         before = self._before.get(oid) if oid else None
         if before and time.time() - before["at"] > HANDBACK_MAX_AGE_S:
             before = self._before.pop(oid)
@@ -1656,6 +1656,16 @@ class SceneApp(App):
         self._pending = None
         self.call_from_thread(self._status, msg)
         self.call_from_thread(self.poll_now)
+
+    def _restore_target(self) -> str | None:
+        """The output `R` puts back: the one being previewed on, else (the device was switched
+        away, to This Mac or a phone) the room most recently captured, whose snapshot is
+        still owed."""
+        oid = self._volume_oid()
+        if oid in self._before:
+            return oid
+        owed = [(b["at"], o) for o, b in self._before.items() if b["token"] and not b["token"]["relay"]]
+        return max(owed)[1] if owed else oid
 
     def _restore_room(self, oid: str, before: dict) -> None:
         """Worker thread only: stop our preview and put the room back, unless
@@ -1703,7 +1713,9 @@ class SceneApp(App):
                 np = self.player.now()
             except Exception:
                 return False                # cannot tell: leave it alone
-            return not np.get("playing") or np.get("uri", "") == self._last_preview["spotify"]
+            # Paused is not idle: Spotify keeps the paused track's URI, so someone else's
+            # paused selection still differs from ours. Idle means no current item at all.
+            return not np.get("uri") or np.get("uri") == self._last_preview["spotify"]
         started = self._last_preview["bandcamp"]
         return bool(started) and _stream_key(started) == _stream_key(st.other or st.uri)
 
