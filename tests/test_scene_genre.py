@@ -92,7 +92,7 @@ def test_a_429_stops_every_bandcamp_request_for_a_while(monkeypatch, fast):
     def slow_down(name):
         raise urllib.error.HTTPError("u", 429, "Too Many Requests", {}, None)
     monkeypatch.setattr(lookup, "bandcamp_bands", slow_down)
-    with pytest.raises(urllib.error.HTTPError):
+    with pytest.raises(site.BlockedError):          # the 429 itself says so, as every later call does
         bandcamp.search("One")
     asked = []
     monkeypatch.setattr(lookup, "bandcamp_bands", lambda n: asked.append(n) or [])

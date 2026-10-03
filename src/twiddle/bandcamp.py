@@ -84,6 +84,8 @@ def _guarded(fn):
         out = fn()
     except urllib.error.HTTPError as exc:
         _outcome(exc.code == 404, exc)    # a missing page is an answer, not a failure
+        if exc.code == 429:               # it started the back-off: say so, as every later call will
+            raise BlockedError("Bandcamp answered 429 (too many requests); resting") from exc
         raise
     except Exception as exc:
         _outcome(False, exc)

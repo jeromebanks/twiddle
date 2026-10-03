@@ -1848,3 +1848,19 @@ def test_R_leaves_the_room_ours_when_scene_moved_Spotify_to_the_mac_after_previe
             await settle(pilot, app, lambda: outs.roam.restored)
             assert outs.roam.restored == [(STATION, False)]
     run(go())
+
+
+def test_volume_presses_made_while_the_first_read_is_out_all_count():
+    # Codex: each press started its own read with only its own step, and all but one were dropped
+    async def go():
+        outs = FakeUrlOutputs()
+        app = _preview_on_the_roam(outs)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")
+            await settle(pilot, app, lambda: outs.roam.played)
+            outs.roam.volume = 30
+            await pilot.press("plus", "plus", "right_square_bracket")        # 2 + 2 + 5, before the read lands
+            await settle(pilot, app, lambda: outs.roam.volumes and outs.roam.volumes[-1] == 39)
+            assert outs.roam.volumes[-1] == 39 and app.volume == 39
+    run(go())

@@ -155,3 +155,19 @@ def test_a_build_deliberately_waiting_out_a_long_retry_after_is_not_called_stall
     assert "stalled" not in text and "waiting on spotify: 10m left" in text
     assert "stalled" in buildstatus.render(st, now=2300.0)      # the wait is over and it still said nothing
     assert "stalled" in buildstatus.render(dict(st, pid=2 ** 30), now=1100.0)   # or the process is gone
+
+
+def test_a_bandcamp_429_is_a_block_not_a_plain_http_error():
+    # Codex: the 429 that starts the back-off was re-raised as an HTTPError, which the builder's
+    # "stop asking" test did not recognise, so bands failed one by one instead of pausing Bandcamp
+    import urllib.error
+    from twiddle import bandcamp
+    from twiddle.scenedata import builder
+    bandcamp._blocked_until = 0.0
+
+    def too_many():
+        raise urllib.error.HTTPError("https://x.bandcamp.com", 429, "Too Many Requests", {}, None)
+    with pytest.raises(bandcamp.BlockedError) as exc:
+        bandcamp._guarded(too_many)
+    assert builder._rate_limited(exc.value) and bandcamp.blocked_for() > 0
+    bandcamp._blocked_until = 0.0

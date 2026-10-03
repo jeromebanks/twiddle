@@ -395,6 +395,8 @@ class SceneApp(App):
         self.muted = False
         self._vol_oid: str | None = None
         self._vol_read_at = 0.0             # when `volume` was last known to be true
+        self._vol_reading = False           # one read in flight; presses meanwhile add up in `_vol_pending`
+        self._vol_pending = 0
         self._vol_timer = None
         self._vol_pushed_at = 0.0
         self._vol_dirty = self._vol_again = False
@@ -1769,10 +1771,14 @@ class SceneApp(App):
                         "Mac or a phone has its own", severity="warning", timeout=4)
             return
         stale = not self._vol_dirty and time.monotonic() - self._vol_read_at > VOLUME_STALE_S
+        if self._vol_reading:
+            self._vol_pending += delta      # the read is still out: these presses count too
+            return
         if self._vol_oid != oid or self.volume is None or stale:
             # Read it again: the Sonos app, a phone or `R` may have changed it since.
             self._vol_oid, self.volume = oid, None
             self._vol_dirty = False
+            self._vol_reading, self._vol_pending = True, 0
             self._first_volume(oid, delta)
             return
         self.action_set_volume(self.volume + delta)
@@ -1782,15 +1788,23 @@ class SceneApp(App):
         try:
             st = self.outputs.get(oid).state()
         except spotify_ops.PlaybackError as exc:
+            self.call_from_thread(self._volume_read_failed)
             self.call_from_thread(self._error, exc)
             return
         if st.volume is None:
+            self.call_from_thread(self._volume_read_failed)
             self.call_from_thread(self.notify, "the volume isn't known for this output",
                                   severity="warning", timeout=3)
             return
-        self.call_from_thread(self._volume_seen, oid, st.volume, st.muted, delta)
+        self.call_from_thread(self._volume_seen, oid, st.volume, st.muted, delta, True)
 
-    def _volume_seen(self, oid: str, volume: int, muted: bool, delta: int = 0) -> None:
+    def _volume_read_failed(self) -> None:
+        self._vol_reading, self._vol_pending = False, 0
+
+    def _volume_seen(self, oid: str, volume: int, muted: bool, delta: int = 0, first: bool = False) -> None:
+        if first:                   # the read a press started has landed: its presses, and the ones since
+            delta += self._vol_pending
+            self._vol_reading, self._vol_pending = False, 0
         if oid != self._volume_oid() or self._vol_dirty:
             return              # not the output on screen, or a newer press is in flight
         self._vol_oid, self.volume, self.muted = oid, volume, muted
