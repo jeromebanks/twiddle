@@ -1864,3 +1864,46 @@ def test_volume_presses_made_while_the_first_read_is_out_all_count():
             await settle(pilot, app, lambda: outs.roam.volumes and outs.roam.volumes[-1] == 39)
             assert outs.roam.volumes[-1] == 39 and app.volume == 39
     run(go())
+
+
+def test_R_prefers_the_room_that_owes_a_station_over_a_tokenless_mac_entry():
+    # Codex: a Bandcamp preview moved to This Mac left a token-less "mac" entry that R then chose,
+    # so it ran Spotify's handback and never put the Roam's station back
+    async def go():
+        outs = FakeUrlOutputs()
+        outs.roam.found = STATION
+        app = _preview_on_the_roam(outs, FakePlayer())
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")
+            await settle(pilot, app, lambda: outs.roam.played)
+            app.device = Device(id="mac", name="Mac", local=True)
+            app._play_bandcamp(app._profile(), 1, confirmed=True)          # the track follows to This Mac
+            await settle(pilot, app, lambda: outs.mac.played)
+            assert app._before["mac"]["token"] is None and app._before["room:roam"]["token"] is STATION
+            await pilot.press("R")
+            await settle(pilot, app, lambda: outs.roam.restored)
+            assert outs.roam.restored == [(STATION, False)]
+    run(go())
+
+
+def test_what_plays_on_the_mac_does_not_make_the_roams_preview_look_foreign():
+    # Codex: one global "last Bandcamp URL" was overwritten by the Mac's second song
+    from twiddle.dial.output import OutputState
+
+    async def go():
+        outs = FakeUrlOutputs()
+        outs.roam.found = STATION
+        app = _preview_on_the_roam(outs, FakePlayer())
+        async with app.run_test(size=(160, 45)) as pilot:
+            await settle(pilot, app, lambda: app._profile() and app._profile().bc_tracks)
+            await pilot.press("p")
+            await settle(pilot, app, lambda: outs.roam.played)
+            roam_url = outs.roam.played[0][0]
+            app._last_preview["bandcamp"]["mac"] = "https://t4.bcbits.com/stream/a different song"
+            outs.roam.state = lambda: OutputState(tuned=None, playing=False, uri=roam_url, other=roam_url)
+            app.bc_now = None
+            await pilot.press("R")
+            await settle(pilot, app, lambda: outs.roam.restored)
+            assert outs.roam.restored == [(STATION, False)]
+    run(go())

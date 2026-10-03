@@ -390,7 +390,7 @@ class SceneApp(App):
         self.viz_options: dict = {}     # VizScreen keywords; the tests' fakes
         self._scan_guesses: dict[str, genre_mod.Guess | None] = {}   # by band key
         self._before: dict[str, dict] = {}  # per output: the room as scene found it before its first preview
-        self._last_preview = {"spotify": set(), "bandcamp": ""}   # exactly what scene last started: the queue, and the stream
+        self._last_preview = {"spotify": set(), "bandcamp": {}}   # exactly what scene last started: the queue, and each output's stream
         self.volume: int | None = None      # of `_vol_oid`; None until read
         self.muted = False
         self._vol_oid: str | None = None
@@ -1541,7 +1541,7 @@ class SceneApp(App):
             self._unstage(staged)
             self.call_from_thread(self._error, exc)
             return
-        self._last_preview["bandcamp"] = url
+        self._last_preview["bandcamp"][oid] = url     # per output: playing elsewhere says nothing about this room
         if not self.dry_run:
             self.bc_now = {"band": p.band, "profile": p, "index": i, "output": oid,
                            "track": tr.get("title", "?"), "label": out.label}
@@ -1667,8 +1667,8 @@ class SceneApp(App):
         away, to This Mac or a phone) the room most recently captured, whose snapshot is
         still owed."""
         oid = self._volume_oid()
-        if oid in self._before:
-            return oid
+        if oid in self._before and self._before[oid]["token"]:
+            return oid                  # (a tokenless entry, a preview on the Mac, owes nothing)
         owed = [(b["at"], o) for o, b in self._before.items() if b["token"]]    # a relay one owes its volume
         return max(owed)[1] if owed else oid
 
@@ -1683,7 +1683,7 @@ class SceneApp(App):
         except spotify_ops.PlaybackError as exc:
             self.call_from_thread(self._error, exc)
             return
-        if not self._preview_is_ours(st):
+        if not self._preview_is_ours(oid, st):
             self._before.pop(oid, None)
             self.call_from_thread(self._status,
                                   f"{out.label} is playing something else now -- left alone", "italic")
@@ -1705,7 +1705,7 @@ class SceneApp(App):
         self.call_from_thread(self._status, msg)
         self.call_from_thread(self.poll_now)
 
-    def _preview_is_ours(self, st) -> bool:
+    def _preview_is_ours(self, oid: str, st) -> bool:
         """Is what the room plays the preview scene started, not just the same kind of thing?
         Judged by what it is pointed at, not whether it is playing: someone else's station,
         paused, is still theirs; so is another Spotify track on the relay, or another
@@ -1726,7 +1726,7 @@ class SceneApp(App):
             # Paused is not idle: Spotify keeps the paused track's URI, so someone else's
             # paused selection still differs from ours. Idle means no current item at all.
             return not np.get("uri") or np.get("uri") in self._last_preview["spotify"]
-        started = self._last_preview["bandcamp"]
+        started = self._last_preview["bandcamp"].get(oid, "")
         return bool(started) and _stream_key(started) == _stream_key(st.other or st.uri)
 
     def _unstage(self, oid: str | None) -> None:

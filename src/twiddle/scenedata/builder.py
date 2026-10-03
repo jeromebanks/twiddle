@@ -420,7 +420,9 @@ def _build(path, days, all_venues, use_spotify, dry_run, sources, enrichers,
         if limit > 0:
             progress.phase("geocoding", "where the unwatched rooms are")
             try:
-                n = geocode.geocode_rooms(deadletters.unwatched_rooms(shows, watched), limit=limit, log=log)
+                n = geocode.geocode_rooms(
+                    deadletters.unwatched_rooms(shows, watched), limit=limit, log=log,
+                    progress=lambda i, total: progress.phase("geocoding", f"room {i + 1}/{total} (4 a minute)"))
                 log("geocoding: " + ", ".join(f"{v} {k}" for k, v in n.items() if v))
             except Exception as exc:        # a map lookup must never fail a build
                 log(f"geocoding: skipped ({exc})")

@@ -148,7 +148,8 @@ def known(rooms: list[Room]) -> dict[str, dict]:
 
 def geocode_rooms(rooms: list[Room], *, limit: int = MAX_PER_BUILD,
                   fetch: Callable[[str], list] | None = None, sleep: Callable[[float], None] = time.sleep,
-                  log: Callable[[str], None] = lambda _m: None) -> dict[str, int]:
+                  log: Callable[[str], None] = lambda _m: None,
+                  progress: Callable[[int, int], None] = lambda _i, _n: None) -> dict[str, int]:
     """Ask Nominatim about up to `limit` rooms not asked about lately, busiest
     first. Returns counts: found, missed, left (not reached), cached.
 
@@ -171,6 +172,7 @@ def geocode_rooms(rooms: list[Room], *, limit: int = MAX_PER_BUILD,
         if i >= limit:
             counts["left"] = len(todo) - i
             break
+        progress(i, min(limit, len(todo)))      # a heartbeat: the 4-a-minute budget makes this step minutes long
         try:
             while True:
                 try:

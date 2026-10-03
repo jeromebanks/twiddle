@@ -131,3 +131,11 @@ def test_a_room_with_no_city_costs_no_request():
     rooms = cluster({"Mystery Hall, East Bay": 5, "Hopmonk, Novato": 1})
     n = geocode.geocode_rooms(rooms, limit=1, fetch=lambda u: asked.append(u) or [], sleep=lambda s: None)
     assert len(asked) == 1 and "Hopmonk" in asked[0] and n["no city"] == 1 and n["left"] == 0
+
+
+def test_geocoding_reports_progress_so_a_long_wait_never_looks_like_a_hang():
+    # Codex: 20 rooms at 4 a minute is minutes of silence, and `scene status` calls 2 minutes of it stalled
+    beats = []
+    rooms = cluster({f"Room {c}, Napa": 1 for c in "ABC"})
+    geocode.geocode_rooms(rooms, fetch=lambda u: [], sleep=lambda s: None, progress=lambda i, n: beats.append((i, n)))
+    assert beats == [(0, 3), (1, 3), (2, 3)]
