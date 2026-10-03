@@ -5,6 +5,8 @@ import json
 import pytest
 
 from twiddle import stations
+from twiddle.stations import titles
+from twiddle.stations.fetchers import icy as icy_fetch
 from twiddle.stations.fetchers import kqed as kqed_mod
 
 
@@ -248,6 +250,98 @@ def test_rain_is_never_taken_for_an_artist(monkeypatch):
     np = stations.STATIONS["rain"].now_playing()
     assert np.artist is None and np.raw_title == "Rain Sounds & White Noise - Loopable Rain"
 
+
+
+# ---- title shapes ----------------------------------------------------------
+
+IHEART = 'title="Ted And The 20 Person Plane",artist="JOHN MULANEY",url="song_spot=\\"T\\""'
+
+
+def test_artist_song_shape_needs_the_dash():
+    assert titles.parse("artist-song", "Neutral Milk Hotel - Holland, 1945") == {
+        "artist": "Neutral Milk Hotel", "song": "Holland, 1945"}
+    assert titles.parse("artist-song", "Morning Becomes Eclectic") == {}
+    # Named outright, artist-song doesn't read iHeart attributes.
+    assert titles.parse("artist-song", IHEART) == {}
+
+
+def test_iheart_shape_is_only_for_iheart_attributes():
+    assert titles.parse("iheart-attrs", IHEART) == {
+        "artist": "JOHN MULANEY", "song": "Ted And The 20 Person Plane"}
+    assert titles.parse("iheart-attrs", "George Carlin - Track 12") == {}
+
+
+def test_iheart_station_still_gets_comedian_dash_track(monkeypatch):
+    monkeypatch.setattr(stations.icy, "icy_title", lambda url: IHEART)
+    np = stations.STATIONS["comedy247"].now_playing()
+    assert (np.artist, np.song) == ("JOHN MULANEY", "Ted And The 20 Person Plane")
+    assert np.raw_title == "JOHN MULANEY - Ted And The 20 Person Plane"
+
+
+def _old_icy(title, music):
+    """What the icy fetcher did before title shapes, frozen here so the
+    new path can be held to it: tidy_title, then split_title."""
+    import re
+    if title:
+        fields = dict(re.findall(r'(\w+)="(.*?)"(?:,|$)', title))
+        if fields.get("artist") and fields.get("title"):
+            title = f"{fields['artist']} - {fields['title']}"
+    artist = song = None
+    if music and title and " - " in title:
+        artist, song = (s.strip() or None for s in title.split(" - ", 1))
+    return artist, song, title
+
+
+# Fetchers that read the ICY title when their own feed has nothing, and the
+# ones of them (with talk) that never take it for an artist. Every other
+# fetcher never looks at ICY.
+ICY_FALLBACKS = ("talk", "wfmu", "spinitron", "wmbr", "kqed")
+NEVER_MUSIC = ("talk", "wmbr", "kqed")
+
+
+def _icy_stations():
+    from pathlib import Path
+    import tomllib
+    for path in sorted((Path(stations.__file__).parent / "catalog").glob("*.toml")):
+        data = tomllib.loads(path.read_text())
+        if data.get("fetch", "icy") in ("icy", *ICY_FALLBACKS):
+            yield path.stem, data
+
+
+ICY_STATIONS = list(_icy_stations())
+
+
+@pytest.mark.parametrize("title", [
+    "Neutral Milk Hotel - Holland, 1945",
+    IHEART,
+    # An iHeart artist with a dash in it has always split at the first dash.
+    'title="Song",artist="A - B",url=""',
+    # Blank attributes split to nothing, never to a split of the url.
+    'title=" ",artist=" ",url="Promo - Break"',
+    'Your DJ speaks over "X" on Bucci\'s show on WFMU',
+    None,
+])
+@pytest.mark.parametrize("key,data", ICY_STATIONS, ids=[k for k, _ in ICY_STATIONS])
+def test_every_icy_station_reads_its_title_as_before(monkeypatch, key, data, title):
+    monkeypatch.setattr(stations.icy, "icy_title", lambda url, encoding="utf-8": title)
+    # Their own feeds come back empty, so each falls back to the ICY title.
+    monkeypatch.setattr(stations.net, "get", lambda url, headers=None: b"")
+    monkeypatch.setattr(kqed_mod, "_cache", {"at": 0.0, "slots": []})
+    np = stations.STATIONS[key].now_playing()
+    music = (data.get("fetch") not in NEVER_MUSIC
+             and (data.get("fetch_args") or {}).get("music", True))
+    assert (np.artist, np.song, np.raw_title) == _old_icy(title, music)
+
+
+@pytest.mark.parametrize("shape,title", [
+    (None, IHEART), ("iheart-attrs", IHEART), ("artist-song", "Band - Song")])
+def test_music_false_never_yields_an_artist_whatever_the_shape(monkeypatch, shape, title):
+    assert set(titles.SHAPES) == {"artist-song", "iheart-attrs"}   # a new shape joins this list
+    monkeypatch.setattr(stations.icy, "icy_title", lambda url: title)
+    s = stations.Station("x", "X", "http://x", "Town -- x")
+    assert icy_fetch.icy(s, titles=shape).artist                 # the shape does match
+    np = icy_fetch.icy(s, music=False, titles=shape)
+    assert np.artist is None and np.song is None and np.raw_title
 
 def test_every_station_has_a_shell_word():
     """`scripts/radio.zsh` makes one word per catalog file, so a new station

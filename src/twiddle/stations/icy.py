@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import urllib.request
 
-from . import net
+from . import net, titles
 
 
 def icy_title(url: str, encoding: str = "utf-8") -> str | None:
@@ -46,24 +46,13 @@ def parse_icy(meta: str) -> str | None:
 
 
 def split_title(title: str | None) -> tuple[str | None, str | None]:
-    """("Artist", "Song") out of an ICY "Artist - Song", or (None, None).
-
-    Only trusted when it has that shape: an ICY title can just as well be a
-    show name or "Your DJ speaks over ..." (WFMU), and a guess there would
-    send a nonsense artist on to `discover` or an info lookup.
-    """
-    if not title or " - " not in title:
-        return None, None
-    artist, song = (s.strip() for s in title.split(" - ", 1))
-    return artist or None, song or None
+    """("Artist", "Song") out of an ICY "Artist - Song", or (None, None):
+    the `artist-song` shape in `titles.py`, as a pair."""
+    got = titles.artist_song(title or "")
+    return got.get("artist"), got.get("song")
 
 
 def tidy_title(title: str | None) -> str | None:
     """iHeart streams send `title="Song",artist="Artist",url="..."` where
     everyone else sends "Artist - Song"; turn the one into the other."""
-    if not title:
-        return title
-    fields = dict(re.findall(r'(\w+)="(.*?)"(?:,|$)', title))
-    if fields.get("artist") and fields.get("title"):
-        return f"{fields['artist']} - {fields['title']}"
-    return title
+    return titles.iheart_rewrite(title)

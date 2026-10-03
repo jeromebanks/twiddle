@@ -8,6 +8,7 @@ Each station is one TOML file in `catalog/`, named for its key:
     tags  = ["public", "indie"]                        # from tags.TAGS only
     fetch = "kexp"                                     # fetchers.FETCHERS; default "icy"
     fetch_args = { rf_id = 74 }                        # optional, passed to the fetcher
+                                                       # (`titles` must be in titles.SHAPES)
     logo  = "https://..."                              # optional, square
     order = 40                                         # optional; lower lists first
 
@@ -104,6 +105,7 @@ def station_from(key: str, data: dict) -> Station:
     """One catalog entry -> a Station, or CatalogError saying what's wrong."""
     from .fetchers import FETCHERS
     from .tags import TAGS
+    from .titles import SHAPES
 
     unknown = set(data) - FIELDS
     if unknown:
@@ -119,6 +121,13 @@ def station_from(key: str, data: dict) -> Station:
     if name not in FETCHERS:
         raise CatalogError(f"fetch = {name!r} is not a known fetcher "
                            f"({', '.join(sorted(FETCHERS))})")
+    args = data.get("fetch_args") or {}
+    if not isinstance(args, dict):
+        raise CatalogError(f"fetch_args = {args!r} should be a table of keyword arguments")
+    shape = args.get("titles")
+    if shape is not None and (not isinstance(shape, str) or shape not in SHAPES):
+        raise CatalogError(f"titles = {shape!r} is not a known title shape "
+                           f"({', '.join(sorted(SHAPES))})")
     fetch = FETCHERS[name]
     if data.get("fetch_args"):
         fetch = partial(fetch, **data["fetch_args"])

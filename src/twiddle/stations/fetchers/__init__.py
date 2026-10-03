@@ -8,7 +8,7 @@ and the fetcher around it, then list it here.
 
 | name        | where it gets now-playing                         | fetch_args        |
 |-------------|---------------------------------------------------|-------------------|
-| icy         | the stream's ICY title (every station has this)   | note, music=false, encoding |
+| icy         | the stream's ICY title (every station has this)   | note, music=false, encoding, titles |
 | talk        | ICY, shown as a segment, never an artist          |                   |
 | spinitron   | spinitron.com/<CALLSIGN> (college/community)      | callsign          |
 | somafm      | somafm.com/songs/<channel>.json                   |                   |
