@@ -258,7 +258,7 @@ def test_list_writes_nothing(speaker, capsys):
     assert code == 0
     actions = {a for _, a in speaker}
     assert "ListAlarms" in actions
-    assert actions <= {"ListAlarms", "GetTimeNow", "GetTimeZone", "GetFormat"}, actions
+    assert actions <= {"ListAlarms", "GetTimeNow", "GetFormat"}, actions
     assert all("/AlarmClock/Control" in url for url, _ in speaker)   # no AVTransport
     assert not play.INTERVENTION_LOG.exists()
 
@@ -280,6 +280,11 @@ def test_a_malformed_alarm_list_is_an_error_not_a_traceback(speaker, monkeypatch
     code, out, _ = run(["alarm", "list", "--json"], capsys)
     assert code == 1
     assert "alarm 1: missing" in json.loads(out)["error"]
+
+
+def test_the_clock_refuses_anything_but_a_read():
+    with pytest.raises(ValueError, match="not an AlarmClock read"):
+        clock._read("10.0.0.11", "DestroyAlarm")
 
 
 def test_no_alarms(speaker, monkeypatch, capsys):

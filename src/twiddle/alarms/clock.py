@@ -1,8 +1,10 @@
 """The speaker's `AlarmClock` service: the read side.
 
 Alarms are household-wide, so any speaker answers for all of them. Every call
-here is a read (`ListAlarms`, `GetTimeNow`, `GetFormat`); the
-writes come later and go through the journal.
+here is a read (`ListAlarms`, `GetTimeNow`, `GetFormat`); the writes come
+later and go through the journal. `GetTimeZone` isn't read: `GetTimeNow`'s
+`CurrentLocalTime` is already the household's wall-clock time, and the zone
+is only an opaque index and a DST flag.
 
 Each call has a pure parser beside it, so tests feed recorded SOAP responses
 and never reach a speaker.
@@ -67,7 +69,8 @@ def parse_format(xml: str) -> tuple[str, str]:
 
 
 def _read(ip: str, action: str) -> str:
-    assert action in READS, action
+    if action not in READS:
+        raise ValueError(f"{action} is not an AlarmClock read")
     return soap(ip, SERVICE, action)
 
 
