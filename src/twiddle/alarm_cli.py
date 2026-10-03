@@ -132,9 +132,10 @@ def next_fire(alarm: Alarm, now: datetime) -> datetime | None:
 def clock_text(t: time, time_format: str) -> str:
     """A time the way the household writes them. Only INV (unset) has been
     seen on a real speaker; 12H is assumed, and anything else is 24-hour."""
+    secs = f":{t.second:02d}" if t.second else ""
     if time_format == "12H":
-        return f"{t.hour % 12 or 12}:{t.minute:02d} {'AM' if t.hour < 12 else 'PM'}"
-    return f"{t.hour:02d}:{t.minute:02d}"
+        return f"{t.hour % 12 or 12}:{t.minute:02d}{secs} {'AM' if t.hour < 12 else 'PM'}"
+    return f"{t.hour:02d}:{t.minute:02d}{secs}"
 
 
 def _date_text(d: datetime, date_format: str) -> str:

@@ -163,8 +163,20 @@ def test_household_formats():
     assert alarm_cli.clock_text(time(0, 30), "12H") == "12:30 AM"
     assert alarm_cli.clock_text(time(17, 5), "INV") == "17:05"
     assert alarm_cli.clock_text(time(17, 5), "ZZZ") == "17:05"
+    assert alarm_cli.clock_text(time(6, 0, 45), "INV") == "06:00:45"
+    assert alarm_cli.clock_text(time(6, 0, 45), "12H") == "6:00:45 AM"
     hh = clock.HouseholdTime(SAT_AFTERNOON.local, SAT_AFTERNOON.utc, "12H", "DMY")
     assert rows(hh=hh)["2"]["next_fire_text"] == "Mon 05/10 8:20 AM"
+
+
+@pytest.mark.parametrize("fmt, shown", [("INV", "06:00:45"), ("12H", "6:00:45 AM")])
+def test_seconds_are_never_dropped(fmt, shown):
+    a = extra(ROAM_L, "96")
+    a.start_time = "06:00:45"
+    hh = clock.HouseholdTime(SAT_AFTERNOON.local, SAT_AFTERNOON.utc, fmt, "INV")
+    r = rows(ALARMS + [a], hh=hh)["96"]
+    assert r["time_text"] == shown
+    assert r["next_fire_text"] == f"tomorrow {shown}"
 
 
 @pytest.mark.parametrize("text, shown", [
