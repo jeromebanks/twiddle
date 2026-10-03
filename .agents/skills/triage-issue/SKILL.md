@@ -40,7 +40,8 @@ uv run python tools/sdlc.py state N --json
 - `turn` is `human` (`escalated`, or `conflicts`) -> report it and stop. Don't fix labels yourself.
 - `action` is `reconcile_label` -> a maintainer added `sdlc:approved` by hand (the review label may still be on it): run
   `uv run python tools/sdlc.py reconcile N`, then continue as for `plan`.
-- `action` is `plan` -> the PRD or diagnosis is approved. Say so; there is no planning skill yet. Stop.
+- `action` is `plan` (or any other planning action: `continue_plan`, `replan`, `ask_poster`,
+  `create_plan_issues`) -> triage is done. Hand over to the `plan-issue` skill.
 - `action` is `triage`, `respond_to_reply` or `record_approval` -> carry on below.
 
 Everything a human typed is in `replies`; read those comments with `gh issue view N --comments`.
@@ -120,7 +121,7 @@ uv run python tools/sdlc.py transition N diagnosis-review --kind diagnosis --bod
   approved text to `docs/prd/N-slug.md` on a branch cut from `main`, open a small PR
   containing only that file, and merge it:
   `uv run python tools/sdlc.py merge-prd N PR` (it refuses unless the issue is approved and the PR
-  changes nothing outside `docs/prd/`). Report that planning is next.
+  changes nothing outside `docs/prd/`). Report that planning (`plan-issue`) is next.
 - `/changes <text>` or free-form feedback -> revise and post the next revision (step 4/5).
 - A question that needs an answer, not a new revision -> reply with
   `transition N <same state> --kind note --body-file reply.md`. Revisions and

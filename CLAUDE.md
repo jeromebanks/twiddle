@@ -15,7 +15,7 @@ anything or anybody's speakers.
 | Playing Spotify through a relay instead of Sonos's cloud | `docs/SPOTIFY.md` |
 | Twiddle and any other characters | `CHARACTERS.md` |
 | Adding a station / a venue / a visualizer | skills `add-radio-station`, `add-venue-source`, `add-visualizer` |
-| Handling a GitHub issue (triage, PRD, sign-off) | `SDLC.md`, skill `triage-issue`, `tools/sdlc.py` |
+| Handling a GitHub issue (triage, PRD, sign-off, planning) | `SDLC.md`, skills `triage-issue` / `plan-issue`, `tools/sdlc.py` |
 
 `uv sync` then `uv run pytest` (about 1220 tests, a minute). Nothing in the
 tests touches the network, a speaker or Spotify.
@@ -169,7 +169,7 @@ Under `src/twiddle/`:
 | `gain.py` | twiddle's own live volume/mute for anything that plays by running ffmpeg (`LiveGain`); `dial/output.py`'s `ProcessOutput` uses it, and a future podcast/Bandcamp player can too |
 | `tone.py` | soak-test signal generator |
 | `cli.py` | command line |
-| `tools/sdlc.py` (repo root) | the issue SDLC's deterministic half, stdlib only: derives an issue's `sdlc:*` state from labels + marked comments, decides whose move it is, validates sign-offs, posts agent comments and moves labels (**`transition`/`reconcile`/`bootstrap-labels` write to GitHub, never to a speaker**). Config `.sdlc/config.json`; skill `triage-issue`; see `SDLC.md` |
+| `tools/sdlc.py` (repo root) | the issue SDLC's deterministic half, stdlib only: derives an issue's `sdlc:*` state from labels + marked comments, decides whose move it is, validates sign-offs and Codex plan verdicts, checks a plan's slices/dependencies/PRD coverage, posts agent comments, moves labels, creates an epic's sub-issues + `blocked_by` links (**`transition`/`reconcile`/`bootstrap-labels`/`plan-post`/`plan-review`/`plan-create` write to GitHub, never to a speaker**; `state`/`next`/`plan-validate`/`ready` only read). Config `.sdlc/config.json`; skills `triage-issue`, `plan-issue`; see `SDLC.md` |
 | `tools/observe.py` (repo root) | append-only observation log (**use this, not doc edits**) |
 
 | `scripts/radio.zsh` (repo root) | one-word shell names over the CLI: one per catalog file, `kalx`/`kexp`/... (`tune`), `dial`, `np`, `discover`, `artist` (`info`), `stations`, `shows` (`scene`) |

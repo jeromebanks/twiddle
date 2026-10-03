@@ -1,29 +1,31 @@
-# Handoff: build `plan-issue` (next SDLC skill)
+# Handoff: build `work-slice` and `milestone-demo` (next SDLC skills)
 
-Read `SDLC.md`, `tools/sdlc.py` and `.agents/skills/triage-issue/SKILL.md` first. Start in **plan mode on Opus**.
+Read `SDLC.md`, `tools/sdlc.py`, `.agents/skills/plan-issue/SKILL.md` and
+`references/plan-schema.md` first. Start in **plan mode on Opus**.
 
 ## State
-- Stage 1 `triage-issue` is built and proven on #12: issue -> questions -> PRD -> `/approve` -> `sdlc:approved`, PRD merged to `docs/prd/12-sonos-alarm-manager.md`.
-- Labels after `approved` already exist and are unused: `sdlc:planned`, `sdlc:in-progress`, `sdlc:demo-review`, `sdlc:done`, `sdlc:escalated`.
-- Mechanisms to reuse: marked agent comments (`<!-- sdlc:v1 kind=... rev=N -->`), revision-bound approval, `transition`, `state`, `next` (`action: plan` is this skill's trigger), the round budget and `escalated`.
+- `triage-issue` takes an issue to `sdlc:approved`, with a PRD merged to `docs/prd/N-*.md`.
+- `plan-issue` takes it to `sdlc:planned`:
+  - the issue is the **epic**;
+  - subtasks (`plan:subtask`) and one-session units of work (`plan:slice`) are native sub-issues;
+  - order is native `blocked_by`;
+  - optional GitHub milestones each name a demo.
+- The plan is reviewed by the advisor, then by Codex rounds (`codex exec --sandbox read-only`,
+  `VERDICT:` line), until they agree. The poster is not asked unless there's no consensus.
+- `uv run python tools/sdlc.py ready --epic N` lists the units of work whose blockers all closed as completed.
+  That is `work-slice`'s queue.
+- Each unit's body has the marker `<!-- sdlc:v1 kind=slice epic=N key=K -->` and the sections
+  Outcome, Scope, Acceptance criteria, Validation, Demo, Non-goals, Context and Dependencies.
 
-## What `plan-issue` must do
-Turn an approved PRD or diagnosis into work an agent can do in separate sessions:
-1. an **epic** issue for the whole PRD;
-2. **milestones**, only if the work needs them;
-3. **subtasks** per milestone, with dependencies between them (they can run in sequence or parallel);
-4. **slices** per subtask, each small enough for one Claude Code session.
-Bugs: subtasks come from the diagnosis's proposed fix; slices only if needed.
+## `work-slice` (one unit per session)
+- Pick from `ready`, claim it, branch, implement only what its sections say, test offline, and open a PR that closes the unit.
+- Review rounds: advisor, then Codex on the PR head, posted to the PR. Escalate after N rounds.
+  Reuse `parse_verdict` and the round-budget pattern from planning.
+- Move the epic `planned -> in-progress` on the first claim.
 
-## Decisions to make with the user (grill-me)
-- Native GitHub sub-issues + `blocked_by`, or checklists? (cubism uses native; check `gh` 2.88 support.)
-- Is a slice an issue or a checklist item in the subtask? Required sections in a slice (cubism's: Outcome, Scope, Acceptance criteria, Validation, Demo, Non-goals).
-- Does the poster approve the plan (a second sign-off, `sdlc:planned`), or only the PRD?
-- Labels/state for epics, subtasks and slices vs the issue's own `sdlc:*` label.
-- Deterministic parts to add to `tools/sdlc.py`: create/link issues, validate slice sections, `next` over slices with unmet dependencies.
+## `milestone-demo`
+- When every unit in a milestone is closed as completed, write the demo + implementation doc and post it to the poster
+  (`sdlc:demo-review`). Their `/approve` closes the milestone. The last one moves the epic to `sdlc:done`.
 
-## Not yet built (do after this)
-`work-slice` (one slice per session; subtask PR; tests; advisor + Codex review rounds posted to the PR, escalate after N rounds) and `milestone-demo` (demo + implementation doc, bounced to the poster). Prior art: postscript_interpreter `.claude/skills/work-issue`, cubism-rs `.agents/skills/{plan-epic,work-slice,codex-review,review-milestone}` and `scripts/sdlc.py`.
-
-## First check
-`uv run python tools/sdlc.py state 12` should say `approved`, action `plan`.
+Prior art: cubism-rs `.agents/skills/{work-slice,codex-review,review-milestone}` and `scripts/sdlc.py`
+(claims, SHA-bound review receipts, `check-slice`).
