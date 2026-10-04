@@ -141,6 +141,12 @@ def test_titles_in_a_registered_shape_are_named():
     # iHeart's own comma attributes and a plain title: the default reads both.
     assert probe.title_shape(['title="Plane",artist="JOHN MULANEY",url=""',
                               "Low - Words"]) == "artist-song"
+    # A spot or show name beside an iHeart song doesn't lose it the shape.
+    spot = 'title="",artist="",url="song_spot=\\"T\\""'
+    assert probe.title_shape(['title="Plane",artist="JOHN MULANEY",url=""', spot]) \
+        == "iheart-attrs"
+    assert probe.title_shape(['title="Plane",artist="JOHN MULANEY",url=""',
+                              "The Breakfast Club"]) == "iheart-attrs"
 
 
 def test_only_specific_shapes_are_ever_guessed():

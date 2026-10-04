@@ -223,6 +223,10 @@ def title_shape(samples: list[str | None], icy_name: str | None = None) -> str:
             return shape
     if all(icy.split_title(icy.tidy_title(t)) != (None, None) for t in real):
         return "artist-song"
+    # An iHeart song beside a spot or station ID (`title="",artist=""`): still
+    # iHeart's, and under its shape the spot gives nothing rather than a split.
+    if any('title="' in t and 'artist="' in t for t in real):
+        return "iheart-attrs"
     return "show-like"
 
 
