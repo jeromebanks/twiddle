@@ -321,7 +321,7 @@ def parse_days(text: str) -> Recurrence:
     if low.upper() in NAMED:
         return Recurrence.parse(low.upper())
     if low.startswith("on_"):
-        return Recurrence.parse(low.upper())
+        return Recurrence.on(Recurrence.parse(low.upper()).days)
     days: set[int] = set()
     for token in filter(None, re.split(r"[,\s]+", low)):
         first, _, last = token.partition("-")
@@ -340,8 +340,9 @@ def parse_duration(text: str) -> str:
     `none` (or 0) is no auto-stop, an empty Duration as soco sends it."""
     if re.fullmatch(r"\d{2}:\d{2}:\d{2}", text.strip()):
         h, m, s = (int(x) for x in text.split(":"))
-        if m > 59 or s > 59:
-            raise ValueError(f"can't read {text!r} as a duration")
+        if m > 59 or s > 59 or not 0 < (h * 60 + m) * 60 + s < 24 * 3600:
+            raise ValueError(f"can't read {text!r} as a duration: more than nothing, "
+                             "less than a day (`none` is no auto-stop)")
         return text.strip()
     try:
         secs = parse_sleep_spec(text)
@@ -737,9 +738,7 @@ def cmd_edit(args):
                              done=_done(house, exc, f"updated alarm {alarm.id}")
                              + f"  ({', '.join(fields)}){_note(target)}")
     return emit(args, about | {"performed": True, "fields": fields, "before": about["alarm"],
-                               "alarm": after.to_attributes(),
-                               "room": aimed_at(house, after.room_uuid)["room"],
-                               "version": now.version},
+                               "alarm": after.to_attributes(), "version": now.version},
                 f"updated {what(after)}")
 
 

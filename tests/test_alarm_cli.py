@@ -683,6 +683,7 @@ def without_id(attrs):
     ("once", "ONCE"), ("daily", "DAILY"), ("weekdays", "WEEKDAYS"), ("weekends", "WEEKENDS"),
     ("mon,wed,fri", "ON_135"), ("Tue", "ON_2"), ("sat,sun", "WEEKENDS"),
     ("mon-fri", "WEEKDAYS"), ("fri-mon", "ON_0156"), ("ON_0246", "ON_0246"),
+    ("on_210", "ON_012"), ("ON_12345", "WEEKDAYS"),
 ])
 def test_add_each_recurrence_form_reads_back_identically(clockfake, capsys, days, spelt):
     argv = ["alarm", "add", "--room", "Sonos Roam", "--time", "7:15", "--days", days, "--json"]
@@ -790,6 +791,8 @@ def test_a_follower_in_a_room_grouped_elsewhere_targets_its_room_not_the_group(
     (["--mode", "loud"], "unknown play mode 'loud'"),
     (["--duration", "forever"], "can't read 'forever' as a duration"),
     (["--duration", "00:75:00"], "can't read '00:75:00' as a duration"),
+    (["--duration", "00:00:00"], "can't read '00:00:00' as a duration"),
+    (["--duration", "25:00:00"], "can't read '25:00:00' as a duration"),
 ])
 def test_a_value_that_cant_be_read_is_an_error_and_nothing_is_sent(
         clockfake, capsys, argv, error):
@@ -956,3 +959,13 @@ def test_play_mode_names_follow_the_speakers_meaning():
         "normal": "NORMAL", "repeat": "REPEAT_ALL", "repeat-one": "REPEAT_ONE",
         "shuffle": "SHUFFLE_NOREPEAT", "shuffle-repeat": "SHUFFLE",
         "shuffle-repeat-one": "SHUFFLE_REPEAT_ONE"}
+
+
+def test_edit_json_room_is_where_the_alarm_was_and_to_room_where_it_goes(clockfake, capsys):
+    for dry in (["--dry-run"], []):
+        code, out, _ = run(["alarm", "edit", "66", "--room", "Living Room", "--json", *dry],
+                           capsys)
+        payload = json.loads(out)
+        assert code == 0 and payload["performed"] is not bool(dry)
+        assert payload["room"] == "Sonos Roam" and payload["to_room"] == "Living Room"
+    assert clockfake.alarms["66"]["RoomUUID"] == LIVING
