@@ -780,9 +780,10 @@ class Gena:
     """`requests.request` for SUBSCRIBE/UNSUBSCRIBE. On SUBSCRIBE it posts
     `notify` (if any) to the callback, as a speaker does, from this thread."""
 
-    def __init__(self, notify=NOTIFY, refuse=False):
-        self.notify, self.refuse = notify, refuse
+    def __init__(self, notify=NOTIFY, refuse=False, stall=False):
+        self.notify, self.refuse, self.stall = notify, refuse, stall
         self.unsubscribed: list[str] = []
+        self.stalled = None                # the half-sent NOTIFY's socket
 
     def __call__(self, method, url, headers=None, timeout=None):
         import http.client
@@ -793,9 +794,14 @@ class Gena:
             self.unsubscribed.append(headers["SID"])
             return type("R", (), {"headers": {}})()
         assert method == "SUBSCRIBE" and url.endswith("/MediaRenderer/AVTransport/Event")
-        if self.notify is not None:
-            cb = urlsplit(headers["CALLBACK"].strip("<>"))
-            assert cb.hostname == "127.0.0.1"
+        cb = urlsplit(headers["CALLBACK"].strip("<>"))
+        assert cb.hostname == "127.0.0.1"
+        if self.stall:                     # headers promise a body that never comes
+            import socket
+            self.stalled = socket.create_connection((cb.hostname, cb.port), timeout=2)
+            self.stalled.sendall(b"NOTIFY / HTTP/1.1\r\nHost: x\r\n"
+                                 b"Content-Length: 500\r\n\r\n<e:propertyset")
+        elif self.notify is not None:
             conn = http.client.HTTPConnection(cb.hostname, cb.port, timeout=2)
             conn.request("NOTIFY", cb.path or "/", self.notify.encode(),
                          {"NT": "upnp:event", "SID": "uuid:fake-sid", "SEQ": "0"})
@@ -824,3 +830,33 @@ def test_last_change_when_subscribing_fails_is_none(monkeypatch):
     monkeypatch.setattr(clock.requests, "request", gena)
     assert REAL_LAST_CHANGE("127.0.0.1", wait=0.2) is None
     assert gena.unsubscribed == []
+
+
+def test_a_notify_that_stalls_halfway_cant_hang_the_command(monkeypatch):
+    import time
+    gena = Gena(stall=True)
+    monkeypatch.setattr(clock.requests, "request", gena)
+    t0 = time.monotonic()
+    assert REAL_LAST_CHANGE("127.0.0.1", wait=0.3) is None
+    assert time.monotonic() - t0 < 2
+    assert gena.unsubscribed == ["uuid:fake-sid"]
+    gena.stalled.close()
+
+
+def test_the_callback_listens_only_on_the_address_facing_the_speaker(monkeypatch):
+    bound = []
+    real = clock_http_server()
+
+    class Spy(real):
+        def __init__(self, addr, handler):
+            bound.append(addr[0])
+            super().__init__(addr, handler)
+    monkeypatch.setattr("http.server.HTTPServer", Spy)
+    monkeypatch.setattr(clock.requests, "request", Gena())
+    REAL_LAST_CHANGE("127.0.0.1", wait=1)
+    assert bound == ["127.0.0.1"]
+
+
+def clock_http_server():
+    from http.server import HTTPServer
+    return HTTPServer

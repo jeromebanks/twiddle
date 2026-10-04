@@ -414,7 +414,11 @@ def running_alarm(ip: str) -> Running | None:
 def last_change(ip: str, wait: float = 3.0) -> dict[str, str] | None:
     """AVTransport's state from one GENA event: subscribe, take the initial
     NOTIFY (it carries every variable), unsubscribe. Read-only, the same
-    subscription `monitor` keeps on the anchor. None if no event came."""
+    subscription `monitor` keeps on the anchor. None if no event came.
+
+    The callback listens only on the address facing the speaker, and every
+    read on it is bounded by `wait`, so a NOTIFY that stalls halfway can't
+    hold the command up: it returns within a few `wait`s whatever happens."""
     import socket
     import threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -423,6 +427,8 @@ def last_change(ip: str, wait: float = 3.0) -> dict[str, str] | None:
     arrived = threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
+        timeout = wait                       # each socket read, the body's included
+
         def do_NOTIFY(self):  # noqa: N802 - UPnP verb
             n = int(self.headers.get("Content-Length", 0) or 0)
             got.append(self.rfile.read(n).decode("utf-8", "replace"))
@@ -434,13 +440,13 @@ def last_change(ip: str, wait: float = 3.0) -> dict[str, str] | None:
             pass
 
     path = f"http://{ip}:{PORT}/MediaRenderer/AVTransport/Event"
-    server = HTTPServer(("0.0.0.0", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    sid = ""
+    server, sid = None, ""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect((ip, PORT))
             me = s.getsockname()[0]
+        server = HTTPServer((me, 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
         r = requests.request("SUBSCRIBE", path, timeout=wait,
                              headers={"CALLBACK": f"<http://{me}:{server.server_port}/>",
                                       "NT": "upnp:event", "TIMEOUT": "Second-60"})
@@ -455,11 +461,12 @@ def last_change(ip: str, wait: float = 3.0) -> dict[str, str] | None:
                 requests.request("UNSUBSCRIBE", path, headers={"SID": sid}, timeout=wait)
             except requests.RequestException:
                 pass
-        server.shutdown()
-        server.server_close()
+        if server is not None:
+            server.shutdown()
+            server.server_close()
     try:
         return parse_last_change(got[0]) if got else None
-    except ET.ParseError:
+    except (ET.ParseError, ValueError):
         return None
 
 
