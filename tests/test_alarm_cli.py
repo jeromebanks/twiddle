@@ -969,3 +969,31 @@ def test_edit_json_room_is_where_the_alarm_was_and_to_room_where_it_goes(clockfa
         assert code == 0 and payload["performed"] is not bool(dry)
         assert payload["room"] == "Sonos Roam" and payload["to_room"] == "Living Room"
     assert clockfake.alarms["66"]["RoomUUID"] == LIVING
+
+
+def dens(grouped, north_first):
+    north = Speaker(ip="10.0.0.21", uuid="RINCON_DEN_N", name="Den North", room="Den North",
+                    group_id="d", is_coordinator=True)
+    south = Speaker(ip="10.0.0.22", uuid="RINCON_DEN_S", name="Den South", room="Den South",
+                    group_id="d" if grouped else "s", is_coordinator=not grouped)
+    pair = [north, south] if north_first else [south, north]
+    groups = ([Group("d", north, pair)] if grouped
+              else [Group("d", north, [north]), Group("s", south, [south])])
+    return Household(pair, groups, Topology(groups={}, vanished=[]))
+
+
+@pytest.mark.parametrize("grouped", [True, False])
+@pytest.mark.parametrize("north_first", [True, False])
+def test_a_name_matching_two_rooms_is_ambiguous_even_when_they_are_grouped(
+        clockfake, capsys, monkeypatch, grouped, north_first):
+    house = dens(grouped, north_first)
+    monkeypatch.setattr(alarm_cli, "_household", lambda args: house)
+    for argv in (["add", "--time", "07:15"], ["edit", "2"]):
+        code, out, _ = run(["alarm", *argv, "--room", "Den", "--json"], capsys)
+        payload = json.loads(out)
+        assert code == 1 and "matches more than one target" in payload["error"]
+        assert payload["candidates"] == ["Den North", "Den South"]
+    code, out, _ = run(["alarm", "add", "--time", "07:15", "--room", "Den South", "--json"],
+                       capsys)
+    assert clockfake.alarms[json.loads(out)["id"]]["RoomUUID"] == "RINCON_DEN_S"
+    assert clockfake.writes == ["CreateAlarm"]
