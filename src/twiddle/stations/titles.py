@@ -62,7 +62,7 @@ def lookup_name(artist: str | None) -> str | None:
     return m["name"] if m else artist
 
 
-def _the_first(artist: str) -> str:
+def the_first(artist: str) -> str:
     # Library order ("Pretenders, The") back to how the band is named,
     # keeping any credit after it.
     m = _CREDIT.match(artist)
@@ -116,7 +116,7 @@ def wfmu(title: str) -> dict:
                    else _last_unquoted(artist, " on "))
             if cut is not None:
                 artist, show = artist[:cut], artist[cut + len(" on "):]
-        fields = {"artist": _the_first(artist.strip()), "song": m["song"].strip(),
+        fields = {"artist": the_first(artist.strip()), "song": m["song"].strip(),
                   "show": show.strip() if show else None}
         return {k: v for k, v in fields.items() if v}
     m = _WFMU_SHOW.match(title)

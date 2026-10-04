@@ -48,6 +48,9 @@ class StationState:
     next_at: float = 0.0
     busy: bool = False
     seen: list[dict] = field(default_factory=list)   # our own history, newest first
+    # The last show a fetch actually named. A fetch naming none (an ICY
+    # fallback) leaves it; only a different named show is a new show.
+    show: str | None = None
 
     @property
     def key(self) -> str:
@@ -143,8 +146,16 @@ class StationFeed:
             else:
                 old = st.np
                 changed = old is None or st.error is not None or old.to_dict() != np.to_dict()
+                # A new show starts our own history over: what played before
+                # it, its last song included, belongs to the show that ended.
+                new_show = bool(np.show) and st.show is not None and np.show != st.show
+                if np.show:
+                    st.show = np.show
+                if new_show:
+                    st.seen.clear()
                 if _ident(old) != _ident(np):
-                    if old is not None and (old.artist or old.song or old.raw_title):
+                    if not new_show and old is not None and (old.artist or old.song
+                                                             or old.raw_title):
                         st.seen.insert(0, {k: v for k, v in {
                             "time": time.strftime("%H:%M", time.localtime(st.since or now)),
                             "artist": old.artist, "song": old.song or old.raw_title,

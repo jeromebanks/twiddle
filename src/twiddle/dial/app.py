@@ -46,6 +46,7 @@ VOLUME_SETTLE_S = 0.35      # an output with no `volume_interval_s` of its own
 SLEEP_SETTLE_S = 1.2        # z z z to reach 45 min is one write, not three
 SLEEP_PRESETS_MIN = (15, 30, 45, 60, 90, 120)
 STATE_POLL_S = 12
+RECENT_MAX = 300            # "Just played" rows drawn: a whole show, not a runaway page
 EQ_FRAMES_S = 0.18
 LINK_ORDER = ("bandcamp", "official", "wikipedia", "discogs", "musicbrainz")
 BARS = "▁▂▃▄▅▆▇"
@@ -601,7 +602,9 @@ class DialApp(App):
         if not rows:
             t.append("Nothing yet: this station doesn't publish a playlist, so this "
                      "fills in as songs change while dial is open.", style="dim")
-        for r in rows[:15]:
+        # Every row the station published, so a show reads from its start;
+        # the cap only guards against a runaway page.
+        for r in rows[:RECENT_MAX]:
             t.append(f"{r.get('time', ''):>8}  ", style="dim")
             t.append("▪ ", style=art.hex_of(self.accent))
             if r.get("artist"):
