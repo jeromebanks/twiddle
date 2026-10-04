@@ -484,17 +484,18 @@ NOTIFY = ('<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><
 RUNNING = {"AlarmID": "34", "GroupID": f"{ROAM_L}:12",
            "LoggedStartTime": "2026-10-04 08:20:00"}
 ROAM_IP, LIVING_IP = "10.0.0.11", "10.0.0.13"
+REAL_LAST_CHANGE = clock.last_change          # before any fixture replaces it
 
 
-def scpd_in_args() -> dict[str, list[str]]:
-    """Each action's in-arguments, in the speaker's own order."""
+def scpd_in_args(direction: str = "in") -> dict[str, list[str]]:
+    """Each action's in- (or out-) arguments, in the speaker's own order."""
     ns = {"u": "urn:schemas-upnp-org:service-1-0"}
     out = {}
     for a in ET.parse(SCPD).getroot().iterfind(".//u:action", ns):
         out[a.findtext("u:name", namespaces=ns)] = [
             arg.findtext("u:name", namespaces=ns)
             for arg in a.iterfind(".//u:argument", ns)
-            if arg.findtext("u:direction", namespaces=ns) == "in"]
+            if arg.findtext("u:direction", namespaces=ns) == direction]
     return out
 
 
@@ -561,6 +562,10 @@ def run(argv, capsys):
 
 def test_the_recorded_scpd_has_every_action_sent():
     assert set(scpd_in_args()) >= clock.AV_READS | clock.AV_WRITES
+
+
+def test_the_built_running_response_has_exactly_the_recorded_out_arguments():
+    assert list(RUNNING) == scpd_in_args("out")["GetRunningAlarmProperties"]
 
 
 def test_a_running_alarm_parses_from_its_response():
@@ -748,13 +753,74 @@ def test_the_snooze_and_duration_spans_are_ones_analyse_pairs(av, capsys):
     assert {p[1] for p in points} >= {"alarm_snooze", "alarm_run"}
 
 
-def test_no_event_leaves_status_to_get_running_alarm_properties(av, monkeypatch, capsys):
-    def refused(*a, **k):
-        raise requests.ConnectionError("refused")
-    monkeypatch.setattr(clock.requests, "request", refused)
-    assert clock.last_change(ROAM_IP, wait=0.1) is None
-    monkeypatch.setattr(clock, "last_change", lambda ip, wait=3.0: None)
+def test_no_event_leaves_status_to_get_running_alarm_properties(av, capsys):
     av.running[ROAM_IP] = RUNNING
     code, out, _ = run(["alarm", "status", "--room", "Sonos Roam", "--json"], capsys)
     [roam] = json.loads(out)["rooms"]
     assert (code, roam["ringing"], roam["alarm_running"]) == (0, True, None)
+
+
+@pytest.mark.parametrize("state, ringing", [
+    ({"AlarmRunning": "0", "SnoozeRunning": "0"}, False),   # the event says plainly: no
+    ({"AlarmRunning": "1", "SnoozeRunning": "0"}, True),
+    (None, True)])                                          # no event: the ID decides
+def test_an_event_saying_nothing_runs_overrules_a_running_alarm_id(av, capsys, state, ringing):
+    av.running[ROAM_IP] = RUNNING
+    if state:
+        av.state[ROAM_IP] = state
+    assert (clock.alarm_now(ROAM_IP) is not None) is ringing
+    code, _, _ = run(["alarm", "stop", "--room", "Sonos Roam"], capsys)
+    assert code == (0 if ringing else 1)
+    assert [a for _, a, _ in av.av_writes] == (["Stop"] if ringing else [])
+
+
+# ---- last_change: one GENA event, on loopback only ----------------------------
+
+class Gena:
+    """`requests.request` for SUBSCRIBE/UNSUBSCRIBE. On SUBSCRIBE it posts
+    `notify` (if any) to the callback, as a speaker does, from this thread."""
+
+    def __init__(self, notify=NOTIFY, refuse=False):
+        self.notify, self.refuse = notify, refuse
+        self.unsubscribed: list[str] = []
+
+    def __call__(self, method, url, headers=None, timeout=None):
+        import http.client
+        from urllib.parse import urlsplit
+        if self.refuse:
+            raise requests.ConnectionError("refused")
+        if method == "UNSUBSCRIBE":
+            self.unsubscribed.append(headers["SID"])
+            return type("R", (), {"headers": {}})()
+        assert method == "SUBSCRIBE" and url.endswith("/MediaRenderer/AVTransport/Event")
+        if self.notify is not None:
+            cb = urlsplit(headers["CALLBACK"].strip("<>"))
+            assert cb.hostname == "127.0.0.1"
+            conn = http.client.HTTPConnection(cb.hostname, cb.port, timeout=2)
+            conn.request("NOTIFY", cb.path or "/", self.notify.encode(),
+                         {"NT": "upnp:event", "SID": "uuid:fake-sid", "SEQ": "0"})
+            conn.getresponse().read()
+            conn.close()
+        return type("R", (), {"headers": {"SID": "uuid:fake-sid"}})()
+
+
+def test_last_change_takes_the_initial_event_and_unsubscribes(monkeypatch):
+    gena = Gena()
+    monkeypatch.setattr(clock.requests, "request", gena)
+    assert REAL_LAST_CHANGE("127.0.0.1", wait=2) == {
+        "TransportState": "STOPPED", "AlarmRunning": "0", "SnoozeRunning": "0"}
+    assert gena.unsubscribed == ["uuid:fake-sid"]
+
+
+def test_last_change_with_no_event_is_none_and_still_unsubscribes(monkeypatch):
+    gena = Gena(notify=None)
+    monkeypatch.setattr(clock.requests, "request", gena)
+    assert REAL_LAST_CHANGE("127.0.0.1", wait=0.2) is None
+    assert gena.unsubscribed == ["uuid:fake-sid"]
+
+
+def test_last_change_when_subscribing_fails_is_none(monkeypatch):
+    gena = Gena(refuse=True)
+    monkeypatch.setattr(clock.requests, "request", gena)
+    assert REAL_LAST_CHANGE("127.0.0.1", wait=0.2) is None
+    assert gena.unsubscribed == []

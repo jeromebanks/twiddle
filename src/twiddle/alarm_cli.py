@@ -918,7 +918,8 @@ def _ringing_or_fail(args, house: Household, verb: str):
     if running is None:
         return None, None, None, fail(
             args, f"no alarm is going off in {group.name}; nothing to {verb}",
-            f"`twiddle stop --room \"{args.room}\"` stops ordinary playback", **about)
+            (f"`twiddle stop --room \"{args.room}\"` stops ordinary playback"
+             if verb == "stop" else "`twiddle alarm status` shows where one is"), **about)
     return group, running, about | {"running": running.to_dict()}, None
 
 

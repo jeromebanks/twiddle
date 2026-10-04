@@ -466,15 +466,22 @@ def last_change(ip: str, wait: float = 3.0) -> dict[str, str] | None:
 def alarm_now(ip: str, events: bool = True) -> Running | None:
     """Whether an alarm is going off, or snoozed, on the group `ip`
     coordinates: GetRunningAlarmProperties, then (with `events`) LastChange's
-    AlarmRunning/SnoozeRunning. None when neither shows one. Read-only."""
+    AlarmRunning/SnoozeRunning. Read-only.
+
+    None when neither shows one, and also when an event says plainly that
+    neither is running whatever GetRunningAlarmProperties named: callers stop
+    the room on this answer, and wrongly refusing costs less than a bare Stop
+    on ordinary playback. With no event, GetRunningAlarmProperties decides."""
     found = running_alarm(ip)
     state = last_change(ip) if events else None
     if state:
-        found = found or Running()
-        found.alarm_running = _flag(state, "AlarmRunning")
-        found.snooze_running = _flag(state, "SnoozeRunning")
-        if not (found.alarm_id or found.alarm_running or found.snooze_running):
+        alarm, snooze = _flag(state, "AlarmRunning"), _flag(state, "SnoozeRunning")
+        if alarm is False and snooze is False:
             return None
+        if found is None and not (alarm or snooze):
+            return None
+        found = found or Running()
+        found.alarm_running, found.snooze_running = alarm, snooze
     return found
 
 

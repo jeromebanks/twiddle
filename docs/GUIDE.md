@@ -247,6 +247,9 @@ coordinator `GetRunningAlarmProperties`, which names the alarm going off
 none is. It also takes one GENA event from each (the subscription the daemon
 keeps on its anchor) for `AlarmRunning` and `SnoozeRunning`, which no action
 returns; without an event it still answers from `GetRunningAlarmProperties`.
+An event that says plainly neither is running wins over an alarm ID
+`GetRunningAlarmProperties` still names: `stop` acts on this answer, and
+refusing wrongly costs less than stopping ordinary playback.
 The alarm is named from `ListAlarms` by its ID, under its own room. `status`
 writes nothing and journals nothing.
 
