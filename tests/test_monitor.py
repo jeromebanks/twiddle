@@ -189,16 +189,21 @@ def test_rotation_past_retention_keeps_the_alarm_discounted(tmp_path: Path,
 
 def test_an_unanswered_alarmclock_never_disturbs_sampling(tmp_path: Path, monkeypatch):
     """The run loop's guard: an AlarmClock error is swallowed, not counted
-    towards re-electing the anchor, and the last schedule stays."""
+    towards re-electing the anchor, and the schedule isn't asked for while
+    the anchor itself is failing."""
     m, out = _monitor(tmp_path)
     calls = []
 
     def snapshot():
         calls.append("snapshot")
-        if len(calls) >= 3:
+        n = calls.count("snapshot")
+        if n == 2:
+            raise OSError("anchor down")                 # this iteration: no alarm read
+        if n == 5:
             raise KeyboardInterrupt
 
     def check_alarms():
+        calls.append("alarms")
         raise ConnectionError("AlarmClock down")
 
     monkeypatch.setattr(m, "_snapshot", snapshot)
@@ -209,6 +214,9 @@ def test_an_unanswered_alarmclock_never_disturbs_sampling(tmp_path: Path, monkey
     monkeypatch.setattr(monitor.time, "sleep", lambda s: None)
     m._fh.close()
     m.run(0)
-    kinds = [r["kind"] for r in map(json.loads, out.read_text().splitlines())]
-    assert "sample_error" not in kinds
-    assert getattr(m, "_consecutive_errors", 0) == 0
+    assert calls == ["snapshot", "alarms", "snapshot", "snapshot", "alarms",
+                     "snapshot", "alarms", "snapshot"]
+    errors = [r for r in map(json.loads, out.read_text().splitlines())
+              if r["kind"] == "sample_error"]
+    assert [e["err"] for e in errors] == ["OSError('anchor down')"]   # never AlarmClock's
+    assert m._consecutive_errors == 0

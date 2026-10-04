@@ -415,13 +415,17 @@ class Monitor:
                     if self._consecutive_errors >= 10:
                         # The anchor may be gone for good; re-elect one.
                         self._reelect_anchor()
-                try:
-                    self._check_alarms()
-                except Exception:
-                    # Kept apart from the sampling above: a speaker that won't
-                    # answer AlarmClock is not a reason to re-elect the anchor,
-                    # and the last schedule logged stays in force until then.
-                    pass
+                # Not while the anchor is failing: that would add another
+                # timeout to every sample during the very outage being recorded.
+                if not getattr(self, "_consecutive_errors", 0):
+                    try:
+                        self._check_alarms()
+                    except Exception:
+                        # Kept apart from the sampling above: a speaker that
+                        # won't answer AlarmClock is not a reason to re-elect
+                        # the anchor, and the last schedule logged stays in
+                        # force until it does.
+                        pass
                 time.sleep(max(0.5, self.interval - (time.monotonic() - t0)))
         except KeyboardInterrupt:
             self._emit({"kind": "interrupted"})
