@@ -130,6 +130,10 @@ def test_title_shapes():
 
 def test_titles_in_a_registered_shape_are_named():
     assert probe.title_shape(WFMU_TITLES, "WFMU Freeform Radio") == "wfmu"
+    # A trailing space is trimmed before the mark is looked for, as the shape trims it.
+    assert probe.title_shape([t + " " for t in WFMU_TITLES]) == "wfmu"
+    assert probe.title_shape([WFMU_TITLES[1] + " "] * 2) == "wfmu"      # not "Orgies as an artist
+    assert probe.title_shape(["  ", None]) == "blank"
     # A show change between songs is still WFMU's shape...
     assert probe.title_shape([WFMU_TITLES[0], "Fool's Paradise with Rex"]) == "wfmu"
     # ...but its filler isn't, and one of those means no shape is certain.
