@@ -13,10 +13,11 @@ hundreds; polling them all every minute would not be polite to anyone.
 `on_change(key)` fires (on a worker thread) only when what a station
 reports actually changed, so the UI redraws per song, not per poll.
 
-Stations that publish their own history (KEXP, Spinitron) supply "just
+Stations that publish their own history (KEXP, Spinitron, WFMU) supply "just
 played" directly; for the ICY-only ones it is built from what this app saw
-change while it was open. A station on a fixed program schedule (KQED)
-supplies `schedule` instead, and the panel shows the day's lineup.
+change while it was open, started over whenever a fetch names a new show.
+A station on a fixed program schedule (KQED) supplies `schedule` instead,
+and the panel shows the day's lineup.
 """
 from __future__ import annotations
 
@@ -35,7 +36,11 @@ SEEN_MAX = 12
 
 
 def _ident(np: NowPlaying | None) -> tuple:
-    return (np.artist, np.song, np.raw_title) if np else ()
+    # The parsed song when there is one: a fetch that also carries the raw
+    # title (WFMU's ICY fallback) names the same song, not a new one.
+    if np is None:
+        return ()
+    return (np.artist, np.song) if np.artist or np.song else (None, None, np.raw_title)
 
 
 @dataclass
@@ -48,6 +53,9 @@ class StationState:
     next_at: float = 0.0
     busy: bool = False
     seen: list[dict] = field(default_factory=list)   # our own history, newest first
+    # The last show a fetch actually named. A fetch naming none (an ICY
+    # fallback) leaves it; only a different named show is a new show.
+    show: str | None = None
 
     @property
     def key(self) -> str:
@@ -143,8 +151,16 @@ class StationFeed:
             else:
                 old = st.np
                 changed = old is None or st.error is not None or old.to_dict() != np.to_dict()
+                # A new show starts our own history over: what played before
+                # it, its last song included, belongs to the show that ended.
+                new_show = bool(np.show) and st.show is not None and np.show != st.show
+                if np.show:
+                    st.show = np.show
+                if new_show:
+                    st.seen.clear()
                 if _ident(old) != _ident(np):
-                    if old is not None and (old.artist or old.song or old.raw_title):
+                    if not new_show and old is not None and (old.artist or old.song
+                                                             or old.raw_title):
                         st.seen.insert(0, {k: v for k, v in {
                             "time": time.strftime("%H:%M", time.localtime(st.since or now)),
                             "artist": old.artist, "song": old.song or old.raw_title,

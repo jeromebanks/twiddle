@@ -73,6 +73,47 @@ def test_feed_prefers_the_stations_own_history():
     feed.close()
 
 
+def _song(n, show=None):
+    return NowPlaying("W", artist=f"Band {n}", song=f"Song {n}", show=show)
+
+
+def test_feed_keeps_a_shows_history_through_a_fetch_that_names_no_show():
+    # Show A, then an ICY fallback naming no show, then Show A again.
+    s = fake_station("w", [_song(1, "Show A"), _song(2, "Show A"), _song(3),
+                           _song(4, "Show A")])
+    feed = StationFeed([s], lambda k: None, clock=lambda: 1000.0)
+    for _ in range(4):
+        feed.poll("w")
+    assert [r["song"] for r in feed.states["w"].recent()] == ["Song 3", "Song 2", "Song 1"]
+    feed.close()
+
+
+def test_feed_a_fallback_naming_the_same_song_is_not_a_song_change():
+    # WFMU: live page (no raw title), one ICY fallback (raw title), live again.
+    live = NowPlaying("W", artist="Band 1", song="Song 1", show="Show A")
+    icy = NowPlaying("W", artist="Band 1", song="Song 1", show="Show A",
+                     raw_title='"Song 1" by Band 1 on Show A on WFMU')
+    s = fake_station("w", [live, icy, live])
+    feed = StationFeed([s], lambda k: None, clock=lambda: 1000.0)
+    for _ in range(3):
+        feed.poll("w")
+    assert feed.states["w"].recent() == []
+    feed.close()
+
+
+def test_feed_starts_its_history_over_when_a_new_show_is_named():
+    # Show A, a fallback naming no show, then Show B: nothing of Show A stays,
+    # not even the song that was on when the fallback came.
+    s = fake_station("w", [_song(1, "Show A"), _song(2, "Show A"), _song(3),
+                           _song(4, "Show B")])
+    feed = StationFeed([s], lambda k: None, clock=lambda: 1000.0)
+    for _ in range(4):
+        feed.poll("w")
+    st = feed.states["w"]
+    assert st.np.song == "Song 4" and st.recent() == []
+    feed.close()
+
+
 def test_feed_failure_reports_once_and_backs_off_keeping_the_last_song():
     s = fake_station("a", [NowPlaying("A", artist="Low", song="Words"),
                            OSError("down"), OSError("down")])
@@ -760,6 +801,24 @@ def test_a_program_station_shows_its_schedule_not_just_played():
             await pilot.press("k", "k")                  # a playlist station is unchanged
             await pilot.pause()
             assert box.border_title == "Just played on KEXP"
+    run(go())
+
+
+def test_just_played_shows_a_whole_published_show_from_its_first_song(monkeypatch):
+    rows = [{"artist": f"Band {n}", "song": f"Song {n}", "album": f"Album {n}",
+             "label": "Label", "year": "1981", "format": "LP", "comment": "a request",
+             "playlist_url": "https://wfmu.org/playlists/shows/1", "song_id": str(n)}
+            for n in range(20, 0, -1)]                   # newest first, Song 1 the show's first
+    monkeypatch.setitem(SONGS, "kexp", NowPlaying("KEXP", artist="Low", song="Words",
+                                                  recent=rows))
+
+    async def go():
+        app = make_app(FakeOutput(tuned="kalx"))
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            text = str(app.query_one("#recent").render())
+            assert "Band 20 — Song 20" in text and "Band 1 — Song 1" in text
+            assert "Album 1" in text
     run(go())
 
 

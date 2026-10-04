@@ -17,7 +17,7 @@ and the fetcher around it, then list it here.
 | kexp        | api.kexp.org (song, show, MusicBrainz ids)        |                   |
 | kqed        | kqed.org/radio/schedule (program schedule)        |                   |
 | wmbr        | wmbr.org/dynamic.xml (show and host)              |                   |
-| wfmu        | ICY (song, artist, show) + playlist RSS fallback  |                   |
+| wfmu        | wfmu.org live show + its playlist; ICY fallback   |                   |
 | rainwave    | rainwave.cc/api4/info (song, game, art, recent)   | sid               |
 | airtime     | <id>.airtime.pro/api/live-info-v2 (show, schedule)| id                |
 | streamabc   | api.streamabc.net/metadata/channel/<key>.json     | channel           |

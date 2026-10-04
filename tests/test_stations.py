@@ -391,16 +391,16 @@ def test_wfmu_titles(title, expected):
 @pytest.mark.parametrize("title,artist,song,show,hosts", [
     (MARS, 'Butch Paulson with "The Motations"', "Man From Mars", "Fool's Paradise", []),
     ("Fool's Paradise with Rex", None, None, "Fool's Paradise", ["Rex"]),
-    # Neither a song nor a show: shown raw, and the RSS names the show.
-    ('Your DJ speaks over "X" on Bucci\'s show on WFMU', None, None,
-     "Rex's show from Oct 3 (latest published)", []),
+    # Neither a song nor a show: shown raw, and nothing else names a show.
+    ('Your DJ speaks over "X" on Bucci\'s show on WFMU', None, None, None, []),
 ])
-def test_wfmu_station_takes_song_and_show_from_its_title(monkeypatch, title, artist, song,
-                                                          show, hosts):
+def test_wfmu_station_falls_back_to_its_title_when_wfmu_org_is_down(monkeypatch, title, artist,
+                                                                    song, show, hosts):
     monkeypatch.setattr(stations.icy, "icy_title", lambda url: title)
-    rss = (b"<rss><channel><item><title>WFMU Playlist: Rex's show from Oct 3"
-           b"</title></item></channel></rss>")
-    monkeypatch.setattr(stations.net, "get", lambda url, headers=None: rss)
+
+    def down(url, headers=None):
+        raise OSError("wfmu.org unreachable")
+    monkeypatch.setattr(stations.net, "get", down)
     np = stations.STATIONS["wfmu"].now_playing()
     assert (np.artist, np.song, np.show, np.hosts) == (artist, song, show, hosts)
     assert np.raw_title == title

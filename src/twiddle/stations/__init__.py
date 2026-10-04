@@ -12,7 +12,7 @@ station names the mechanism it has, one module each in `fetchers/`:
 1. **ICY in-stream metadata** (`icy.py`): every station has it, but it is a
    free-text string the station chooses to populate.
 2. **A station's own feed.** KEXP's API (song, show, MusicBrainz ids), KQED's
-   schedule page, WMBR's `dynamic.xml`, WFMU's playlist RSS.
+   schedule page, WMBR's `dynamic.xml`, WFMU's live show and playlist.
 3. **A platform many stations share.** Spinitron (college/community radio,
    scraped from spinitron.com/<CALLSIGN>), SomaFM's song history, Radio
    France's `livemeta`, NTS's live API. These take the station as data, so
