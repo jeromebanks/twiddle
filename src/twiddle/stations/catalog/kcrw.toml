@@ -1,6 +1,8 @@
-# No logo: kcrw.com answers scripts with 429.
+# No logo: kcrw.com answers scripts with 429. Titles name the show,
+# `Show-Host-join.kcrw.com`: the kcrw shape gives show and host, never an artist.
 name  = "KCRW"
 url   = "https://streams.kcrw.com/kcrw_mp3"
 blurb = "Santa Monica -- NPR/eclectic"
 tags  = ["public", "freeform"]
 order = 50
+fetch_args = { titles = "kcrw" }

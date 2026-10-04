@@ -294,7 +294,8 @@ def _old_icy(title, music):
 
 # Fetchers that read the ICY title, with the default shape, when their own
 # feed has nothing, and the ones of them (with talk) that never take it for
-# an artist. wfmu reads ICY with its own shape (`titles.wfmu`, tested below);
+# an artist. wfmu reads ICY with its own shape (`titles.wfmu`, tested below),
+# as does any station naming `titles` (each held to its own shape's tests);
 # every other fetcher never looks at ICY.
 ICY_FALLBACKS = ("talk", "spinitron", "wmbr", "kqed")
 NEVER_MUSIC = ("talk", "wmbr", "kqed")
@@ -305,7 +306,8 @@ def _icy_stations():
     import tomllib
     for path in sorted((Path(stations.__file__).parent / "catalog").glob("*.toml")):
         data = tomllib.loads(path.read_text())
-        if data.get("fetch", "icy") in ("icy", *ICY_FALLBACKS):
+        if (data.get("fetch", "icy") in ("icy", *ICY_FALLBACKS)
+                and "titles" not in (data.get("fetch_args") or {})):
             yield path.stem, data
 
 
@@ -337,10 +339,28 @@ def test_every_icy_station_reads_its_title_as_before(monkeypatch, key, data, tit
 MARS = '"Man From Mars" by Butch Paulson with "The Motations" on Fool\'s Paradise on WFMU'
 
 
+# comedy247's live title, captured 2026-10-03 (with its trailing space).
+COMEDY_SPACE = ('KEVIN HART - text="Dating Games" song_spot="M" spotInstanceId="-1" '
+                'length="00:01:35" MediaBaseId="" TAID="0" TPID="10586456" cartcutId="4145657" '
+                'amgArtworkURL="https://i.iheart.com/v3/catalog/track/10586456?ops=fit(200,200),'
+                'format(%22jpeg%22)" spEventID="729b58f0-dbbb-f111-8386-0242c86e7629" ')
+KEVIN_ART = "https://i.iheart.com/v3/catalog/track/10586456?ops=fit(200,200),format(%22jpeg%22)"
+# The diagnosis's capture, elided there, filled out in the same structure.
+BOBCAT_ART = "https://i.iheart.com/v3/catalog/track/31772035?ops=fit(200,200),format(%22jpeg%22)"
+BOBCAT = ('BOBCAT GOLDTHWAIT - text="The Game Of Love" song_spot="M" spotInstanceId="-1" '
+          'length="00:02:41" MediaBaseId="" TAID="0" TPID="31772035" cartcutId="3990212" '
+          f'amgArtworkURL="{BOBCAT_ART}" spEventID="1f0c1e4a-dbbb-f111-8386-0242c86e7629" ')
+CITYPOP = "Namee · Scarecrow (1985)"
+GOOD_FOOD = "Good Food-Evan Kleiman-join.kcrw.com"
+
+
 @pytest.mark.parametrize("shape,title", [
-    (None, IHEART), ("iheart-attrs", IHEART), ("artist-song", "Band - Song"), ("wfmu", MARS)])
+    (None, IHEART), ("iheart-attrs", IHEART), ("artist-song", "Band - Song"), ("wfmu", MARS),
+    ("iheart-space", BOBCAT), ("artist-dot-song", CITYPOP)])
 def test_music_false_never_yields_an_artist_whatever_the_shape(monkeypatch, shape, title):
-    assert set(titles.SHAPES) == {"artist-song", "iheart-attrs", "wfmu"}   # a new shape joins this list
+    # A new shape joins this list (kcrw never yields an artist at all: tested below).
+    assert set(titles.SHAPES) == {"artist-song", "iheart-attrs", "iheart-space",
+                                  "artist-dot-song", "kcrw", "wfmu"}
     monkeypatch.setattr(stations.icy, "icy_title", lambda url: title)
     s = stations.Station("x", "X", "http://x", "Town -- x")
     assert icy_fetch.icy(s, titles=shape).artist                 # the shape does match
@@ -403,6 +423,72 @@ def test_wfmu_station_falls_back_to_its_title_when_wfmu_org_is_down(monkeypatch,
     monkeypatch.setattr(stations.net, "get", down)
     np = stations.STATIONS["wfmu"].now_playing()
     assert (np.artist, np.song, np.show, np.hosts) == (artist, song, show, hosts)
+    assert np.raw_title == title
+
+
+@pytest.mark.parametrize("title,expected", [
+    (BOBCAT, {"artist": "BOBCAT GOLDTHWAIT", "song": "The Game Of Love", "art_url": BOBCAT_ART}),
+    (COMEDY_SPACE, {"artist": "KEVIN HART", "song": "Dating Games", "art_url": KEVIN_ART}),
+    # A quote inside the track stays in it; no artwork, no cover.
+    ('JIM GAFFIGAN - text="The "Hot Pocket" Bit" song_spot="M" TAID="0"',
+     {"artist": "JIM GAFFIGAN", "song": 'The "Hot Pocket" Bit'}),
+    # iHeart's comma attributes too.
+    (IHEART, {"artist": "JOHN MULANEY", "song": "Ted And The 20 Person Plane"}),
+    # This variant without its text= is no song, never the attribute blob.
+    ('BOBCAT GOLDTHWAIT - song_spot="M" amgArtworkURL="https://i.iheart.com/x"', {}),
+    ('BOBCAT GOLDTHWAIT - text="" song_spot="M"', {}),
+    # Nothing else: not even "Artist - Song".
+    ("George Carlin - Track 12", {}),
+    ("24/7 Comedy", {}),
+])
+def test_iheart_space_titles(title, expected):
+    assert titles.parse("iheart-space", title) == expected
+
+
+@pytest.mark.parametrize("title,expected", [
+    (CITYPOP, {"artist": "Namee", "song": "Scarecrow"}),
+    ("Yun Soo Il · It's Beautiful (1984)", {"artist": "Yun Soo Il", "song": "It's Beautiful"}),
+    # Only a trailing year goes; other parentheses, and a song with no year, stay.
+    ("Kim Hyun Chul · Drive (Remastered)", {"artist": "Kim Hyun Chul", "song": "Drive (Remastered)"}),
+    ("Kim Hyun Chul · Drive", {"artist": "Kim Hyun Chul", "song": "Drive"}),
+    ("Namee - Scarecrow", {}),
+    ("Korean City Pop", {}),
+])
+def test_artist_dot_song_titles(title, expected):
+    assert titles.parse("artist-dot-song", title) == expected
+
+
+@pytest.mark.parametrize("title,expected", [
+    (GOOD_FOOD, {"show": "Good Food", "hosts": ["Evan Kleiman"]}),
+    ("Morning Becomes Eclectic-Anthony Valadez-join.kcrw.com",
+     {"show": "Morning Becomes Eclectic", "hosts": ["Anthony Valadez"]}),
+    # Anchored on the suffix: a generic "A - B" never matches...
+    ("90s90s - DIGITAL WEB", {}),
+    ("Artist - Song", {}),
+    # ...nor KCRW's own "Song-Artist-Album" from a music show (captured 2026-10-03).
+    ("I'm Gonna Get You Baby (Feat. Angie Browb)-Illyus Barrientos-I'm Gonna Get You Baby", {}),
+    ("Good Food-join.kcrw.com", {}),
+    ("Good Food-Evan Kleiman-Guest-join.kcrw.com", {}),
+])
+def test_kcrw_titles(title, expected):
+    assert titles.parse("kcrw", title) == expected
+
+
+@pytest.mark.parametrize("key,title,artist,song,art_url,show,hosts", [
+    ("comedy247", BOBCAT, "BOBCAT GOLDTHWAIT", "The Game Of Love", BOBCAT_ART, None, []),
+    ("koreancitypop", CITYPOP, "Namee", "Scarecrow", None, None, []),
+    ("kcrw", GOOD_FOOD, None, None, None, "Good Food", ["Evan Kleiman"]),
+    # A title in none of these shapes is shown raw, with no artist.
+    ("comedy247", "George Carlin - Track 12", None, None, None, None, []),
+    ("koreancitypop", "Namee - Scarecrow", None, None, None, None, []),
+    ("kcrw", "Artist - Song", None, None, None, None, []),
+])
+def test_shaped_stations_read_their_titles(monkeypatch, key, title, artist, song, art_url,
+                                           show, hosts):
+    monkeypatch.setattr(stations.icy, "icy_title", lambda url: title)
+    np = stations.STATIONS[key].now_playing()
+    assert (np.artist, np.song, np.art_url, np.show, np.hosts) == (artist, song, art_url,
+                                                                  show, hosts)
     assert np.raw_title == title
 
 
