@@ -361,10 +361,15 @@ def _about(house: Household, alarm: Alarm, found: clock.AlarmList) -> dict:
 def _write_failed(args, doing: str, done: str, about: dict, exc: Exception) -> int:
     """A write that raised: say whether it happened, as far as can be told.
     One that landed (someone else edited another alarm in the same moment,
-    say) is reported done, with what else happened as a warning."""
+    say) is reported done, with what else happened as a warning, and the
+    alarm and list version as read back after it (the alarm is the one
+    deleted, for a delete; the version is null if the list couldn't be read)."""
     landed = getattr(exc, "landed", False)
     if landed is True:
-        return emit(args, about | {"performed": True, "warning": str(exc)},
+        now = {"version": exc.current.version if exc.current else None}
+        if exc.alarm is not None:
+            now["alarm"] = exc.alarm.to_attributes()
+        return emit(args, about | now | {"performed": True, "warning": str(exc)},
                     f"{done}\n  warning: {exc}")
     if landed is None:
         hint = "it may have happened anyway: check `twiddle alarm list`"

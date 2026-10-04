@@ -14,7 +14,7 @@ import pytest
 
 from twiddle import alarm_cli, cli, devices, play
 from twiddle.alarms import clock
-from twiddle.alarms.model import Alarm, Recurrence, key, parse_alarms
+from twiddle.alarms.model import Alarm, Recurrence, parse_alarms
 from twiddle.household import Group, Household, Speaker
 from twiddle.topology import Member, Topology, Vanished
 
@@ -552,6 +552,17 @@ def test_a_delete_that_landed_while_another_alarm_moved_is_reported_done(
     assert entry["written"] is True and entry["others_changed"] == ["11"]
 
 
+def test_an_enable_that_landed_while_another_alarm_moved_shows_the_alarm_after(
+        clockfake, capsys):
+    clockfake.after_write = lambda f: f.edit_in_app("11", Volume="4")
+    code, out, _ = run(["alarm", "enable", "66", "--json"], capsys)
+    payload = json.loads(out)
+    assert code == 0 and payload["performed"] is True and "warning" in payload
+    assert clockfake.alarms["66"]["Enabled"] == "1"
+    assert payload["alarm"] == clockfake.alarms["66"]
+    assert payload["version"] == clockfake.version
+
+
 def test_rm_refuses_if_the_list_moved_while_asking(clockfake, capsys, monkeypatch):
     answers(monkeypatch)
     said = iter(["y", "66"])
@@ -568,23 +579,27 @@ def test_rm_refuses_if_the_list_moved_while_asking(clockfake, capsys, monkeypatc
     assert clockfake.writes == [] and journal() == []
 
 
-def test_a_deleted_alarm_is_recreated_from_its_journal_entry(clockfake, capsys, monkeypatch):
-    answers(monkeypatch, "y", "66")
-    assert run(["alarm", "rm", "66"], capsys)[0] == 0
-    old = next(a for a in ALARMS if a.id == "66")
+@pytest.mark.parametrize("aid", ["2", "66"])
+def test_a_deleted_alarm_is_recreated_from_its_journal_entry(
+        clockfake, capsys, monkeypatch, aid):
+    answers(monkeypatch, "y", aid)
+    assert run(["alarm", "rm", aid], capsys)[0] == 0
+    old = next(a for a in ALARMS if a.id == aid)
     # From the journal on disk, not from anything still in memory.
     entry = json.loads(play.INTERVENTION_LOG.read_text().splitlines()[-1])
     assert clock.from_record(entry["before"]) == old
-    made, now = clock.recreate("10.0.0.11", "66", clockfake.version)
-    assert made.id != "66" and made.id in clockfake.alarms
-    assert key(made) == key(old)
+    made, now = clock.recreate("10.0.0.11", aid, clockfake.version)
+    assert made.id != aid and made.id in clockfake.alarms
     assert made.program_uri == old.program_uri
     assert made.program_metadata == old.program_metadata
-    assert clockfake.alarms[made.id]["ProgramMetaData"] == clockfake_before("66")["ProgramMetaData"]
-    assert made.children == ()      # CreateAlarm has no argument for <Content>
+    assert clockfake.alarms[made.id]["ProgramMetaData"] == clockfake_before(aid)["ProgramMetaData"]
+    # Every field equal but the ID. A Spotify alarm's <Content> child is the
+    # one exception: CreateAlarm has no argument for it (see model.py).
+    assert replace(made, id=aid, children=old.children) == old
+    assert made.children == ()
     assert [r["action"] for r in journal()] == ["alarm_destroy", "alarm_create"]
     with pytest.raises(ValueError, match=f"alarm {made.id} is already the same"):
-        clock.recreate("10.0.0.11", "66", clockfake.version)
+        clock.recreate("10.0.0.11", aid, clockfake.version)
     assert clockfake.writes == ["DestroyAlarm", "CreateAlarm"]
 
 
