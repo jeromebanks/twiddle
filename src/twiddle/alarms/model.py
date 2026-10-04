@@ -153,6 +153,15 @@ class Alarm:
         return [("ID", self.id), *self.create_args()]
 
 
+def key(a: Alarm) -> tuple:
+    """What CreateAlarm/UpdateAlarm can set, compared: everything but the ID,
+    `extra` and children, with the recurrence by its days and the program URI
+    and metadata as exact strings."""
+    return (a.start_time, a.recurrence.days, a.duration, a.enabled, a.room_uuid,
+            a.program_uri, a.program_metadata, a.play_mode, a.volume,
+            a.include_linked_zones)
+
+
 def parse_alarms(xml: str | bytes) -> list[Alarm]:
     """Every alarm in a ListAlarms `CurrentAlarmList`."""
     root = ET.fromstring(xml)
