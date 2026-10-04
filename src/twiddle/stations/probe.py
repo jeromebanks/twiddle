@@ -210,7 +210,8 @@ def _has_shape(shape: str, real: list[str]) -> bool:
     # title it takes an artist from has the shape's mark.
     got = [titles.parse(shape, t) for t in real]
     return (all(got) and any(g.get("artist") for g in got)
-            and all(DETECTABLE[shape].search(t) for t, g in zip(real, got) if g.get("artist")))
+            and all(DETECTABLE[shape].search(t.strip())
+                    for t, g in zip(real, got) if g.get("artist")))
 
 
 def _reads_every_song(real: list[str]) -> str | None:
@@ -232,8 +233,8 @@ def title_shape(samples: list[str | None], icy_name: str | None = None) -> str:
     """`blank`, `artist-song` (the default reading is enough), a shape in
     DETECTABLE that every title has, or `show-like`: consistent titles in no
     shape we know, which may still carry an artist a new shape could read."""
-    # Trimmed as the shapes trim them, so a mark anchored at the end still finds it.
-    real = [t.strip() for t in samples if t and t.strip()]
+    # Parsed as sent, as the fetcher will; trimmed only to look for a mark.
+    real = [t for t in samples if t and t.strip()]
     if not real:
         return "blank"
     # "90s90s - DIGITAL WEB" splits like Artist - Song but is only the
@@ -246,7 +247,7 @@ def title_shape(samples: list[str | None], icy_name: str | None = None) -> str:
         if _has_shape(shape, real):
             return shape
     # Before a plain split, which would read comedy247's `text="..."` as a song.
-    if any(DETECTABLE[k].search(t) for k in _IHEART for t in real):
+    if any(DETECTABLE[k].search(t.strip()) for k in _IHEART for t in real):
         return _reads_every_song(real) or "show-like"
     if all(icy.split_title(icy.tidy_title(t)) != (None, None) for t in real):
         return "artist-song"
