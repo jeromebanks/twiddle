@@ -13,7 +13,8 @@ def icy(station: Station, note: str | None = None, music: bool = True,
     `encoding` for a server that doesn't send UTF-8 ("cp932": Shift-JIS).
     `titles` names the title's shape in `titles.SHAPES`; by default iHeart
     attributes, else "Artist - Song". Whatever the shape, `raw_title` is the
-    title with any iHeart attributes rewritten, and under `music=False` a
+    title with any iHeart comma attributes rewritten (shown only when no
+    artist is: comedy247's other variant stays as sent), and under `music=False` a
     shape can still give the show or hosts but never an artist or song."""
     raw = (icy_meta.icy_title(station.url, encoding=encoding) if encoding
            else icy_meta.icy_title(station.url))
