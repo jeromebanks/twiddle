@@ -1,4 +1,5 @@
-"""WFMU: ICY for the song, the playlist RSS for the DJ (not real-time)."""
+"""WFMU: its ICY title names song, artist and show (`titles.wfmu`); the
+playlist RSS (not real-time) only when the title names no show."""
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
@@ -9,7 +10,9 @@ from .icy import icy
 
 
 def wfmu(station: Station) -> NowPlaying:
-    np = icy(station)
+    np = icy(station, titles="wfmu")
+    if np.show:
+        return np
     try:
         root = ET.fromstring(net.get("https://wfmu.org/playlistfeed.xml"))
         latest = root.find("./channel/item/title")

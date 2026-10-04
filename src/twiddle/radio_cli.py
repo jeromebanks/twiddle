@@ -64,9 +64,11 @@ def _fetch(args, source: str):
 
 
 def _primary_artist(np: stations.NowPlaying) -> str | None:
-    # Spotify's "A, B" is a list joined for display; the lookup wants one.
-    return np.artist.split(", ")[0] if np.artist and np.source.startswith("Spotify") \
+    # Spotify's "A, B" is a list joined for display; the lookup wants one,
+    # and without a `with "..."` credit (WFMU's backing bands).
+    artist = np.artist.split(", ")[0] if np.artist and np.source.startswith("Spotify") \
         else np.artist
+    return stations.lookup_name(artist)
 
 
 def cmd_np(args):

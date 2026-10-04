@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .. import lookup
-from ..stations import NowPlaying
+from ..stations import NowPlaying, lookup_name
 from . import art
 
 
@@ -33,7 +33,8 @@ class ArtistCard:
 def query_of(np: NowPlaying | None) -> tuple | None:
     if np is None or not np.artist:
         return None
-    return (np.artist, np.album, np.song)
+    # The name a lookup asks for: a `with "..."` credit is shown, not searched.
+    return (lookup_name(np.artist), np.album, np.song)
 
 
 class Enricher:
@@ -68,14 +69,14 @@ class Enricher:
     def run_one(self, q: tuple, np: NowPlaying) -> ArtistCard:
         card = ArtistCard(q)
         try:
-            r = self._identify(np.artist, np.album, np.song,
+            r = self._identify(q[0], np.album, np.song,
                                mb_artist_id=np.mb_artist_id,
                                mb_release_group_id=np.mb_release_group_id)
             card.info, card.candidates = r.artist, r.candidates
         except Exception as exc:     # LookupFailed, or a network error beneath it
             card.error = str(exc)
         if card.info:
-            card.photo_url = self._photo(card.info, np.artist)
+            card.photo_url = self._photo(card.info, q[0])
             if card.info.album:
                 card.cover_url = art.cover_art_archive(card.info.album.mbid)
         self.cards[q] = card

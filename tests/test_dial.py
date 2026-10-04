@@ -143,6 +143,23 @@ def test_enricher_carries_musicbrainz_ids_and_finds_the_photo_and_cover():
     en.close()
 
 
+
+def test_enricher_identifies_and_pictures_the_artist_without_a_with_credit():
+    from twiddle import lookup
+    calls, heard = [], []
+
+    def identify(artist, album, song, **ids):
+        calls.append(artist)
+        return lookup.Result(artist=lookup.ArtistInfo(name="Butch Paulson"))
+    en = Enricher(lambda c: None, identify=identify,
+                  photo=lambda info, name: heard.append(name) or None)
+    np = NowPlaying("WFMU", artist='Butch Paulson with "The Motations"', song="Man From Mars")
+    q = query_of(np)
+    assert q == ("Butch Paulson", None, "Man From Mars")
+    en.run_one(q, np)
+    assert calls == ["Butch Paulson"] and heard == ["Butch Paulson"]
+    en.close()
+
 # ---- outputs ----------------------------------------------------------------------
 
 

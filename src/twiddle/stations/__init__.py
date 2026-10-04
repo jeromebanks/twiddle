@@ -33,11 +33,12 @@ from .fetchers.spinitron import bigger_art, parse_spinitron, parse_spinitron_spi
 from .icy import icy_title, parse_icy, split_title, tidy_title
 from .model import CatalogError, NowPlaying, Station, load_catalog
 from .tags import TAGS
+from .titles import lookup_name
 
 __all__ = [
     "STATIONS", "TAGS", "SPOTIFY", "LAST_SOURCE_FILE", "NowPlaying", "Station",
     "CatalogError", "load_catalog", "with_tag", "tag_counts", "remember", "last_source",
-    "icy_title", "parse_icy", "split_title", "tidy_title", "parse_spinitron",
+    "icy_title", "parse_icy", "split_title", "tidy_title", "lookup_name", "parse_spinitron",
     "parse_spinitron_spins", "bigger_art", "parse_radiofrance", "parse_kqed_schedule",
     "kqed_slot", "kqed_row",
 ]
