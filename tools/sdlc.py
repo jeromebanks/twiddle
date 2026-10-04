@@ -1337,9 +1337,17 @@ def command_ready(args: argparse.Namespace, config: dict[str, Any]) -> int:
     blockers = {r["number"]: fetch_blockers(r["number"], config) for r in leaves if r["state"] == "open"}
     ready, waiting = ready_leaves(leaves, blockers)
     progress = summarise_progress(leaves, blockers)
+    paused: list[str] = []
+    if args.epic:
+        trusted = fetch_trusted(config)
+        paused = claim_pause_errors(bundle_state(fetch_bundle(args.epic, config, trusted), config), progress)
     if args.json:
-        print(json.dumps({"ready": ready, "waiting": waiting, "progress": progress}, indent=2))
+        strip = lambda rs: [{k: v for k, v in r.items() if k != "body"} for r in rs]  # noqa: E731
+        print(json.dumps({"ready": strip(ready), "waiting": strip(waiting), "progress": progress,
+                          "paused": paused}, indent=2))
         return 0
+    for p in paused:
+        print(f"paused: {p}; nothing new can be claimed")
     for r in ready + waiting:
         tag = ("escalated" if r["number"] in progress["escalated"] else "claimed" if r["number"] in progress["in_flight"]
                else "ready" if not r["unmet"] else "waiting")

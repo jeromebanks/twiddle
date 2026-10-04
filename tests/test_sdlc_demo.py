@@ -258,3 +258,18 @@ def test_publish_demo_to_an_orphan_branch(tmp_path):
                              "epic-12/M1/rev-2/README.md", "epic-12/M1/rev-2/list.svg"]   # main's files never land there
     assert sha1 != sha2
     assert subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True).stdout == ""
+
+
+def test_a_question_is_answered_with_a_note_and_changes_are_recorded(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    b = _bundle(tmp_path, ["sdlc:demo-review"], [DEMO, comment(POSTER, "what is the bell for?", 11)])
+    answer = tmp_path / "answer.md"
+    answer.write_text("It marks an alarm that is on.")
+    assert sdlc.main(["transition", "12", "demo-review", "--kind", "note", "--body-file", str(answer),
+                      "--from-file", b, "--dry-run"]) == 0
+    assert "kind=note" in capsys.readouterr().out
+    assert sdlc.main(["demo-changes", "12", "--body-file", str(answer), "--from-file", b, "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "demo-review -> in-progress" in out and "kind=demo-changes rev=1 milestone=M1" in out
+    waiting = _bundle(tmp_path, ["sdlc:demo-review"], [DEMO])        # nothing from the poster to act on
+    assert sdlc.main(["demo-changes", "12", "--body-file", str(answer), "--from-file", waiting, "--dry-run"]) == 1

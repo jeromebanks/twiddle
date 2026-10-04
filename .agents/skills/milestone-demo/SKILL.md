@@ -78,15 +78,21 @@ Have the `advisor` check the script.
 You're in the session with the person running it. They may not be the poster.
 
 - Read-only and `--dry-run` steps: run them.
-- **Writes**, one at a time:
-  1. Before the first write, `uv run twiddle snapshot --room <room>` (and
-     `uv run twiddle alarm snapshot` if alarms change).
-  2. Run the step with `--dry-run` and show the user what it will do.
-  3. Ask them. Only a yes fires it.
+- **Writes**, one at a time. **The user runs them, not you**: several ask
+  for confirmation at a terminal (`alarm rm` asks twice, and with no terminal
+  the answer is no), and your shell has none.
+  1. Before the first write, the user runs `! uv run twiddle snapshot --room <room>` (and
+     `! uv run twiddle alarm snapshot` if alarms change).
+  2. You run the step with `--dry-run` and show them what it will do.
+  3. They run the real command themselves, as `! uv run twiddle ...`, so it lands in
+     this session.
   4. Afterwards, ask what they heard or saw, and record it:
      `uv run python tools/observe.py add --heard "<their words>"`.
-  5. When done, restore: `uv run twiddle restore --room <room>`, then
-     `uv run twiddle alarm restore --dry-run`, then `alarm restore`.
+  5. When done, they restore: `! uv run twiddle restore --room <room>`, then
+     `alarm restore --dry-run` (you can run that), then `! uv run twiddle alarm restore`.
+
+  The pictures of a write are its `--dry-run` and the read-only state afterwards
+  (e.g. `alarm list`), never the write itself.
 - If the user isn't available for writes, demo what you can and say plainly which
   steps weren't shown and why. Never fake one.
 - If a step fails, that's a finding, not something to hide. Note it for "Known gaps",
@@ -94,7 +100,11 @@ You're in the session with the person running it. They may not be the poster.
 
 ## 4. Take the pictures
 
-Put everything in `<SCRATCH>/demo/` (your scratchpad), not in the repo:
+Put everything in `<SCRATCH>/demo/` (your scratchpad), not in the repo. **Every file
+in it is published**, so nothing else goes there. `demo_shot.py` takes **read-only and
+`--dry-run` commands only**: it runs what it's given, and a command's prompt would end
+up in the picture instead of in front of the user.
+
 
 ```bash
 # a command's output, drawn as a terminal window
@@ -111,9 +121,9 @@ uv run python tools/demo_shot.py tui --out-dir <SCRATCH>/demo \
 - **Before:** `git worktree add <SCRATCH>/before <before-sha>`, then
   `cd <SCRATCH>/before && uv sync -q && uv run python <PRIMARY>/tools/demo_shot.py cli --out <SCRATCH>/demo/before-np.svg -- uv run twiddle np wfmu`.
   Take the "after" picture straight away. Remove the worktree when done.
-- Look at each picture: `qlmanage -t -s 1400 -o <SCRATCH>/demo <file>.svg` makes a
-  PNG you can Read. Retake anything blank, cut off or mid-load. The PNG previews
-  are not published: delete them.
+- Look at each picture: `qlmanage -t -s 1400 -o <SCRATCH>/previews <SCRATCH>/demo/<file>.svg`
+  makes a PNG you can Read (`mkdir -p <SCRATCH>/previews` first, outside the published folder).
+  Retake anything blank, cut off or mid-load.
 
 ## 5. Write the two files
 
