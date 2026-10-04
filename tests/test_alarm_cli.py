@@ -561,6 +561,11 @@ def test_an_enable_that_landed_while_another_alarm_moved_shows_the_alarm_after(
     assert clockfake.alarms["66"]["Enabled"] == "1"
     assert payload["alarm"] == clockfake.alarms["66"]
     assert payload["version"] == clockfake.version
+    clockfake.after_write = lambda f: f.edit_in_app("11", Volume="5")
+    code, out, _ = run(["alarm", "disable", "66"], capsys)
+    assert code == 0 and clockfake.alarms["66"]["Enabled"] == "0"
+    assert out.startswith("disabled alarm 66: Sonos Roam ") and "(off, vol" in out
+    assert "warning: alarm 66 was written, but alarms 11 changed meanwhile" in out
 
 
 def test_rm_refuses_if_the_list_moved_while_asking(clockfake, capsys, monkeypatch):
