@@ -62,7 +62,9 @@ def parse_current_live_shows(page: str) -> dict:
         show = titles.wfmu(_text(line.group(1)))
         # "Fool's Paradise with Rex" is show and host; "Marty McSorley's
         # show" is just the show, as the stream's own title names it.
-        out.update(show if show.get("show") else {"show": _text(line.group(1))})
+        # Only show and host: a line shaped like a song never replaces the song.
+        out.update({k: v for k, v in show.items() if k in ("show", "hosts")}
+                   if show.get("show") else {"show": _text(line.group(1))})
     pid = _PLAYLIST_ID.search(block)
     if pid:
         out["playlist_id"] = pid.group(1)

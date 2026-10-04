@@ -13,10 +13,11 @@ hundreds; polling them all every minute would not be polite to anyone.
 `on_change(key)` fires (on a worker thread) only when what a station
 reports actually changed, so the UI redraws per song, not per poll.
 
-Stations that publish their own history (KEXP, Spinitron) supply "just
+Stations that publish their own history (KEXP, Spinitron, WFMU) supply "just
 played" directly; for the ICY-only ones it is built from what this app saw
-change while it was open. A station on a fixed program schedule (KQED)
-supplies `schedule` instead, and the panel shows the day's lineup.
+change while it was open, started over whenever a fetch names a new show.
+A station on a fixed program schedule (KQED) supplies `schedule` instead,
+and the panel shows the day's lineup.
 """
 from __future__ import annotations
 

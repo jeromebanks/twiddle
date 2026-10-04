@@ -73,6 +73,13 @@ def test_live_page_with_a_host_names_show_and_host():
         "show": "Fool's Paradise", "hosts": ["Rex"], "playlist_id": "169127"}
 
 
+def test_a_show_line_shaped_like_a_song_never_replaces_the_song():
+    odd = FOOLS_PARADISE.replace("Fool's Paradise with Rex",
+                                 "&quot;X&quot; by Y on Fool's Paradise on WFMU")
+    got = wfmu.parse_current_live_shows(odd)
+    assert (got["artist"], got["show"]) == ("Cowboy Copas", "Fool's Paradise")
+
+
 def test_with_several_channels_the_freeform_one_is_picked_not_the_first():
     other = (FOOLS_PARADISE.replace("/wfmu_mp3.pls", "/rocknsoul.pls")
              .replace("Cowboy Copas", "Someone Else").replace("169127", "999"))
