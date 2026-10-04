@@ -88,6 +88,19 @@ def test_feed_keeps_a_shows_history_through_a_fetch_that_names_no_show():
     feed.close()
 
 
+def test_feed_a_fallback_naming_the_same_song_is_not_a_song_change():
+    # WFMU: live page (no raw title), one ICY fallback (raw title), live again.
+    live = NowPlaying("W", artist="Band 1", song="Song 1", show="Show A")
+    icy = NowPlaying("W", artist="Band 1", song="Song 1", show="Show A",
+                     raw_title='"Song 1" by Band 1 on Show A on WFMU')
+    s = fake_station("w", [live, icy, live])
+    feed = StationFeed([s], lambda k: None, clock=lambda: 1000.0)
+    for _ in range(3):
+        feed.poll("w")
+    assert feed.states["w"].recent() == []
+    feed.close()
+
+
 def test_feed_starts_its_history_over_when_a_new_show_is_named():
     # Show A, a fallback naming no show, then Show B: nothing of Show A stays,
     # not even the song that was on when the fallback came.

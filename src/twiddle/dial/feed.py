@@ -36,7 +36,11 @@ SEEN_MAX = 12
 
 
 def _ident(np: NowPlaying | None) -> tuple:
-    return (np.artist, np.song, np.raw_title) if np else ()
+    # The parsed song when there is one: a fetch that also carries the raw
+    # title (WFMU's ICY fallback) names the same song, not a new one.
+    if np is None:
+        return ()
+    return (np.artist, np.song) if np.artist or np.song else (None, None, np.raw_title)
 
 
 @dataclass
