@@ -2,7 +2,9 @@
 
 An ICY `StreamTitle` is free text, and stations fill it differently: most
 send "Artist - Song", iHeart sends `title="Song",artist="Artist",url="..."`,
-WFMU sends `"Song" by Artist on Show on WFMU`.
+WFMU sends `"Song" by Artist on Show on WFMU`, comedy247 sends iHeart's
+`Artist - text="Song" ... amgArtworkURL="..."`, Korean City Pop sends
+`Artist · Song (year)` and KCRW names `Show-Host-join.kcrw.com`.
 A catalog file names its shape with `fetch_args = { titles = "<shape>" }`;
 without one, the `icy` fetcher reads iHeart attributes first and then
 "Artist - Song", which is what every station got before shapes existed.
@@ -125,9 +127,65 @@ def wfmu(title: str) -> dict:
     return {}
 
 
+# iHeart's other variant: `Artist - text="Song" song_spot="M" ...
+# amgArtworkURL="..." ...`, space-separated with no artist= of its own. A
+# value runs to the quote that ends it before the next ` key="` or the end,
+# so a quote inside the song doesn't cut it short.
+_IHEART_SPACE = re.compile(r'^(?P<artist>.+?) - (?P<attrs>text=".*)$', re.DOTALL)
+_IHEART_FIELD = re.compile(r'(\w+)="(.*?)"(?=\s+\w+="|\s*$)', re.DOTALL)
+
+
+def iheart_space(title: str) -> dict:
+    """comedy247's `Artist - text="Song" ... amgArtworkURL="..."`: the artist,
+    the song out of text= and the artwork as the cover; iHeart's comma
+    attributes as `iheart-attrs` reads them; nothing for anything else.
+
+    Never a plain "Artist - Song" split: a title of this variant that lost its
+    text= would hand on the whole attribute blob as the song."""
+    title = title.strip()
+    m = _IHEART_SPACE.match(title)
+    if not m:
+        return iheart_attrs(title)
+    fields = dict(_IHEART_FIELD.findall(m["attrs"]))
+    got = {"artist": m["artist"].strip(), "song": fields.get("text", "").strip(),
+           "art_url": fields.get("amgArtworkURL", "").strip()}
+    return {k: v for k, v in got.items() if v} if got["song"] else {}
+
+
+_DOT_YEAR = re.compile(r"\s*\(\d{4}\)$")
+
+
+def artist_dot_song(title: str) -> dict:
+    """"Artist · Song (year)", split at the first " · " with a trailing
+    four-digit year dropped (any other parentheses stay); nothing without one."""
+    if " · " not in title:
+        return {}
+    artist, song = (s.strip() for s in title.split(" · ", 1))
+    song = _DOT_YEAR.sub("", song)
+    return {k: v for k, v in (("artist", artist), ("song", song)) if v}
+
+
+# Anchored on the suffix, with exactly two hyphen-free fields before it, so a
+# generic "A - B" (or KCRW's own "Song-Artist-Album" in a music show) never
+# matches.
+_KCRW = re.compile(r"^(?P<show>[^-]+)-(?P<host>[^-]+)-join\.kcrw\.com$")
+
+
+def kcrw(title: str) -> dict:
+    """KCRW's `Show-Host-join.kcrw.com`: the show and its host, never an
+    artist; nothing for anything else."""
+    m = _KCRW.match(title.strip())
+    if not m or not m["show"].strip() or not m["host"].strip():
+        return {}
+    return {"show": m["show"].strip(), "hosts": [m["host"].strip()]}
+
+
 SHAPES: dict[str, Callable[[str], dict]] = {
     "artist-song": artist_song,
     "iheart-attrs": iheart_attrs,
+    "iheart-space": iheart_space,
+    "artist-dot-song": artist_dot_song,
+    "kcrw": kcrw,
     "wfmu": wfmu,
 }
 
