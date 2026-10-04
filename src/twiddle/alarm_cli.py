@@ -57,21 +57,42 @@ def _household(args) -> Household:
 
 # ---- what an alarm is aimed at ---------------------------------------------
 
+def _bond(house: Household, sp: Speaker, attr: str = "chan_map") -> set[str]:
+    """The UUIDs in `sp`'s ChannelMapSet (or `attr`), empty when it has none."""
+    member = house.topology.by_uuid(sp.uuid) if house.topology else None
+    raw = getattr(member, attr, "") if member else ""
+    return {pair.split(":", 1)[0] for pair in raw.split(";") if pair}
+
+
+def _bonded_with(house: Household, sp: Speaker) -> list[Speaker]:
+    """The visible units bonded with `sp` into one room (a stereo pair), `sp`
+    among them: the units its ChannelMapSet lists. Without one in the
+    topology, the visible units of its room that were given a channel from
+    one. Two units that only share a room name are two rooms."""
+    members = [m for m in house.group_of(sp).members if not m.invisible]
+    bond = _bond(house, sp)
+    if bond:
+        return [m for m in members if m.uuid in bond]
+    if sp.channel and not (house.topology and house.topology.by_uuid(sp.uuid)):
+        return [m for m in members if m.room == sp.room and m.channel]
+    return [sp]
+
+
 def _is_bonded_follower(house: Household, sp: Speaker) -> bool:
     """A unit that is part of a room but not the room itself.
 
-    Invisible units (surrounds, sub) always are. Of several visible units in
-    one room (a stereo pair) the primary is the group's coordinator when it is
+    Invisible units (surrounds, sub) always are. Of the visible units in one
+    bond (a stereo pair) the primary is the group's coordinator when it is
     one of them, else the first listed in the bond's ChannelMapSet -- which in
     the author's household is also the coordinator, the left Roam; the
     fallback is inferred, not observed.
     """
     if sp.invisible:
         return True
-    group = house.group_of(sp)
-    mates = [m for m in group.members if m.room == sp.room and not m.invisible]
+    mates = _bonded_with(house, sp)
     if len(mates) < 2:
         return False
+    group = house.group_of(sp)
     if group.coordinator in mates:
         return sp is not group.coordinator
     member = house.topology.by_uuid(sp.uuid) if house.topology else None
@@ -80,11 +101,18 @@ def _is_bonded_follower(house: Household, sp: Speaker) -> bool:
 
 
 def room_primary(house: Household, sp: Speaker) -> Speaker | None:
-    """The unit that is `sp`'s room: `sp` itself unless it is a bonded follower."""
+    """The unit that is `sp`'s room: `sp` itself unless it is a bonded follower.
+    A satellite's is the visible unit its SatChannelMapSet names, failing
+    that one of its room's."""
     if not _is_bonded_follower(house, sp):
         return sp
-    return next((m for m in house.group_of(sp).members
-                 if m.room == sp.room and not _is_bonded_follower(house, m)), None)
+    if sp.invisible:
+        bond = _bond(house, sp, "sat_chan_map") or _bond(house, sp)
+        units = [m for m in house.group_of(sp).members if not m.invisible
+                 and (m.uuid in bond if bond else m.room == sp.room)]
+    else:
+        units = _bonded_with(house, sp)
+    return next((m for m in units if not _is_bonded_follower(house, m)), None)
 
 
 def room_target(house: Household, query: str) -> dict:
@@ -106,7 +134,10 @@ def room_target(house: Household, query: str) -> dict:
             raise NotFound(query, house.names)
         rooms.setdefault(primary.uuid, primary)
     if len(rooms) > 1:
-        raise Ambiguous(query, sorted(p.room or p.name for p in rooms.values()))
+        names = sorted(p.room or p.name for p in rooms.values())
+        if len(set(names)) < len(names):        # two rooms of one name: tell them apart
+            names = sorted(p.label for p in rooms.values())
+        raise Ambiguous(query, names)
     [primary] = rooms.values()
     out = {"requested": query, "room": primary.room or primary.name,
            "speaker": primary.name, "room_uuid": primary.uuid}
@@ -653,7 +684,8 @@ def _room_or_fail(args, house: Household):
     try:
         return room_target(house, args.room), None
     except Ambiguous as exc:
-        return None, fail(args, str(exc), "be more specific", candidates=exc.candidates)
+        return None, fail(args, str(exc), "be more specific, or name the speaker by its IP",
+                          candidates=exc.candidates)
     except NotFound as exc:
         return None, fail(args, str(exc), "run `twiddle rooms` to list targets",
                           known=exc.known)

@@ -997,3 +997,29 @@ def test_a_name_matching_two_rooms_is_ambiguous_even_when_they_are_grouped(
                        capsys)
     assert clockfake.alarms[json.loads(out)["id"]]["RoomUUID"] == "RINCON_DEN_S"
     assert clockfake.writes == ["CreateAlarm"]
+
+
+@pytest.mark.parametrize("north_first", [True, False])
+def test_two_unbonded_units_sharing_a_room_name_are_two_rooms(
+        clockfake, capsys, monkeypatch, north_first):
+    house = dens(True, north_first)
+    for sp in house.speakers:
+        sp.name = sp.room = "Den"
+    house.topology = Topology(groups={"d": [Member(uuid=s.uuid, ip=s.ip, zone_name="Den",
+                                                   software="") for s in house.speakers]},
+                              vanished=[])
+    monkeypatch.setattr(alarm_cli, "_household", lambda args: house)
+    for argv in (["add", "--time", "07:15"], ["edit", "2"]):
+        code, out, _ = run(["alarm", *argv, "--room", "Den", "--json"], capsys)
+        payload = json.loads(out)
+        assert code == 1 and "matches more than one target" in payload["error"]
+        assert payload["candidates"] == ["Den [10.0.0.21]", "Den [10.0.0.22]"]
+        assert "by its IP" in payload["hint"]
+    for ip, uuid in (("10.0.0.21", "RINCON_DEN_N"), ("10.0.0.22", "RINCON_DEN_S")):
+        code, out, _ = run(["alarm", "add", "--time", "07:15", "--room", ip, "--json"], capsys)
+        payload = json.loads(out)
+        assert clockfake.alarms[payload["id"]]["RoomUUID"] == uuid
+        assert "redirected_from" not in payload
+    got = {r["room_uuid"]: r["status"] for r in alarm_cli.listing(
+        house, [extra("RINCON_DEN_N", "1"), extra("RINCON_DEN_S", "2")], SAT_AFTERNOON)}
+    assert got == {"RINCON_DEN_N": "ok", "RINCON_DEN_S": "ok"}
