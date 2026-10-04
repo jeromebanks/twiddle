@@ -222,7 +222,10 @@ the room's primary unit: naming a bonded follower (`"Sonos Roam (R)"`, a
 surround, or its IP) puts the alarm on the left Roam or the soundbar, and the
 output says so in a `note:` (`redirected_from`/`reason` in `--json`). Naming
 the room itself is never a redirect. It is never the group coordinator: a
-room grouped with another today keeps its own alarm. `edit` without `--room`
+room grouped with another today keeps its own alarm. For the same reason a
+name that matches two rooms is refused as ambiguous even when they are
+grouped (`--room Den` with Den North and Den South), where transport commands
+would act on the group. `edit` without `--room`
 leaves the alarm where it is, even on a follower (`alarm list` labels those).
 `--dry-run` resolves the room and prints the whole alarm it would write;
 like every alarm write, the real thing is refused if the list moved since it

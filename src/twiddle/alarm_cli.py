@@ -42,7 +42,7 @@ from .alarms.model import CHIME_URI, NAMED, Alarm, Recurrence
 from . import play
 from .control_cli import (SNAPSHOT_DIR, BadSpec, add_write_args, emit, fail,
                           parse_sleep_spec)
-from .household import Ambiguous, Household, NotFound, Speaker, _norm
+from .household import Ambiguous, Household, NotFound, Speaker
 
 CHIME = "Sonos chime"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "alarms.json"
@@ -79,30 +79,40 @@ def _is_bonded_follower(house: Household, sp: Speaker) -> bool:
     return bool(first) and sp.uuid != first
 
 
+def room_primary(house: Household, sp: Speaker) -> Speaker | None:
+    """The unit that is `sp`'s room: `sp` itself unless it is a bonded follower."""
+    if not _is_bonded_follower(house, sp):
+        return sp
+    return next((m for m in house.group_of(sp).members
+                 if m.room == sp.room and not _is_bonded_follower(house, m)), None)
+
+
 def room_target(house: Household, query: str) -> dict:
     """Where an alarm for the room named `query` goes: the RoomUUID of the
     room's primary unit, never a bonded follower, and never the group
     coordinator (an alarm belongs to its room, not to whatever the room is
     grouped with today). Raises the household's NotFound/Ambiguous.
 
-    Naming the follower itself (its own ZoneName, or its IP) is redirected
-    and says so. Naming the room is not a redirect, whichever of its units
-    `resolve` happened to pick.
+    A name that matches more than one room is ambiguous even when those
+    rooms are grouped (`resolve` would happily pick one: a group shares
+    transport, not alarms). Naming a follower alone (its own ZoneName, or
+    its IP) is redirected and says so; naming the room is not.
     """
-    sp = house.resolve(query).matched
-    primary = sp
-    if _is_bonded_follower(house, sp):
-        primary = next((m for m in house.group_of(sp).members
-                        if m.room == sp.room and not _is_bonded_follower(house, m)), None)
+    hits = house.matches(query)
+    rooms: dict[str, Speaker] = {}
+    for sp in hits:
+        primary = room_primary(house, sp)
         if primary is None:
             raise NotFound(query, house.names)
+        rooms.setdefault(primary.uuid, primary)
+    if len(rooms) > 1:
+        raise Ambiguous(query, sorted(p.room or p.name for p in rooms.values()))
+    [primary] = rooms.values()
     out = {"requested": query, "room": primary.room or primary.name,
            "speaker": primary.name, "room_uuid": primary.uuid}
-    nq = _norm(query)
-    if primary is not sp and not any(nq in _norm(f) for f in
-                                     (primary.name, primary.room, primary.model) if f):
-        out |= {"redirected_from": sp.label,
-                "reason": f"{sp.label} is a bonded follower; the alarm goes on "
+    if primary not in hits:
+        out |= {"redirected_from": hits[0].label,
+                "reason": f"{hits[0].label} is a bonded follower; the alarm goes on "
                           f"{primary.label}, its room's primary"}
     return out
 
