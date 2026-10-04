@@ -1,7 +1,8 @@
 """How a station builds its ICY title: a registry of named title shapes.
 
 An ICY `StreamTitle` is free text, and stations fill it differently: most
-send "Artist - Song", iHeart sends `title="Song",artist="Artist",url="..."`.
+send "Artist - Song", iHeart sends `title="Song",artist="Artist",url="..."`,
+WFMU sends `"Song" by Artist on Show on WFMU`.
 A catalog file names its shape with `fetch_args = { titles = "<shape>" }`;
 without one, the `icy` fetcher reads iHeart attributes first and then
 "Artist - Song", which is what every station got before shapes existed.
@@ -47,9 +48,87 @@ def iheart_attrs(title: str) -> dict:
     return artist_song(tidied) if tidied != title else {}
 
 
+# A trailing `with "The Motations"` credits a backing band: shown as part of
+# the artist, but not part of the name a lookup should search for.
+_CREDIT = re.compile(r'^(?P<name>.+?)(?P<credit> with ".*")$')
+
+
+def lookup_name(artist: str | None) -> str | None:
+    """The artist as a lookup or search should ask for it: without a
+    trailing `with "..."` credit, which no database files them under."""
+    if not artist:
+        return artist
+    m = _CREDIT.match(artist)
+    return m["name"] if m else artist
+
+
+def _the_first(artist: str) -> str:
+    # Library order ("Pretenders, The") back to how the band is named,
+    # keeping any credit after it.
+    m = _CREDIT.match(artist)
+    name, credit = (m["name"], m["credit"]) if m else (artist, "")
+    if name.endswith(", The"):
+        name = "The " + name[:-len(", The")]
+    return name + credit
+
+
+def _last_unquoted(text: str, sep: str) -> int | None:
+    """Where the last `sep` outside "..." starts in `text`, or None."""
+    found, quoted = None, False
+    for i, ch in enumerate(text):
+        if ch == '"':
+            quoted = not quoted
+        elif not quoted and text.startswith(sep, i):
+            found = i
+    return found
+
+
+# The song runs to the first `" by `: later quotes belong to a credit or a
+# show, and the artist between them is what gets looked up.
+_WFMU_SONG = re.compile(r'^"(?P<song>.*?)" by (?P<rest>.+)$', re.DOTALL)
+_WFMU_CREDITED = re.compile(r'^(?P<artist>[^"]+? with "[^"]*") on ')
+_WFMU_SHOW = re.compile(r'^(?P<show>[^"]+?) with (?P<host>[^"]+?)(?: on WFMU)?$')
+
+
+def wfmu(title: str) -> dict:
+    """WFMU's `"Song" by Artist on Show on WFMU`, or a bare `Show with Host`
+    at a show change; nothing for anything else ("Your DJ speaks over ...").
+
+    The song is the leading quoted run up to the first `" by `, so its own
+    " by ", " on " and inner quotes are safe (only a song containing `" by `
+    itself would end early). Between artist and show, the first " on " after a
+    quoted `with "..."` credit, else the last " on " outside quotes: an
+    artist with " on " in the name keeps it, and a show with one loses its
+    first half instead. The artist is what gets looked up; the
+    show is only shown."""
+    title = title.strip()
+    if title.startswith("Your DJ "):
+        return {}
+    m = _WFMU_SONG.match(title)
+    if m:
+        artist, show = m["rest"].strip(), None
+        if artist.endswith(" on WFMU"):
+            artist = artist[:-len(" on WFMU")]
+            # After a quoted credit the boundary is certain: the " on " right
+            # past the credit's own closing quote. Without one, the last wins.
+            credited = _WFMU_CREDITED.match(artist)
+            cut = (credited.end("artist") if credited
+                   else _last_unquoted(artist, " on "))
+            if cut is not None:
+                artist, show = artist[:cut], artist[cut + len(" on "):]
+        fields = {"artist": _the_first(artist.strip()), "song": m["song"].strip(),
+                  "show": show.strip() if show else None}
+        return {k: v for k, v in fields.items() if v}
+    m = _WFMU_SHOW.match(title)
+    if m:
+        return {"show": m["show"].strip(), "hosts": [m["host"].strip()]}
+    return {}
+
+
 SHAPES: dict[str, Callable[[str], dict]] = {
     "artist-song": artist_song,
     "iheart-attrs": iheart_attrs,
+    "wfmu": wfmu,
 }
 
 

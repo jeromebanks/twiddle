@@ -63,6 +63,25 @@ def test_np_discover_hands_the_artist_to_discover(monkeypatch):
     assert got["room"] == "roam"
 
 
+def test_np_discover_hands_over_the_artist_without_a_with_credit(monkeypatch):
+    _station(monkeypatch, artist='Butch Paulson with "The Motations"', song="Man From Mars")
+    got = {}
+    monkeypatch.setattr(discover_cli, "cmd_discover", lambda a: got.update(vars(a)) or 0)
+    args = parse(["np", "kalx", "-d", "--dry-run"])
+    assert args.func(args) == 0
+    assert got["artist"] == ["Butch Paulson"]
+
+
+def test_np_info_looks_up_without_a_with_credit(monkeypatch):
+    _station(monkeypatch, artist='Butch Paulson with "The Motations"', song="Man From Mars")
+    seen = []
+    monkeypatch.setattr(radio_cli.lookup, "identify",
+                        lambda artist, *a, **kw: seen.append(artist) or radio_cli.lookup.Result())
+    args = parse(["np", "kalx", "-i"])
+    assert args.func(args) == 0
+    assert seen == ["Butch Paulson"]
+
+
 def test_np_discover_without_an_artist_fails_before_discover(monkeypatch):
     _station(monkeypatch, raw_title="Your DJ speaks over something")
     args = parse(["np", "kalx", "-d"])

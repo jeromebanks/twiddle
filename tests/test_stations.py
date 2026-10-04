@@ -292,10 +292,11 @@ def _old_icy(title, music):
     return artist, song, title
 
 
-# Fetchers that read the ICY title when their own feed has nothing, and the
-# ones of them (with talk) that never take it for an artist. Every other
-# fetcher never looks at ICY.
-ICY_FALLBACKS = ("talk", "wfmu", "spinitron", "wmbr", "kqed")
+# Fetchers that read the ICY title, with the default shape, when their own
+# feed has nothing, and the ones of them (with talk) that never take it for
+# an artist. wfmu reads ICY with its own shape (`titles.wfmu`, tested below);
+# every other fetcher never looks at ICY.
+ICY_FALLBACKS = ("talk", "spinitron", "wmbr", "kqed")
 NEVER_MUSIC = ("talk", "wmbr", "kqed")
 
 
@@ -333,15 +334,86 @@ def test_every_icy_station_reads_its_title_as_before(monkeypatch, key, data, tit
     assert (np.artist, np.song, np.raw_title) == _old_icy(title, music)
 
 
+MARS = '"Man From Mars" by Butch Paulson with "The Motations" on Fool\'s Paradise on WFMU'
+
+
 @pytest.mark.parametrize("shape,title", [
-    (None, IHEART), ("iheart-attrs", IHEART), ("artist-song", "Band - Song")])
+    (None, IHEART), ("iheart-attrs", IHEART), ("artist-song", "Band - Song"), ("wfmu", MARS)])
 def test_music_false_never_yields_an_artist_whatever_the_shape(monkeypatch, shape, title):
-    assert set(titles.SHAPES) == {"artist-song", "iheart-attrs"}   # a new shape joins this list
+    assert set(titles.SHAPES) == {"artist-song", "iheart-attrs", "wfmu"}   # a new shape joins this list
     monkeypatch.setattr(stations.icy, "icy_title", lambda url: title)
     s = stations.Station("x", "X", "http://x", "Town -- x")
     assert icy_fetch.icy(s, titles=shape).artist                 # the shape does match
     np = icy_fetch.icy(s, music=False, titles=shape)
     assert np.artist is None and np.song is None and np.raw_title
+
+
+@pytest.mark.parametrize("title,expected", [
+    (MARS, {"song": "Man From Mars", "artist": 'Butch Paulson with "The Motations"',
+            "show": "Fool's Paradise"}),
+    # The song's own " by ", " on ", dash and parentheses stay inside its quotes.
+    ('"Stand By Me (Live on Air) — Take 2" by Ben E. King on Fool\'s Paradise on WFMU',
+     {"song": "Stand By Me (Live on Air) — Take 2", "artist": "Ben E. King",
+      "show": "Fool's Paradise"}),
+    ('"Written by Him" by Cowboy Copas on Rock\'n\'Soul Radio on WFMU',
+     {"song": "Written by Him", "artist": "Cowboy Copas", "show": "Rock'n'Soul Radio"}),
+    ('"Brass in Pocket" by Pretenders, The on Fool\'s Paradise on WFMU',
+     {"song": "Brass in Pocket", "artist": "The Pretenders", "show": "Fool's Paradise"}),
+    # A credit is kept, and an " on " inside its quotes is not the show.
+    ('"Song" by Sam with "Live on Mars" on Bodega Pop on WFMU',
+     {"song": "Song", "artist": 'Sam with "Live on Mars"', "show": "Bodega Pop"}),
+    # After a quoted credit the first " on " is the show's, whatever follows.
+    ('"Man From Mars" by Butch Paulson with "The Motations" on Music on the Move on WFMU',
+     {"song": "Man From Mars", "artist": 'Butch Paulson with "The Motations"',
+      "show": "Music on the Move"}),
+    ('"Man From Mars" by Butch Paulson with "The Motations" on Music "Live" Hour on the Move'
+     ' on WFMU', {"song": "Man From Mars", "artist": 'Butch Paulson with "The Motations"',
+                  "show": 'Music "Live" Hour on the Move'}),
+    ('"Man From Mars" by Butch Paulson with "The Motations" on Music "Live" by Request'
+     ' on WFMU', {"song": "Man From Mars", "artist": 'Butch Paulson with "The Motations"',
+                  "show": 'Music "Live" by Request'}),
+    ('"Theme From "Shaft"" by Isaac Hayes on Fool\'s Paradise on WFMU',
+     {"song": 'Theme From "Shaft"', "artist": "Isaac Hayes", "show": "Fool's Paradise"}),
+    # Without one, the last " on " splits artist from show: an artist keeps its own.
+    ('"Song" by Hot on the Heels on Fool\'s Paradise on WFMU',
+     {"song": "Song", "artist": "Hot on the Heels", "show": "Fool's Paradise"}),
+    # No show named: artist and song still.
+    ('"Song" by Cowboy Copas', {"song": "Song", "artist": "Cowboy Copas"}),
+    # A show change: the show and its host, never an artist.
+    ("Fool's Paradise with Rex", {"show": "Fool's Paradise", "hosts": ["Rex"]}),
+    ('Your DJ speaks over "X" on Bucci\'s show on WFMU', {}),
+    ("Neutral Milk Hotel - Holland, 1945", {}),
+])
+def test_wfmu_titles(title, expected):
+    assert titles.parse("wfmu", title) == expected
+
+
+@pytest.mark.parametrize("title,artist,song,show,hosts", [
+    (MARS, 'Butch Paulson with "The Motations"', "Man From Mars", "Fool's Paradise", []),
+    ("Fool's Paradise with Rex", None, None, "Fool's Paradise", ["Rex"]),
+    # Neither a song nor a show: shown raw, and the RSS names the show.
+    ('Your DJ speaks over "X" on Bucci\'s show on WFMU', None, None,
+     "Rex's show from Oct 3 (latest published)", []),
+])
+def test_wfmu_station_takes_song_and_show_from_its_title(monkeypatch, title, artist, song,
+                                                          show, hosts):
+    monkeypatch.setattr(stations.icy, "icy_title", lambda url: title)
+    rss = (b"<rss><channel><item><title>WFMU Playlist: Rex's show from Oct 3"
+           b"</title></item></channel></rss>")
+    monkeypatch.setattr(stations.net, "get", lambda url, headers=None: rss)
+    np = stations.STATIONS["wfmu"].now_playing()
+    assert (np.artist, np.song, np.show, np.hosts) == (artist, song, show, hosts)
+    assert np.raw_title == title
+
+
+@pytest.mark.parametrize("artist,expected", [
+    ('Butch Paulson with "The Motations"', "Butch Paulson"),
+    ("Butch Paulson", "Butch Paulson"),
+    ("Earth, Wind & Fire with the Emotions", "Earth, Wind & Fire with the Emotions"),
+    (None, None),
+])
+def test_lookup_name_drops_only_a_quoted_with_credit(artist, expected):
+    assert stations.lookup_name(artist) == expected
 
 def test_every_station_has_a_shell_word():
     """`scripts/radio.zsh` makes one word per catalog file, so a new station
