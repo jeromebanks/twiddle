@@ -1,4 +1,5 @@
-"""The speaker's `AlarmClock` service: reads, and the three writes.
+"""The speaker's `AlarmClock` service: reads, and the three writes; and the
+`AVTransport` side of alarms: is one ringing, try it now, stop, snooze.
 
 Alarms are household-wide, so any speaker answers for all of them. The reads
 are `ListAlarms`, `GetTimeNow` and `GetFormat`. `GetTimeZone` isn't read:
@@ -21,11 +22,13 @@ from __future__ import annotations
 import json
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import requests
+
 from .. import play
-from ..devices import soap
+from ..devices import PORT, soap
 from .model import Alarm, key, parse_alarms
 
 SERVICE = "AlarmClock"
@@ -309,3 +312,229 @@ def recreate(ip: str, alarm_id: str, expected_version: str
     if twin is not None:
         raise ValueError(f"alarm {twin.id} is already the same as deleted alarm {alarm_id}")
     return (*create_alarm(ip, alarm, expected_version), unrecreatable(alarm))
+
+
+# ---- AVTransport: is one ringing; try it now, stop it, snooze it -------------
+#
+# Ringing belongs to a group's transport, not to the household, so these go to
+# a group coordinator's AVTransport, never to any speaker that will answer.
+# The argument names are the speaker's own (/xml/AVTransport1.xml, recorded in
+# tests/fixtures/avtransport_alarm_scpd.xml).
+
+AV_READS = frozenset({"GetRunningAlarmProperties"})
+AV_WRITES = frozenset({"RunAlarm", "SnoozeAlarm", "Stop"})
+# GetRunningAlarmProperties answers UPnPError 800 when no alarm is running
+# (observed on a Beam and a Roam, 2026-10-04, nothing ringing).
+NOT_RUNNING = "800"
+SNOOZE_MINUTES = (5, 10, 15, 30)
+DEFAULT_SNOOZE = 10
+FIRE_MARGIN_S = 180     # how loosely the speaker keeps a duration or snooze
+
+
+@dataclass
+class Running:
+    """An alarm going off (or snoozed) on one group's transport.
+
+    `alarm_id`, `group_id` and `logged_start` are GetRunningAlarmProperties';
+    `alarm_running`/`snooze_running` are LastChange's `AlarmRunning` and
+    `SnoozeRunning`, None when no event could be had. A snoozed alarm may not
+    answer GetRunningAlarmProperties at all (not observed yet), so one known
+    only from LastChange has an empty `alarm_id`.
+    """
+    alarm_id: str = ""
+    group_id: str = ""
+    logged_start: str = ""
+    alarm_running: bool | None = None
+    snooze_running: bool | None = None
+
+    @property
+    def snoozed(self) -> bool:
+        return bool(self.snooze_running) and not self.alarm_running
+
+    def to_dict(self) -> dict:
+        return {"alarm_id": self.alarm_id or None, "group_id": self.group_id or None,
+                "logged_start": self.logged_start or None,
+                "alarm_running": self.alarm_running, "snooze_running": self.snooze_running,
+                "snoozed": self.snoozed}
+
+
+def upnp_error(text: str) -> str | None:
+    """The `errorCode` of a SOAP fault, or None if `text` isn't one."""
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return None
+    code = next((el for el in root.iter() if el.tag.rsplit("}", 1)[-1] == "errorCode"), None)
+    return (code.text or "").strip() if code is not None else None
+
+
+def parse_running_alarm(xml: str) -> Running | None:
+    r = _response(xml, "GetRunningAlarmProperties")
+    if r.get("AlarmID", "") in ("", "0"):
+        return None
+    return Running(r["AlarmID"], r.get("GroupID", ""), r.get("LoggedStartTime", ""))
+
+
+def parse_last_change(notify: str) -> dict[str, str]:
+    """An AVTransport NOTIFY body's LastChange, flattened to {variable: val}
+    for instance 0: `TransportState`, `AlarmRunning`, `SnoozeRunning`, ..."""
+    prop = ET.fromstring(notify)
+    lc = next((el.text for el in prop.iter() if el.tag.rsplit("}", 1)[-1] == "LastChange"), "")
+    if not lc:
+        return {}
+    event = ET.fromstring(lc)
+    inst = next((el for el in event if el.tag.rsplit("}", 1)[-1] == "InstanceID"
+                 and el.get("val") == "0"), None)
+    if inst is None:
+        return {}
+    return {el.tag.rsplit("}", 1)[-1]: el.get("val", "") for el in inst}
+
+
+def _flag(state: dict[str, str], name: str) -> bool | None:
+    return state[name] == "1" if name in state else None
+
+
+def _av_read(ip: str, action: str) -> str:
+    if action not in AV_READS:
+        raise ValueError(f"{action} is not an AVTransport alarm read")
+    return play._av(ip, action, "")
+
+
+def running_alarm(ip: str) -> Running | None:
+    """The alarm going off on the group `ip` coordinates, or None (read-only)."""
+    try:
+        return parse_running_alarm(_av_read(ip, "GetRunningAlarmProperties"))
+    except requests.HTTPError as exc:
+        text = exc.response.text if exc.response is not None else ""
+        if upnp_error(text) == NOT_RUNNING:
+            return None
+        raise
+
+
+def last_change(ip: str, wait: float = 3.0) -> dict[str, str] | None:
+    """AVTransport's state from one GENA event: subscribe, take the initial
+    NOTIFY (it carries every variable), unsubscribe. Read-only, the same
+    subscription `monitor` keeps on the anchor. None if no event came."""
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    got: list[str] = []
+    arrived = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_NOTIFY(self):  # noqa: N802 - UPnP verb
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            got.append(self.rfile.read(n).decode("utf-8", "replace"))
+            self.send_response(200)
+            self.end_headers()
+            arrived.set()
+
+        def log_message(self, *_args):
+            pass
+
+    path = f"http://{ip}:{PORT}/MediaRenderer/AVTransport/Event"
+    server = HTTPServer(("0.0.0.0", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    sid = ""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((ip, PORT))
+            me = s.getsockname()[0]
+        r = requests.request("SUBSCRIBE", path, timeout=wait,
+                             headers={"CALLBACK": f"<http://{me}:{server.server_port}/>",
+                                      "NT": "upnp:event", "TIMEOUT": "Second-60"})
+        sid = r.headers.get("SID", "")
+        if sid:
+            arrived.wait(wait)
+    except (OSError, requests.RequestException):
+        return None
+    finally:
+        if sid:
+            try:
+                requests.request("UNSUBSCRIBE", path, headers={"SID": sid}, timeout=wait)
+            except requests.RequestException:
+                pass
+        server.shutdown()
+        server.server_close()
+    try:
+        return parse_last_change(got[0]) if got else None
+    except ET.ParseError:
+        return None
+
+
+def alarm_now(ip: str, events: bool = True) -> Running | None:
+    """Whether an alarm is going off, or snoozed, on the group `ip`
+    coordinates: GetRunningAlarmProperties, then (with `events`) LastChange's
+    AlarmRunning/SnoozeRunning. None when neither shows one. Read-only."""
+    found = running_alarm(ip)
+    state = last_change(ip) if events else None
+    if state:
+        found = found or Running()
+        found.alarm_running = _flag(state, "AlarmRunning")
+        found.snooze_running = _flag(state, "SnoozeRunning")
+        if not (found.alarm_id or found.alarm_running or found.snooze_running):
+            return None
+    return found
+
+
+def _span(name: str, ip: str, at: datetime, **journal) -> None:
+    """Journal a span around a moment the speaker will act on its own (an
+    alarm's duration-stop, a snooze running out), so `analyse` discounts it."""
+    for edge, t in (("start", at - timedelta(seconds=60)),
+                    ("end", at + timedelta(seconds=FIRE_MARGIN_S))):
+        play.journal_span(f"{name}_{edge}", ip, ts=t.isoformat(timespec="milliseconds"),
+                          **journal)
+
+
+def _av_write(ip: str, action: str, args: list[tuple[str, str]], journal: str,
+              **extra) -> None:
+    """Journal, then send, one AVTransport alarm write (play's own order)."""
+    if action not in AV_WRITES:
+        raise ValueError(f"{action} is not an AVTransport alarm write")
+    play._journal(journal, ip, **extra)
+    play._av(ip, action, "".join(f"<{k}>{play._esc(v)}</{k}>" for k, v in args))
+
+
+def run_args(alarm: Alarm, logged_start: str) -> list[tuple[str, str]]:
+    """RunAlarm's arguments for `alarm`, in the speaker's order."""
+    return [("AlarmID", alarm.id or ""), ("LoggedStartTime", logged_start),
+            ("Duration", alarm.duration), ("ProgramURI", alarm.program_uri),
+            ("ProgramMetaData", alarm.program_metadata), ("PlayMode", alarm.play_mode),
+            ("Volume", str(alarm.volume)),
+            ("IncludeLinkedZones", "1" if alarm.include_linked_zones else "0")]
+
+
+def run_alarm(ip: str, alarm: Alarm, logged_start: str) -> datetime | None:
+    """Fire `alarm` now on the group `ip` coordinates (**writes** transport
+    and volume). `logged_start` is the household's local time, as GetTimeNow
+    writes it (the format RunAlarm wants is not documented; unverified).
+    Returns when its duration will stop it, or None if it has none."""
+    _av_write(ip, "RunAlarm", run_args(alarm, logged_start), "alarm_run",
+              alarm_id=alarm.id, alarm=_record(alarm))
+    seconds = play.parse_hms(alarm.duration)
+    if not seconds:
+        return None
+    stops = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    _span("alarm_run_stop", ip, stops, alarm_id=alarm.id)
+    return stops
+
+
+def snooze_alarm(ip: str, minutes: int = DEFAULT_SNOOZE, alarm_id: str | None = None
+                 ) -> datetime:
+    """The speaker's own snooze, for `minutes` (**writes** transport).
+    Returns when it will ring again."""
+    if minutes not in SNOOZE_MINUTES:
+        raise ValueError(f"snooze for {', '.join(map(str, SNOOZE_MINUTES))} minutes, "
+                         f"not {minutes}")
+    _av_write(ip, "SnoozeAlarm", [("Duration", play._hms(minutes * 60))], "alarm_snooze",
+              minutes=minutes, alarm_id=alarm_id)
+    rings = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    _span("alarm_snooze_ring", ip, rings, alarm_id=alarm_id)
+    return rings
+
+
+def stop_alarm(ip: str, alarm_id: str | None = None) -> None:
+    """Stop the alarm going off: the group's own `Stop` (**writes** transport).
+    The caller checks one is going off first; this stops whatever plays."""
+    _av_write(ip, "Stop", [], "alarm_stop", alarm_id=alarm_id)

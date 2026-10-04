@@ -25,6 +25,14 @@ default, the source as it is, byte-for-byte). A room is named, never
 addressed: a bonded follower's alarm goes on its room's primary, and the
 answer says so. Both take `--dry-run`.
 
+`alarm status` is read-only: whether an alarm is going off (or snoozed) in
+each room, from each group coordinator's `GetRunningAlarmProperties` and
+AVTransport's `AlarmRunning`/`SnoozeRunning`. `alarm try <id>` WRITES: the
+speaker's `RunAlarm`, now, on the alarm's room. `alarm stop|snooze --room`
+WRITE: the group's own `Stop` / `SnoozeAlarm` (5, 10, 15 or 30 minutes,
+default 10), refused when no alarm is going off there. Each takes
+`--dry-run` and is journalled (`alarm_run`/`alarm_stop`/`alarm_snooze`).
+
 Follows the rest of the package: the `ok`/`error` envelope, `--json` anywhere.
 """
 from __future__ import annotations
@@ -796,6 +804,165 @@ def cmd_edit(args):
                 f"updated {what(after)}")
 
 
+# ---- ringing: status, try, stop, snooze ----------------------------------------
+
+def ringing_row(house: Household, group, running: clock.Running | None,
+                alarms: clock.AlarmList | None) -> dict:
+    """One group's alarm state: the room from the alarm's own RoomUUID when the
+    speaker names the alarm, else the group's."""
+    row = {"group": group.name, "speaker": group.coordinator.label,
+           "ringing": False, "snoozed": False}
+    if running is None:
+        return row
+    alarm = alarms.get(running.alarm_id) if alarms and running.alarm_id else None
+    row |= running.to_dict() | {"ringing": not running.snoozed, "snoozed": running.snoozed}
+    row["room"] = aimed_at(house, alarm.room_uuid)["room"] if alarm else group.name
+    if alarm is not None:
+        row |= {"alarm": alarm.to_attributes(), "what": brief(house, alarm)}
+    return row
+
+
+def ringing_text(row: dict) -> str:
+    if not (row["ringing"] or row["snoozed"]):
+        return f"{row['group']}: nothing ringing"
+    state = "snoozed" if row["snoozed"] else "RINGING"
+    what = f"alarm {row['alarm_id']}" if row.get("alarm_id") else "an alarm"
+    if row.get("what"):
+        what += f": {row['what']}"
+    since = f", since {row['logged_start']}" if row.get("logged_start") else ""
+    return f"{row['room']}: {state} {what}{since}"
+
+
+def _groups_or_fail(args, house: Household):
+    """The groups `--room` names (one), or every group; or (None, exit code)."""
+    if not getattr(args, "room", None):
+        return house.groups, None
+    try:
+        return [house.resolve(args.room).group], None
+    except Ambiguous as exc:
+        return None, fail(args, str(exc), "be more specific", candidates=exc.candidates)
+    except NotFound as exc:
+        return None, fail(args, str(exc), "run `twiddle rooms` to list targets",
+                          known=exc.known)
+
+
+def cmd_status(args):
+    """Is an alarm going off anywhere? Read-only: GetRunningAlarmProperties on
+    each group's coordinator, LastChange where one is, ListAlarms to name it."""
+    house, ip, err = _anchor(args)
+    if err is not None:
+        return err
+    groups, err = _groups_or_fail(args, house)
+    if err is not None:
+        return err
+    try:
+        running = [(g, clock.alarm_now(g.coordinator.ip)) for g in groups]
+        alarms = clock.list_alarms(ip) if any(r for _, r in running) else None
+    except Exception as exc:
+        return fail(args, f"could not read whether an alarm is ringing: {exc}")
+    rows = [ringing_row(house, g, r, alarms) for g, r in running]
+    return emit(args, {"rooms": rows, "ringing": [r["room"] for r in rows if r["ringing"]]},
+                "\n".join(ringing_text(r) for r in rows))
+
+
+def cmd_try(args):
+    """Fire an alarm now, through the speaker's own RunAlarm."""
+    house, ip, found, alarm, err = _target(args)
+    if err is not None:
+        return err
+    about = _about(house, alarm, found)
+    aim = aimed_at(house, alarm.room_uuid)
+    if aim["status"] in ("vanished", "unknown"):
+        return fail(args, f"alarm {alarm.id} is aimed at a speaker that isn't here "
+                          f"({aim['room']})", "`twiddle alarm edit --room` can move it", **about)
+    sp = next(s for s in house.speakers if s.uuid == alarm.room_uuid)
+    coordinator = house.group_of(sp).coordinator
+    about["acted_on"] = coordinator.label
+    what = f"alarm {alarm.id} on {coordinator.label}: {brief(house, alarm)}"
+    if getattr(args, "dry_run", False):
+        return emit(args, about | {"would": "run", "performed": False,
+                                   "sent": dict(clock.run_args(alarm, "<household time>"))},
+                    f"[dry-run] would fire {what}\n  {details(alarm)}")
+    try:
+        logged = clock.household_time(ip).local.strftime("%Y-%m-%d %H:%M:%S")
+        stops = clock.run_alarm(coordinator.ip, alarm, logged)
+    except Exception as exc:
+        return fail(args, f"could not fire alarm {alarm.id}: {exc}",
+                    "`twiddle alarm status` shows whether it went off", **about)
+    after = f"\n  it stops itself at {stops.astimezone():%H:%M} " \
+            f"(duration {duration_text(alarm.duration)})" if stops else ""
+    return emit(args, about | {"performed": True, "logged_start": logged,
+                               "stops_utc": stops.isoformat() if stops else None},
+                f"fired {what}{after}\n  stop it with "
+                f"`twiddle alarm stop --room \"{about['room']}\"`")
+
+
+def _ringing_or_fail(args, house: Household, verb: str):
+    """The room's group, its coordinator's running alarm, and an `about`; or
+    an exit code last. Refused when nothing is going off: a bare Stop would
+    silence whatever the room is playing."""
+    try:
+        res = house.resolve(args.room)
+    except Ambiguous as exc:
+        return None, None, None, fail(args, str(exc), "be more specific",
+                                      candidates=exc.candidates)
+    except NotFound as exc:
+        return None, None, None, fail(args, str(exc), "run `twiddle rooms` to list targets",
+                                      known=exc.known)
+    group, about = res.group, res.to_dict()
+    try:
+        running = clock.alarm_now(group.coordinator.ip)
+    except Exception as exc:
+        return None, None, None, fail(args, f"could not read whether {group.name} is "
+                                            f"ringing: {exc}", **about)
+    if running is None:
+        return None, None, None, fail(
+            args, f"no alarm is going off in {group.name}; nothing to {verb}",
+            f"`twiddle stop --room \"{args.room}\"` stops ordinary playback", **about)
+    return group, running, about | {"running": running.to_dict()}, None
+
+
+def cmd_stop(args):
+    """Stop the alarm going off in a room: the speaker's own Stop."""
+    house, ip, err = _anchor(args)
+    if err is not None:
+        return err
+    group, running, about, err = _ringing_or_fail(args, house, "stop")
+    if err is not None:
+        return err
+    what = f"the alarm in {group.name} ({group.coordinator.label})"
+    if getattr(args, "dry_run", False):
+        return emit(args, about | {"would": "stop", "performed": False},
+                    f"[dry-run] would stop {what}")
+    try:
+        clock.stop_alarm(group.coordinator.ip, running.alarm_id or None)
+    except Exception as exc:
+        return fail(args, f"could not stop {what}: {exc}", **about)
+    return emit(args, about | {"performed": True}, f"stopped {what}")
+
+
+def cmd_snooze(args):
+    """Snooze the alarm going off in a room: the speaker's own SnoozeAlarm."""
+    house, ip, err = _anchor(args)
+    if err is not None:
+        return err
+    group, running, about, err = _ringing_or_fail(args, house, "snooze")
+    if err is not None:
+        return err
+    what = f"the alarm in {group.name} ({group.coordinator.label}) for {args.minutes} minutes"
+    about["minutes"] = args.minutes
+    if getattr(args, "dry_run", False):
+        return emit(args, about | {"would": "snooze", "performed": False},
+                    f"[dry-run] would snooze {what}")
+    try:
+        rings = clock.snooze_alarm(group.coordinator.ip, args.minutes,
+                                   running.alarm_id or None)
+    except Exception as exc:
+        return fail(args, f"could not snooze {what}: {exc}", **about)
+    return emit(args, about | {"performed": True, "rings_utc": rings.isoformat()},
+                f"snoozed {what}: it rings again at {rings.astimezone():%H:%M}")
+
+
 def register(sub, parents=None):
     kw = {"parents": parents} if parents else {}
     p = sub.add_parser(**kw, name="alarm", help="the household's Sonos alarms")
@@ -850,6 +1017,35 @@ def register(sub, parents=None):
     ed.add_argument("--time", default=None, help="24-hour HH:MM or HH:MM:SS, household time")
     _field_args(ed, adding=False)
     ed.set_defaults(func=cmd_edit)
+
+    st = asub.add_parser(**kw, name="status",
+                         help="is an alarm going off, and where (read-only)")
+    st.add_argument("--room", default=None, help="only this room, by name")
+    st.add_argument("--anchor", default=None,
+                    help="speaker IP to query instead of SSDP discovery")
+    st.set_defaults(func=cmd_status)
+
+    tr = asub.add_parser(**kw, name="try", help="fire an alarm now, to hear it (WRITES)")
+    tr.add_argument("alarm_id", metavar="id", help="the alarm's ID, from `alarm list`")
+    tr.add_argument("--anchor", default=None,
+                    help="speaker IP to query instead of SSDP discovery")
+    add_write_args(tr)
+    tr.set_defaults(func=cmd_try)
+
+    for name, fn, helptext in (
+        ("stop", cmd_stop, "stop the alarm going off in a room (WRITES)"),
+        ("snooze", cmd_snooze, "snooze the alarm going off in a room (WRITES)"),
+    ):
+        w = asub.add_parser(**kw, name=name, help=helptext)
+        w.add_argument("--room", required=True, help="the room, by name")
+        if name == "snooze":
+            w.add_argument("--minutes", type=int, choices=clock.SNOOZE_MINUTES,
+                           default=clock.DEFAULT_SNOOZE,
+                           help=f"how long (default {clock.DEFAULT_SNOOZE})")
+        w.add_argument("--anchor", default=None,
+                       help="speaker IP to query instead of SSDP discovery")
+        add_write_args(w)
+        w.set_defaults(func=fn)
 
 
 def _field_args(p, adding: bool):
