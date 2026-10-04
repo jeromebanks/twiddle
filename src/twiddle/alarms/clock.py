@@ -139,15 +139,16 @@ def _journalled(ip: str, action: str, alarm_id: str | None, before: Alarm | None
     """Send a write, then read the list back; journal both whatever happens.
 
     A write that raises may still have landed (a timeout after the speaker
-    acted), so the journal line is written in any case, with `error` when it
-    failed. Returns the alarm as the speaker now has it (None once destroyed)
+    acted), so the journal line is written in any case, with `error` when
+    something failed and `written` saying whether the speaker acknowledged it. Returns the alarm as the speaker now has it (None once destroyed)
     and the list it came from, whose version the next write expects.
     """
-    entry: dict = {"alarm_id": alarm_id, "before": _record(before), "sent": dict(args)}
+    entry: dict = {"alarm_id": alarm_id, "before": _record(before), "sent": dict(args),
+                   "written": False}
     try:
         reply = _write(ip, action, args)
         alarm_id = reply.get("AssignedID") or alarm_id
-        entry["alarm_id"] = alarm_id
+        entry |= {"alarm_id": alarm_id, "written": True}
         after_list = list_alarms(ip)
         after = after_list.get(alarm_id)
         entry["after"] = _record(after)

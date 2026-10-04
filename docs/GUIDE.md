@@ -515,8 +515,9 @@ uv run twiddle diag soak --room roam --duration 120
 ```
 
 `rooms`, `status`, `snapshot`, and all of `diag scan|ping|watch|analyse` are
-strictly read-only. Every write goes through `play.py`, which journals it to
-`logs/interventions.jsonl` — see *Telling real dropouts from ones you caused*.
+strictly read-only. Every write goes through `play.py`, or for alarms through
+`alarms/clock.py`, and both journal it to `logs/interventions.jsonl` — see
+*Telling real dropouts from ones you caused*.
 
 ## Reading PHY error rates
 

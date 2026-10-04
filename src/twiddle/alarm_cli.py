@@ -301,7 +301,7 @@ def cmd_restore(args):
     lines = [change_text(house, c) for c in changes]
     head = f"alarms as at {snap.taken_utc} ({path})"
     if getattr(args, "dry_run", False) or not changes:
-        notes = [] if changes else baseline.leftovers(want, found.alarms)[1]
+        notes = baseline.leftovers(want, found.alarms)[1]
         if not changes:
             human = f"nothing to do: the alarms already match {head}"
         else:

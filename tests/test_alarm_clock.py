@@ -184,7 +184,7 @@ def test_create_gets_a_fresh_id_and_journals_the_alarm_after(fake):
     assert rec["alarm_id"] == "200"
     assert rec["before"] is None
     assert rec["after"]["attributes"] == made.to_attributes()
-    assert "error" not in rec
+    assert rec["written"] is True and "error" not in rec
 
 
 def test_update_journals_the_alarm_before_and_after(fake):
@@ -220,6 +220,19 @@ def test_a_failed_write_is_still_journalled(fake):
     [rec] = journal()
     assert rec["action"] == "alarm_create"
     assert "UPnPError" in rec["error"] and rec["sent"]["RoomUUID"] == ROAM_L
+    assert rec["written"] is False
+
+
+def test_a_failed_read_back_is_journalled_as_written(fake, monkeypatch):
+    v = clock.list_alarms(IP).version
+    real = clock.list_alarms
+    monkeypatch.setattr(clock, "list_alarms",
+                        lambda ip: real(ip) if not fake.writes else 1 / 0)
+    with pytest.raises(ZeroDivisionError):
+        clock.create_alarm(IP, new_alarm(), v)
+    [rec] = journal()
+    assert rec["written"] is True and rec["alarm_id"] == "200"
+    assert "ZeroDivisionError" in rec["error"]
 
 
 def test_unknown_ids_are_refused_before_writing(fake):
