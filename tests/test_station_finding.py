@@ -154,18 +154,32 @@ def test_titles_in_a_registered_shape_are_named():
     assert probe.title_shape(["Low - Words", 'title="",artist="",url=""']) == "artist-song"
 
 
-@pytest.mark.parametrize("samples", [
-    [WFMU_TITLES[0], "Low - Words", 'title="Plane",artist="JOHN MULANEY",url=""',
-     'title="",artist="",url=""'],
-    ['BOBCAT GOLDTHWAIT - text="The Game Of Love" song_spot="M"', 'title="",artist="",url=""'],
-    ['title="Plane",artist="JOHN MULANEY",url=""', "Low - Words", 'title="",artist="",url=""'],
-])
-def test_the_shape_named_keeps_every_artist_in_the_samples(samples):
-    shape = probe.title_shape(samples)
-    reader = None if shape in ("artist-song", "show-like") else shape
-    for t in samples:
-        if any(titles.parse(r, t).get("artist") for r in (None, "iheart-attrs", "iheart-space")):
-            assert titles.parse(reader, t).get("artist"), (shape, t)
+SPACE = ('BOBCAT GOLDTHWAIT - text="The Game Of Love" song_spot="M" '
+         'amgArtworkURL="https://i.iheart.com/x.jpg" length="00:03:12"')
+COMMA = 'title="Plane",artist="JOHN MULANEY",url=""'
+
+
+def test_both_iheart_forms_together_are_iheart_space():
+    # iheart-space reads both; a plain split would make `text="..."` the song.
+    assert probe.title_shape([SPACE, COMMA]) == "iheart-space"
+    got = titles.parse("iheart-space", SPACE)
+    assert (got["song"], got["art_url"]) == ("The Game Of Love", "https://i.iheart.com/x.jpg")
+    assert titles.parse("iheart-space", COMMA)["artist"] == "JOHN MULANEY"
+    # ...and with a plain title too, no one reader is right for all three.
+    assert probe.title_shape([SPACE, "Low - Words"]) == "show-like"
+
+
+def test_the_shape_named_reads_every_sample_as_well_as_any_reader():
+    spot = 'title="",artist="",url=""'
+    for samples, reader in [([SPACE, spot], "iheart-space"),
+                            ([COMMA, "Low - Words", spot], None),
+                            ([SPACE, COMMA, spot], "iheart-space")]:
+        shape = probe.title_shape(samples)
+        assert (None if shape == "artist-song" else shape) == reader
+        for t in samples:
+            assert titles.parse(reader, t) == next(
+                (g for r in ("iheart-attrs", "iheart-space", None)
+                 if (g := titles.parse(r, t)).get("artist")), titles.parse(reader, t))
 
 
 def test_only_specific_shapes_are_ever_guessed():
@@ -293,3 +307,12 @@ def test_a_stalled_read_times_out_instead_of_hanging():
     with pytest.raises(TimeoutError):
         probe.bounded(never.wait, 0.05)
     assert probe.bounded(lambda: 7, 1) == 7
+
+
+def test_probe_drafts_iheart_space_for_both_iheart_forms(monkeypatch):
+    _fake_stream(monkeypatch, final="http://ihr.example/live",
+                 headers={"icy-metaint": "16000", "icy-name": "Comedy Example"},
+                 titles=[SPACE, COMMA])
+    p = probe.probe("http://ihr.example/live", sleep=lambda s: None)
+    assert (p.title_shape, p.fetch) == ("iheart-space", "icy")
+    assert 'fetch_args = { titles = "iheart-space" }' in probe.draft_toml(p)

@@ -199,8 +199,9 @@ def bounded(fn, timeout: float):
 DETECTABLE = {
     "wfmu": re.compile(r" on WFMU$"),
     "iheart-attrs": re.compile(r'\bartist="'),
-    "iheart-space": re.compile(r' - text="'),
+    "iheart-space": re.compile(r' - text="|\bartist="'),       # it reads both
 }
+_IHEART = ("iheart-attrs", "iheart-space")
 
 
 def _has_shape(shape: str, real: list[str]) -> bool:
@@ -212,13 +213,17 @@ def _has_shape(shape: str, real: list[str]) -> bool:
             and all(DETECTABLE[shape].search(t) for t, g in zip(real, got) if g.get("artist")))
 
 
-def _keeps_every_artist(real: list[str]) -> str | None:
-    """An iHeart song beside a spot (`title="",artist=""`) or a show name:
-    the first reader that loses no artist any of them finds, or None."""
-    readers = ("iheart-attrs", "iheart-space", None)
-    wanted = [t for t in real if any(titles.parse(r, t).get("artist") for r in readers)]
+def _reads_every_song(real: list[str]) -> str | None:
+    """iHeart titles mixed with a spot (`title="",artist=""`), a show name or
+    a plain "Artist - Song": the first reader that reads each title with an
+    artist as well as its best reader does (song and cover too), or None."""
+    readers = (*_IHEART, None)
+
+    def best(t: str) -> dict:
+        return next((g for r in readers if (g := titles.parse(r, t)).get("artist")), {})
+    wanted = [(t, b) for t in real if (b := best(t))]
     for r in readers if wanted else ():
-        if all(titles.parse(r, t).get("artist") for t in wanted):
+        if all(titles.parse(r, t) == b for t, b in wanted):
             return r or "artist-song"
     return None
 
@@ -239,10 +244,11 @@ def title_shape(samples: list[str | None], icy_name: str | None = None) -> str:
     for shape in DETECTABLE:
         if _has_shape(shape, real):
             return shape
+    # Before a plain split, which would read comedy247's `text="..."` as a song.
+    if any(DETECTABLE[k].search(t) for k in _IHEART for t in real):
+        return _reads_every_song(real) or "show-like"
     if all(icy.split_title(icy.tidy_title(t)) != (None, None) for t in real):
         return "artist-song"
-    if any(DETECTABLE[k].search(t) for k in ("iheart-attrs", "iheart-space") for t in real):
-        return _keeps_every_artist(real) or "show-like"
     return "show-like"
 
 
