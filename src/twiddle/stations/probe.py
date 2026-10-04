@@ -229,9 +229,10 @@ def _reads_every_song(real: list[str]) -> str | None:
     readers = (*_IHEART, None)
 
     def best(t: str) -> dict:
-        # comedy247's form is only iheart-space's: any other reader would
-        # make "Artist - text=..." an artist and song.
-        own = ("iheart-space",) if ' - text="' in t else readers
+        # An iHeart title is only its readers': a plain split would make
+        # "Artist - text=..." or `title="Promo - Break"` an artist and song.
+        own = (("iheart-space",) if ' - text="' in t
+               else _IHEART if DETECTABLE["iheart-attrs"].search(t) else readers)
         return next((g for r in own if (g := titles.parse(r, t)).get("artist")), {})
     wanted = {t: b for t in real if (b := best(t))}
     if not wanted:

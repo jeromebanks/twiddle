@@ -351,7 +351,7 @@ _POOL = {
     "wfmu": [WFMU_TITLES[0], WFMU_TITLES[1], WFMU_TITLES[1] + " ", _FILLER,
              "Fool's Paradise with Rex"],
     "iheart": [COMMA, 'title="Words",artist="Low" ', SPACE, 'title="",artist="",url=""',
-               'AD - text="" song_spot="T"'],
+               'AD - text="" song_spot="T"', 'title="Promo - Break",artist="",url=""'],
     "other": ["Low - Words", "Morning Edition with Steve Inskeep",
               "Good Food-Evan Kleiman-join.kcrw.com", '"Words" by Low on Evening Show on WXYZ'],
 }
