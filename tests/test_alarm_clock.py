@@ -433,6 +433,27 @@ def test_restore_maps_a_create_whose_answer_and_read_back_were_both_lost(fake):
     create = next(r for r in journal() if r["action"] == "alarm_create")
     assert create["written"] is None and create["alarm_id"] is None
     assert out.id_map == {"2": "200"} and out.left == []
-    assert out.done == [out.done[0]] and out.done[0]["new_id"] == "200"
+    assert len(out.done) == 1 and out.done[0]["new_id"] == "200"
     assert out.done[0]["recovered"] and out.done[0]["uncertain"]
     assert journal()[-1]["id_map"] == {"2": "200"}
+
+
+def test_an_alarm_someone_else_recreates_is_not_credited_to_restore(fake):
+    """Alarm 2 is missing; the app recreates it after restore has read the
+    list. The create is refused, nothing is written, and restore claims none
+    of it."""
+    snap = snapshot(fake)
+    clock.destroy_alarm(IP, "2", fake.version)
+    read = clock.list_alarms(IP)
+    fake.alarms["201"] = dict(next(a for a in snap.alarms if a.id == "2").to_attributes(),
+                              ID="201")
+    fake.children["201"] = []
+    fake.n += 1
+    before = len(journal())
+
+    out = baseline.restore(IP, snap, read)
+
+    assert "nothing written" in out.error and fake.writes.count("CreateAlarm") == 0
+    assert out.done == [] and out.id_map == {} and out.left == []
+    [rec] = journal()[before:]
+    assert rec["action"] == "alarm_restore" and rec["changes"] == 0 and rec["id_map"] == {}
