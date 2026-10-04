@@ -98,7 +98,7 @@ Read every line of the report:
   or a fallback to `icy`). Use a feed, or leave the station out.
 - **`problem ... redirects to ...`**: a load balancer handing out edges.
   Keep the station's own URL, which the draft already does.
-- **`VERDICT`** has three possible outcomes:
+- **`VERDICT`** has four possible outcomes:
   - **`known platform ... data only`**: go to step 3.
   - **`needs a custom fetcher`**: go to step 4.
   - **`ICY titles in the '<shape>' shape`**: data only; step 3.
@@ -116,10 +116,12 @@ nothing (or worse, splits inside a quoted song), and which once got
 
 1. **Capture.** Probe two or three times, a few minutes apart, so you see a
    show change and the filler as well as songs. Copy the titles exactly,
-   with the date. WFMU's, 2026-10-03:
-   `"At War With Satan" by Venom on Marty McSorley's show on WFMU`,
-   `Fool's Paradise with Rex` (a show change),
-   `Your DJ speaks over "X" on Bucci's show on WFMU` (filler).
+   with the date. WFMU's stream, 2026-10-03:
+   `"At War With Satan" by Venom on Marty McSorley's show on WFMU` and
+   `"Orgies - A Tool Of Witchcraft" by Louise Huebner with Louis and Bebe Barron on Marty McSorley's show on WFMU`
+   (the second is why " - " can't be trusted: it's inside the song). Its
+   tests add the other forms it sends: a bare `Show with Host` at a show
+   change, and filler like `Your DJ speaks over "..." on <show> on WFMU`.
 2. **Write the shape** in `stations/titles.py`: a pure `str -> dict` of
    NowPlaying fields (`artist`, `song`, `show`, `hosts`, `art_url`) that
    returns `{}` for anything not in its shape. Filler must give `{}`, never
