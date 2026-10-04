@@ -92,9 +92,10 @@ def wfmu(title: str) -> dict:
     at a show change; nothing for anything else ("Your DJ speaks over ...").
 
     The song is everything inside the outer quotes, so its own " by " and
-    " on " are safe. Between artist and show the last " on " outside quotes
-    wins: an artist with " on " in the name keeps it, and a show with one
-    loses its first half instead. The artist is what gets looked up; the
+    " on " are safe. Between artist and show, the first " on " after a
+    quoted `with "..."` credit, else the last " on " outside quotes: an
+    artist with " on " in the name keeps it, and a show with one loses its
+    first half instead. The artist is what gets looked up; the
     show is only shown."""
     title = title.strip()
     if title.startswith("Your DJ "):
@@ -104,7 +105,11 @@ def wfmu(title: str) -> dict:
         artist, show = m["rest"].strip(), None
         if artist.endswith(" on WFMU"):
             artist = artist[:-len(" on WFMU")]
-            cut = _last_unquoted(artist, " on ")
+            # After a quoted credit the boundary is certain: the first " on "
+            # past its closing quote. Without one, the last " on " wins.
+            close = artist.rfind('"')
+            cut = (artist.find(" on ", close) if close >= 0 else -1)
+            cut = cut if cut >= 0 else _last_unquoted(artist, " on ")
             if cut is not None:
                 artist, show = artist[:cut], artist[cut + len(" on "):]
         fields = {"artist": _the_first(artist.strip()), "song": m["song"].strip(),

@@ -362,7 +362,11 @@ def test_music_false_never_yields_an_artist_whatever_the_shape(monkeypatch, shap
     # A credit is kept, and an " on " inside its quotes is not the show.
     ('"Song" by Sam with "Live on Mars" on Bodega Pop on WFMU',
      {"song": "Song", "artist": 'Sam with "Live on Mars"', "show": "Bodega Pop"}),
-    # The last " on " splits artist from show: an artist keeps its own.
+    # After a quoted credit the first " on " is the show's, whatever follows.
+    ('"Man From Mars" by Butch Paulson with "The Motations" on Music on the Move on WFMU',
+     {"song": "Man From Mars", "artist": 'Butch Paulson with "The Motations"',
+      "show": "Music on the Move"}),
+    # Without one, the last " on " splits artist from show: an artist keeps its own.
     ('"Song" by Hot on the Heels on Fool\'s Paradise on WFMU',
      {"song": "Song", "artist": "Hot on the Heels", "show": "Fool's Paradise"}),
     # No show named: artist and song still.
