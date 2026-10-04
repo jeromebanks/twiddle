@@ -57,23 +57,30 @@ def _household(args) -> Household:
 
 # ---- what an alarm is aimed at ---------------------------------------------
 
-def _bond(house: Household, sp: Speaker, attr: str = "chan_map") -> set[str]:
-    """The UUIDs in `sp`'s ChannelMapSet (or `attr`), empty when it has none."""
-    member = house.topology.by_uuid(sp.uuid) if house.topology else None
-    raw = getattr(member, attr, "") if member else ""
-    return {pair.split(":", 1)[0] for pair in raw.split(";") if pair}
+def _bond(house: Household, sp: Speaker) -> set[str]:
+    """Every unit bonded with `sp`, itself included: the UUIDs of whichever
+    ChannelMapSet or HTSatChanMapSet in the topology lists it (a surround's
+    may be only on its soundbar's member). Empty when none does."""
+    out: set[str] = set()
+    for m in house.topology.members if house.topology else ():
+        for raw in (m.chan_map, m.sat_chan_map):
+            uuids = {pair.split(":", 1)[0] for pair in raw.split(";") if pair}
+            if sp.uuid in uuids:
+                out |= uuids
+    return out
 
 
 def _bonded_with(house: Household, sp: Speaker) -> list[Speaker]:
     """The visible units bonded with `sp` into one room (a stereo pair), `sp`
-    among them: the units its ChannelMapSet lists. Without one in the
-    topology, the visible units of its room that were given a channel from
-    one. Two units that only share a room name are two rooms."""
+    among them: the units its map lists. With no map naming it in the
+    topology but a channel given from one, the visible units of its room
+    that were given one too. Two units that only share a room name are two
+    rooms."""
     members = [m for m in house.group_of(sp).members if not m.invisible]
     bond = _bond(house, sp)
     if bond:
         return [m for m in members if m.uuid in bond]
-    if sp.channel and not (house.topology and house.topology.by_uuid(sp.uuid)):
+    if sp.channel:
         return [m for m in members if m.room == sp.room and m.channel]
     return [sp]
 
@@ -100,19 +107,22 @@ def _is_bonded_follower(house: Household, sp: Speaker) -> bool:
     return bool(first) and sp.uuid != first
 
 
-def room_primary(house: Household, sp: Speaker) -> Speaker | None:
-    """The unit that is `sp`'s room: `sp` itself unless it is a bonded follower.
-    A satellite's is the visible unit its SatChannelMapSet names, failing
-    that one of its room's."""
+def room_primaries(house: Household, sp: Speaker) -> list[Speaker]:
+    """The unit that is `sp`'s room: `sp` itself unless it is a bonded
+    follower, else the visible unit of its bond that isn't one. A satellite
+    no map names falls back to its room's visible units, which can be none
+    or several: the caller refuses either rather than guess."""
     if not _is_bonded_follower(house, sp):
-        return sp
-    if sp.invisible:
-        bond = _bond(house, sp, "sat_chan_map") or _bond(house, sp)
-        units = [m for m in house.group_of(sp).members if not m.invisible
-                 and (m.uuid in bond if bond else m.room == sp.room)]
+        return [sp]
+    members = house.group_of(sp).members
+    bond = _bond(house, sp)
+    if bond:
+        units = [m for m in members if m.uuid in bond and not m.invisible]
+    elif sp.invisible:
+        units = [m for m in members if not m.invisible and m.room == sp.room]
     else:
         units = _bonded_with(house, sp)
-    return next((m for m in units if not _is_bonded_follower(house, m)), None)
+    return [m for m in units if not _is_bonded_follower(house, m)]
 
 
 def room_target(house: Household, query: str) -> dict:
@@ -129,10 +139,12 @@ def room_target(house: Household, query: str) -> dict:
     hits = house.matches(query)
     rooms: dict[str, Speaker] = {}
     for sp in hits:
-        primary = room_primary(house, sp)
-        if primary is None:
+        primaries = room_primaries(house, sp)
+        if not primaries:
             raise NotFound(query, house.names)
-        rooms.setdefault(primary.uuid, primary)
+        if len(primaries) > 1:
+            raise Ambiguous(query, sorted(p.label for p in primaries))
+        rooms.setdefault(primaries[0].uuid, primaries[0])
     if len(rooms) > 1:
         names = sorted(p.room or p.name for p in rooms.values())
         if len(set(names)) < len(names):        # two rooms of one name: tell them apart

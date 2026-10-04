@@ -1023,3 +1023,51 @@ def test_two_unbonded_units_sharing_a_room_name_are_two_rooms(
     got = {r["room_uuid"]: r["status"] for r in alarm_cli.listing(
         house, [extra("RINCON_DEN_N", "1"), extra("RINCON_DEN_S", "2")], SAT_AFTERNOON)}
     assert got == {"RINCON_DEN_N": "ok", "RINCON_DEN_S": "ok"}
+
+
+def den_theatre(other_first, maps=True):
+    """A soundbar and its surround, and another unbonded speaker called Den,
+    grouped. The surround's HTSatChanMapSet is only on the soundbar's member."""
+    beam = Speaker(ip="10.0.0.31", uuid="RINCON_BEAM", name="Den", room="Den",
+                   group_id="d", is_coordinator=not other_first, channel="LF,RF" if maps else "")
+    other = Speaker(ip="10.0.0.32", uuid="RINCON_OTHER", name="Den", room="Den",
+                    group_id="d", is_coordinator=other_first)
+    sur = Speaker(ip="10.0.0.33", uuid="RINCON_SUR", name="Den Surround", room="Den",
+                  group_id="d", invisible=True, is_satellite=True, channel="LR" if maps else "")
+    units = [other, beam, sur] if other_first else [beam, other, sur]
+    sat_map = "RINCON_BEAM:LF,RF;RINCON_SUR:LR" if maps else ""
+    topo = Topology(groups={"d": [
+        Member(uuid=beam.uuid, ip=beam.ip, zone_name="Den", software="", sat_chan_map=sat_map),
+        Member(uuid=other.uuid, ip=other.ip, zone_name="Den", software=""),
+        Member(uuid=sur.uuid, ip=sur.ip, zone_name="Den", software="", is_satellite=True,
+               invisible=True)]}, vanished=[])
+    coord = other if other_first else beam
+    return Household(units, [Group("d", coord, units)], topo)
+
+
+@pytest.mark.parametrize("other_first", [True, False])
+def test_a_surround_goes_to_the_soundbar_whose_map_names_it(
+        clockfake, capsys, monkeypatch, other_first):
+    house = den_theatre(other_first)
+    monkeypatch.setattr(alarm_cli, "_household", lambda args: house)
+    code, out, _ = run(["alarm", "add", "--time", "07:15", "--room", "Den Surround", "--json"],
+                       capsys)
+    payload = json.loads(out)
+    assert code == 0 and clockfake.alarms[payload["id"]]["RoomUUID"] == "RINCON_BEAM"
+    assert payload["redirected_from"] == "Den Surround [10.0.0.33]"
+    code, out, _ = run(["alarm", "edit", "2", "--room", "Den Surround", "--json"], capsys)
+    assert code == 0 and clockfake.alarms["2"]["RoomUUID"] == "RINCON_BEAM"
+    assert alarm_cli.aimed_at(house, "RINCON_OTHER")["status"] == "ok"
+
+
+@pytest.mark.parametrize("other_first", [True, False])
+def test_a_surround_no_map_names_is_ambiguous_between_two_units_of_its_room(
+        clockfake, capsys, monkeypatch, other_first):
+    house = den_theatre(other_first, maps=False)
+    monkeypatch.setattr(alarm_cli, "_household", lambda args: house)
+    for argv in (["add", "--time", "07:15"], ["edit", "2"]):
+        code, out, _ = run(["alarm", *argv, "--room", "Den Surround", "--json"], capsys)
+        payload = json.loads(out)
+        assert code == 1 and "matches more than one target" in payload["error"]
+        assert payload["candidates"] == ["Den [10.0.0.31]", "Den [10.0.0.32]"]
+    assert clockfake.writes == []
