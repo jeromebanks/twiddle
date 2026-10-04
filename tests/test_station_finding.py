@@ -131,6 +131,11 @@ def test_title_shapes():
 def test_titles_in_a_registered_shape_are_named():
     assert probe.title_shape(WFMU_TITLES, "WFMU Freeform Radio") == "wfmu"
     assert probe.title_shape(["  ", None]) == "blank"
+    # WFMU's filler beside a song, both with a " - " inside the quotes: never split.
+    assert probe.title_shape([
+        WFMU_TITLES[1],
+        'Your DJ speaks over "Orgies - A Tool Of Witchcraft" on Marty McSorley\'s show on WFMU',
+    ]) == "show-like"
 
 
 @pytest.mark.parametrize("samples,expected", [
@@ -178,6 +183,11 @@ def test_both_iheart_forms_together_are_iheart_space():
     got = titles.parse("iheart-space", SPACE)
     assert (got["song"], got["art_url"]) == ("The Game Of Love", "https://i.iheart.com/x.jpg")
     assert titles.parse("iheart-space", COMMA)["artist"] == "JOHN MULANEY"
+    # Only spots sampled is still iHeart's, never music = false.
+    assert probe.title_shape(['title="",artist="",url=""'] * 2) == "iheart-attrs"
+    assert probe.title_shape(['AD - text="" song_spot="T"'] * 2) == "iheart-space"
+    # A reader that would make that spot an artist ("AD") is never chosen.
+    assert probe.title_shape([COMMA, "Low - Words", 'AD - text="" song_spot="T"']) == "show-like"
     # ...and with a plain title too, no one reader is right for all three.
     assert probe.title_shape([SPACE, "Low - Words"]) == "show-like"
 
