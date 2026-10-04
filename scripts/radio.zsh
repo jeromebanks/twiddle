@@ -17,8 +17,11 @@
 #   dial                   radio TUI: every station's now-playing, covers, artist
 #                            bios; enter tunes the Roam, +/- volume, m mute, d output
 #     dial list              the same, as text (read-only)
-#   shows                  local shows TUI: venues -> lineup -> band -> play
-#     shows --venue ivy      start on one venue; `shows list` prints them instead
+#   scene                  local shows TUI: venues -> lineup -> band -> play
+#     scene --venue ivy      start on one venue; `scene list` prints them instead
+#     scene build            compile the local events dataset it reads (network)
+#     scene schedule         print a launchd agent that runs the build on a timer
+#   shows                  the same as `scene` (the older name)
 #   vol ++3                bump the Roam's volume (twiddle vol); also -, --,
 #                            --8, 44, mute, unmute
 #   bass -4, treble ++2    same shorthand for EQ (-10..10): N sets absolute,
@@ -43,8 +46,8 @@
 # Stations live in src/twiddle/stations/catalog/, not here. Only the station
 # names, `discover`, `snooze`, and vol/bass/treble/balance/loudness/shuffle/
 # rpt write to a speaker (journalled, like any twiddle write); `np`, `np -i`,
-# `artist`, `stations`, `shows list`, `comedy artists/refresh/new` are
-# read-only. `shows` writes only when you press play in it; `dial` only when
+# `artist`, `stations`, `scene list`, `comedy artists/refresh/new` are
+# read-only. `scene` writes only when you press play in it; `dial` only when
 # you tune, stop, or change volume/mute.
 
 # Everything below also works in bash (a Chromebook's Linux shell); only
@@ -76,7 +79,8 @@ unset _station _station_file
 np()        { _twiddle np "$@"; }
 discover()  { _twiddle spotify discover "$@"; }
 artist()    { _twiddle info "$@"; }
-shows()     { _twiddle scene "$@"; }
+scene()     { _twiddle scene "$@"; }
+shows()     { scene "$@"; }   # the older name
 stations()  { _twiddle stations "$@"; }
 radio-stations() { stations "$@"; }  # the old name
 comedy()    { _twiddle comedy "$@"; }

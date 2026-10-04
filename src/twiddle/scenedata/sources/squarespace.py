@@ -18,8 +18,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from ..model import Show
-from .base import SourceError
+from ...scenespec.model import Show
+from .base import SourceError, split_outside_parens
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
 # source name -> (events collection URL, the venue as a watched venue matches it)
@@ -55,8 +55,9 @@ def to_show(ev: dict, source: str) -> Show | None:
     if _NAMED_NIGHT.search(title):
         bands, name = [], title
     else:
-        bands = [b.strip() for b in re.split(r"\s+(?:with|w/|feat\.?|featuring)\s+|\s*,\s*|\s+\+\s+",
-                                             title, flags=re.IGNORECASE) if b.strip()]
+        bands = [b.strip() for b in split_outside_parens(
+            title, re.compile(r"\s+(?:with|w/|feat\.?|featuring)\s+|\s*,\s*|\s+\+\s+", re.IGNORECASE))
+                 if b.strip()]
         name = ""
     notes = [_text(t) for t in (ev.get("categories") or []) + (ev.get("tags") or []) if t]
     return Show(day=when.date(), venue=venue, bands=bands, price=price, times=_clock(when),

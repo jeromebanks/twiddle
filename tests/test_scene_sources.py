@@ -1,4 +1,4 @@
-"""The List parser, venue matching and the listings cache.
+"""The List parser and venue matching.
 
 The fixture is a trimmed copy of the real by-club pages from 2026-09-22 --
 five venues, 74 rows -- not a hand-written imitation, so it carries The
@@ -10,10 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from twiddle.scene import cache, venues
-from twiddle.scene.model import Show, dedupe
-from twiddle.scene.sources import SourceError, fetch_all
-from twiddle.scene.sources.thelist import infer_year, parse_page
+from twiddle.scene import cache
+from twiddle.scenedata import venues
+from twiddle.scenespec import venue
+from twiddle.scenespec.model import Show, dedupe
+from twiddle.scenedata.sources import SourceError, fetch_all
+from twiddle.scenedata.sources.thelist import infer_year, parse_page
 
 FIXTURE = Path(__file__).parent / "fixtures" / "thelist_by_club.html"
 TODAY = date(2026, 9, 22)
@@ -69,14 +71,14 @@ def test_year_inference(today, month, day, expected):
 
 
 def test_watched_venues_match_the_lists_spelling():
-    v = venues.find(venues.DEFAULT_VENUES, "Thee Stork Club, Oakland")
+    v = venue.find(venues.DEFAULT_VENUES, "Thee Stork Club, Oakland")
     assert v is not None and v.name == "Stork Club"
-    assert venues.find(venues.DEFAULT_VENUES, "Eli's Mile High Club, Oakland").name == "Eli's Mile High"
-    assert venues.find(venues.DEFAULT_VENUES, "Hardly Strictly Bluegrass, Golden Gate Park, S.F.") is None
-    assert venues.resolve(venues.DEFAULT_VENUES, "stork").name == "Stork Club"
-    assert venues.resolve(venues.DEFAULT_VENUES, "eli").name == "Eli's Mile High"   # not D*eli*
-    assert venues.resolve(venues.DEFAULT_VENUES, "gold").name == "Stay Gold Deli"
-    assert venues.display_name(venues.DEFAULT_VENUES, "Rio Theater, Santa Cruz") == "Rio Theater"
+    assert venue.find(venues.DEFAULT_VENUES, "Eli's Mile High Club, Oakland").name == "Eli's Mile High"
+    assert venue.find(venues.DEFAULT_VENUES, "Hardly Strictly Bluegrass, Golden Gate Park, S.F.") is None
+    assert venue.resolve(venues.DEFAULT_VENUES, "stork").name == "Stork Club"
+    assert venue.resolve(venues.DEFAULT_VENUES, "eli").name == "Eli's Mile High"   # not D*eli*
+    assert venue.resolve(venues.DEFAULT_VENUES, "gold").name == "Stay Gold Deli"
+    assert venue.display_name(venues.DEFAULT_VENUES, "Rio Theater, Santa Cruz") == "Rio Theater"
 
 
 def test_every_spelling_of_gilman_and_gamh_is_matched():
@@ -84,12 +86,12 @@ def test_every_spelling_of_gilman_and_gamh_is_matched():
     for listed in ["924 Gilman Street, Berkeley", "924 Gilman St., Berkeley",
                    "924 Gilman, Berkeley", "924 Gilman Street, S.F.",
                    "924 Gilman Street and Gilman Brewery, Berkeley"]:
-        assert venues.find(venues.DEFAULT_VENUES, listed).name == "924 Gilman"
-    assert venues.find(venues.DEFAULT_VENUES, "Gilman Brewing Co., 912 Gilman Street, Berkeley") is None
+        assert venue.find(venues.DEFAULT_VENUES, listed).name == "924 Gilman"
+    assert venue.find(venues.DEFAULT_VENUES, "Gilman Brewing Co., 912 Gilman Street, Berkeley") is None
     for listed in ["Great American Music Hall, S.F.", "Great American Music Hall, S.f."]:
-        assert venues.find(venues.DEFAULT_VENUES, listed).name == "Great American"
-    assert venues.resolve(venues.DEFAULT_VENUES, "gilman").name == "924 Gilman"
-    assert venues.resolve(venues.DEFAULT_VENUES, "great").name == "Great American"
+        assert venue.find(venues.DEFAULT_VENUES, listed).name == "Great American"
+    assert venue.resolve(venues.DEFAULT_VENUES, "gilman").name == "924 Gilman"
+    assert venue.resolve(venues.DEFAULT_VENUES, "great").name == "Great American"
 
 
 def test_a_config_venue_list_replaces_the_defaults(tmp_path):
@@ -124,12 +126,6 @@ def test_one_failing_source_does_not_blank_the_others():
     assert len(shows) == 1 and errors == ["bad: down"]
 
 
-def test_listings_round_trip_through_the_cache(shows):
-    cache.save_listings(shows)
-    back, at = cache.load_listings()
-    assert back == shows and cache.listings_fresh(at)
-
-
 def test_pins_are_keyed_by_normalised_name():
     cache.pin("M.D.C.", "abc", "MDC")
     assert cache.pinned("m.d.c.")["spotify_id"] == "abc"
@@ -140,9 +136,9 @@ def test_pins_are_keyed_by_normalised_name():
 
 
 def test_yoshis_is_watched_whatever_the_apostrophe():
-    assert venues.find(venues.DEFAULT_VENUES, "Yoshi's, Oakland").name == "Yoshi's"
-    assert venues.find(venues.DEFAULT_VENUES, "Yoshi’s, Oakland").name == "Yoshi's"
-    assert venues.resolve(venues.DEFAULT_VENUES, "yosh").name == "Yoshi's"
+    assert venue.find(venues.DEFAULT_VENUES, "Yoshi's, Oakland").name == "Yoshi's"
+    assert venue.find(venues.DEFAULT_VENUES, "Yoshi’s, Oakland").name == "Yoshi's"
+    assert venue.resolve(venues.DEFAULT_VENUES, "yosh").name == "Yoshi's"
 
 
 @pytest.mark.parametrize("listed, name", [
@@ -152,18 +148,18 @@ def test_yoshis_is_watched_whatever_the_apostrophe():
     ("Midway, S.F.", "The Midway"),
 ])
 def test_the_big_rooms_match_the_lists_spelling(listed, name):
-    assert venues.find(venues.DEFAULT_VENUES, listed).name == name
+    assert venue.find(venues.DEFAULT_VENUES, listed).name == name
 
 
 def test_the_redwood_city_fox_is_not_oaklands():
-    assert venues.find(venues.DEFAULT_VENUES, "Fox Theater, 2215 Broadwa, Redwood City") is None
+    assert venue.find(venues.DEFAULT_VENUES, "Fox Theater, 2215 Broadwa, Redwood City") is None
 
 
 @pytest.mark.parametrize("query, name", [
     ("greek", "Greek Theatre"), ("fox", "Fox Theater"),
     ("paramount", "Paramount"), ("midway", "The Midway")])
 def test_the_big_rooms_resolve_by_partial_name(query, name):
-    assert venues.resolve(venues.DEFAULT_VENUES, query).name == name
+    assert venue.resolve(venues.DEFAULT_VENUES, query).name == name
 
 
 def test_the_same_show_spelled_differently_by_two_sources_appears_once():
@@ -196,7 +192,7 @@ def test_unwatched_rooms_are_only_merged_on_the_same_spelling():
     ("great", "Great American"), ("castro", "Castro Theatre"), ("bottom", "Bottom of the Hill"),
     ("star", "Starry Plough"), ("4 star", "4 Star"), ("indep", "Independent")])
 def test_partial_names_prefer_the_venues_own_name(query, name):
-    assert venues.resolve(venues.DEFAULT_VENUES, query).name == name
+    assert venue.resolve(venues.DEFAULT_VENUES, query).name == name
 
 
 def test_every_default_venue_has_an_address_and_a_site():
@@ -216,14 +212,14 @@ def test_a_config_venue_keeps_built_in_details_unless_it_gives_its_own():
 
 
 def test_the_house_venue_has_a_street_but_no_number():
-    v = venues.resolve(venues.DEFAULT_VENUES, "pussy")
+    v = venue.resolve(venues.DEFAULT_VENUES, "pussy")
     # A private home: the street is how its shows are described, the number isn't.
     assert v.info.address.split(",")[0] == "34th St"
-    assert venues.find(venues.DEFAULT_VENUES, "Oakland.Secret, Oakland").name == "Oakland Secret"
+    assert venue.find(venues.DEFAULT_VENUES, "Oakland.Secret, Oakland").name == "Oakland Secret"
 
 
 def test_wikipedia_summaries_are_cached(monkeypatch):
-    from twiddle.scene import venue_info
+    from twiddle.scenedata import venue_info
     calls = []
 
     class Resp:
@@ -256,3 +252,33 @@ def test_share_text_is_a_message_a_person_can_read():
     # An unwatched room: the source's own spelling, which carries the city.
     assert "Greek Theater, UC Berkeley Campus" in Show(
         date(2026, 10, 3), "Greek Theater, UC Berkeley Campus", ["X"]).share_text()
+
+
+# ---- a bracket is a note, not a lineup ---------------------------------------
+
+
+def test_the_list_keeps_a_bracketed_lineup_with_its_band():
+    # measured: The List anchors each comma-separated name, even inside "( )",
+    # so Black Flag's members used to come out as three "bands" with stray brackets
+    from datetime import date
+    from twiddle.scenedata.sources import thelist
+    row = ('<B><A HREF="by-date.0.html">Oct 23</A></B> <A HREF="by-band.1">Black Flag (Greg Ginn, '
+           'Max Zanelly</A>, <A HREF="by-band.2">David Rodriquez</A>, '
+           '<A HREF="by-band.3">Bryce Weston)</A>, <A HREF="by-band.4">Opener</A> 21+ $20')
+    show = thelist.parse_row(row, "Felton Music Hall, Felton", date(2026, 10, 1))
+    assert show.bands == ["Black Flag", "Opener"]
+    assert any("Greg Ginn" in n and n.startswith("Black Flag") for n in show.notes)
+
+
+def test_an_unclosed_bracket_does_not_swallow_the_lineup():
+    from twiddle.scenedata.sources.base import join_open_parens, split_outside_parens
+    assert join_open_parens(["A (b", "C", "D"]) == ["A (b", "C", "D"]
+    assert split_outside_parens("A (x, y", r"\s*,\s*") == ["A (x", "y"]
+    assert split_outside_parens("Crash Out (a, b), Other", r"\s*,\s*") == ["Crash Out (a, b)", "Other"]
+
+
+def test_ticketweb_does_not_split_inside_a_bracket():
+    from twiddle.scenedata.sources import ticketweb
+    bands, notes = ticketweb._split("AFROBASHMENT(afrobeats, dancehall, hip-hop & more), DJ Foo")
+    assert bands == ["AFROBASHMENT", "DJ Foo"]
+    assert notes == ["AFROBASHMENT: afrobeats, dancehall, hip-hop & more"]

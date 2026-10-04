@@ -6,8 +6,12 @@ knows. Three ship today:
   LookupEnricher     MusicBrainz -> Wikipedia / Discogs / Bandcamp (lookup.py)
   SpotifyEnricher    the Spotify artist, and a list of their tracks
   BandcampEnricher   their Bandcamp page: photo, tags (-> `genre`), songs
+  TrackEnricher      song lists only, for a band known by identity alone: the
+                     dataset builder skips tracks (2-4 more requests a band,
+                     and only useful when you press play), so the app fetches
+                     them for the band on screen
 
-`BandBook` runs them off the UI thread and calls back as each finishes.
+The client's `BandBook` (scene/book.py) runs them off the UI thread.
 
 ## Identity is the hard part, so it is never guessed silently
 
@@ -49,17 +53,16 @@ calls are independent and run on a small pool.
 """
 from __future__ import annotations
 
-import itertools
 import re
-import queue
 import threading
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
 from typing import Protocol
 
-from .. import lookup, spotify_ops
-from . import bandcamp, cache, genre
+from .. import bandcamp as site, lookup, spotify_ops
+from . import bandcamp, cache
+from ..scenespec import genre
+from ..scenespec.band import (CORROBORATED, NAME_ONLY, NONE, PENDING, UNCERTAIN, UNLOOKED,
+                              BandProfile)
 
 # Where the venues are. Origin strings come from MusicBrainz areas
 # ("Oakland", "California") and Bandcamp locations ("Oakland, California").
@@ -67,55 +70,9 @@ REGION = ("california", "bay area", "oakland", "berkeley", "san francisco",
           "albany", "emeryville", "alameda", "richmond", "san jose", "santa cruz",
           "vallejo", "san leandro", "hayward", "fremont", "sacramento", ", ca")
 
-CORROBORATED, NAME_ONLY, UNCERTAIN, NONE, PENDING = (
-    "corroborated", "name_only", "uncertain", "none", "pending")
-
 NOT_SIGNED_IN = ("not signed in -- run `twiddle spotify auth`; "
                  "Bandcamp tracks still play")
 SEARCH_LIMIT = 10   # see spotify_cli.RESOLVE_LIMIT: small limits rank badly
-
-
-@dataclass
-class BandProfile:
-    band: str
-    # per enricher: "pending" | "done" | "error: ..."
-    status: dict[str, str] = field(default_factory=dict)
-    info: lookup.ArtistInfo | None = None
-    lookup_candidates: list[dict] = field(default_factory=list)
-    spotify_artist: dict | None = None      # the chosen artist, when there is one
-    spotify_candidates: list[dict] = field(default_factory=list)
-    tracks: list[dict] = field(default_factory=list)
-    confidence: str = PENDING
-    why: str = ""
-    bandcamp: dict | None = None            # the chosen band (`bandcamp.choose`)
-    bc_tracks: list[dict] = field(default_factory=list)
-    alias: str | None = None                # a trimmed name the catalog knows
-    searched: dict[str, str] = field(default_factory=dict)   # enricher -> name it used
-
-    @property
-    def search_name(self) -> str:
-        return self.alias or self.band
-
-    def genre(self) -> genre.Guess:
-        """Sure when MusicBrainz tagged them, or the Bandcamp page is the one
-        it links, or is local -- not when it was found by name alone."""
-        bc = self.bandcamp or {}
-        linked = self.info.links.get("bandcamp") if self.info else None
-        sure = bool(self.info and self.info.genres) or near(bc.get("location")) or \
-            (bool(linked) and bandcamp._host(linked) == bandcamp._host(bc.get("item_url_root")))
-        return genre.for_band(self.bandcamp, self.info.genres if self.info else (), sure)
-
-    def busy(self) -> bool:
-        return any(v in ("pending", "running") for v in self.status.values())
-
-    def links(self) -> dict[str, str]:
-        out = dict(self.info.links) if self.info else {}
-        if self.bandcamp and self.bandcamp.get("item_url_root"):
-            out.setdefault("bandcamp", self.bandcamp["item_url_root"])
-        if self.spotify_artist and self.spotify_artist.get("id"):
-            out.setdefault("spotify",
-                           f"https://open.spotify.com/artist/{self.spotify_artist['id']}")
-        return out
 
 
 def _spotify_id(url: str | None) -> str:
@@ -144,6 +101,20 @@ SHOW_WORDS = {"christmas", "xmas", "holiday", "holidays", "show", "tour", "live"
               "trio", "quartet", "quintet", "sextet", "concert", "anniversary"}
 _ABOUT = re.compile(r"^(?:an?\s+)?(?:tribute\s+to|salute\s+to|celebration\s+of|"
                     r"celebrating|the\s+music\s+of|the\s+songs\s+of)\s+(.+)$", re.IGNORECASE)
+# Billings that are an event, not an act: nothing to look up, so never a dead letter.
+# Measured against the real queue (2026-10): "Private Event", "Membership Meeting",
+# "Karaoke Tuesday", "Bachata Nightz", "Salsa Crazy Mondays". Only consulted for a
+# billing that found nothing, so a band really called "Open Mic" costs us nothing.
+EVENT = re.compile(r"\b(?:private (?:event|party)|closed for|membership meeting|open mic|karaoke|"
+                   r"trivia|bingo|jam session|storytelling|workshop|nights?|nightz|nite|"
+                   r"(?:mon|tues|wednes|thurs|fri|satur|sun)days)\b|\bvs\.?\s", re.IGNORECASE)
+
+
+def non_band(name: str) -> bool:
+    """True when this billing reads as an event (a night, a meeting), not a band."""
+    return bool(EVENT.search(name))
+
+
 MAX_CANDIDATES = 3      # each is up to three database searches on the lookup lane
 
 
@@ -178,9 +149,23 @@ def name_candidates(billed: str) -> list[str]:
     return keep[:MAX_CANDIDATES]
 
 
+_CA = re.compile(r",\s*ca\b")           # ", CA" but not ", Canada"
+
+
 def near(place: str | None) -> bool:
     place = (place or "").lower()
-    return any(r in place for r in REGION)
+    return any(r in place for r in REGION if r != ", ca") or bool(_CA.search(place))
+
+
+# Stricter, for choosing an artist automatically and for good: names that are Bay Area
+# only (not Albany NY, Richmond VA), on word boundaries.
+_BAY_ONLY = re.compile(r"\b(?:bay area|east bay|north bay|san francisco|oakland|berkeley|san jose|"
+                       r"santa cruz|san leandro|emeryville|vallejo|hayward|alameda|marin|"
+                       r"california)\b|,\s*ca\b")
+
+
+def bay_area_only(place: str | None) -> bool:
+    return bool(_BAY_ONLY.search((place or "").lower()))
 
 
 def local(info: lookup.ArtistInfo | None) -> bool:
@@ -188,13 +173,13 @@ def local(info: lookup.ArtistInfo | None) -> bool:
 
 
 def assess(p: BandProfile) -> None:
-    """Grade the Spotify identity from everything gathered so far."""
-    pin = cache.pinned(p.band)
-    if pin is not None:
-        if pin.get("spotify_id"):
-            p.confidence, p.why = CORROBORATED, "chosen by you"
-        else:
-            p.confidence, p.why = NONE, "marked by you as not on Spotify"
+    """Grade the Spotify identity from everything gathered so far, on evidence
+    alone: one person's hand-made pins never travel with the data (the client
+    overlays its own, `scene/book.py`)."""
+    if p.status.get("spotify") == "idle":
+        # Seeded from the dataset with no (usable) Spotify answer: the band on
+        # screen is looked up when it is selected.
+        p.confidence, p.why = UNLOOKED, "not looked up on Spotify yet"
         return
     if p.status.get("spotify") in ("pending", "running"):
         p.confidence, p.why = PENDING, "searching Spotify…"
@@ -240,6 +225,16 @@ def assess(p: BandProfile) -> None:
 # ---- enrichers ----------------------------------------------------------------
 
 
+def genre_of(p: BandProfile) -> genre.Guess:
+    """Sure when MusicBrainz tagged them, or the Bandcamp page is the one
+    it links, or is local -- not when it was found by name alone."""
+    bc = p.bandcamp or {}
+    linked = p.info.links.get("bandcamp") if p.info else None
+    sure = bool(p.info and p.info.genres) or near(bc.get("location")) or \
+        (bool(linked) and site._host(linked) == site._host(bc.get("item_url_root")))
+    return genre.for_band(p.bandcamp, p.info.genres if p.info else (), sure)
+
+
 class Enricher(Protocol):
     name: str
     serial: bool    # True: must run on the single lookup lane
@@ -253,19 +248,27 @@ class LookupEnricher:
     name = "lookup"
     serial = True
 
-    def __init__(self, identify=None):
+    def __init__(self, identify=None, bandcamp_ok: Callable[[], bool] | None = None):
         self._identify = identify
+        self._bandcamp_ok = bandcamp_ok     # False: leave Bandcamp alone (rate-limited)
 
     def enrich(self, p: BandProfile) -> None:
-        identify = self._identify or lookup.identify
-        r = identify(p.band)
+        ok = self._bandcamp_ok() if self._bandcamp_ok else True
+        identify = self._identify or (
+            lambda name: lookup.identify(name, bandcamp_fallback=ok))
+        ov = cache.override(p.band)      # someone decided: a chosen artist and/or the name to search
+        chosen, alias = ov.get("mbid", ""), ov.get("alias", "")
+        r = lookup.identify(alias or p.band, mb_artist_id=chosen, bandcamp_fallback=ok) \
+            if chosen and self._identify is None else identify(alias or p.band)
         if not r.artist and not r.candidates:
-            r = self._trimmed(p, identify) or r
+            r = self._trimmed(p, identify, record_miss=ok) or r
         p.info = r.artist
         p.lookup_candidates = r.candidates
+        if alias:
+            p.alias = alias              # Spotify and Bandcamp search by it too, found here or not
 
     @staticmethod
-    def _trimmed(p: BandProfile, identify) -> lookup.Result | None:
+    def _trimmed(p: BandProfile, identify, record_miss: bool = True) -> lookup.Result | None:
         """The first trimmed name the databases uniquely identify, if any.
 
         Only a single identified artist counts: "several candidates" for a
@@ -284,7 +287,8 @@ class LookupEnricher:
                 p.alias = name
                 cache.save_alias(p.band, name)
                 return r
-        cache.save_alias(p.band, "")    # a network failure raises before here
+        if record_miss:                 # not when we skipped a source: "none worked" would be false
+            cache.save_alias(p.band, "")    # a network failure raises before here
         return None
 
 
@@ -297,8 +301,9 @@ class SpotifyEnricher:
     name = "spotify"
     serial = False
 
-    def __init__(self, session_factory: Callable[[], object]):
+    def __init__(self, session_factory: Callable[[], object], tracks: bool = True):
         self._session_factory = session_factory
+        self._tracks = tracks           # the builder's are off: see `TrackEnricher`
         self._sess = None
         self._lock = threading.Lock()
 
@@ -319,39 +324,30 @@ class SpotifyEnricher:
     def _enrich(self, p: BandProfile) -> None:
         from ..discover_cli import _artist_tracks
         sess = self.session()
-        pin = cache.pinned(p.band)
-        if pin is not None:
-            p.spotify_candidates = []
-            if not pin.get("spotify_id"):
-                p.spotify_artist, p.tracks = None, []
-                return
-            p.spotify_artist = sess.request("GET", f"/artists/{pin['spotify_id']}")
-        else:
-            term = p.searched["spotify"] = p.search_name
-            hits = sess.search(term, "artist", limit=SEARCH_LIMIT)
-            want = name_key(term)
-            exact = [a for a in hits if name_key(a.get("name")) == want]
-            linked = linked_spotify_id(p)
-            chosen = None
-            if linked:
-                # MusicBrainz names the exact Spotify artist: that settles
-                # it, even among several same-named ones ("Chuck Johnson").
-                chosen = next((a for a in hits if a.get("id") == linked), None) \
-                    or sess.request("GET", f"/artists/{linked}")
-            elif len(exact) == 1:
-                chosen = exact[0]
-            p.spotify_artist = chosen
-            # Only *same-named* artists are candidates. Loose hits for a band
-            # Spotify doesn't have are noise (measured: "Girl Chow" returns
-            # Girlschool and a Maori girls' choir); `m` searches by hand.
-            p.spotify_candidates = exact if (chosen is None and len(exact) > 1) else []
-        p.tracks = _artist_tracks(sess, p.spotify_artist) if p.spotify_artist else []
+        term = p.searched["spotify"] = p.search_name
+        hits = sess.search(term, "artist", limit=SEARCH_LIMIT)
+        want = name_key(term)
+        exact = [a for a in hits if name_key(a.get("name")) == want]
+        linked = linked_spotify_id(p)
+        chosen = None
+        if linked:
+            # MusicBrainz names the exact Spotify artist: that settles
+            # it, even among several same-named ones ("Chuck Johnson").
+            chosen = next((a for a in hits if a.get("id") == linked), None) \
+                or sess.request("GET", f"/artists/{linked}")
+        elif len(exact) == 1:
+            chosen = exact[0]
+        p.spotify_artist = chosen
+        # Only *same-named* artists are candidates. Loose hits for a band
+        # Spotify doesn't have are noise (measured: "Girl Chow" returns
+        # Girlschool and a Maori girls' choir); `m` searches by hand.
+        p.spotify_candidates = exact if (chosen is None and len(exact) > 1) else []
+        p.tracks = _artist_tracks(sess, p.spotify_artist) \
+            if p.spotify_artist and self._tracks else []
 
     def wants_rerun(self, p: BandProfile) -> bool:
         """After the lookup lands: does MusicBrainz name a different artist,
         or did it find the band under a trimmed name we haven't searched?"""
-        if cache.pinned(p.band) is not None:
-            return False
         linked = linked_spotify_id(p)
         current = (p.spotify_artist or {}).get("id", "")
         return (bool(linked) and linked != current) or \
@@ -371,9 +367,11 @@ class BandcampEnricher:
     name = "bandcamp"
     serial = False
 
-    def __init__(self, search=bandcamp.search, tracks=bandcamp.tracks):
+    def __init__(self, search=bandcamp.search, tracks=site.tracks,
+                 fetch_tracks: bool = True):
         self._search = search
         self._tracks = tracks
+        self._fetch_tracks = fetch_tracks       # the builder's is off: see `TrackEnricher`
 
     @staticmethod
     def _linked(p: BandProfile) -> str | None:
@@ -392,114 +390,10 @@ class BandcampEnricher:
         if band is None and linked:
             band = {"name": p.band, "item_url_root": linked}     # linked, but named otherwise
         p.bandcamp = band
-        p.bc_tracks = self._tracks(band["item_url_root"]) if band else []
+        p.bc_tracks = self._tracks(band["item_url_root"]) if band and self._fetch_tracks else []
 
     def wants_rerun(self, p: BandProfile) -> bool:
         linked = self._linked(p)
         have = (p.bandcamp or {}).get("item_url_root")
-        return (bool(linked) and bandcamp._host(linked) != bandcamp._host(have)) or \
+        return (bool(linked) and site._host(linked) != site._host(have)) or \
             bool(p.alias and p.searched.get("bandcamp") != p.alias)
-
-
-# ---- the book -------------------------------------------------------------------
-
-
-class BandBook:
-    """Profiles by band, enriched in the background, reported via `on_update`.
-
-    `on_update(profile)` is called from worker threads; a UI must marshal it
-    onto its own thread (Textual: `app.call_from_thread`).
-    """
-
-    def __init__(self, enrichers: list[Enricher],
-                 on_update: Callable[[BandProfile], None] = lambda p: None,
-                 spotify_workers: int = 3):
-        self.enrichers = enrichers
-        self.on_update = on_update
-        self.profiles: dict[str, BandProfile] = {}
-        self._lock = threading.Lock()
-        self._pool = ThreadPoolExecutor(max_workers=spotify_workers,
-                                        thread_name_prefix="scene-spotify")
-        self._lane: queue.PriorityQueue = queue.PriorityQueue()
-        self._seq = itertools.count()
-        self._lane_thread = threading.Thread(target=self._run_lane, daemon=True,
-                                             name="scene-lookup")
-        self._lane_thread.start()
-
-    def get(self, band: str, urgent: bool = True) -> BandProfile:
-        """The profile as known now; missing enrichments are scheduled.
-
-        `urgent` is for the band on screen: it jumps the lookup lane ahead of
-        prefetched lineup members.
-        """
-        key = lookup.norm(band)
-        with self._lock:
-            p = self.profiles.get(key)
-            fresh = p is None
-            if fresh:
-                p = BandProfile(band=band)
-                for e in self.enrichers:
-                    p.status[e.name] = "pending"
-                self.profiles[key] = p
-        if fresh:
-            assess(p)
-            for e in self.enrichers:
-                self._schedule(e, p, urgent)
-        elif urgent:
-            self._bump(p)
-        return p
-
-    def refresh(self, band: str) -> BandProfile:
-        """Forget and re-enrich -- after a pin changes, say."""
-        with self._lock:
-            self.profiles.pop(lookup.norm(band), None)
-        return self.get(band)
-
-    def _schedule(self, e: Enricher, p: BandProfile, urgent: bool) -> None:
-        if e.serial:
-            self._lane.put((0 if urgent else 1, next(self._seq), e, p))
-        else:
-            self._pool.submit(self._run, e, p)
-
-    def _bump(self, p: BandProfile) -> None:
-        # Re-queue at high priority; `_run` skips work already done.
-        for e in self.enrichers:
-            if e.serial and p.status.get(e.name) == "pending":
-                self._lane.put((0, next(self._seq), e, p))
-
-    def _run_lane(self) -> None:
-        while True:
-            _prio, _n, e, p = self._lane.get()
-            if e is None:
-                return
-            self._run(e, p)
-
-    def _run(self, e: Enricher, p: BandProfile) -> None:
-        with self._lock:
-            if p.status.get(e.name) != "pending":
-                return
-            p.status[e.name] = "running"
-        try:
-            e.enrich(p)
-            p.status[e.name] = "done"
-        except Exception as exc:   # one source failing must not break the rest
-            p.status[e.name] = f"error: {getattr(exc, 'message', None) or exc}"
-        # One enricher's answer can change another's: MusicBrainz landing
-        # after Spotify may name a different Spotify artist. Redo that one.
-        for other in self.enrichers:
-            rerun = getattr(other, "wants_rerun", None)
-            with self._lock:
-                if other is e or p.status.get(other.name) != "done" \
-                        or not (rerun and rerun(p)):
-                    continue
-                p.status[other.name] = "pending"
-            self._schedule(other, p, urgent=True)
-        assess(p)
-        try:
-            self.on_update(p)
-        except Exception:
-            pass
-
-    def close(self) -> None:
-        self._lane.put((-1, -1, None, None))
-        self._pool.shutdown(wait=False, cancel_futures=True)

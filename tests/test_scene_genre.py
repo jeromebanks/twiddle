@@ -4,8 +4,12 @@ import urllib.error
 import pytest
 
 from twiddle import lookup
-from twiddle.scene import bandcamp, genre
-from twiddle.scene.bands import BandBook, BandcampEnricher, BandProfile, near
+from twiddle import bandcamp as site
+from twiddle.scenedata import bandcamp
+from twiddle.scenespec import genre
+from twiddle.scenespec.band import BandProfile
+from twiddle.scene.book import BandBook
+from twiddle.scenedata.bands import BandcampEnricher, genre_of, near
 
 SLEEPBOMB = {"name": "Sleepbomb", "item_url_root": "https://sleepbomb.bandcamp.com",
              "location": "San Francisco, California", "genre_name": "Metal",
@@ -68,10 +72,10 @@ def test_choose_prefers_the_linked_page_then_unique_then_the_local_one():
 
 @pytest.fixture
 def fast(monkeypatch):
-    bandcamp.reset()
-    monkeypatch.setattr(bandcamp, "MIN_INTERVAL_S", 0)
+    site.reset()
+    monkeypatch.setattr(site, "MIN_INTERVAL_S", 0)
     yield
-    bandcamp.reset()
+    site.reset()
 
 
 def test_search_is_cached_and_offline_says_when_it_does_not_know(monkeypatch, fast):
@@ -88,11 +92,11 @@ def test_a_429_stops_every_bandcamp_request_for_a_while(monkeypatch, fast):
     def slow_down(name):
         raise urllib.error.HTTPError("u", 429, "Too Many Requests", {}, None)
     monkeypatch.setattr(lookup, "bandcamp_bands", slow_down)
-    with pytest.raises(urllib.error.HTTPError):
+    with pytest.raises(site.BlockedError):          # the 429 itself says so, as every later call does
         bandcamp.search("One")
     asked = []
     monkeypatch.setattr(lookup, "bandcamp_bands", lambda n: asked.append(n) or [])
-    with pytest.raises(bandcamp.BlockedError):
+    with pytest.raises(site.BlockedError):
         bandcamp.search("Two")
     assert asked == []
 
@@ -101,10 +105,10 @@ def test_a_run_of_failures_backs_off_too(monkeypatch, fast):
     def down(name):
         raise TimeoutError("slow")
     monkeypatch.setattr(lookup, "bandcamp_bands", down)
-    for i in range(bandcamp.MAX_ERRORS):
+    for i in range(site.MAX_ERRORS):
         with pytest.raises(TimeoutError):
             bandcamp.search(f"band {i}")
-    with pytest.raises(bandcamp.BlockedError):
+    with pytest.raises(site.BlockedError):
         bandcamp.search("next")
 
 
@@ -120,10 +124,10 @@ def test_tracks_and_a_fresh_stream_url_from_the_release_page(monkeypatch, fast):
     pages = {"https://sleepbomb.bandcamp.com/music":
              '<div data-tralbum="{}"></div><a href="/album/conan">x</a>',
              "https://sleepbomb.bandcamp.com/album/conan": album}
-    monkeypatch.setattr(bandcamp, "_get", pages.__getitem__)
-    ts = bandcamp.tracks("https://sleepbomb.bandcamp.com")
+    monkeypatch.setattr(site, "_get", pages.__getitem__)
+    ts = site.tracks("https://sleepbomb.bandcamp.com")
     assert [(t["title"], t["year"]) for t in ts] == [("Forged in Steel", "2026")]
-    assert bandcamp.stream_url(ts[0]) == "https://t4.bcbits.com/stream/new"
+    assert site.stream_url(ts[0]) == "https://t4.bcbits.com/stream/new"
 
 
 # ---- the enricher --------------------------------------------------------------------
@@ -140,7 +144,7 @@ def test_bandcamp_enricher_reruns_when_musicbrainz_links_another_page():
                                links={"bandcamp": "https://sleepbomb-sf.bandcamp.com/"})
     assert e.wants_rerun(p)
     e.enrich(p)
-    assert p.bandcamp is other and p.genre().label() == "punk"
+    assert p.bandcamp is other and genre_of(p).label() == "punk"
     assert not e.wants_rerun(p)
 
 
@@ -164,22 +168,22 @@ def test_bandcamp_enricher_runs_in_the_book():
 def test_a_faraway_band_found_by_name_alone_is_only_a_guess():
     """Measured: "Inayah" at the Great American is an R&B singer; by name
     on Bandcamp, a French death metal band."""
-    from twiddle.scene.app import SceneApp
+    from twiddle.scenedata.builder import guess_from
     inayah = [{"name": "Inayah", "item_url_root": "https://inayah.bandcamp.com",
                "location": "Valenciennes, France", "genre_name": "Metal"}]
-    g = SceneApp._guess_from(inayah)
+    g = guess_from(inayah)
     assert g.label() == "metal?" and not g.sure
-    assert SceneApp._guess_from([SLEEPBOMB]).label() == "metal"      # local: sure
+    assert guess_from([SLEEPBOMB]).label() == "metal"      # local: sure
 
 
 def test_same_named_pages_that_agree_still_give_a_genre():
     thelma = [{"name": "Thelma And The Sleaze", "location": "Nashville, Tennessee",
                "item_url_root": f"https://t{i}.bandcamp.com", "genre_name": "Rock"}
               for i in range(2)]
-    from twiddle.scene.app import SceneApp
-    assert SceneApp._guess_from(thelma).label() == "rock?"
+    from twiddle.scenedata.builder import guess_from
+    assert guess_from(thelma).label() == "rock?"
     split = [thelma[0], dict(thelma[1], genre_name="Reggae")]
-    assert SceneApp._guess_from(split) is None
+    assert guess_from(split) is None
 
 
 def test_a_show_is_sure_if_any_band_behind_its_genre_is():

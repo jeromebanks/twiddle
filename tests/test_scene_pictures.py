@@ -2,7 +2,7 @@
 from twiddle import lookup
 from twiddle.dial import art
 from twiddle.scene import pictures
-from twiddle.scene.bands import CORROBORATED, NAME_ONLY, UNCERTAIN, BandProfile
+from twiddle.scenespec.band import CORROBORATED, NAME_ONLY, UNCERTAIN, BandProfile
 
 SPOTIFY = {"id": "x", "images": [{"url": "https://i.scdn.co/big", "height": 640},
                                  {"url": "https://i.scdn.co/small", "height": 64}]}

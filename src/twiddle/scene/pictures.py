@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 
 from ..dial import art
-from .bands import CORROBORATED, NAME_ONLY, BandProfile
+from ..scenespec.band import CORROBORATED, NAME_ONLY, BandProfile
 
 
 def spotify_image(artist: dict | None) -> str | None:

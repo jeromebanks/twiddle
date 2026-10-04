@@ -135,6 +135,18 @@ class SpotifyConnectPlayer:
         return (self._relay_name or spotify_ops.relay_argv_value("--device-name")
                 or DEFAULT_DEVICE_NAME)
 
+    _relay_room_val: str | None = None
+    _relay_room_at = 0.0
+
+    @property
+    def relay_room(self) -> str:
+        """`_relay_room`, remembered for 30 s: the UI asks on every redraw and the
+        answer comes from the running relay's argv."""
+        now = time.monotonic()
+        if self._relay_room_val is None or now - self._relay_room_at > 30:
+            self._relay_room_val, self._relay_room_at = self._relay_room(), now
+        return self._relay_room_val
+
     def _relay_room(self) -> str:
         """The room the running relay feeds -- from its own argv, else ours."""
         return spotify_ops.relay_argv_value("--room") or self.room
