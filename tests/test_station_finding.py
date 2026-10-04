@@ -147,20 +147,44 @@ def test_titles_in_a_registered_shape_are_named():
         == "iheart-attrs"
     assert probe.title_shape(['title="Plane",artist="JOHN MULANEY",url=""',
                               "The Breakfast Club"]) == "iheart-attrs"
+    # ...but never by choosing a reader that drops a song another title has.
+    assert probe.title_shape([space, spot]) == "iheart-space"
+    assert probe.title_shape(['title="Plane",artist="JOHN MULANEY",url=""',
+                              "Low - Words", spot]) == "artist-song"
+    assert probe.title_shape(["Low - Words", 'title="",artist="",url=""']) == "artist-song"
+
+
+@pytest.mark.parametrize("samples", [
+    [WFMU_TITLES[0], "Low - Words", 'title="Plane",artist="JOHN MULANEY",url=""',
+     'title="",artist="",url=""'],
+    ['BOBCAT GOLDTHWAIT - text="The Game Of Love" song_spot="M"', 'title="",artist="",url=""'],
+    ['title="Plane",artist="JOHN MULANEY",url=""', "Low - Words", 'title="",artist="",url=""'],
+])
+def test_the_shape_named_keeps_every_artist_in_the_samples(samples):
+    shape = probe.title_shape(samples)
+    reader = None if shape in ("artist-song", "show-like") else shape
+    for t in samples:
+        if any(titles.parse(r, t).get("artist") for r in (None, "iheart-attrs", "iheart-space")):
+            assert titles.parse(reader, t).get("artist"), (shape, t)
 
 
 def test_only_specific_shapes_are_ever_guessed():
     assert set(probe.DETECTABLE) <= set(titles.SHAPES)
+    assert all(hasattr(mark, "search") for mark in probe.DETECTABLE.values())
     assert not {"artist-song", "artist-dot-song", "kcrw"} & set(probe.DETECTABLE)
     # The most specific first: a comma-attribute title is iheart-attrs, never
     # iheart-space (which reads those too).
-    assert probe.DETECTABLE.index("iheart-attrs") < probe.DETECTABLE.index("iheart-space")
+    order = list(probe.DETECTABLE)
+    assert order.index("iheart-attrs") < order.index("iheart-space")
 
 
 @pytest.mark.parametrize("samples", [
     ["Good Food-Evan Kleiman-join.kcrw.com"] * 2,        # KCRW's, and only KCRW's
     ["Namee · Scarecrow (1985)", "Low · Words"],            # artist-dot-song is permissive
     ["Morning Edition with Steve Inskeep"] * 2,             # WFMU's show line, no song
+    # WFMU's song form from anywhere else: its parser reads it, but the artist
+    # would come out "Low on Evening Show on WXYZ".
+    ['"Words" by Low on Evening Show on WXYZ', '"Tears" by Broadcast on Evening Show on WXYZ'],
 ])
 def test_a_permissive_or_station_anchored_shape_is_never_guessed(samples):
     assert probe.title_shape(samples) == "show-like"

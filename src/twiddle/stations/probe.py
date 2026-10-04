@@ -191,18 +191,36 @@ def bounded(fn, timeout: float):
 
 
 # The title shapes (`titles.SHAPES`) the probe may name from a few titles alone,
-# most specific first: each anchored on markers no other station's titles
-# carry. Never a permissive one (`artist-dot-song` splits any " · ") or one
-# that only makes sense for its own station (`kcrw`). `iheart-attrs` before
-# `iheart-space`, which reads comma attributes too.
-DETECTABLE = ("wfmu", "iheart-attrs", "iheart-space")
+# most specific first, each with the mark only its own titles carry: parsing
+# isn't enough (`wfmu` reads any `"Song" by Artist`, "on WXYZ" and all). Never
+# a permissive one (`artist-dot-song` splits any " · ") or one that only makes
+# sense for its own station (`kcrw`). `iheart-attrs` before `iheart-space`,
+# which reads comma attributes too.
+DETECTABLE = {
+    "wfmu": re.compile(r" on WFMU$"),
+    "iheart-attrs": re.compile(r'\bartist="'),
+    "iheart-space": re.compile(r' - text="'),
+}
 
 
 def _has_shape(shape: str, real: list[str]) -> bool:
-    # Every title parses, and at least one to an artist: WFMU's bare
-    # `Show with Host` alone would match any "Morning Edition with Steve".
+    # Every title parses, at least one to an artist (WFMU's bare `Show with
+    # Host` alone would match any "Morning Edition with Steve"), and every
+    # title it takes an artist from has the shape's mark.
     got = [titles.parse(shape, t) for t in real]
-    return all(got) and any(g.get("artist") for g in got)
+    return (all(got) and any(g.get("artist") for g in got)
+            and all(DETECTABLE[shape].search(t) for t, g in zip(real, got) if g.get("artist")))
+
+
+def _keeps_every_artist(real: list[str]) -> str | None:
+    """An iHeart song beside a spot (`title="",artist=""`) or a show name:
+    the first reader that loses no artist any of them finds, or None."""
+    readers = ("iheart-attrs", "iheart-space", None)
+    wanted = [t for t in real if any(titles.parse(r, t).get("artist") for r in readers)]
+    for r in readers if wanted else ():
+        if all(titles.parse(r, t).get("artist") for t in wanted):
+            return r or "artist-song"
+    return None
 
 
 def title_shape(samples: list[str | None], icy_name: str | None = None) -> str:
@@ -223,10 +241,8 @@ def title_shape(samples: list[str | None], icy_name: str | None = None) -> str:
             return shape
     if all(icy.split_title(icy.tidy_title(t)) != (None, None) for t in real):
         return "artist-song"
-    # An iHeart song beside a spot or station ID (`title="",artist=""`): still
-    # iHeart's, and under its shape the spot gives nothing rather than a split.
-    if any('title="' in t and 'artist="' in t for t in real):
-        return "iheart-attrs"
+    if any(DETECTABLE[k].search(t) for k in ("iheart-attrs", "iheart-space") for t in real):
+        return _keeps_every_artist(real) or "show-like"
     return "show-like"
 
 
