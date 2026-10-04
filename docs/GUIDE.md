@@ -186,6 +186,45 @@ snapshot taken before the delete brings it back as well. Every field
 Spotify alarm's `<Content>` child (see above) and any attribute twiddle's
 model doesn't know. `recreate` returns a list of what it couldn't bring back.
 
+```bash
+uv run twiddle alarm add --room roam --time 07:15 --days weekdays --dry-run   # the alarm it would create
+uv run twiddle alarm add --room roam --time 07:15 --days weekdays --volume 20 --duration 1h
+uv run twiddle alarm edit 34 --volume 15 --mode shuffle --dry-run               # the change; writes nothing
+uv run twiddle alarm edit 34 --days sat,sun --off                               # WRITES
+```
+
+`add` sends one `CreateAlarm` and prints the ID the speaker gave it; `edit`
+sends one `UpdateAlarm` that changes only the fields named on the command line
+and sends every other one back exactly as `ListAlarms` gave it. Between them
+every field `AlarmClock` takes is settable:
+
+| Flag | Field | Values (`add`'s default) |
+|---|---|---|
+| `--time` | `StartLocalTime` | 24-hour `HH:MM` or `HH:MM:SS`, the household's time (required on `add`) |
+| `--days` | `Recurrence` | `once`, `daily`, `weekdays`, `weekends`, days like `mon,wed,fri` or `mon-fri`, or the speaker's own `ON_<days>` (Sunday 0); written the speaker's way, so `sat,sun` is `WEEKENDS` (`daily`) |
+| `--duration` | `Duration` | the auto-stop: `1h`, `30m`, `1h30`, `HH:MM:SS`; `none` sends an empty `Duration`, as soco does for no auto-stop (unverified on a real speaker) (`2h`) |
+| `--volume` | `Volume` | 0-100 (25) |
+| `--mode` | `PlayMode` | `normal`, `repeat`, `repeat-one`, `shuffle`, `shuffle-repeat`, `shuffle-repeat-one`, or the speaker's own value. The speaker's `SHUFFLE` is shuffle *and* repeat (`shuffle-repeat`); plain `shuffle` is `SHUFFLE_NOREPEAT` (`normal`) |
+| `--include-grouped-rooms` / `--no-...` | `IncludeLinkedZones` | also play in the rooms grouped with it when it fires (no) |
+| `--room` | `RoomUUID` | a room by name (required on `add`) |
+| `--on` / `--off` | `Enabled` | (on) |
+| `--source` | `ProgramURI`, `ProgramMetaData` | `chime`; on `edit`, `keep` (the default) leaves the source byte-for-byte (`chime`) |
+
+So editing anything about an alarm whose source twiddle doesn't recognise (an
+iHeart or Spotify alarm) leaves its `ProgramURI` and `ProgramMetaData`
+untouched. An edit that would change nothing writes nothing.
+
+The room is named, never addressed. An alarm belongs to a room, so it goes on
+the room's primary unit: naming a bonded follower (`"Sonos Roam (R)"`, a
+surround, or its IP) puts the alarm on the left Roam or the soundbar, and the
+output says so in a `note:` (`redirected_from`/`reason` in `--json`). Naming
+the room itself is never a redirect. It is never the group coordinator: a
+room grouped with another today keeps its own alarm. `edit` without `--room`
+leaves the alarm where it is, even on a follower (`alarm list` labels those).
+`--dry-run` resolves the room and prints the whole alarm it would write;
+like every alarm write, the real thing is refused if the list moved since it
+was read, and journalled (`alarm_create`/`alarm_update`) before and after.
+
 ### Relay: play anything on this Mac, including Spotify
 
 `serve` plays files off disk. `relay` widens the same pipe to *live* audio and
