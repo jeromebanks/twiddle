@@ -84,6 +84,7 @@ def _last_unquoted(text: str, sep: str) -> int | None:
 
 
 _WFMU_SONG = re.compile(r'^"(?P<song>.*)" by (?P<rest>.+)$', re.DOTALL)
+_WFMU_CREDITED = re.compile(r'^(?P<artist>[^"]+? with "[^"]*") on ')
 _WFMU_SHOW = re.compile(r'^(?P<show>[^"]+?) with (?P<host>[^"]+?)(?: on WFMU)?$')
 
 
@@ -105,11 +106,11 @@ def wfmu(title: str) -> dict:
         artist, show = m["rest"].strip(), None
         if artist.endswith(" on WFMU"):
             artist = artist[:-len(" on WFMU")]
-            # After a quoted credit the boundary is certain: the first " on "
-            # past its closing quote. Without one, the last " on " wins.
-            close = artist.rfind('"')
-            cut = (artist.find(" on ", close) if close >= 0 else -1)
-            cut = cut if cut >= 0 else _last_unquoted(artist, " on ")
+            # After a quoted credit the boundary is certain: the " on " right
+            # past the credit's own closing quote. Without one, the last wins.
+            credited = _WFMU_CREDITED.match(artist)
+            cut = (credited.end("artist") if credited
+                   else _last_unquoted(artist, " on "))
             if cut is not None:
                 artist, show = artist[:cut], artist[cut + len(" on "):]
         fields = {"artist": _the_first(artist.strip()), "song": m["song"].strip(),

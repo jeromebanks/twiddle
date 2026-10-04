@@ -366,6 +366,9 @@ def test_music_false_never_yields_an_artist_whatever_the_shape(monkeypatch, shap
     ('"Man From Mars" by Butch Paulson with "The Motations" on Music on the Move on WFMU',
      {"song": "Man From Mars", "artist": 'Butch Paulson with "The Motations"',
       "show": "Music on the Move"}),
+    ('"Man From Mars" by Butch Paulson with "The Motations" on Music "Live" Hour on the Move'
+     ' on WFMU', {"song": "Man From Mars", "artist": 'Butch Paulson with "The Motations"',
+                  "show": 'Music "Live" Hour on the Move'}),
     # Without one, the last " on " splits artist from show: an artist keeps its own.
     ('"Song" by Hot on the Heels on Fool\'s Paradise on WFMU',
      {"song": "Song", "artist": "Hot on the Heels", "show": "Fool's Paradise"}),
