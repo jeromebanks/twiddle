@@ -12,6 +12,9 @@ exactly when they disagree:
 A speaker that is reachable but absent from the topology lost the household
 heartbeat, not power. BootSeq then says whether it rebooted.
 
+It also records the household's alarm schedule (`alarm_schedule`), so
+`analyse` can tell a vanish an alarm caused from a fault, whoever set it.
+
 Read-only: nothing here changes speaker state.
 """
 from __future__ import annotations
@@ -30,6 +33,7 @@ from pathlib import Path
 import requests
 
 from . import topology
+from .alarms import clock
 from .devices import PORT, load_device
 
 
@@ -187,6 +191,10 @@ class Monitor:
         self.watches: dict[str, Watch] = {}
         self.events = 0
         self._fh = None
+        # The alarm schedule as last logged. Rotation (which can run on the
+        # GENA thread) copies it into each new file, so it is only ever
+        # replaced whole, never mutated.
+        self._alarm_schedule: dict | None = None
         # GENA notifications arrive on the HTTP server's thread while the poll
         # loop is also writing, so every log write and the rotation that
         # closes the handle must be serialised. Without this, records
@@ -210,6 +218,14 @@ class Monitor:
                 src.replace(dst)
         self.out.replace(self.out.with_suffix(self.out.suffix + ".1"))
         self._fh = self.out.open("a")
+        # Carry the schedule into the new file with its original valid_from:
+        # once the file that first recorded it rotates past `keep`, this is
+        # the only record left that the alarms were set. Written directly --
+        # `_emit` holds the lock that calling it again would deadlock on.
+        schedule = self._alarm_schedule
+        if schedule is not None:
+            self._fh.write(json.dumps(schedule | {"ts": _now(), "checkpoint": True}) + "\n")
+            self._fh.flush()
 
     def _emit(self, rec: dict):
         rec.setdefault("ts", _now())
@@ -310,6 +326,38 @@ class Monitor:
                     "absent_from_topology": sorted(missing)})
         return {"samples": samples}
 
+    def _check_alarms(self):
+        """Log the alarm schedule when it, or the household's UTC offset,
+        changes.
+
+        Read-only: ListAlarms, GetTimeNow and GetFormat, on the anchor (alarms
+        are household-wide, so any speaker answers). StartTime is the
+        household's local time and this log is UTC, so each record carries
+        the offset between them; a DST change makes a new record with the same
+        version. GetTimeZone isn't used: it is an opaque index (`clock.py`),
+        while GetTimeNow's local - UTC is the offset actually in force. Polled
+        every sample, and logged only on a change.
+        """
+        found = clock.list_alarms(self.anchor)
+        hh = clock.household_time(self.anchor)
+        offset = round((hh.local - hh.utc).total_seconds() / 900) * 900
+        last = self._alarm_schedule
+        if last and last["version"] == found.version and last["utc_offset_s"] == offset:
+            return
+        rooms = {w.uuid: w.name for w in self.watches.values()}
+        now = _now()
+        schedule = {
+            "kind": "alarm_schedule", "valid_from": now, "version": found.version,
+            "utc_offset_s": offset,
+            "alarms": [{"id": a.id, "start_time": a.start_time, "duration": a.duration,
+                        "recurrence": str(a.recurrence), "enabled": a.enabled,
+                        "room_uuid": a.room_uuid,
+                        "room": rooms.get(a.room_uuid, a.room_uuid)}
+                       for a in found.alarms],
+        }
+        self._alarm_schedule = schedule
+        self._emit(schedule | {"ts": now})
+
     def _reelect_anchor(self):
         """Pick another speaker to ask about the household.
 
@@ -367,6 +415,13 @@ class Monitor:
                     if self._consecutive_errors >= 10:
                         # The anchor may be gone for good; re-elect one.
                         self._reelect_anchor()
+                try:
+                    self._check_alarms()
+                except Exception:
+                    # Kept apart from the sampling above: a speaker that won't
+                    # answer AlarmClock is not a reason to re-elect the anchor,
+                    # and the last schedule logged stays in force until then.
+                    pass
                 time.sleep(max(0.5, self.interval - (time.monotonic() - t0)))
         except KeyboardInterrupt:
             self._emit({"kind": "interrupted"})
