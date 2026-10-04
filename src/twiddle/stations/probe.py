@@ -232,7 +232,8 @@ def title_shape(samples: list[str | None], icy_name: str | None = None) -> str:
     """`blank`, `artist-song` (the default reading is enough), a shape in
     DETECTABLE that every title has, or `show-like`: consistent titles in no
     shape we know, which may still carry an artist a new shape could read."""
-    real = [t for t in samples if t]
+    # Trimmed as the shapes trim them, so a mark anchored at the end still finds it.
+    real = [t.strip() for t in samples if t and t.strip()]
     if not real:
         return "blank"
     # "90s90s - DIGITAL WEB" splits like Artist - Song but is only the

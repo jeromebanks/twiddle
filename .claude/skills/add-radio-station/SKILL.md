@@ -137,7 +137,9 @@ nothing (or worse, splits inside a quoted song), and which once got
    - a row in `test_shaped_stations_read_their_titles` once a catalog file uses it.
 4. **Name it** in the catalog file: `fetch_args = { titles = "<shape>" }`.
 5. **Detectable?** Add it to `DETECTABLE` in `stations/probe.py` (most specific
-   first) only if no other station's titles could match it. A shape that
+   first, with the mark only its titles carry: WFMU's is a trailing
+   ` on WFMU`, since its parser alone reads any `"Song" by Artist`) only if
+   no other station's titles could match it. A shape that
    splits any separator, or only means something for its own station
    (`kcrw`), stays out; `tests/test_station_finding.py` pins that.
 
