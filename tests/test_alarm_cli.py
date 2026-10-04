@@ -398,7 +398,7 @@ def test_restore_that_leaves_differences_says_so_and_fails(clockfake, capsys):
     code, out, err = run(["alarm", "restore"], capsys)
     assert code == 1
     assert "INCOMPLETE" in out
-    assert "stopped: HTTPError" in out
+    assert "stopped: AlarmWriteError: CreateAlarm: HTTPError" in out
     assert "STILL DIFFERENT: create  Sonos Roam 08:20:00" in out
 
 

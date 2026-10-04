@@ -24,7 +24,7 @@ from datetime import datetime
 
 from .. import play
 from ..devices import soap
-from .model import Alarm, parse_alarms
+from .model import Alarm, key, parse_alarms
 
 SERVICE = "AlarmClock"
 READS = frozenset({"ListAlarms", "GetTimeNow", "GetFormat"})
@@ -41,14 +41,34 @@ class AlarmList:
         return next((a for a in self.alarms if a.id == alarm_id), None)
 
 
-class VersionChanged(RuntimeError):
-    """The alarm list moved since it was read. Nothing was written; `current`
-    is the list as it is now."""
+class AlarmWriteError(RuntimeError):
+    """A write that stopped short. `landed` is whether the list read back
+    shows the speaker did it (None when that can't be told); `alarm_id` and
+    `alarm` are the alarm written, as read back; `current` is the list as
+    last read, None if it couldn't be."""
 
-    def __init__(self, expected: str, current: AlarmList):
-        self.expected, self.current = expected, current
-        super().__init__(f"the alarm list changed since it was read "
-                         f"(version {expected}, now {current.version}); nothing written")
+    def __init__(self, message: str, *, landed: bool | None = False,
+                 alarm_id: str | None = None, alarm: Alarm | None = None,
+                 current: AlarmList | None = None):
+        super().__init__(message)
+        self.landed, self.alarm_id, self.alarm, self.current = landed, alarm_id, alarm, current
+
+
+class VersionChanged(AlarmWriteError):
+    """The alarm list moved by someone else's hand. Either before the write,
+    and nothing was written; or between the write and its read-back, when
+    the write landed and `others` names the alarms someone else changed."""
+
+    def __init__(self, expected: str, current: AlarmList, others: list[str] = (),
+                 **landed):
+        self.expected, self.others = expected, list(others)
+        if landed.get("landed"):
+            msg = (f"alarm {landed.get('alarm_id')} was written, but alarms "
+                   f"{', '.join(self.others)} changed meanwhile; stopped")
+        else:
+            msg = (f"the alarm list changed since it was read "
+                   f"(version {expected}, now {current.version}); nothing written")
+        super().__init__(msg, current=current, **landed)
 
 
 @dataclass
@@ -134,57 +154,100 @@ def _checked(ip: str, expected_version: str) -> AlarmList:
     return current
 
 
-def _journalled(ip: str, action: str, alarm_id: str | None, before: Alarm | None,
-                args: list[tuple[str, str]]) -> tuple[Alarm | None, AlarmList]:
-    """Send a write, then read the list back; journal both whatever happens.
+def _landed(action: str, read: AlarmList, now: AlarmList, alarm_id: str | None,
+            want: Alarm | None) -> tuple[bool | None, str | None]:
+    """Did a write whose answer was lost happen? Judged from the list read
+    back: (True/False, or None when it can't be told; the alarm's ID)."""
+    if action == "DestroyAlarm":
+        return now.get(alarm_id) is None, alarm_id
+    if action == "UpdateAlarm":
+        got = now.get(alarm_id)
+        if got is not None and key(got) == key(want):
+            return True, alarm_id
+        return (False if got == read.get(alarm_id) else None), alarm_id
+    new = [a for a in now.alarms if read.get(a.id) is None]
+    same = [a for a in new if key(a) == key(want)]
+    if len(same) == 1:
+        return True, same[0].id
+    return (False if not new else None), None
 
-    A write that raises may still have landed (a timeout after the speaker
-    acted), so the journal line is written in any case, with `error` when
-    something failed and `written` saying whether the speaker acknowledged it. Returns the alarm as the speaker now has it (None once destroyed)
-    and the list it came from, whose version the next write expects.
+
+def _others(read: AlarmList, now: AlarmList, alarm_id: str | None) -> list[str]:
+    """The alarms that changed between two reads, apart from `alarm_id`."""
+    ids = {a.id for a in read.alarms} | {a.id for a in now.alarms}
+    return sorted((i for i in ids - {alarm_id} if read.get(i) != now.get(i)),
+                  key=lambda i: (len(i), i))
+
+
+def _journalled(ip: str, action: str, read: AlarmList, alarm_id: str | None,
+                args: list[tuple[str, str]], want: Alarm | None = None
+                ) -> tuple[Alarm | None, AlarmList]:
+    """Send a write, read the list back, and journal both whatever happens.
+
+    The read-back must differ from `read` (the list the write was checked
+    against) only in the alarm written. If anything else moved, someone
+    edited an alarm in that window: VersionChanged, and the caller stops
+    rather than overwrite it. A write that raises may still have landed (a
+    timeout after the speaker acted), so the list is read back then too and
+    `written` says whether it shows the write: true, false, or null when it
+    can't be told. Returns the alarm as the speaker now has it (None once
+    destroyed) and the list it came from, whose version the next write expects.
     """
-    entry: dict = {"alarm_id": alarm_id, "before": _record(before), "sent": dict(args),
-                   "written": False}
+    entry: dict = {"alarm_id": alarm_id, "before": _record(read.get(alarm_id)),
+                   "sent": dict(args), "written": False}
+    landed, failed, now, after = None, None, None, None
     try:
-        reply = _write(ip, action, args)
-        alarm_id = reply.get("AssignedID") or alarm_id
-        entry |= {"alarm_id": alarm_id, "written": True}
-        after_list = list_alarms(ip)
-        after = after_list.get(alarm_id)
-        entry["after"] = _record(after)
-        entry["version"] = after_list.version
-        return after, after_list
-    except Exception as exc:
-        entry["error"] = f"{type(exc).__name__}: {exc}"
-        raise
+        try:
+            reply = _write(ip, action, args)
+            alarm_id, landed = reply.get("AssignedID") or alarm_id, True
+        except Exception as exc:
+            failed = exc
+        try:
+            now = list_alarms(ip)
+        except Exception as exc:
+            failed = failed or exc
+        if now is not None and landed is None:
+            landed, alarm_id = _landed(action, read, now, alarm_id, want)
+        after = now.get(alarm_id) if now is not None else None
+        others = _others(read, now, alarm_id) if now is not None else []
+        entry |= {"alarm_id": alarm_id, "written": landed, "after": _record(after)}
+        if now is not None:
+            entry["version"] = now.version
+        if others:
+            entry["others_changed"] = others
+        if failed is not None:
+            entry["error"] = f"{type(failed).__name__}: {failed}"
     finally:
         play._journal(f"alarm_{action.removesuffix('Alarm').lower()}", ip, **entry)
+    found = {"landed": landed, "alarm_id": alarm_id, "alarm": after}
+    if failed is not None:
+        raise AlarmWriteError(f"{action}: {type(failed).__name__}: {failed}",
+                              current=now, **found) from failed
+    if others:
+        raise VersionChanged(read.version, now, others, **found)
+    if action != "DestroyAlarm" and after is None:
+        raise AlarmWriteError(f"{action} answered, but alarm {alarm_id} isn't in "
+                              "the list read back", current=now, **found)
+    return after, now
 
 
 def create_alarm(ip: str, alarm: Alarm, expected_version: str) -> tuple[Alarm, AlarmList]:
     """Create `alarm` (its `id` is ignored; the speaker assigns one)."""
-    _checked(ip, expected_version)
-    after, now = _journalled(ip, "CreateAlarm", None, None, alarm.create_args())
-    if after is None:
-        raise RuntimeError("CreateAlarm answered but the new alarm isn't in the list")
-    return after, now
+    read = _checked(ip, expected_version)
+    return _journalled(ip, "CreateAlarm", read, None, alarm.create_args(), alarm)
 
 
 def update_alarm(ip: str, alarm: Alarm, expected_version: str) -> tuple[Alarm, AlarmList]:
     """Overwrite the alarm with `alarm.id` with every field of `alarm`."""
-    before = _checked(ip, expected_version).get(alarm.id)
-    if before is None:
+    read = _checked(ip, expected_version)
+    if read.get(alarm.id) is None:
         raise KeyError(f"no alarm {alarm.id} to update")
-    after, now = _journalled(ip, "UpdateAlarm", alarm.id, before, alarm.update_args())
-    if after is None:
-        raise RuntimeError(f"alarm {alarm.id} vanished after UpdateAlarm")
-    return after, now
+    return _journalled(ip, "UpdateAlarm", read, alarm.id, alarm.update_args(), alarm)
 
 
 def destroy_alarm(ip: str, alarm_id: str, expected_version: str) -> AlarmList:
     """Delete one alarm; the journal keeps all of it."""
-    before = _checked(ip, expected_version).get(alarm_id)
-    if before is None:
+    read = _checked(ip, expected_version)
+    if read.get(alarm_id) is None:
         raise KeyError(f"no alarm {alarm_id} to destroy")
-    _, now = _journalled(ip, "DestroyAlarm", alarm_id, before, [("ID", alarm_id)])
-    return now
+    return _journalled(ip, "DestroyAlarm", read, alarm_id, [("ID", alarm_id)])[1]

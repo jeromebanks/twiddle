@@ -27,14 +27,7 @@ from pathlib import Path
 
 from .. import play
 from . import clock
-from .model import Alarm, parse_alarms
-
-
-def key(a: Alarm) -> tuple:
-    """What restore makes equal: everything but the ID, `extra` and children."""
-    return (a.start_time, a.recurrence.days, a.duration, a.enabled, a.room_uuid,
-            a.program_uri, a.program_metadata, a.play_mode, a.volume,
-            a.include_linked_zones)
+from .model import Alarm, key, parse_alarms
 
 
 _FIELDS = ("start_time", "recurrence", "duration", "enabled", "room_uuid",
@@ -157,21 +150,38 @@ def restore(ip: str, snap: AlarmSnapshot, found: clock.AlarmList) -> Restored:
     """Make the household's alarms match `snap`, starting from `found` (the
     list as just read). Stops at the first failed write, including a refusal
     because someone else changed the list; then reads the list once more and
-    reports whatever still differs. The ID map is journalled either way."""
+    reports whatever still differs. A write that failed but landed anyway
+    still counts as done, and one that may have is marked `uncertain`. The ID
+    map is journalled either way."""
     out = Restored()
     version = found.version
+
+    def did(c: Change, alarm_id: str | None, uncertain: bool = False) -> None:
+        rec = c.to_dict()
+        if c.op == "create" and alarm_id:
+            out.id_map[c.want.id] = rec["new_id"] = alarm_id
+        if uncertain:
+            rec["uncertain"] = True
+        out.done.append(rec)
+
     try:
         for c in plan(snap.alarms, found.alarms):
-            if c.op == "create":
-                made, now = clock.create_alarm(ip, c.want, version)
-                out.id_map[c.want.id] = made.id
-            elif c.op == "update":
-                _, now = clock.update_alarm(ip, replace(c.want, id=c.have.id), version)
-            else:
-                now = clock.destroy_alarm(ip, c.have.id, version)
+            try:
+                if c.op == "create":
+                    made, now = clock.create_alarm(ip, c.want, version)
+                    alarm_id = made.id
+                elif c.op == "update":
+                    _, now = clock.update_alarm(ip, replace(c.want, id=c.have.id), version)
+                    alarm_id = c.have.id
+                else:
+                    now = clock.destroy_alarm(ip, c.have.id, version)
+                    alarm_id = c.have.id
+            except clock.AlarmWriteError as exc:
+                if exc.landed is not False:
+                    did(c, exc.alarm_id, uncertain=exc.landed is None)
+                raise
             version = now.version
-            out.done.append(c.to_dict() | ({"new_id": out.id_map[c.want.id]}
-                                           if c.op == "create" else {}))
+            did(c, alarm_id)
     except Exception as exc:
         out.error = f"{type(exc).__name__}: {exc}"
     try:

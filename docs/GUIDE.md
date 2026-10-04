@@ -137,9 +137,14 @@ journalled (`alarm_restore`).
 Every alarm write (`CreateAlarm`, `UpdateAlarm`, `DestroyAlarm`) first re-reads
 the list and is **refused if its version moved** since twiddle read it: someone
 changed an alarm in the Sonos app meanwhile, and that edit is not overwritten.
-Each write is journalled as `alarm_create`/`alarm_update`/`alarm_destroy` with
-the whole alarm before and after (or the error, if it failed), so a deleted or
-clobbered alarm can be recreated from `logs/interventions.jsonl`. A restore
+AlarmClock has no compare-and-swap, so the list read back after each write must
+differ only in the alarm written; if anything else moved in that window, the
+write is reported done and everything after it stops. Each write is journalled
+as `alarm_create`/`alarm_update`/`alarm_destroy` with the whole alarm before
+and after (or the error, if it failed), so a deleted or clobbered alarm can be
+recreated from `logs/interventions.jsonl`. A write whose answer is lost (a
+timeout after the speaker acted) is judged from the list read back: `written`
+in the journal is true, false, or null when that can't be told. A restore
 stops at the first write that fails or is refused, reads the list again and
 reports everything still different, exiting 1. Some Spotify alarms carry a
 `<Content>` child that `CreateAlarm` can't set: a recreated one comes back

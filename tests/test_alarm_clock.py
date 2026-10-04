@@ -44,6 +44,7 @@ class FakeClock:
         self.refuse_rooms: set[str] = set()
         self.after_write = None            # called after each write (an app edit, say)
         self.after_read = None             # called after answering each ListAlarms
+        self.lose_reply: set[str] = set()  # do these, then time out answering
 
     @property
     def version(self) -> str:
@@ -80,6 +81,8 @@ class FakeClock:
                 self.after_write(self)
         elif self.after_read:
             self.after_read(self)
+        if action in self.lose_reply:
+            raise requests.Timeout("read timed out")
         inner = "".join(f"<{k}>{escape(v)}</{k}>" for k, v in out.items())
         return Reply(f'<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
                      f'<s:Body><u:{action}Response xmlns:u="urn:schemas-upnp-org:service:'
@@ -215,8 +218,9 @@ def test_destroy_journals_the_whole_alarm_and_the_journal_can_recreate_it(fake):
 
 def test_a_failed_write_is_still_journalled(fake):
     fake.refuse_rooms.add(ROAM_L)
-    with pytest.raises(requests.HTTPError):
+    with pytest.raises(clock.AlarmWriteError) as exc:
         clock.create_alarm(IP, new_alarm(), clock.list_alarms(IP).version)
+    assert exc.value.landed is False and isinstance(exc.value.__cause__, requests.HTTPError)
     [rec] = journal()
     assert rec["action"] == "alarm_create"
     assert "UPnPError" in rec["error"] and rec["sent"]["RoomUUID"] == ROAM_L
@@ -228,8 +232,9 @@ def test_a_failed_read_back_is_journalled_as_written(fake, monkeypatch):
     real = clock.list_alarms
     monkeypatch.setattr(clock, "list_alarms",
                         lambda ip: real(ip) if not fake.writes else 1 / 0)
-    with pytest.raises(ZeroDivisionError):
+    with pytest.raises(clock.AlarmWriteError) as exc:
         clock.create_alarm(IP, new_alarm(), v)
+    assert exc.value.landed is True and exc.value.alarm_id == "200"
     [rec] = journal()
     assert rec["written"] is True and rec["alarm_id"] == "200"
     assert "ZeroDivisionError" in rec["error"]
@@ -354,19 +359,57 @@ def test_someone_editing_during_a_restore_stops_it(fake):
     assert journal()[-1]["id_map"] == out.id_map != {}
 
 
-def test_an_edit_between_a_write_and_its_read_back_is_reported_not_overwritten(fake):
-    """No compare-and-swap: an app edit landing in that window can't be refused,
-    but the final compare still finds it."""
+def test_an_edit_between_a_write_and_its_read_back_stops_the_restore(fake):
+    """The app edits an alarm still waiting for its update, after restore's
+    first write and before that write's read-back: the read-back shows more
+    than our write changed, so restore stops instead of overwriting it."""
     snap = snapshot(fake)
     clock.destroy_alarm(IP, "1", fake.version)
+    clock.update_alarm(IP, Alarm(**{**vars(ALARMS[2]), "volume": 5}), fake.version)
 
     def app_edit(f):
         f.after_write = None
-        f.edit_in_app("3", Volume="1")
+        f.edit_in_app("3", Volume="99")
     fake.after_write = app_edit
 
     out = baseline.restore(IP, snap, clock.list_alarms(IP))
 
-    assert not out.ok and not out.error
+    assert "VersionChanged" in out.error and "alarms 3 changed" in out.error
+    assert fake.writes.count("UpdateAlarm") == 1          # only the setup's
+    assert clock.list_alarms(IP).get("3").volume == 99    # not overwritten
+    assert [d["op"] for d in out.done] == ["create"] and out.id_map == {"1": "200"}
     assert [(c.op, c.have.id) for c in out.left] == [("update", "3")]
-    assert clock.list_alarms(IP).get("3").volume == 1
+    create = next(r for r in journal() if r["action"] == "alarm_create")
+    assert create["others_changed"] == ["3"] and create["written"] is True
+
+
+@pytest.mark.parametrize("action", ["CreateAlarm", "DestroyAlarm"])
+def test_a_write_whose_answer_is_lost_is_reconciled_from_the_list(fake, action):
+    """A timeout after the speaker acted: the read-back shows the write landed."""
+    fake.lose_reply = {action}
+    v = clock.list_alarms(IP).version
+    with pytest.raises(clock.AlarmWriteError) as exc:
+        if action == "CreateAlarm":
+            clock.create_alarm(IP, new_alarm(), v)
+        else:
+            clock.destroy_alarm(IP, "1", v)
+    assert exc.value.landed is True
+    [rec] = journal()
+    assert rec["written"] is True and "Timeout" in rec["error"]
+    if action == "CreateAlarm":
+        assert exc.value.alarm_id == rec["alarm_id"] == "200"
+        assert rec["after"]["attributes"]["ID"] == "200"
+    else:
+        assert rec["alarm_id"] == "1" and rec["after"] is None
+
+
+def test_restore_counts_a_create_whose_answer_was_lost(fake):
+    snap = snapshot(fake)
+    clock.destroy_alarm(IP, "2", fake.version)
+    fake.lose_reply = {"CreateAlarm"}
+
+    out = baseline.restore(IP, snap, clock.list_alarms(IP))
+
+    assert "Timeout" in out.error
+    assert out.id_map == {"2": "200"} and out.left == []
+    assert journal()[-1]["id_map"] == {"2": "200"}
