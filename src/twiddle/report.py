@@ -337,12 +337,94 @@ def _self_induced(ev_ts: str, interventions, window: float = 45.0):
     for start, end, name, ip in spans:
         if start <= t <= end:
             return (0.0, f"during {name}", ip)
-    near = [(abs(t - ts), act, ip) for ts, act, ip in points
-            if abs(t - ts) <= window]
+    # A point may carry a fourth field, the earliest event it can explain: an
+    # alarm's fire can't explain a drop logged before its schedule was.
+    near = [(abs(t - ts), act, ip) for ts, act, ip, *since in points
+            if abs(t - ts) <= window and not (since and t < since[0])]
     if not near:
         return None
     near.sort()
     return near[0]
+
+
+def _utc(ts: str) -> float | None:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
+
+
+def _seconds(hms: str) -> int:
+    """"HH:MM:SS" as seconds; 0 for an empty or unreadable one."""
+    try:
+        h, m, s = (int(x) for x in hms.split(":"))
+    except (AttributeError, ValueError):
+        return 0
+    return h * 3600 + m * 60 + s
+
+
+def _alarm_points(schedules: list[dict],
+                  until: float) -> list[tuple[float, str, str, float]]:
+    """Each enabled alarm's fire and duration-stop instants, as intervention
+    points: (UTC seconds, "alarm HH:MM[ stop]", room, valid from).
+
+    A schedule is valid from when it was first recorded (`valid_from`, which
+    rotation checkpoints carry over) until the next one, so an alarm added,
+    edited or disabled later never changes how earlier events are scored: it
+    explains no event logged before it either. A fire belongs to the schedule
+    in force at its fire time, and its stop goes with it even past the next
+    schedule (disabling an alarm while it rings). StartTime is
+    household-local; each schedule's `utc_offset_s` turns it into UTC. A DST
+    change arrives as a new schedule with the new offset, valid from the last
+    read before it (`offset_from`), since the clock changed somewhere between
+    the two: a fire in that gap is tried under both offsets. A ONCE
+    alarm can fire on any day: the speaker disables it after it fires, which
+    is a new version and ends its segment.
+    """
+    from datetime import date, datetime, timedelta, timezone
+
+    from .alarms.model import Recurrence
+
+    by_start: dict[float, dict] = {}
+    for rec in schedules:
+        start = _utc(rec.get("valid_from", ""))
+        if start is not None:
+            by_start.setdefault(start, rec)
+    starts = sorted(by_start)
+    points: list[tuple[float, str, str, float]] = []
+    for i, recorded in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else until
+        rec = by_start[recorded]
+        start = min(recorded, _utc(rec.get("offset_from") or "") or recorded)
+        if end <= start:
+            continue
+        offset = timedelta(seconds=rec.get("utc_offset_s", 0))
+        first = (datetime.fromtimestamp(start, timezone.utc) + offset).date()
+        last = (datetime.fromtimestamp(end, timezone.utc) + offset).date()
+        for a in rec.get("alarms", []):
+            if not a.get("enabled"):
+                continue
+            try:
+                days = Recurrence.parse(a.get("recurrence", "")).days or None
+            except ValueError:
+                continue
+            at = _seconds(a.get("start_time", ""))
+            label = f"alarm {a.get('start_time', '')[:5]}"
+            room = a.get("room") or a.get("room_uuid", "?")
+            stop = _seconds(a.get("duration", ""))
+            day: date = first
+            while day <= last:
+                # Python's Monday 0 -> Sonos's Sunday 0; None = ONCE, any day.
+                if days is None or (day.weekday() + 1) % 7 in days:
+                    local = datetime.combine(day, datetime.min.time(), timezone.utc)
+                    fire = (local - offset).timestamp() + at
+                    if start <= fire < end:
+                        points.append((fire, label, room, start))
+                        if stop:
+                            points.append((fire + stop, label + " stop", room, start))
+                day += timedelta(days=1)
+    return points
 
 
 def rotated_logs(path: Path) -> list[Path]:
@@ -391,6 +473,27 @@ def summarise_log(path: Path,
         except OSError:
             continue
 
+    # Alarms are discounted like our own writes, whoever set them. Every
+    # schedule is gathered before any event is scored: a vanish can come up to
+    # the window's width before the fire time that explains it. Only vanishes
+    # are scored, so the newest schedule need only run an hour past the last.
+    schedules: list[dict] = []
+    last_vanish = 0.0
+    for line in lines:
+        if '"alarm_schedule"' not in line and '"vanish"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("kind") == "alarm_schedule":
+            schedules.append(rec)
+        elif rec.get("kind") == "vanish":
+            last_vanish = max(last_vanish, _utc(rec.get("ts", "")) or 0.0)
+    if schedules:
+        points, spans = interventions
+        interventions = (points + _alarm_points(schedules, last_vanish + 3600), spans)
+
     for line in lines:
         try:
             rec = json.loads(line)
@@ -402,7 +505,8 @@ def summarise_log(path: Path,
             if hit:
                 rec["_induced_by"] = (
                     f"{hit[1]} on {hit[2]}"
-                    + (f", {hit[0]:.0f}s away" if hit[0] else " (we were in the audio path)"))
+                    + (" (we were in the audio path)" if hit[1].startswith("during ")
+                       else f", {hit[0]:.0f}s away"))
                 induced[rec.get("ip", "?")].append(rec)
             else:
                 vanish[rec.get("ip", "?")].append(rec)
@@ -450,15 +554,18 @@ def summarise_log(path: Path,
         ))
 
     for ip, evs in sorted(induced.items()):
+        alarm = any(e["_induced_by"].startswith("alarm ") for e in evs)
         findings.append(Finding(
             "info",
-            f"{names.get(ip, ip)} ({ip}) dropped {len(evs)}x right after one "
-            "of our own commands",
+            f"{names.get(ip, ip)} ({ip}) dropped {len(evs)}x right after "
+            + ("an alarm or " if alarm else "") + "one of our own commands",
             "Discounted, not counted as a fault: "
             + "; ".join(e["_induced_by"] for e in evs) +
             ". Re-pointing a stereo pair's coordinator makes the pair "
-            "re-synchronise, and the other half briefly leaves the household. "
-            "Real-world evidence has to come from windows where nothing was "
+            "re-synchronise, and the other half briefly leaves the household"
+            + (" -- and an alarm going off or stopping re-points it too"
+               if alarm else "") +
+            ". Real-world evidence has to come from windows where nothing was "
             "sent to the speakers.",
         ))
 

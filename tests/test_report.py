@@ -287,3 +287,194 @@ def test_baseline_diff_never_compares_across_models():
     # against the Beam's zero.
     assert "no same-model peer" in crit.detail
     assert "796x" not in crit.detail and "Beam" not in crit.detail
+
+
+# ---- alarms: discounted like our own writes, whoever set them --------------
+# 2026-10-05 is a Monday. The household is on Pacific time: PDT (UTC-7) until
+# 2026-11-01 09:00Z, PST (UTC-8) after.
+PDT, PST = -7 * 3600, -8 * 3600
+
+
+def _alarm(start="07:00:00", recurrence="DAILY", enabled=True, duration="01:00:00",
+           room="Bedroom", aid="1"):
+    return {"id": aid, "start_time": start, "duration": duration,
+            "recurrence": recurrence, "enabled": enabled,
+            "room_uuid": "RINCON_00000000000101400", "room": room}
+
+
+def _schedule(valid_from, alarms, offset=PDT, version="RINCON_00000000000101400:1",
+              **kw):
+    return {"kind": "alarm_schedule", "ts": valid_from, "valid_from": valid_from,
+            "version": version, "utc_offset_s": offset, "alarms": alarms} | kw
+
+
+def _vanish(ts, ip):
+    return {"kind": "vanish", "ts": ts, "ip": ip, "name": ip,
+            "probe": {"http_ok": True}}
+
+
+def _scored(findings) -> dict[str, str]:
+    """Each vanishing ip -> 'induced' or 'fault'."""
+    out = {}
+    for f in findings:
+        ip = f.title.split(" (", 1)[0]
+        if "right after" in f.title:
+            out[ip] = "induced"
+        elif "left the household" in f.title:
+            out[ip] = "fault"
+    return out
+
+
+def _log(tmp_path: Path, records) -> Path:
+    mon = tmp_path / "daemon.jsonl"
+    mon.write_text("\n".join(json.dumps(r) for r in
+                             [{"kind": "sample", "samples": []}, *records]) + "\n")
+    return mon
+
+
+def test_a_drop_at_an_alarms_fire_or_stop_is_induced_not_a_fault(tmp_path: Path):
+    # Set in the Sonos app: there is no interventions.jsonl at all.
+    mon = _log(tmp_path, [
+        _schedule("2026-10-04T12:00:00.000Z", [
+            _alarm("07:00:00", "WEEKDAYS"),
+            _alarm("06:00:00", "DAILY", enabled=False, aid="2")]),
+        _vanish("2026-10-05T14:00:20.000Z", "fire"),       # 07:00 PDT, Monday
+        _vanish("2026-10-05T15:00:30.000Z", "stop"),       # + 01:00 duration
+        _vanish("2026-10-05T14:30:00.000Z", "between"),
+        _vanish("2026-10-06T14:00:00.000Z", "exact"),      # on the second
+        _vanish("2026-10-10T14:00:20.000Z", "saturday"),   # not a weekday
+        _vanish("2026-10-06T13:00:10.000Z", "disabled"),   # 06:00, alarm 2 is off
+    ])
+    assert not (tmp_path / "interventions.jsonl").exists()
+    findings = report.summarise_log(mon)
+    assert _scored(findings) == {"fire": "induced", "stop": "induced",
+                                 "exact": "induced", "between": "fault", "saturday": "fault",
+                                 "disabled": "fault"}
+    fire = next(f for f in findings if f.title.startswith("fire "))
+    assert "right after an alarm" in fire.title
+    assert "alarm 07:00 on Bedroom, 20s away" in fire.detail
+    stop = next(f for f in findings if f.title.startswith("stop "))
+    assert "alarm 07:00 stop on Bedroom, 30s away" in stop.detail
+    exact = next(f for f in findings if f.title.startswith("exact "))
+    assert "alarm 07:00 on Bedroom, 0s away" in exact.detail
+
+
+def test_a_drop_just_before_the_fire_time_is_induced(tmp_path: Path):
+    # The vanish is logged before the fire time it is scored against: every
+    # schedule has to be read before any event is.
+    mon = _log(tmp_path, [
+        _vanish("2026-10-05T13:59:30.000Z", "early"),
+        _schedule("2026-10-04T12:00:00.000Z", [_alarm()]),
+    ])
+    assert _scored(report.summarise_log(mon)) == {"early": "induced"}
+
+
+def test_an_alarm_changed_later_does_not_rescore_earlier_events(tmp_path: Path):
+    mon = _log(tmp_path, [
+        _schedule("2026-10-04T12:00:00.000Z", [_alarm("07:00:00", duration="02:00:00")]),
+        _vanish("2026-10-05T14:00:20.000Z", "v1-fire"),
+        # Disabled while it rang (07:30 PDT), and an 08:00 alarm added.
+        _schedule("2026-10-05T14:30:00.000Z",
+                  [_alarm("07:00:00", duration="02:00:00", enabled=False),
+                   _alarm("08:00:00", aid="2")],
+                  version="RINCON_00000000000101400:2"),
+        _vanish("2026-10-05T16:00:10.000Z", "v1-stop"),       # its stop still counts
+        _vanish("2026-10-06T14:00:20.000Z", "disabled-fire"),
+        _vanish("2026-10-06T15:00:20.000Z", "added-fire"),
+    ])
+    assert _scored(report.summarise_log(mon)) == {
+        "v1-fire": "induced", "v1-stop": "induced",
+        "disabled-fire": "fault", "added-fire": "induced"}
+
+
+def test_an_alarm_added_later_does_not_reach_back(tmp_path: Path):
+    mon = _log(tmp_path, [
+        _schedule("2026-10-04T12:00:00.000Z", [_alarm("07:00:00", duration="")]),
+        _vanish("2026-10-05T15:00:20.000Z", "before-added"),    # 08:00 PDT
+        _schedule("2026-10-05T20:00:00.000Z", [_alarm("08:00:00", aid="2")],
+                  version="RINCON_00000000000101400:2"),
+    ])
+    assert _scored(report.summarise_log(mon)) == {"before-added": "fault"}
+
+
+def test_the_checkpoint_keeps_an_alarm_discounted_after_rotation(tmp_path: Path):
+    # The file that first recorded the schedule has rotated away; the live
+    # file starts with a checkpoint carrying its original valid_from.
+    log = tmp_path / "daemon.jsonl"
+    (tmp_path / "daemon.jsonl.1").write_text(json.dumps(
+        {"kind": "sample", "samples": []}) + "\n")
+    log.write_text("\n".join(json.dumps(r) for r in [
+        _schedule("2026-10-04T12:00:00.000Z", [_alarm()], checkpoint=True)
+        | {"ts": "2026-10-09T03:00:00.000Z"},
+        {"kind": "sample", "samples": []},
+        _vanish("2026-10-09T14:00:20.000Z", "fire"),
+    ]) + "\n")
+    assert _scored(report.summarise_log(log)) == {"fire": "induced"}
+
+
+def test_a_checkpoint_is_the_same_schedule_not_a_new_one(tmp_path: Path):
+    # Read alongside the original, a checkpoint must not start a segment of
+    # its own (here it would wrongly re-enable an alarm disabled since).
+    original = _schedule("2026-10-04T12:00:00.000Z", [_alarm()])
+    mon = _log(tmp_path, [
+        original,
+        _schedule("2026-10-06T20:00:00.000Z", [_alarm(enabled=False)],
+                  version="RINCON_00000000000101400:2"),
+        original | {"checkpoint": True, "ts": "2026-10-07T00:00:00.000Z"},
+        _vanish("2026-10-08T14:00:20.000Z", "after-disable"),
+    ])
+    assert _scored(report.summarise_log(mon)) == {"after-disable": "fault"}
+
+
+def test_fire_windows_follow_the_household_clock_across_dst(tmp_path: Path):
+    mon = _log(tmp_path, [
+        _schedule("2026-10-30T12:00:00.000Z", [_alarm()], offset=PDT),
+        # Same version: only the offset changed, at 02:00 PDT on 2026-11-01.
+        _schedule("2026-11-01T09:00:30.000Z", [_alarm()], offset=PST),
+        _vanish("2026-10-31T14:00:20.000Z", "pdt-fire"),    # 07:00 PDT
+        _vanish("2026-11-02T15:00:20.000Z", "pst-fire"),    # 07:00 PST
+        _vanish("2026-11-02T14:00:20.000Z", "pst-0600"),    # 06:00 PST: nothing
+    ])
+    assert _scored(report.summarise_log(mon)) == {
+        "pdt-fire": "induced", "pst-fire": "induced", "pst-0600": "fault"}
+
+
+def test_a_once_alarm_fires_on_whatever_day_comes_next(tmp_path: Path):
+    mon = _log(tmp_path, [
+        _schedule("2026-10-04T12:00:00.000Z", [_alarm(recurrence="ONCE")]),
+        _vanish("2026-10-05T14:00:20.000Z", "once"),
+        # The speaker disables it once it has fired: a new version.
+        _schedule("2026-10-05T14:01:00.000Z", [_alarm(recurrence="ONCE", enabled=False)],
+                  version="RINCON_00000000000101400:2"),
+        _vanish("2026-10-06T14:00:20.000Z", "next-day"),
+    ])
+    assert _scored(report.summarise_log(mon)) == {"once": "induced", "next-day": "fault"}
+
+
+def test_a_schedule_explains_nothing_logged_before_it(tmp_path: Path):
+    # Recorded at the very second its alarm fires: the drop 30s earlier came
+    # first, so it can't be the alarm's -- the one 20s after can.
+    mon = _log(tmp_path, [
+        _vanish("2026-10-05T13:59:30.000Z", "before"),
+        _schedule("2026-10-05T14:00:00.000Z", [_alarm()]),
+        _vanish("2026-10-05T14:00:20.000Z", "after"),
+    ])
+    assert _scored(report.summarise_log(mon)) == {"before": "fault", "after": "induced"}
+
+
+def test_a_fire_at_the_dst_switch_is_scored_under_the_new_offset(tmp_path: Path):
+    # 2026-03-08: 02:00 PST becomes 03:00 PDT at 10:00Z. The monitor read the
+    # old offset at 09:59:58 and the new one at 10:00:28, so the 03:00 alarm's
+    # fire (10:00Z) lies between the two reads.
+    mon = _log(tmp_path, [
+        _schedule("2026-03-07T12:00:00.000Z", [_alarm("03:00:00", duration="")],
+                  offset=PST),
+        _schedule("2026-03-08T10:00:28.000Z", [_alarm("03:00:00", duration="")],
+                  offset=PDT,
+                  offset_from="2026-03-08T09:59:58.000Z"),
+        _vanish("2026-03-08T10:00:20.000Z", "at-switch"),
+        _vanish("2026-03-08T11:00:20.000Z", "pst-0300"),    # 03:00 PST never came
+        _vanish("2026-03-09T10:00:20.000Z", "next-day"),
+    ])
+    assert _scored(report.summarise_log(mon)) == {
+        "at-switch": "induced", "pst-0300": "fault", "next-day": "induced"}

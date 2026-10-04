@@ -606,6 +606,20 @@ are not tracking it. So every write `play.py` makes is journalled to
      Discounted, not counted as a fault: set_uri on 192.168.1.4, 2s away.
 ```
 
+Alarms re-point a speaker too, whoever set them, so the monitor also logs the
+household's alarm schedule (`alarm_schedule`: ListAlarms plus the local−UTC
+offset from GetTimeNow, both reads) whenever it or the offset changes, and copies
+it to the top of each new file when it rotates. `analyse` discounts a vanish
+within 45s of an enabled alarm's fire time, or of fire time + its duration, by
+the schedule in force when it fired:
+
+```
+[ i] Sonos Roam (192.168.1.8) dropped 1x right after an alarm or one of our own commands
+     Discounted, not counted as a fault: alarm 07:00 on Sonos Roam, 20s away. ...
+```
+
+A log written before this has no schedule, so the alarms in it still count.
+
 Evidence about the speakers has to come from windows where nothing was sent to
 them. `watch` on its own never writes, so its windows are clean by construction.
 
