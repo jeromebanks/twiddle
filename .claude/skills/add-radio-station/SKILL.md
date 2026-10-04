@@ -29,7 +29,7 @@ uv run twiddle stations probe <stream-url> [--callsign KXYZ] [--homepage URL]
 
 | fetch | platform | fetch_args | stations on it now |
 |---|---|---|---|
-| `icy` (default) | the stream's own ICY title | `music = false` if titles aren't "Artist - Song"; `note`; `encoding = "cp932"` for a Shift-JIS server (never guessed) | kcrw, dublab, sleep stations |
+| `icy` (default) | the stream's own ICY title | `titles = "<shape>"` when titles aren't "Artist - Song" but name an artist in a shape of their own (`stations/titles.py`, step 2a); `music = false` only when there's no artist to recover; `note`; `encoding = "cp932"` for a Shift-JIS server (never guessed) | kcrw, dublab, comedy247, koreancitypop, sleep stations |
 | `talk` | ICY, shown as a segment and never taken for an artist | | bbc, wnyc |
 | `spinitron` | spinitron.com/CALLSIGN (college/community DJs log spins there) | `callsign` if it isn't the `name` | kalx, wkcr, kspc, kxlu, kdvs, kxsf, kzsc, whrb |
 | `somafm` | somafm.com/songs/CHANNEL.json (channel read from the URL) | | groovesalad, beatblender, ... |
@@ -80,9 +80,17 @@ Read every line of the report:
   Still add it if it's worth it, but put that in a TOML comment and tell
   the user.
 - **`titles`**: its value decides what the dial shows.
-  - `artist-song` (or `iheart`) is enough on its own.
+  - `artist-song` is enough on its own.
+  - A shape's name (`wfmu`, `iheart-attrs`, `iheart-space`) means every
+    title was in that registered shape, and the draft already says
+    `titles = "<shape>"`. Only the anchored, specific shapes are ever
+    guessed (`DETECTABLE` in `probe.py`); a station-anchored one like `kcrw`
+    never is.
   - `blank` means ICY shows nothing, so the station needs a feed.
-  - `show-like` means the titles are show names; use `music = false`.
+  - `show-like` means the titles fit no shape we know. Read them: if they
+    name an artist in some consistent form, write a shape for them (step
+    2a). Only if they're show names, with no artist to recover, use
+    `music = false`, which the draft carries until then.
 - **`problem ICY title didn't arrive`**: the stream stalled while the probe
   was reading its metadata. `icy.icy_title` has no wall-clock bound in the
   dial, `np` or `dial list`, and NTS's https edge once blocked it for over
@@ -93,8 +101,43 @@ Read every line of the report:
 - **`VERDICT`** has three possible outcomes:
   - **`known platform ... data only`**: go to step 3.
   - **`needs a custom fetcher`**: go to step 4.
-  - **`ICY only`**: step 3 with `fetch_args = { music = false }`, but first
+  - **`ICY titles in the '<shape>' shape`**: data only; step 3.
+  - **`ICY only`**: the titles fit no shape. Step 2a if they name an artist,
+    else step 3 with `fetch_args = { music = false }`; either way, first
     spend a few minutes on step 4's search. A playlist feed is worth having.
+
+## 2a. Titles in a shape of their own
+
+`music = false` throws the artist away, so it is the last resort, not the
+answer to "titles aren't Artist - Song". WFMU is the worked example: its
+stream sends `"Song" by Artist on Show on WFMU`, which split on " - " gives
+nothing (or worse, splits inside a quoted song), and which once got
+`music = false`. Now `titles.wfmu` reads it. The steps:
+
+1. **Capture.** Probe two or three times, a few minutes apart, so you see a
+   show change and the filler as well as songs. Copy the titles exactly,
+   with the date. WFMU's, 2026-10-03:
+   `"At War With Satan" by Venom on Marty McSorley's show on WFMU`,
+   `Fool's Paradise with Rex` (a show change),
+   `Your DJ speaks over "X" on Bucci's show on WFMU` (filler).
+2. **Write the shape** in `stations/titles.py`: a pure `str -> dict` of
+   NowPlaying fields (`artist`, `song`, `show`, `hosts`, `art_url`) that
+   returns `{}` for anything not in its shape. Filler must give `{}`, never
+   an artist: a wrong artist goes on to `discover` and `np -i`. Anchor it on
+   what only this shape has (`" by "` after a leading quote, `on WFMU`, a
+   `join.kcrw.com` suffix). Add it to `SHAPES`.
+3. **Test it** in `tests/test_stations.py`, with the captured titles inline:
+   - a parametrized parse test, like `test_wfmu_titles` / `test_kcrw_titles`,
+     including the filler and a generic `A - B` giving `{}`;
+   - add the name to the pinned set in
+     `test_music_false_never_yields_an_artist_whatever_the_shape` (and a row
+     there if it yields an artist);
+   - a row in `test_shaped_stations_read_their_titles` once a catalog file uses it.
+4. **Name it** in the catalog file: `fetch_args = { titles = "<shape>" }`.
+5. **Detectable?** Add it to `DETECTABLE` in `stations/probe.py` (most specific
+   first) only if no other station's titles could match it. A shape that
+   splits any separator, or only means something for its own station
+   (`kcrw`), stays out; `tests/test_station_finding.py` pins that.
 
 ## 3. Write the catalog file
 
