@@ -69,14 +69,14 @@ class Enricher:
     def run_one(self, q: tuple, np: NowPlaying) -> ArtistCard:
         card = ArtistCard(q)
         try:
-            r = self._identify(q[0], np.album, np.song,
+            r = self._identify(lookup_name(np.artist), np.album, np.song,
                                mb_artist_id=np.mb_artist_id,
                                mb_release_group_id=np.mb_release_group_id)
             card.info, card.candidates = r.artist, r.candidates
         except Exception as exc:     # LookupFailed, or a network error beneath it
             card.error = str(exc)
         if card.info:
-            card.photo_url = self._photo(card.info, q[0])
+            card.photo_url = self._photo(card.info, lookup_name(np.artist))
             if card.info.album:
                 card.cover_url = art.cover_art_archive(card.info.album.mbid)
         self.cards[q] = card
