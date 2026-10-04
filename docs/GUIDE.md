@@ -211,8 +211,11 @@ every field `AlarmClock` takes is settable:
 | `--source` | `ProgramURI`, `ProgramMetaData` | `chime`; on `edit`, `keep` (the default) leaves the source byte-for-byte (`chime`) |
 
 So editing anything about an alarm whose source twiddle doesn't recognise (an
-iHeart or Spotify alarm) leaves its `ProgramURI` and `ProgramMetaData`
-untouched. An edit that would change nothing writes nothing.
+iHeart or Spotify alarm) sends its `ProgramURI` and `ProgramMetaData` back
+untouched; as with `enable`, whether a real speaker keeps a Spotify alarm's
+`<Content>` child through that `UpdateAlarm` is unverified (see above). An edit
+that would change nothing writes nothing. In `--json`, `room` is where the
+alarm was and `to_room` where `--room` moves it.
 
 The room is named, never addressed. An alarm belongs to a room, so it goes on
 the room's primary unit: naming a bonded follower (`"Sonos Roam (R)"`, a
