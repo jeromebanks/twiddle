@@ -10,16 +10,26 @@ speaker that has vanished: labelled, never hidden.
 household matches the snapshot (`alarms/baseline.py`), journalled, and
 `--dry-run` prints the plan without writing.
 
+`alarm enable|disable <id>` WRITE: one `UpdateAlarm` that changes only
+`Enabled`, sending every other field back exactly as `ListAlarms` gave it, so
+a source twiddle doesn't recognise is untouched. `alarm rm <id>` WRITES: it
+asks twice, then `DestroyAlarm`; the journal keeps the whole alarm, and
+`clock.recreate` makes it again from there. Each takes `--dry-run`, and each
+write is refused if the alarm list moved since it was read (`alarms/clock.py`).
+
 Follows the rest of the package: the `ok`/`error` envelope, `--json` anywhere.
 """
 from __future__ import annotations
 
+import sys
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from datetime import datetime, time, timedelta
 from pathlib import Path
 
 from .alarms import baseline, clock
 from .alarms.model import Alarm, Recurrence
+from . import play
 from .control_cli import SNAPSHOT_DIR, add_write_args, emit, fail
 from .household import Household, Speaker
 
@@ -209,7 +219,7 @@ def human(rows: list[dict], hh: clock.HouseholdTime) -> str:
             lines.append(("" if not lines else "\n") + room)
         on = "on " if r["enabled"] else "off"
         lines.append(
-            f"  {on} {r['time_text']:>8}  {r['days_text']:<18} vol {r['volume']:<3} "
+            f"  {'#' + r['id']:>4} {on} {r['time_text']:>8}  {r['days_text']:<18} vol {r['volume']:<3} "
             f"{r['duration_text']:<7} {r['play_mode']:<11} {r['source_title']}")
         if r["status"] != "ok":
             lines.append(f"      ! {_LABEL[r['status']].format(**r)}")
@@ -326,6 +336,108 @@ def cmd_restore(args):
     return 0 if out.ok else 1
 
 
+def _target(args):
+    """The household, a speaker to ask, the alarm list and the alarm named by
+    `args.alarm_id`; or an exit code last."""
+    house, ip, err = _anchor(args)
+    if err is not None:
+        return None, None, None, None, err
+    try:
+        found = clock.list_alarms(ip)
+    except Exception as exc:
+        return None, None, None, None, fail(args, f"could not read the alarms from {ip}: {exc}")
+    alarm = found.get(args.alarm_id)
+    if alarm is None:
+        return None, None, None, None, fail(
+            args, f"no alarm {args.alarm_id}", "`twiddle alarm list` shows every alarm's ID")
+    return house, ip, found, alarm, None
+
+
+def _about(house: Household, alarm: Alarm, found: clock.AlarmList) -> dict:
+    return {"id": alarm.id, "room": aimed_at(house, alarm.room_uuid)["room"],
+            "alarm": alarm.to_attributes(), "version": found.version}
+
+
+def _write_failed(args, doing: str, exc: Exception) -> int:
+    """A write that raised: say whether it happened, as far as can be told."""
+    landed = getattr(exc, "landed", False)
+    if landed is None:
+        hint = "it may have happened anyway: check `twiddle alarm list`"
+    elif isinstance(exc, clock.VersionChanged) and not landed:
+        hint = "someone changed an alarm meanwhile (the Sonos app?); check `twiddle alarm list`"
+    else:
+        hint = "check `twiddle alarm list`"
+    return fail(args, f"could not {doing}: {exc}", hint, written=landed)
+
+
+def _set_enabled(args, on: bool) -> int:
+    house, ip, found, alarm, err = _target(args)
+    if err is not None:
+        return err
+    verb = "enable" if on else "disable"
+    about = _about(house, alarm, found)
+    if alarm.enabled == on:
+        return emit(args, about | {"performed": False},
+                    f"alarm {alarm.id} is already {'on' if on else 'off'}: {brief(house, alarm)}")
+    if getattr(args, "dry_run", False):
+        return emit(args, about | {"would": verb, "performed": False},
+                    f"[dry-run] would {verb} alarm {alarm.id}: {brief(house, alarm)}")
+    try:
+        after, now = clock.update_alarm(ip, replace(alarm, enabled=on), found.version)
+    except Exception as exc:
+        return _write_failed(args, f"{verb} alarm {alarm.id}", exc)
+    return emit(args, about | {"performed": True, "alarm": after.to_attributes(),
+                               "version": now.version},
+                f"{verb}d alarm {alarm.id}: {brief(house, after)}")
+
+
+def cmd_enable(args):
+    return _set_enabled(args, True)
+
+
+def cmd_disable(args):
+    return _set_enabled(args, False)
+
+
+def _ask(prompt: str) -> str:
+    """One answer from the terminal. The prompt goes to stderr, so stdout stays
+    one `--json` envelope; no terminal to ask counts as no."""
+    print(prompt, end="", file=sys.stderr, flush=True)
+    try:
+        return input().strip()
+    except (EOFError, OSError):
+        return ""
+
+
+def _confirmed(alarm: Alarm, what: str) -> bool:
+    """Asked twice, differently: a y, then the alarm's ID typed out."""
+    if _ask(f"delete alarm {alarm.id}: {what}? [y/N] ").lower() not in ("y", "yes"):
+        return False
+    return _ask(f"type its ID ({alarm.id}) to delete it: ") == alarm.id
+
+
+def cmd_rm(args):
+    """Delete one alarm, after asking twice. The journal keeps all of it."""
+    house, ip, found, alarm, err = _target(args)
+    if err is not None:
+        return err
+    what = brief(house, alarm)
+    about = _about(house, alarm, found)
+    if getattr(args, "dry_run", False):
+        return emit(args, about | {"would": "delete", "performed": False},
+                    f"[dry-run] would delete alarm {alarm.id}: {what}")
+    if not _confirmed(alarm, what):
+        return fail(args, f"not deleted: alarm {alarm.id}", **about)
+    try:
+        now = clock.destroy_alarm(ip, alarm.id, found.version)
+    except Exception as exc:
+        return _write_failed(args, f"delete alarm {alarm.id}", exc)
+    return emit(args, about | {"performed": True, "version": now.version},
+                f"deleted alarm {alarm.id}: {what}\n"
+                f"  journalled whole (alarm_destroy in {play.INTERVENTION_LOG}), "
+                "so it can be recreated")
+
+
 def register(sub, parents=None):
     kw = {"parents": parents} if parents else {}
     p = sub.add_parser(**kw, name="alarm", help="the household's Sonos alarms")
@@ -351,3 +463,15 @@ def register(sub, parents=None):
                     help=f"the snapshot to restore (default {SNAPSHOT_FILE})")
     add_write_args(rs)
     rs.set_defaults(func=cmd_restore)
+
+    for name, fn, helptext in (
+        ("enable", cmd_enable, "switch an alarm on (WRITES)"),
+        ("disable", cmd_disable, "switch an alarm off (WRITES)"),
+        ("rm", cmd_rm, "delete an alarm, after asking twice (WRITES)"),
+    ):
+        w = asub.add_parser(**kw, name=name, help=helptext)
+        w.add_argument("alarm_id", metavar="id", help="the alarm's ID, from `alarm list`")
+        w.add_argument("--anchor", default=None,
+                       help="speaker IP to query instead of SSDP discovery")
+        add_write_args(w)
+        w.set_defaults(func=fn)
