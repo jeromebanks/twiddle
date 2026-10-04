@@ -144,20 +144,33 @@ def test_recording_the_alarm_schedule_is_read_only(tmp_path: Path, monkeypatch):
 
 def test_a_schedule_is_logged_when_it_or_the_utc_offset_changes(tmp_path: Path,
                                                                 monkeypatch):
+    clock_now = [""]
+    monkeypatch.setattr(monitor, "_now", lambda: clock_now[0])
     speaker = FakeSpeaker(monkeypatch)
     m, out = _monitor(tmp_path)
     m.watches[ROAM_L] = monitor.Watch(uuid=ROAM_L, ip="192.168.1.2", name="Sonos Roam")
-    m._check_alarms()
-    m._check_alarms()                                    # nothing changed: nothing logged
+
+    def read_at(ts):
+        clock_now[0] = ts
+        m._check_alarms()
+
+    read_at("2026-11-01T08:59:30.000Z")
+    read_at("2026-11-01T09:00:00.000Z")                  # nothing changed: nothing logged
     speaker.local, speaker.utc = "2026-11-01 01:00:30", "2026-11-01 09:00:30"   # PST now
-    m._check_alarms()                                    # same version, new offset
+    read_at("2026-11-01T09:00:30.000Z")                  # same version, new offset
     speaker.version = f"{ROAM_L}:2"
-    m._check_alarms()                                    # edited in the Sonos app
+    read_at("2026-11-01T09:01:00.000Z")                  # edited in the Sonos app
     m._fh.close()
     recs = _records(out, "alarm_schedule")
     assert [(r["version"][-1], r["utc_offset_s"]) for r in recs] == [
         ("1", -7 * 3600), ("1", -8 * 3600), ("2", -8 * 3600)]
     assert recs[0]["alarms"][0]["room"] == "Sonos Roam"
+    # The clock changed after the read before: the new offset is valid from
+    # then. An edited list is valid only from when it was seen.
+    assert "offset_from" not in recs[0]
+    assert recs[1]["offset_from"] == "2026-11-01T09:00:00.000Z"
+    assert recs[1]["valid_from"] == "2026-11-01T09:00:30.000Z"
+    assert "offset_from" not in recs[2]
 
 
 def test_rotation_past_retention_keeps_the_alarm_discounted(tmp_path: Path,

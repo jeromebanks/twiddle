@@ -195,6 +195,7 @@ class Monitor:
         # GENA thread) copies it into each new file, so it is only ever
         # replaced whole, never mutated.
         self._alarm_schedule: dict | None = None
+        self._alarms_read_at: str | None = None    # the last successful read
         # GENA notifications arrive on the HTTP server's thread while the poll
         # loop is also writing, so every log write and the rotation that
         # closes the handle must be serialised. Without this, records
@@ -337,18 +338,25 @@ class Monitor:
         version. GetTimeZone isn't used: it is an opaque index (`clock.py`),
         while GetTimeNow's local - UTC is the offset actually in force. Polled
         every sample, and logged only on a change.
+
+        The clock changed somewhere between the last read and this one, so a
+        record for an offset change alone carries `offset_from`, the last read:
+        a fire in that gap is scored under both offsets rather than neither.
         """
         found = clock.list_alarms(self.anchor)
         hh = clock.household_time(self.anchor)
         offset = round((hh.local - hh.utc).total_seconds() / 900) * 900
+        now, last_read = _now(), self._alarms_read_at
+        self._alarms_read_at = now
         last = self._alarm_schedule
         if last and last["version"] == found.version and last["utc_offset_s"] == offset:
             return
         rooms = {w.uuid: w.name for w in self.watches.values()}
-        now = _now()
         schedule = {
             "kind": "alarm_schedule", "valid_from": now, "version": found.version,
             "utc_offset_s": offset,
+            **({"offset_from": last_read}
+               if last and last["version"] == found.version and last_read else {}),
             "alarms": [{"id": a.id, "start_time": a.start_time, "duration": a.duration,
                         "recurrence": str(a.recurrence), "enabled": a.enabled,
                         "room_uuid": a.room_uuid,

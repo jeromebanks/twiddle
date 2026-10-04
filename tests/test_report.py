@@ -449,3 +449,32 @@ def test_a_once_alarm_fires_on_whatever_day_comes_next(tmp_path: Path):
         _vanish("2026-10-06T14:00:20.000Z", "next-day"),
     ])
     assert _scored(report.summarise_log(mon)) == {"once": "induced", "next-day": "fault"}
+
+
+def test_a_schedule_explains_nothing_logged_before_it(tmp_path: Path):
+    # Recorded at the very second its alarm fires: the drop 30s earlier came
+    # first, so it can't be the alarm's -- the one 20s after can.
+    mon = _log(tmp_path, [
+        _vanish("2026-10-05T13:59:30.000Z", "before"),
+        _schedule("2026-10-05T14:00:00.000Z", [_alarm()]),
+        _vanish("2026-10-05T14:00:20.000Z", "after"),
+    ])
+    assert _scored(report.summarise_log(mon)) == {"before": "fault", "after": "induced"}
+
+
+def test_a_fire_at_the_dst_switch_is_scored_under_the_new_offset(tmp_path: Path):
+    # 2026-03-08: 02:00 PST becomes 03:00 PDT at 10:00Z. The monitor read the
+    # old offset at 09:59:58 and the new one at 10:00:28, so the 03:00 alarm's
+    # fire (10:00Z) lies between the two reads.
+    mon = _log(tmp_path, [
+        _schedule("2026-03-07T12:00:00.000Z", [_alarm("03:00:00", duration="")],
+                  offset=PST),
+        _schedule("2026-03-08T10:00:28.000Z", [_alarm("03:00:00", duration="")],
+                  offset=PDT,
+                  offset_from="2026-03-08T09:59:58.000Z"),
+        _vanish("2026-03-08T10:00:20.000Z", "at-switch"),
+        _vanish("2026-03-08T11:00:20.000Z", "pst-0300"),    # 03:00 PST never came
+        _vanish("2026-03-09T10:00:20.000Z", "next-day"),
+    ])
+    assert _scored(report.summarise_log(mon)) == {
+        "at-switch": "induced", "pst-0300": "fault", "next-day": "induced"}

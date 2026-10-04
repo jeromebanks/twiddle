@@ -337,8 +337,10 @@ def _self_induced(ev_ts: str, interventions, window: float = 45.0):
     for start, end, name, ip in spans:
         if start <= t <= end:
             return (0.0, f"during {name}", ip)
-    near = [(abs(t - ts), act, ip) for ts, act, ip in points
-            if abs(t - ts) <= window]
+    # A point may carry a fourth field, the earliest event it can explain: an
+    # alarm's fire can't explain a drop logged before its schedule was.
+    near = [(abs(t - ts), act, ip) for ts, act, ip, *since in points
+            if abs(t - ts) <= window and not (since and t < since[0])]
     if not near:
         return None
     near.sort()
@@ -362,17 +364,21 @@ def _seconds(hms: str) -> int:
     return h * 3600 + m * 60 + s
 
 
-def _alarm_points(schedules: list[dict], until: float) -> list[tuple[float, str, str]]:
+def _alarm_points(schedules: list[dict],
+                  until: float) -> list[tuple[float, str, str, float]]:
     """Each enabled alarm's fire and duration-stop instants, as intervention
-    points: (UTC seconds, "alarm HH:MM[ stop]", room).
+    points: (UTC seconds, "alarm HH:MM[ stop]", room, valid from).
 
     A schedule is valid from when it was first recorded (`valid_from`, which
     rotation checkpoints carry over) until the next one, so an alarm added,
-    edited or disabled later never changes how earlier events are scored. A
-    fire belongs to the schedule in force at its fire time, and its stop goes
-    with it even past the next schedule (disabling an alarm while it rings).
-    StartTime is household-local; each schedule's `utc_offset_s` turns it into
-    UTC, and a DST change arrives as a new schedule with the new offset. A ONCE
+    edited or disabled later never changes how earlier events are scored: it
+    explains no event logged before it either. A fire belongs to the schedule
+    in force at its fire time, and its stop goes with it even past the next
+    schedule (disabling an alarm while it rings). StartTime is
+    household-local; each schedule's `utc_offset_s` turns it into UTC. A DST
+    change arrives as a new schedule with the new offset, valid from the last
+    read before it (`offset_from`), since the clock changed somewhere between
+    the two: a fire in that gap is tried under both offsets. A ONCE
     alarm can fire on any day: the speaker disables it after it fires, which
     is a new version and ends its segment.
     """
@@ -386,12 +392,13 @@ def _alarm_points(schedules: list[dict], until: float) -> list[tuple[float, str,
         if start is not None:
             by_start.setdefault(start, rec)
     starts = sorted(by_start)
-    points: list[tuple[float, str, str]] = []
-    for i, start in enumerate(starts):
+    points: list[tuple[float, str, str, float]] = []
+    for i, recorded in enumerate(starts):
         end = starts[i + 1] if i + 1 < len(starts) else until
+        rec = by_start[recorded]
+        start = min(recorded, _utc(rec.get("offset_from") or "") or recorded)
         if end <= start:
             continue
-        rec = by_start[start]
         offset = timedelta(seconds=rec.get("utc_offset_s", 0))
         first = (datetime.fromtimestamp(start, timezone.utc) + offset).date()
         last = (datetime.fromtimestamp(end, timezone.utc) + offset).date()
@@ -413,9 +420,9 @@ def _alarm_points(schedules: list[dict], until: float) -> list[tuple[float, str,
                     local = datetime.combine(day, datetime.min.time(), timezone.utc)
                     fire = (local - offset).timestamp() + at
                     if start <= fire < end:
-                        points.append((fire, label, room))
+                        points.append((fire, label, room, start))
                         if stop:
-                            points.append((fire + stop, label + " stop", room))
+                            points.append((fire + stop, label + " stop", room, start))
                 day += timedelta(days=1)
     return points
 
