@@ -513,6 +513,7 @@ class FakeTransport(FakeClock):
         self.running: dict[str, dict] = {}          # ip -> GetRunningAlarmProperties
         self.state: dict[str, dict] = {}            # ip -> LastChange variables
         self.av: list[tuple[str, str, dict]] = []   # (ip, action, args)
+        self.refuse_av: set[str] = set()            # answer these with a UPnP fault
 
     @property
     def av_writes(self):
@@ -527,6 +528,11 @@ class FakeTransport(FakeClock):
         args = [(_local(c.tag), c.text or "") for c in call]
         assert [k for k, _ in args] == scpd_in_args()[action], action
         self.av.append((ip, action, dict(args)))
+        if action in self.refuse_av:
+            raise requests.HTTPError("500 Server Error", response=FaultReply(
+                FAULT_800.replace(">800<", ">701<")))
+        if action in self.lose_reply:      # it acted, then the answer was lost
+            raise requests.Timeout("read timed out")
         out = {}
         if action == "GetRunningAlarmProperties":
             if ip not in self.running:
@@ -869,3 +875,27 @@ def test_the_callback_listens_only_on_the_address_facing_the_speaker(monkeypatch
 def clock_http_server():
     from http.server import ThreadingHTTPServer
     return ThreadingHTTPServer
+
+
+WRITES_WITH_A_LATER_ACT = [
+    (lambda: clock.run_alarm(ROAM_IP, ALARMS[4], "2026-10-04 14:58:15"), "RunAlarm",
+     "alarm_run", "alarm_run_stop"),
+    (lambda: clock.snooze_alarm(ROAM_IP, 10, "34"), "SnoozeAlarm",
+     "alarm_snooze", "alarm_snooze_ring")]
+
+
+@pytest.mark.parametrize("write, action, name, span", WRITES_WITH_A_LATER_ACT)
+def test_a_lost_reply_still_journals_the_later_span(av, write, action, name, span):
+    av.lose_reply.add(action)
+    with pytest.raises(requests.Timeout):
+        write()
+    assert [a for _, a, _ in av.av_writes] == [action]       # the speaker had it
+    assert [r["action"] for r in journal()] == [name, f"{span}_start", f"{span}_end"]
+
+
+@pytest.mark.parametrize("write, action, name, span", WRITES_WITH_A_LATER_ACT)
+def test_a_refused_write_journals_no_later_span(av, write, action, name, span):
+    av.refuse_av.add(action)
+    with pytest.raises(requests.HTTPError):
+        write()
+    assert [r["action"] for r in journal()] == [name]

@@ -532,6 +532,25 @@ def _av_write(ip: str, action: str, args: list[tuple[str, str]], journal: str,
     play._av(ip, action, "".join(f"<{k}>{play._esc(v)}</{k}>" for k, v in args))
 
 
+def _write_then_span(ip: str, action: str, args: list[tuple[str, str]], journal: str,
+                     span: str, at: datetime, **extra) -> None:
+    """`_av_write`, then a span around `at`, when the speaker will act again
+    on its own. The span is journalled whenever the write may have landed --
+    a reply lost to a timeout or a dropped connection included -- and skipped
+    only when the speaker answered with a refusal: a few minutes wrongly
+    discounted is the cheaper mistake (as with `play.set_sleep_timer`)."""
+    try:
+        _av_write(ip, action, args, journal, **extra)
+    except requests.HTTPError as exc:
+        if exc.response is None:
+            _span(span, ip, at, alarm_id=extra.get("alarm_id"))
+        raise
+    except Exception:
+        _span(span, ip, at, alarm_id=extra.get("alarm_id"))
+        raise
+    _span(span, ip, at, alarm_id=extra.get("alarm_id"))
+
+
 def run_args(alarm: Alarm, logged_start: str) -> list[tuple[str, str]]:
     """RunAlarm's arguments for `alarm`, in the speaker's order."""
     return [("AlarmID", alarm.id or ""), ("LoggedStartTime", logged_start),
@@ -547,13 +566,14 @@ def run_alarm(ip: str, alarm: Alarm, logged_start: str) -> datetime | None:
     writes it; the Roam took that and reported it back the same way from
     GetRunningAlarmProperties (2026-10-04). Returns when its duration will
     stop it, or None if it has none."""
-    _av_write(ip, "RunAlarm", run_args(alarm, logged_start), "alarm_run",
-              alarm_id=alarm.id, alarm=_record(alarm))
     seconds = play.parse_hms(alarm.duration)
     if not seconds:
+        _av_write(ip, "RunAlarm", run_args(alarm, logged_start), "alarm_run",
+                  alarm_id=alarm.id, alarm=_record(alarm))
         return None
     stops = datetime.now(timezone.utc) + timedelta(seconds=seconds)
-    _span("alarm_run_stop", ip, stops, alarm_id=alarm.id)
+    _write_then_span(ip, "RunAlarm", run_args(alarm, logged_start), "alarm_run",
+                     "alarm_run_stop", stops, alarm_id=alarm.id, alarm=_record(alarm))
     return stops
 
 
@@ -564,10 +584,10 @@ def snooze_alarm(ip: str, minutes: int = DEFAULT_SNOOZE, alarm_id: str | None = 
     if minutes not in SNOOZE_MINUTES:
         raise ValueError(f"snooze for {', '.join(map(str, SNOOZE_MINUTES))} minutes, "
                          f"not {minutes}")
-    _av_write(ip, "SnoozeAlarm", [("Duration", play._hms(minutes * 60))], "alarm_snooze",
-              minutes=minutes, alarm_id=alarm_id)
     rings = datetime.now(timezone.utc) + timedelta(minutes=minutes)
-    _span("alarm_snooze_ring", ip, rings, alarm_id=alarm_id)
+    _write_then_span(ip, "SnoozeAlarm", [("Duration", play._hms(minutes * 60))],
+                     "alarm_snooze", "alarm_snooze_ring", rings,
+                     minutes=minutes, alarm_id=alarm_id)
     return rings
 
 
