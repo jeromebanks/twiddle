@@ -217,14 +217,23 @@ def _has_shape(shape: str, real: list[str]) -> bool:
 def _reads_every_song(real: list[str]) -> str | None:
     """iHeart titles mixed with a spot (`title="",artist=""`), a show name or
     a plain "Artist - Song": the first reader that reads each title with an
-    artist as well as its best reader does (song and cover too), or None."""
+    artist as well as its best reader does (song and cover too), and makes
+    up none from the rest, or None."""
     readers = (*_IHEART, None)
 
     def best(t: str) -> dict:
-        return next((g for r in readers if (g := titles.parse(r, t)).get("artist")), {})
-    wanted = [(t, b) for t in real if (b := best(t))]
-    for r in readers if wanted else ():
-        if all(titles.parse(r, t) == b for t, b in wanted):
+        # comedy247's form is only iheart-space's: any other reader would
+        # make "Artist - text=..." an artist and song.
+        own = ("iheart-space",) if ' - text="' in t else readers
+        return next((g for r in own if (g := titles.parse(r, t)).get("artist")), {})
+    wanted = {t: b for t in real if (b := best(t))}
+    if not wanted:
+        # Only spots sampled: still iHeart's, in the form its marks show.
+        return "iheart-space" if any(' - text="' in t for t in real) else "iheart-attrs"
+    for r in readers:
+        got = {t: titles.parse(r, t) for t in real}
+        if all(got[t] == b for t, b in wanted.items()) and \
+                not any(got[t].get("artist") for t in real if t not in wanted):
             return r or "artist-song"
     return None
 
@@ -249,6 +258,10 @@ def title_shape(samples: list[str | None], icy_name: str | None = None) -> str:
     # Before a plain split, which would read comedy247's `text="..."` as a song.
     if any(DETECTABLE[k].search(t.strip()) for k in _IHEART for t in real):
         return _reads_every_song(real) or "show-like"
+    # Nor one in a known shape that the shape couldn't place (WFMU's filler
+    # beside a song): `"Orgies - A Tool ..." by` would split into "Orgies.
+    if any(mark.search(t.strip()) for mark in DETECTABLE.values() for t in real):
+        return "show-like"
     if all(icy.split_title(icy.tidy_title(t)) != (None, None) for t in real):
         return "artist-song"
     return "show-like"
