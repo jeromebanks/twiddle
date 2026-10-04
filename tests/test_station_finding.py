@@ -135,7 +135,9 @@ def test_titles_in_a_registered_shape_are_named():
     assert probe.title_shape([
         WFMU_TITLES[1],
         'Your DJ speaks over "Orgies - A Tool Of Witchcraft" on Marty McSorley\'s show on WFMU',
-    ]) == "show-like"
+    ]) == "wfmu"
+    # Nor beside an iHeart spot, which no WFMU stream sends: no "Orgies artist.
+    assert probe.title_shape([WFMU_TITLES[1], 'title="",artist="",url=""']) == "show-like"
 
 
 @pytest.mark.parametrize("samples,expected", [
@@ -150,9 +152,9 @@ def test_a_shape_is_judged_on_titles_as_sent(samples, expected):
     assert all(titles.parse(reader, t).get("artist") for t in samples)   # what the fetcher sees
     # A show change between songs is still WFMU's shape...
     assert probe.title_shape([WFMU_TITLES[0], "Fool's Paradise with Rex"]) == "wfmu"
-    # ...but its filler isn't, and one of those means no shape is certain.
+    # ...and so is its filler, which it reads as nothing.
     assert probe.title_shape([WFMU_TITLES[0],
-                              'Your DJ speaks over "X" on Bucci\'s show on WFMU']) == "show-like"
+                              'Your DJ speaks over "X" on Bucci\'s show on WFMU']) == "wfmu"
     space = ('BOBCAT GOLDTHWAIT - text="The Game Of Love" song_spot="M" '
              'amgArtworkURL="https://i.iheart.com/x.jpg" length="00:03:12"')
     assert probe.title_shape([space]) == "iheart-space"
@@ -339,3 +341,39 @@ def test_probe_drafts_iheart_space_for_both_iheart_forms(monkeypatch):
     p = probe.probe("http://ihr.example/live", sleep=lambda s: None)
     assert (p.title_shape, p.fetch) == ("iheart-space", "icy")
     assert 'fetch_args = { titles = "iheart-space" }' in probe.draft_toml(p)
+
+
+# Every title the probe might meet, with what its own reader makes of it
+# ({} for no artist): the shape named for any mix of them must never put a
+# wrong artist on one, and for a station's own titles must not lose them all.
+_FILLER = 'Your DJ speaks over "Orgies - A Tool Of Witchcraft" on Marty McSorley\'s show on WFMU'
+_POOL = {
+    "wfmu": [WFMU_TITLES[0], WFMU_TITLES[1], WFMU_TITLES[1] + " ", _FILLER,
+             "Fool's Paradise with Rex"],
+    "iheart": [COMMA, 'title="Words",artist="Low" ', SPACE, 'title="",artist="",url=""',
+               'AD - text="" song_spot="T"'],
+    "other": ["Low - Words", "Morning Edition with Steve Inskeep",
+              "Good Food-Evan Kleiman-join.kcrw.com", '"Words" by Low on Evening Show on WXYZ'],
+}
+_TRUE = {WFMU_TITLES[0]: "wfmu", WFMU_TITLES[1]: "wfmu", WFMU_TITLES[1] + " ": "wfmu",
+         COMMA: "iheart-attrs", 'title="Words",artist="Low" ': "iheart-space",
+         SPACE: "iheart-space", "Low - Words": None}
+
+
+def _truth(t):
+    return titles.parse(_TRUE[t], t) if t in _TRUE else {}
+
+
+def test_no_mix_of_titles_gets_a_wrong_artist_or_loses_its_own():
+    import itertools
+    pool = [t for ts in _POOL.values() for t in ts]
+    for n in (1, 2, 3):
+        for samples in itertools.product(pool, repeat=n):
+            shape = probe.title_shape(list(samples))
+            reader = (None if shape == "artist-song" else shape) if shape != "show-like" else ""
+            for t in samples:
+                got = titles.parse(reader, t) if reader != "" else {}
+                assert not got.get("artist") or got == _truth(t), (samples, shape, t, got)
+            for station in ("wfmu", "iheart"):
+                if set(samples) <= set(_POOL[station]) and any(_truth(t) for t in samples):
+                    assert shape != "show-like", samples

@@ -202,16 +202,23 @@ DETECTABLE = {
     "iheart-space": re.compile(r' - text="|\bartist="'),       # it reads both
 }
 _IHEART = ("iheart-attrs", "iheart-space")
+# Shapes that are the only reader of a title with their mark, so one it reads
+# as nothing (WFMU's "Your DJ speaks over ...") is still its own. Not iHeart's:
+# an iheart-attrs blank can hide what iheart-space reads.
+_OWNS_ITS_MARK = {"wfmu"}
 
 
 def _has_shape(shape: str, real: list[str]) -> bool:
-    # Every title parses, at least one to an artist (WFMU's bare `Show with
-    # Host` alone would match any "Morning Edition with Steve"), and every
-    # title it takes an artist from has the shape's mark.
+    # Every title parses (or is the shape's own filler), at least one to an
+    # artist (WFMU's bare `Show with Host` alone would match any "Morning
+    # Edition with Steve"), and every title it takes an artist from has the
+    # shape's mark.
+    mark = DETECTABLE[shape]
     got = [titles.parse(shape, t) for t in real]
-    return (all(got) and any(g.get("artist") for g in got)
-            and all(DETECTABLE[shape].search(t.strip())
-                    for t, g in zip(real, got) if g.get("artist")))
+    return (all(g or (shape in _OWNS_ITS_MARK and mark.search(t.strip()))
+                for t, g in zip(real, got))
+            and any(g.get("artist") for g in got)
+            and all(mark.search(t.strip()) for t, g in zip(real, got) if g.get("artist")))
 
 
 def _reads_every_song(real: list[str]) -> str | None:
@@ -255,13 +262,14 @@ def title_shape(samples: list[str | None], icy_name: str | None = None) -> str:
     for shape in DETECTABLE:
         if _has_shape(shape, real):
             return shape
-    # Before a plain split, which would read comedy247's `text="..."` as a song.
+    # A title in another known shape that it couldn't place is never split on
+    # " - " instead: `"Orgies - A Tool ..." by` would give the artist "Orgies.
+    if any(DETECTABLE[k].search(t.strip()) for k in DETECTABLE if k not in _IHEART
+           for t in real):
+        return "show-like"
+    # Nor is an iHeart one: a plain split reads comedy247's `text="..."` as a song.
     if any(DETECTABLE[k].search(t.strip()) for k in _IHEART for t in real):
         return _reads_every_song(real) or "show-like"
-    # Nor one in a known shape that the shape couldn't place (WFMU's filler
-    # beside a song): `"Orgies - A Tool ..." by` would split into "Orgies.
-    if any(mark.search(t.strip()) for mark in DETECTABLE.values() for t in real):
-        return "show-like"
     if all(icy.split_title(icy.tidy_title(t)) != (None, None) for t in real):
         return "artist-song"
     return "show-like"
