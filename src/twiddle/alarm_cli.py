@@ -17,10 +17,20 @@ asks twice, then `DestroyAlarm`; the journal keeps the whole alarm, and
 `clock.recreate` makes it again from there. Each takes `--dry-run`, and each
 write is refused if the alarm list moved since it was read (`alarms/clock.py`).
 
+`alarm add` WRITES one `CreateAlarm`; `alarm edit <id>` one `UpdateAlarm`
+changing only the fields named on the command line. Between them every field
+`AlarmClock` takes is settable: time, days, duration, volume, play mode,
+include-grouped-rooms, room, on/off and source (the chime; on edit, by
+default, the source as it is, byte-for-byte). A room is named, never
+addressed: a bonded follower's alarm goes on its room's primary, and the
+answer says so. Both take `--dry-run`.
+
 Follows the rest of the package: the `ok`/`error` envelope, `--json` anywhere.
 """
 from __future__ import annotations
 
+import argparse
+import re
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import replace
@@ -28,10 +38,11 @@ from datetime import datetime, time, timedelta
 from pathlib import Path
 
 from .alarms import baseline, clock
-from .alarms.model import Alarm, Recurrence
+from .alarms.model import CHIME_URI, NAMED, Alarm, Recurrence
 from . import play
-from .control_cli import SNAPSHOT_DIR, add_write_args, emit, fail
-from .household import Household, Speaker
+from .control_cli import (SNAPSHOT_DIR, BadSpec, add_write_args, emit, fail,
+                          parse_sleep_spec)
+from .household import Ambiguous, Household, NotFound, Speaker
 
 CHIME = "Sonos chime"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "alarms.json"
@@ -46,26 +57,107 @@ def _household(args) -> Household:
 
 # ---- what an alarm is aimed at ---------------------------------------------
 
+def _bond(house: Household, sp: Speaker) -> set[str]:
+    """Every unit bonded with `sp`, itself included: the UUIDs of whichever
+    ChannelMapSet or HTSatChanMapSet in the topology lists it (a surround's
+    may be only on its soundbar's member). Empty when none does."""
+    out: set[str] = set()
+    for m in house.topology.members if house.topology else ():
+        for raw in (m.chan_map, m.sat_chan_map):
+            uuids = {pair.split(":", 1)[0] for pair in raw.split(";") if pair}
+            if sp.uuid in uuids:
+                out |= uuids
+    return out
+
+
+def _bonded_with(house: Household, sp: Speaker) -> list[Speaker]:
+    """The visible units bonded with `sp` into one room (a stereo pair), `sp`
+    among them: the units its map lists. With no map naming it in the
+    topology but a channel given from one, the visible units of its room
+    that were given one too. Two units that only share a room name are two
+    rooms."""
+    members = [m for m in house.group_of(sp).members if not m.invisible]
+    bond = _bond(house, sp)
+    if bond:
+        return [m for m in members if m.uuid in bond]
+    if sp.channel:
+        return [m for m in members if m.room == sp.room and m.channel]
+    return [sp]
+
+
 def _is_bonded_follower(house: Household, sp: Speaker) -> bool:
     """A unit that is part of a room but not the room itself.
 
-    Invisible units (surrounds, sub) always are. Of several visible units in
-    one room (a stereo pair) the primary is the group's coordinator when it is
+    Invisible units (surrounds, sub) always are. Of the visible units in one
+    bond (a stereo pair) the primary is the group's coordinator when it is
     one of them, else the first listed in the bond's ChannelMapSet -- which in
     the author's household is also the coordinator, the left Roam; the
     fallback is inferred, not observed.
     """
     if sp.invisible:
         return True
-    group = house.group_of(sp)
-    mates = [m for m in group.members if m.room == sp.room and not m.invisible]
+    mates = _bonded_with(house, sp)
     if len(mates) < 2:
         return False
+    group = house.group_of(sp)
     if group.coordinator in mates:
         return sp is not group.coordinator
     member = house.topology.by_uuid(sp.uuid) if house.topology else None
     first = (member.chan_map.split(":", 1)[0] if member and member.chan_map else "")
     return bool(first) and sp.uuid != first
+
+
+def room_primaries(house: Household, sp: Speaker) -> list[Speaker]:
+    """The unit that is `sp`'s room: `sp` itself unless it is a bonded
+    follower, else the visible unit of its bond that isn't one. A satellite
+    no map names falls back to its room's visible units, which can be none
+    or several: the caller refuses either rather than guess."""
+    if not _is_bonded_follower(house, sp):
+        return [sp]
+    members = house.group_of(sp).members
+    bond = _bond(house, sp)
+    if bond:
+        units = [m for m in members if m.uuid in bond and not m.invisible]
+    elif sp.invisible:
+        units = [m for m in members if not m.invisible and m.room == sp.room]
+    else:
+        units = _bonded_with(house, sp)
+    return [m for m in units if not _is_bonded_follower(house, m)]
+
+
+def room_target(house: Household, query: str) -> dict:
+    """Where an alarm for the room named `query` goes: the RoomUUID of the
+    room's primary unit, never a bonded follower, and never the group
+    coordinator (an alarm belongs to its room, not to whatever the room is
+    grouped with today). Raises the household's NotFound/Ambiguous.
+
+    A name that matches more than one room is ambiguous even when those
+    rooms are grouped (`resolve` would happily pick one: a group shares
+    transport, not alarms). Naming a follower alone (its own ZoneName, or
+    its IP) is redirected and says so; naming the room is not.
+    """
+    hits = house.matches(query)
+    rooms: dict[str, Speaker] = {}
+    for sp in hits:
+        primaries = room_primaries(house, sp)
+        if not primaries:
+            raise NotFound(query, house.names)
+        if len(primaries) > 1:
+            raise Ambiguous(query, sorted(p.label for p in primaries))
+        rooms.setdefault(primaries[0].uuid, primaries[0])
+    if len(rooms) > 1:
+        names = sorted(p.room or p.name for p in rooms.values())
+        if len(set(names)) < len(names):        # two rooms of one name: tell them apart
+            names = sorted(p.label for p in rooms.values())
+        raise Ambiguous(query, names)
+    [primary] = rooms.values()
+    out = {"requested": query, "room": primary.room or primary.name,
+           "speaker": primary.name, "room_uuid": primary.uuid}
+    if primary not in hits:
+        out |= {"redirected_from": hits[0].label,
+                "reason": f"{hits[0].label} is a bonded follower; the alarm goes on "
+                          f"{primary.label}, its room's primary"}
+    return out
 
 
 def aimed_at(house: Household, uuid: str) -> dict:
@@ -245,6 +337,121 @@ def change_text(house: Household, c: baseline.Change) -> str:
     return f"update  alarm {c.have.id}: {brief(house, c.want)}  ({', '.join(c.fields)})"
 
 
+# ---- what `add` and `edit` set ---------------------------------------------
+
+# The CLI's names for the speaker's play modes, from the same table `shuffle`
+# and `repeat` use: SHUFFLE is shuffle *and* repeat-all, SHUFFLE_NOREPEAT the
+# plain shuffle.
+_MODE_NAME = {(False, "off"): "normal", (False, "all"): "repeat",
+              (False, "one"): "repeat-one", (True, "off"): "shuffle",
+              (True, "all"): "shuffle-repeat", (True, "one"): "shuffle-repeat-one"}
+PLAY_MODES = {name: play.encode_play_mode(*k) for k, name in _MODE_NAME.items()}
+_DAY_NAMES = ("sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday")
+DAYS_HELP = ("once, daily, weekdays, weekends, days like mon,wed,fri or mon-fri, "
+             "or the speaker's own ON_<days> (Sunday 0)")
+SOURCES = {"chime": (CHIME_URI, "")}
+
+
+def parse_time(text: str) -> str:
+    """"7:15", "07:15" or "07:15:30" -> the speaker's "HH:MM:SS"."""
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", text.strip())
+    if not m or int(m[1]) > 23 or int(m[2]) > 59 or int(m[3] or 0) > 59:
+        raise ValueError(f"can't read {text!r} as a time: 24-hour HH:MM or HH:MM:SS")
+    return f"{int(m[1]):02d}:{m[2]}:{m[3] or '00'}"
+
+
+def _day(token: str) -> int:
+    hits = [i for i, name in enumerate(_DAY_NAMES) if len(token) >= 2 and name.startswith(token)]
+    if len(hits) != 1:
+        raise ValueError(f"can't read {token!r} as a day")
+    return hits[0]
+
+
+def parse_days(text: str) -> Recurrence:
+    """A recurrence in the speaker's own spelling (`Recurrence.on`), so
+    `sat,sun` is WEEKENDS. Day ranges run forward through the week."""
+    low = text.strip().lower()
+    if low.upper() in NAMED:
+        return Recurrence.parse(low.upper())
+    if low.startswith("on_"):
+        return Recurrence.on(Recurrence.parse(low.upper()).days)
+    days: set[int] = set()
+    for token in filter(None, re.split(r"[,\s]+", low)):
+        first, _, last = token.partition("-")
+        d, end = _day(first), _day(last) if last else _day(first)
+        days.add(d)
+        while d != end:
+            d = (d + 1) % 7
+            days.add(d)
+    if not days:
+        raise ValueError(f"no days in {text!r}: {DAYS_HELP}")
+    return Recurrence.on(days)
+
+
+def parse_duration(text: str) -> str:
+    """The auto-stop, "HH:MM:SS": "1h", "30m", "1h30", "1:30", "01:30:00";
+    `none` (or 0) is no auto-stop, an empty Duration as soco sends it."""
+    if re.fullmatch(r"\d{2}:\d{2}:\d{2}", text.strip()):
+        h, m, s = (int(x) for x in text.split(":"))
+        if m > 59 or s > 59 or not 0 < (h * 60 + m) * 60 + s < 24 * 3600:
+            raise ValueError(f"can't read {text!r} as a duration: more than nothing, "
+                             "less than a day (`none` is no auto-stop)")
+        return text.strip()
+    try:
+        secs = parse_sleep_spec(text)
+    except BadSpec as exc:
+        raise ValueError(f"{exc}: 1h, 30m, 1h30, HH:MM:SS, or none") from None
+    return "" if secs == 0 else f"{secs // 3600:02d}:{secs // 60 % 60:02d}:00"
+
+
+def parse_volume(text: str) -> int:
+    if not re.fullmatch(r"\d{1,3}", text.strip()) or int(text) > 100:
+        raise ValueError(f"volume {text!r} is not 0-100")
+    return int(text)
+
+
+def parse_mode(text: str) -> str:
+    low = text.strip().lower()
+    if low in PLAY_MODES:
+        return PLAY_MODES[low]
+    if text.strip().upper() in PLAY_MODES.values():
+        return text.strip().upper()
+    raise ValueError(f"unknown play mode {text!r}: {', '.join(PLAY_MODES)}")
+
+
+def settings(args) -> dict:
+    """The Alarm fields named on the command line, parsed; ValueError names
+    the one that can't be read. A field not named is not in the result, so
+    an edit leaves it, the source included, exactly as it was."""
+    out: dict = {}
+    for flag, name, parse in (("time", "start_time", parse_time),
+                              ("days", "recurrence", parse_days),
+                              ("duration", "duration", parse_duration),
+                              ("volume", "volume", parse_volume),
+                              ("mode", "play_mode", parse_mode)):
+        if getattr(args, flag, None) is not None:
+            out[name] = parse(getattr(args, flag))
+    if getattr(args, "enabled", None) is not None:
+        out["enabled"] = args.enabled
+    if getattr(args, "include_grouped_rooms", None) is not None:
+        out["include_linked_zones"] = args.include_grouped_rooms
+    if getattr(args, "source", None) in SOURCES:
+        out["program_uri"], out["program_metadata"] = SOURCES[args.source]
+    return out
+
+
+def details(alarm: Alarm) -> str:
+    """What `brief` leaves out: the auto-stop, play mode and grouped rooms."""
+    stop = (f"stops after {duration_text(alarm.duration)}" if alarm.duration
+            else "no auto-stop")
+    grouped = "includes grouped rooms" if alarm.include_linked_zones else "this room only"
+    return f"{stop}, play mode {_mode_name(alarm.play_mode)}, {grouped}"
+
+
+def _mode_name(value: str) -> str:
+    return next((n for n, v in PLAY_MODES.items() if v == value), value)
+
+
 # ---- commands --------------------------------------------------------------
 
 def _anchor(args):
@@ -359,7 +566,7 @@ def _about(house: Household, alarm: Alarm, found: clock.AlarmList) -> dict:
 
 
 def _write_failed(args, doing: str, about: dict, exc: Exception, *, done: str,
-                  update: bool) -> int:
+                  update: bool, created: bool = False) -> int:
     """A write that raised: say whether it happened, as far as can be told.
 
     One that landed (another alarm moved in the same moment, or the list
@@ -367,12 +574,16 @@ def _write_failed(args, doing: str, about: dict, exc: Exception, *, done: str,
     raised as a warning. The version is the list's after the write, null if
     it couldn't be read. For an update, `alarm` becomes the alarm as read
     back (null when it couldn't be) and `before` the one written over; for a
-    delete, `alarm` stays the alarm deleted.
+    create, likewise but with no `before`, and `id` the one the speaker
+    assigned; for a delete, `alarm` stays the alarm deleted.
     """
     landed = getattr(exc, "landed", False)
     if landed is True:
         now = {"version": exc.current.version if exc.current else None}
-        if update:
+        if created:
+            now |= {"id": exc.alarm_id,
+                    "alarm": exc.alarm.to_attributes() if exc.alarm else None}
+        elif update:
             now |= {"before": about["alarm"],
                     "alarm": exc.alarm.to_attributes() if exc.alarm else None}
         return emit(args, about | now | {"performed": True, "warning": str(exc)},
@@ -384,6 +595,16 @@ def _write_failed(args, doing: str, about: dict, exc: Exception, *, done: str,
     else:
         hint = "check `twiddle alarm list`"
     return fail(args, f"could not {doing}: {exc}", hint, written=landed)
+
+
+def _done(house: Household, exc: Exception, did: str) -> str:
+    """A write that landed although it raised, as far as the list read back shows."""
+    seen = getattr(exc, "alarm", None)
+    if seen is not None:
+        return f"{did}: {brief(house, seen)}"
+    if getattr(exc, "current", None) is None:
+        return f"{did} (the list couldn't be read back to show it)"
+    return f"{did}, but it isn't in the list read back"
 
 
 def _set_enabled(args, on: bool) -> int:
@@ -401,15 +622,9 @@ def _set_enabled(args, on: bool) -> int:
     try:
         after, now = clock.update_alarm(ip, replace(alarm, enabled=on), found.version)
     except Exception as exc:
-        seen = getattr(exc, "alarm", None)
-        if seen is not None:
-            done = f"{verb}d alarm {alarm.id}: {brief(house, seen)}"
-        elif getattr(exc, "current", None) is None:
-            done = f"{verb}d alarm {alarm.id} (the list couldn't be read back to show it)"
-        else:
-            done = f"{verb}d alarm {alarm.id}, but it isn't in the list read back"
         return _write_failed(args, f"{verb} alarm {alarm.id}", about, exc,
-                             done=done, update=True)
+                             done=_done(house, exc, f"{verb}d alarm {alarm.id}"),
+                             update=True)
     return emit(args, about | {"performed": True, "alarm": after.to_attributes(),
                                "version": now.version},
                 f"{verb}d alarm {alarm.id}: {brief(house, after)}")
@@ -468,6 +683,119 @@ def cmd_rm(args):
                 "so it can be recreated")
 
 
+def _settings_or_fail(args):
+    """`settings(args)`, or (None, an exit code) when a value can't be read."""
+    try:
+        return settings(args), None
+    except ValueError as exc:
+        return None, fail(args, str(exc), "`twiddle alarm add --help` lists every field")
+
+
+def _room_or_fail(args, house: Household):
+    """`room_target` for `args.room`, or (None, an exit code)."""
+    try:
+        return room_target(house, args.room), None
+    except Ambiguous as exc:
+        return None, fail(args, str(exc), "be more specific, or name the speaker by its IP",
+                          candidates=exc.candidates)
+    except NotFound as exc:
+        return None, fail(args, str(exc), "run `twiddle rooms` to list targets",
+                          known=exc.known)
+
+
+def _note(target: dict | None) -> str:
+    return f"\n  note: {target['reason']}" if target and "reason" in target else ""
+
+
+def _aim(target: dict | None) -> dict:
+    """What the payload says about naming the room: asked for, and redirected."""
+    if not target:
+        return {}
+    return {k: target[k] for k in ("requested", "redirected_from", "reason") if k in target}
+
+
+def cmd_add(args):
+    """Create one alarm: the fields given, the model's defaults for the rest."""
+    found_set, err = _settings_or_fail(args)
+    if err is not None:
+        return err
+    house, ip, err = _anchor(args)
+    if err is not None:
+        return err
+    target, err = _room_or_fail(args, house)
+    if err is not None:
+        return err
+    alarm = replace(Alarm(start_time="", recurrence=Recurrence.parse("DAILY"),
+                          room_uuid=target["room_uuid"]), **found_set)
+    about = {"room": target["room"], "alarm": alarm.to_attributes(), **_aim(target)}
+    what = f"{brief(house, alarm)}\n  {details(alarm)}{_note(target)}"
+    if getattr(args, "dry_run", False):
+        return emit(args, about | {"would": "create", "performed": False},
+                    f"[dry-run] would create an alarm: {what}")
+    try:
+        found = clock.list_alarms(ip)
+    except Exception as exc:
+        return fail(args, f"could not read the alarms from {ip}: {exc}")
+    try:
+        after, now = clock.create_alarm(ip, alarm, found.version)
+    except Exception as exc:
+        did = f"created alarm {exc.alarm_id}" if getattr(exc, "alarm_id", None) else \
+            "created an alarm"
+        return _write_failed(args, "create the alarm", about, exc, update=True, created=True,
+                             done=_done(house, exc, did) + _note(target))
+    return emit(args, about | {"performed": True, "id": after.id,
+                               "alarm": after.to_attributes(), "version": now.version},
+                f"created alarm {after.id}: {brief(house, after)}\n  {details(after)}"
+                f"{_note(target)}")
+
+
+def cmd_edit(args):
+    """Change only the fields given; everything else, the source included
+    unless `--source` names one, goes back exactly as ListAlarms gave it."""
+    changes, err = _settings_or_fail(args)
+    if err is not None:
+        return err
+    if not changes and args.room is None:
+        return fail(args, "nothing to change",
+                    "give at least one of --time, --days, --duration, --volume, --mode, "
+                    "--include-grouped-rooms, --room, --on/--off, --source")
+    house, ip, found, alarm, err = _target(args)
+    if err is not None:
+        return err
+    target = None
+    if args.room is not None:
+        target, err = _room_or_fail(args, house)
+        if err is not None:
+            return err
+        changes["room_uuid"] = target["room_uuid"]
+    want = replace(alarm, **changes)
+    fields = baseline.differences(want, alarm)
+    about = _about(house, alarm, found) | _aim(target)
+    if not fields:
+        return emit(args, about | {"performed": False, "fields": []},
+                    f"alarm {alarm.id} is already so: {brief(house, alarm)}{_note(target)}")
+    if target:
+        about["to_room"] = target["room"]
+
+    def what(a: Alarm) -> str:
+        return (f"alarm {alarm.id}: {brief(house, a)}  ({', '.join(fields)})\n"
+                f"  {details(a)}{_note(target)}")
+    if getattr(args, "dry_run", False):
+        return emit(args, about | {"would": "update", "performed": False, "fields": fields,
+                                   "would_be": want.to_attributes()},
+                    f"[dry-run] would update {what(want)}")
+    try:
+        after, now = clock.update_alarm(ip, want, found.version)
+    except Exception as exc:
+        return _write_failed(args, f"update alarm {alarm.id}", about | {"fields": fields},
+                             exc, update=True,
+                             done=_done(house, exc, f"updated alarm {alarm.id}")
+                             + f"  ({', '.join(fields)}){_note(target)}")
+    return emit(args, about | {"performed": True, "fields": fields, "before": about["alarm"],
+                               "alarm": after.to_attributes(), "version": now.version},
+                f"updated {what(after)}")
+
+
 def register(sub, parents=None):
     kw = {"parents": parents} if parents else {}
     p = sub.add_parser(**kw, name="alarm", help="the household's Sonos alarms")
@@ -505,3 +833,54 @@ def register(sub, parents=None):
                        help="speaker IP to query instead of SSDP discovery")
         add_write_args(w)
         w.set_defaults(func=fn)
+
+    ad = asub.add_parser(**kw, name="add", help="create an alarm (WRITES)")
+    ad.add_argument("--room", required=True,
+                    help="the room, by name; a bonded follower's goes on its room's primary")
+    ad.add_argument("--time", required=True, help="24-hour HH:MM or HH:MM:SS, household time")
+    _field_args(ad, adding=True)
+    ad.set_defaults(func=cmd_add)
+
+    ed = asub.add_parser(**kw, name="edit",
+                         help="change some fields of an alarm, leaving the rest (WRITES)")
+    ed.add_argument("alarm_id", metavar="id", help="the alarm's ID, from `alarm list`")
+    ed.add_argument("--room", default=None,
+                    help="move it to this room, by name; a bonded follower's goes on "
+                         "its room's primary")
+    ed.add_argument("--time", default=None, help="24-hour HH:MM or HH:MM:SS, household time")
+    _field_args(ed, adding=False)
+    ed.set_defaults(func=cmd_edit)
+
+
+def _field_args(p, adding: bool):
+    """The fields `add` and `edit` share. Each defaults to None, "not given":
+    `add` then takes the model's default, `edit` leaves the field alone."""
+    d = Alarm(start_time="", recurrence=Recurrence.parse("DAILY"), room_uuid="")
+    default = (lambda text: f" (default {text})") if adding else (lambda text: "")
+    p.add_argument("--days", default="daily" if adding else None,
+                   help=DAYS_HELP + default("daily"))
+    p.add_argument("--duration", default=None,
+                   help="auto-stop: 1h, 30m, 1h30, HH:MM:SS, or none"
+                        + default(duration_text(d.duration)))
+    p.add_argument("--volume", default=None, help="0-100" + default(str(d.volume)))
+    p.add_argument("--mode", default=None,
+                   help=", ".join(PLAY_MODES) + ", or the speaker's own value"
+                        + default(_mode_name(d.play_mode)))
+    p.add_argument("--include-grouped-rooms", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="also play in rooms grouped with it at the time"
+                        + default("no"))
+    on = p.add_mutually_exclusive_group()
+    on.add_argument("--on", dest="enabled", action="store_const", const=True, default=None,
+                    help="switched on" + default("on"))
+    on.add_argument("--off", dest="enabled", action="store_const", const=False,
+                    help="switched off")
+    if adding:
+        p.add_argument("--source", choices=sorted(SOURCES), default=None,
+                       help="what it plays (default chime)")
+    else:
+        p.add_argument("--source", choices=[*sorted(SOURCES), "keep"], default=None,
+                       help="what it plays (default keep: the source as it is, byte-for-byte)")
+    p.add_argument("--anchor", default=None,
+                   help="speaker IP to query instead of SSDP discovery")
+    add_write_args(p)
