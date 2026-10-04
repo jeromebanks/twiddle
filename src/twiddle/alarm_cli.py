@@ -358,9 +358,14 @@ def _about(house: Household, alarm: Alarm, found: clock.AlarmList) -> dict:
             "alarm": alarm.to_attributes(), "version": found.version}
 
 
-def _write_failed(args, doing: str, exc: Exception) -> int:
-    """A write that raised: say whether it happened, as far as can be told."""
+def _write_failed(args, doing: str, done: str, about: dict, exc: Exception) -> int:
+    """A write that raised: say whether it happened, as far as can be told.
+    One that landed (someone else edited another alarm in the same moment,
+    say) is reported done, with what else happened as a warning."""
     landed = getattr(exc, "landed", False)
+    if landed is True:
+        return emit(args, about | {"performed": True, "warning": str(exc)},
+                    f"{done}\n  warning: {exc}")
     if landed is None:
         hint = "it may have happened anyway: check `twiddle alarm list`"
     elif isinstance(exc, clock.VersionChanged) and not landed:
@@ -385,7 +390,8 @@ def _set_enabled(args, on: bool) -> int:
     try:
         after, now = clock.update_alarm(ip, replace(alarm, enabled=on), found.version)
     except Exception as exc:
-        return _write_failed(args, f"{verb} alarm {alarm.id}", exc)
+        return _write_failed(args, f"{verb} alarm {alarm.id}",
+                             f"{verb}d alarm {alarm.id}: {brief(house, alarm)}", about, exc)
     return emit(args, about | {"performed": True, "alarm": after.to_attributes(),
                                "version": now.version},
                 f"{verb}d alarm {alarm.id}: {brief(house, after)}")
@@ -401,7 +407,7 @@ def cmd_disable(args):
 
 def _ask(prompt: str) -> str:
     """One answer from the terminal. The prompt goes to stderr, so stdout stays
-    one `--json` envelope; no terminal to ask counts as no."""
+    one `--json` envelope; end of input counts as no."""
     print(prompt, end="", file=sys.stderr, flush=True)
     try:
         return input().strip()
@@ -410,7 +416,10 @@ def _ask(prompt: str) -> str:
 
 
 def _confirmed(alarm: Alarm, what: str) -> bool:
-    """Asked twice, differently: a y, then the alarm's ID typed out."""
+    """Asked twice, differently: a y, then the alarm's ID typed out. Only a
+    person at a terminal can answer: piped answers are never asked for."""
+    if not sys.stdin.isatty():
+        return False
     if _ask(f"delete alarm {alarm.id}: {what}? [y/N] ").lower() not in ("y", "yes"):
         return False
     return _ask(f"type its ID ({alarm.id}) to delete it: ") == alarm.id
@@ -427,11 +436,14 @@ def cmd_rm(args):
         return emit(args, about | {"would": "delete", "performed": False},
                     f"[dry-run] would delete alarm {alarm.id}: {what}")
     if not _confirmed(alarm, what):
-        return fail(args, f"not deleted: alarm {alarm.id}", **about)
+        hint = ("" if sys.stdin.isatty()
+                else "`alarm rm` asks twice, so it needs a terminal; --dry-run shows what it would do")
+        return fail(args, f"not deleted: alarm {alarm.id}", hint, **about)
     try:
         now = clock.destroy_alarm(ip, alarm.id, found.version)
     except Exception as exc:
-        return _write_failed(args, f"delete alarm {alarm.id}", exc)
+        return _write_failed(args, f"delete alarm {alarm.id}",
+                             f"deleted alarm {alarm.id}: {what}", about, exc)
     return emit(args, about | {"performed": True, "version": now.version},
                 f"deleted alarm {alarm.id}: {what}\n"
                 f"  journalled whole (alarm_destroy in {play.INTERVENTION_LOG}), "

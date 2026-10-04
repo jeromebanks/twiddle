@@ -420,9 +420,18 @@ def journal():
     return [json.loads(l) for l in play.INTERVENTION_LOG.read_text().splitlines()]
 
 
-def answers(monkeypatch, *said):
-    """Type these at the prompts; record which prompts were shown."""
+class Terminal:
+    def __init__(self, tty):
+        self.tty = tty
+
+    def isatty(self):
+        return self.tty
+
+
+def answers(monkeypatch, *said, tty=True):
+    """A person at a terminal types these at the prompts; record which were shown."""
     said, asked = list(said), []
+    monkeypatch.setattr(alarm_cli.sys, "stdin", Terminal(tty))
 
     def fake_input(prompt=""):
         asked.append(prompt)
@@ -518,7 +527,33 @@ def test_rm_not_confirmed_twice_deletes_nothing(clockfake, capsys, monkeypatch, 
     assert clockfake.writes == [] and journal() == []
 
 
+def test_rm_with_answers_piped_in_never_asks_and_deletes_nothing(
+        clockfake, capsys, monkeypatch):
+    asked = answers(monkeypatch, "y", "66", tty=False)
+    code, out, err = run(["alarm", "rm", "66", "--json"], capsys)
+    payload = json.loads(out)
+    assert code == 1 and payload["error"] == "not deleted: alarm 66"
+    assert "needs a terminal" in payload["hint"]
+    assert asked == [] and err == ""
+    assert "66" in clockfake.alarms
+    assert clockfake.writes == [] and journal() == []
+
+
+def test_a_delete_that_landed_while_another_alarm_moved_is_reported_done(
+        clockfake, capsys, monkeypatch):
+    answers(monkeypatch, "y", "66")
+    clockfake.after_write = lambda f: f.edit_in_app("11", Volume="4")
+    code, out, _ = run(["alarm", "rm", "66", "--json"], capsys)
+    payload = json.loads(out)
+    assert code == 0 and payload["ok"] is True and payload["performed"] is True
+    assert "alarms 11 changed meanwhile" in payload["warning"]
+    assert "66" not in clockfake.alarms
+    [entry] = journal()
+    assert entry["written"] is True and entry["others_changed"] == ["11"]
+
+
 def test_rm_refuses_if_the_list_moved_while_asking(clockfake, capsys, monkeypatch):
+    answers(monkeypatch)
     said = iter(["y", "66"])
 
     def meanwhile(prompt=""):
@@ -548,6 +583,9 @@ def test_a_deleted_alarm_is_recreated_from_its_journal_entry(clockfake, capsys, 
     assert clockfake.alarms[made.id]["ProgramMetaData"] == clockfake_before("66")["ProgramMetaData"]
     assert made.children == ()      # CreateAlarm has no argument for <Content>
     assert [r["action"] for r in journal()] == ["alarm_destroy", "alarm_create"]
+    with pytest.raises(ValueError, match=f"alarm {made.id} is already the same"):
+        clock.recreate("10.0.0.11", "66", clockfake.version)
+    assert clockfake.writes == ["DestroyAlarm", "CreateAlarm"]
 
 
 def test_only_a_delete_that_landed_can_be_recreated(clockfake, capsys, monkeypatch):

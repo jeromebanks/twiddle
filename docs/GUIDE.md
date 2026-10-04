@@ -162,14 +162,18 @@ uv run twiddle alarm rm 34                  # WRITES: delete it, after asking tw
 nothing else: every other field goes back exactly as `ListAlarms` gave it, so
 an alarm whose source twiddle doesn't recognise (an iHeart station, say) keeps
 its `ProgramURI` and `ProgramMetaData` byte-for-byte. An alarm already in the
-state asked for is left alone, with nothing written or journalled.
+state asked for is left alone, with nothing written or journalled. That is
+what is *sent*: whether a real speaker keeps a Spotify alarm's `<Content>`
+child through an `UpdateAlarm` is unverified, and the journal entry's
+`before`/`after` children show it.
 
 `rm` asks twice, on the terminal: `y`, then the alarm's ID typed out. Anything
-else, or no terminal to ask (a pipe, a script), deletes nothing. The prompts go
+else, or no terminal to ask (answers piped in, a script), deletes nothing. The prompts go
 to stderr, so `--json` still prints one envelope. If someone changed an alarm
 in the Sonos app while it was asking, the delete is refused. The
 `alarm_destroy` journal entry keeps the whole alarm (every attribute and child
-element), so a deleted alarm can be made again from it, with a new ID:
+element), so a deleted alarm can be made again from it, with a new ID
+(refused if an equal alarm is already there):
 
 ```bash
 uv run python -c "from twiddle.alarms import clock; ip = '<any speaker>'; \

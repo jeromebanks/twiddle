@@ -287,8 +287,12 @@ def destroy_alarm(ip: str, alarm_id: str, expected_version: str) -> AlarmList:
 def recreate(ip: str, alarm_id: str, expected_version: str) -> tuple[Alarm, AlarmList]:
     """Create again the alarm twiddle deleted as `alarm_id`, from the journal.
     It gets a new ID. Its child elements (a Spotify alarm's `<Content>`) can't
-    be recreated: CreateAlarm has no argument for them."""
+    be recreated: CreateAlarm has no argument for them. Refused, sending
+    nothing, if an alarm equal to it is already there (recreated before, say)."""
     alarm = deleted(alarm_id)
     if alarm is None:
         raise KeyError(f"no deleted alarm {alarm_id} in {play.INTERVENTION_LOG}")
+    twin = next((a for a in list_alarms(ip).alarms if key(a) == key(alarm)), None)
+    if twin is not None:
+        raise ValueError(f"alarm {twin.id} is already the same as deleted alarm {alarm_id}")
     return create_alarm(ip, alarm, expected_version)
