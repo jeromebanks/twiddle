@@ -82,8 +82,9 @@ Read every line of the report:
 - **`titles`**: its value decides what the dial shows.
   - `artist-song` is enough on its own.
   - A shape's name (`wfmu`, `iheart-attrs`, `iheart-space`) means the
-    titles were in that registered shape (iHeart's may sit beside a spot or
-    show name the shape reads as nothing), and the draft already says
+    titles were in that registered shape (beside, at most, titles it reads
+    as nothing: an iHeart spot or show name, WFMU's "Your DJ speaks over
+    ..."), and the draft already says
     `titles = "<shape>"`. Only the anchored, specific shapes are ever
     guessed (`DETECTABLE` in `probe.py`); a station-anchored one like `kcrw`
     never is.
