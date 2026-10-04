@@ -5,11 +5,13 @@ them is built here. The end-to-end tests answer at the HTTP layer, so the real
 SOAP envelopes are built and every action the command sends is seen.
 """
 import json
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import escape
 
 import pytest
+import requests
 
 from twiddle import alarm_cli, cli, devices, play
 from twiddle.alarms import clock
@@ -406,3 +408,260 @@ def test_restore_without_a_snapshot_is_an_error(clockfake, capsys):
     code, out, _ = run(["alarm", "restore", "--json"], capsys)
     assert code == 1 and "no alarm snapshot" in json.loads(out)["error"]
     assert clockfake.sent == []
+
+
+# ---- alarm enable / disable / rm ---------------------------------------------
+# Alarm 2 is iHeart (not a source twiddle knows), enabled, an `&` in its URI and
+# `&amp;` in its metadata; 66 is Sonos Spotify, disabled, with `&apos;` in its
+# metadata and a <Content> child.
+
+def journal():
+    if not play.INTERVENTION_LOG.exists():
+        return []
+    return [json.loads(l) for l in play.INTERVENTION_LOG.read_text().splitlines()]
+
+
+class Terminal:
+    def __init__(self, tty):
+        self.tty = tty
+
+    def isatty(self):
+        return self.tty
+
+
+def answers(monkeypatch, *said, tty=True):
+    """A person at a terminal types these at the prompts; record which were shown."""
+    said, asked = list(said), []
+    monkeypatch.setattr(alarm_cli.sys, "stdin", Terminal(tty))
+
+    def fake_input(prompt=""):
+        asked.append(prompt)
+        if not said:
+            raise EOFError
+        return said.pop(0)
+    monkeypatch.setattr("builtins.input", fake_input)
+    return asked
+
+
+@pytest.mark.parametrize("verb, aid, on", [("disable", "2", "0"), ("enable", "66", "1")])
+def test_enable_disable_leaves_an_unrecognised_source_byte_for_byte(
+        clockfake, capsys, verb, aid, on):
+    before = dict(clockfake.alarms[aid])
+    children = list(clockfake.children[aid])
+    code, out, _ = run(["alarm", verb, aid], capsys)
+    assert code == 0 and out.startswith(f"{verb}d alarm {aid}: Sonos Roam")
+    got = clockfake.alarms[aid]
+    assert got["Enabled"] == on
+    assert got["ProgramURI"] == before["ProgramURI"]
+    assert got["ProgramMetaData"] == before["ProgramMetaData"]
+    assert {k: v for k, v in got.items() if k != "Enabled"} == \
+        {k: v for k, v in before.items() if k != "Enabled"}
+    assert clockfake.children[aid] == children       # the fake keeps them on update
+    old = next(a for a in ALARMS if a.id == aid)
+    new = parse_alarms(clockfake.document())
+    assert next(a for a in new if a.id == aid) == replace(old, enabled=on == "1")
+    assert clockfake.writes == ["UpdateAlarm"]
+    [entry] = journal()
+    assert entry["action"] == "alarm_update" and entry["written"] is True
+    assert entry["before"]["attributes"]["Enabled"] != on
+    assert entry["after"]["attributes"]["Enabled"] == on
+
+
+@pytest.mark.parametrize("verb, aid", [("enable", "2"), ("disable", "66")])
+def test_already_so_writes_nothing(clockfake, capsys, verb, aid):
+    code, out, _ = run(["alarm", verb, aid, "--json"], capsys)
+    assert code == 0 and json.loads(out)["performed"] is False
+    assert clockfake.writes == [] and journal() == []
+
+
+@pytest.mark.parametrize("argv", [["disable", "2"], ["enable", "66"], ["rm", "66"]])
+def test_dry_run_prints_the_room_and_alarm_and_writes_nothing(
+        clockfake, capsys, monkeypatch, argv):
+    asked = answers(monkeypatch)
+    code, out, _ = run(["alarm", *argv, "--dry-run"], capsys)
+    assert code == 0
+    assert out.startswith(f"[dry-run] would {'delete' if argv[0] == 'rm' else argv[0]} "
+                          f"alarm {argv[1]}: Sonos Roam ")
+    code, out, _ = run(["alarm", *argv, "--dry-run", "--json"], capsys)
+    payload = json.loads(out)
+    assert payload["room"] == "Sonos Roam" and payload["id"] == argv[1]
+    assert payload["alarm"] == clockfake.alarms[argv[1]]
+    assert payload["performed"] is False
+    assert asked == []
+    assert clockfake.sent == ["ListAlarms"] * 2
+    assert not play.INTERVENTION_LOG.exists()
+
+
+def test_an_unknown_alarm_is_an_error(clockfake, capsys):
+    code, out, _ = run(["alarm", "disable", "999", "--json"], capsys)
+    assert code == 1 and json.loads(out)["error"] == "no alarm 999"
+    assert clockfake.writes == []
+
+
+def test_rm_asks_twice_then_journals_the_whole_alarm(clockfake, capsys, monkeypatch):
+    asked = answers(monkeypatch, "y", "66")
+    code, out, err = run(["alarm", "rm", "66", "--json"], capsys)
+    assert code == 0 and json.loads(out)["performed"] is True     # stdout: the envelope only
+    assert len(asked) == 2                     # the prompts are on stderr, and differ:
+    assert err.startswith("delete alarm 66: Sonos Roam") and "? [y/N] " in err
+    assert err.endswith("type its ID (66) to delete it: ")
+    assert "66" not in clockfake.alarms
+    [entry] = journal()
+    assert entry["action"] == "alarm_destroy" and entry["written"] is True
+    assert entry["before"]["attributes"] == clockfake_before("66")
+    assert entry["before"]["children"] == list(next(a for a in ALARMS if a.id == "66").children)
+
+
+def clockfake_before(aid):
+    from tests.test_alarm_clock import FakeClock
+    return FakeClock().alarms[aid]
+
+
+@pytest.mark.parametrize("said, prompts", [
+    (["n"], 1), ([""], 1), (["y", "n"], 2), (["y", "y"], 2), (["y", "6"], 2), ([], 1)])
+def test_rm_not_confirmed_twice_deletes_nothing(clockfake, capsys, monkeypatch, said, prompts):
+    asked = answers(monkeypatch, *said)
+    code, out, _ = run(["alarm", "rm", "66", "--json"], capsys)
+    assert code == 1 and json.loads(out)["error"] == "not deleted: alarm 66"
+    assert len(asked) == prompts
+    assert "66" in clockfake.alarms
+    assert clockfake.writes == [] and journal() == []
+
+
+def test_rm_with_answers_piped_in_never_asks_and_deletes_nothing(
+        clockfake, capsys, monkeypatch):
+    asked = answers(monkeypatch, "y", "66", tty=False)
+    code, out, err = run(["alarm", "rm", "66", "--json"], capsys)
+    payload = json.loads(out)
+    assert code == 1 and payload["error"] == "not deleted: alarm 66"
+    assert "needs a terminal" in payload["hint"]
+    assert asked == [] and err == ""
+    assert "66" in clockfake.alarms
+    assert clockfake.writes == [] and journal() == []
+
+
+def test_a_delete_that_landed_while_another_alarm_moved_is_reported_done(
+        clockfake, capsys, monkeypatch):
+    answers(monkeypatch, "y", "66")
+    clockfake.after_write = lambda f: f.edit_in_app("11", Volume="4")
+    code, out, _ = run(["alarm", "rm", "66", "--json"], capsys)
+    payload = json.loads(out)
+    assert code == 0 and payload["ok"] is True and payload["performed"] is True
+    assert "alarms 11 changed meanwhile" in payload["warning"]
+    assert "66" not in clockfake.alarms
+    [entry] = journal()
+    assert entry["written"] is True and entry["others_changed"] == ["11"]
+
+
+def test_an_enable_that_landed_while_another_alarm_moved_shows_the_alarm_after(
+        clockfake, capsys):
+    clockfake.after_write = lambda f: f.edit_in_app("11", Volume="4")
+    code, out, _ = run(["alarm", "enable", "66", "--json"], capsys)
+    payload = json.loads(out)
+    assert code == 0 and payload["performed"] is True and "warning" in payload
+    assert clockfake.alarms["66"]["Enabled"] == "1"
+    assert payload["alarm"] == clockfake.alarms["66"]
+    assert payload["version"] == clockfake.version
+    clockfake.after_write = lambda f: f.edit_in_app("11", Volume="5")
+    code, out, _ = run(["alarm", "disable", "66"], capsys)
+    assert code == 0 and clockfake.alarms["66"]["Enabled"] == "0"
+    assert out.startswith("disabled alarm 66: Sonos Roam ") and "(off, vol" in out
+    assert "warning: alarm 66 was written, but alarms 11 changed meanwhile" in out
+
+
+def test_an_enable_whose_list_couldnt_be_read_back_says_so(clockfake, capsys):
+    def quiet(f):                       # the write answered; the read-back times out
+        def ListAlarms(args):
+            raise requests.Timeout("read timed out")
+        f.ListAlarms = ListAlarms
+    clockfake.after_write = quiet
+    before = dict(clockfake.alarms["66"])
+    code, out, _ = run(["alarm", "enable", "66", "--json"], capsys)
+    payload = json.loads(out)
+    assert code == 0 and payload["performed"] is True
+    assert clockfake.alarms["66"]["Enabled"] == "1"
+    assert payload["alarm"] is None and payload["version"] is None
+    assert payload["before"] == before
+    assert "Timeout" in payload["warning"]
+    clockfake.after_write = None
+    clockfake.alarms["66"]["Enabled"] = "0"
+    del clockfake.ListAlarms
+    clockfake.after_write = quiet
+    code, out, _ = run(["alarm", "enable", "66"], capsys)
+    assert out.startswith("enabled alarm 66 (the list couldn't be read back to show it)")
+    assert "isn't in the list" not in out
+
+
+def test_rm_refuses_if_the_list_moved_while_asking(clockfake, capsys, monkeypatch):
+    answers(monkeypatch)
+    said = iter(["y", "66"])
+
+    def meanwhile(prompt=""):
+        clockfake.edit_in_app("11", Volume="4")
+        return next(said)
+    monkeypatch.setattr("builtins.input", meanwhile)
+    code, out, _ = run(["alarm", "rm", "66", "--json"], capsys)
+    payload = json.loads(out)
+    assert code == 1 and "nothing written" in payload["error"]
+    assert payload["written"] is False and "Sonos app" in payload["hint"]
+    assert "66" in clockfake.alarms
+    assert clockfake.writes == [] and journal() == []
+
+
+@pytest.mark.parametrize("aid", ["2", "66"])
+def test_a_deleted_alarm_is_recreated_from_its_journal_entry(
+        clockfake, capsys, monkeypatch, aid):
+    answers(monkeypatch, "y", aid)
+    assert run(["alarm", "rm", aid], capsys)[0] == 0
+    old = next(a for a in ALARMS if a.id == aid)
+    # From the journal on disk, not from anything still in memory.
+    entry = json.loads(play.INTERVENTION_LOG.read_text().splitlines()[-1])
+    assert clock.from_record(entry["before"]) == old
+    made, now, lost = clock.recreate("10.0.0.11", aid, clockfake.version)
+    assert lost == ([] if aid == "2" else ["its child elements (1)"])
+    assert made.id != aid and made.id in clockfake.alarms
+    assert made.program_uri == old.program_uri
+    assert made.program_metadata == old.program_metadata
+    assert clockfake.alarms[made.id]["ProgramMetaData"] == clockfake_before(aid)["ProgramMetaData"]
+    # Every field equal but the ID. A Spotify alarm's <Content> child is the
+    # exception: CreateAlarm has no argument for it (see model.py), and
+    # `lost` says so.
+    assert replace(made, id=aid, children=old.children) == old
+    assert made.children == ()
+    assert [r["action"] for r in journal()] == ["alarm_destroy", "alarm_create"]
+    with pytest.raises(ValueError, match=f"alarm {made.id} is already the same"):
+        clock.recreate("10.0.0.11", aid, clockfake.version)
+    assert clockfake.writes == ["DestroyAlarm", "CreateAlarm"]
+
+
+def test_an_attribute_the_model_doesnt_know_is_journalled_but_cant_be_recreated(
+        clockfake, capsys, monkeypatch):
+    clockfake.alarms["300"] = dict(clockfake.alarms["2"], ID="300", StartTime="05:00:00",
+                                   FutureField="keep-me")
+    clockfake.children["300"] = []
+    clockfake.n += 1
+    answers(monkeypatch, "y", "300")
+    assert run(["alarm", "rm", "300"], capsys)[0] == 0
+    entry = json.loads(play.INTERVENTION_LOG.read_text().splitlines()[-1])
+    assert entry["before"]["attributes"]["FutureField"] == "keep-me"
+    old = clock.from_record(entry["before"])
+    assert old.extra == {"FutureField": "keep-me"}
+    made, _, lost = clock.recreate("10.0.0.11", "300", clockfake.version)
+    assert lost == ["attributes FutureField"]
+    assert replace(made, id="300", extra=old.extra) == old
+    assert "FutureField" not in clockfake.alarms[made.id]
+
+
+def test_only_a_delete_that_landed_can_be_recreated(clockfake, capsys, monkeypatch):
+    assert clock.deleted("66") is None
+    play._journal("alarm_destroy", "10.0.0.11", alarm_id="66", written=False,
+                  before={"attributes": clockfake_before("66"), "children": []})
+    assert clock.deleted("66") is None
+    with pytest.raises(KeyError, match="no deleted alarm 66"):
+        clock.recreate("10.0.0.11", "66", clockfake.version)
+    assert clockfake.writes == []
+
+
+def test_list_shows_each_alarms_id(speaker, capsys):
+    code, out, _ = run(["alarm", "list"], capsys)
+    assert all(f"#{a.id} " in out for a in ALARMS)

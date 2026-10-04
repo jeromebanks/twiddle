@@ -11,16 +11,18 @@ nothing, if `CurrentAlarmListVersion` has moved from the version the caller
 read (someone edited an alarm in the Sonos app meanwhile). The window between
 that re-read and the write is unavoidable, and short. Every write is journalled
 with the alarm before and after, so a deleted or clobbered alarm can be
-recreated from `logs/interventions.jsonl`.
+recreated from `logs/interventions.jsonl` (`deleted`, `recreate`).
 
 Each call has a pure parser beside it, so tests feed recorded SOAP responses
 and never reach a speaker.
 """
 from __future__ import annotations
 
+import json
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 from .. import play
 from ..devices import soap
@@ -147,6 +149,35 @@ def _record(alarm: Alarm | None) -> dict | None:
     return {"attributes": alarm.to_attributes(), "children": list(alarm.children)}
 
 
+def from_record(rec: dict) -> Alarm:
+    """An alarm as the journal kept it (`_record`'s inverse), through the same
+    parser as ListAlarms: unknown attributes, children and escaping included."""
+    el = ET.Element("Alarm", rec["attributes"])
+    for child in rec.get("children", ()):
+        el.append(ET.fromstring(child))
+    return Alarm.from_element(el)
+
+
+def deleted(alarm_id: str, log: Path | None = None) -> Alarm | None:
+    """Alarm `alarm_id` as it was when twiddle deleted it: the `before` of the
+    journal's last `alarm_destroy` of it that landed. None if there is none."""
+    log = log or play.INTERVENTION_LOG
+    found = None
+    try:
+        lines = log.read_text().splitlines()
+    except FileNotFoundError:
+        return None
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if (rec.get("action") == "alarm_destroy" and rec.get("alarm_id") == alarm_id
+                and rec.get("written") is True and rec.get("before")):
+            found = rec["before"]
+    return from_record(found) if found else None
+
+
 def _checked(ip: str, expected_version: str) -> AlarmList:
     current = list_alarms(ip)
     if current.version != expected_version:
@@ -251,3 +282,30 @@ def destroy_alarm(ip: str, alarm_id: str, expected_version: str) -> AlarmList:
     if read.get(alarm_id) is None:
         raise KeyError(f"no alarm {alarm_id} to destroy")
     return _journalled(ip, "DestroyAlarm", read, alarm_id, [("ID", alarm_id)])[1]
+
+
+def unrecreatable(alarm: Alarm) -> list[str]:
+    """What of `alarm` CreateAlarm can't set, so a recreated copy lacks: its
+    child elements (a Spotify alarm's `<Content>`) and attributes the model
+    doesn't know. Every field CreateAlarm takes comes back exactly."""
+    lost = []
+    if alarm.children:
+        lost.append(f"its child elements ({len(alarm.children)})")
+    if alarm.extra:
+        lost.append(f"attributes {', '.join(sorted(alarm.extra))}")
+    return lost
+
+
+def recreate(ip: str, alarm_id: str, expected_version: str
+             ) -> tuple[Alarm, AlarmList, list[str]]:
+    """Create again the alarm twiddle deleted as `alarm_id`, from the journal:
+    every CreateAlarm field exactly, under a new ID, and `unrecreatable`'s
+    list of what couldn't come back. Refused, sending nothing, if an alarm
+    equal to it is already there (recreated before, say)."""
+    alarm = deleted(alarm_id)
+    if alarm is None:
+        raise KeyError(f"no deleted alarm {alarm_id} in {play.INTERVENTION_LOG}")
+    twin = next((a for a in list_alarms(ip).alarms if key(a) == key(alarm)), None)
+    if twin is not None:
+        raise ValueError(f"alarm {twin.id} is already the same as deleted alarm {alarm_id}")
+    return (*create_alarm(ip, alarm, expected_version), unrecreatable(alarm))
