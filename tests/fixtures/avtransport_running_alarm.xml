@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<!--
+  AVTransport.GetRunningAlarmProperties, read (read-only) from the left Roam,
+  its group's coordinator, on 2026-10-04 while alarm 34 rang after `alarm try 34`.
+  LoggedStartTime is the household's local time at the fire, in the form
+  RunAlarm was sent it. Its LastChange at the same moment had
+  r:AlarmRunning=1, r:SnoozeRunning=0.
+  Anonymised: GroupID's UUID is the right Roam's test UUID (as in
+  alarms_listalarms.xml) and its group number is made up.
+-->
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:GetRunningAlarmPropertiesResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"><AlarmID>34</AlarmID><GroupID>RINCON_00000000000201400:1000000001</GroupID><LoggedStartTime>2026-10-04 14:58:15</LoggedStartTime></u:GetRunningAlarmPropertiesResponse></s:Body></s:Envelope>

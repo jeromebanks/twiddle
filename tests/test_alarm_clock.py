@@ -9,16 +9,17 @@ a value escaped twice or not at all comes back different.
 """
 import json
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from xml.sax.saxutils import escape
 
 import pytest
 import requests
 
-from twiddle import devices, play
+from twiddle import alarm_cli, cli, devices, play, report
 from twiddle.alarms import baseline, clock
 from twiddle.alarms.model import Alarm, Recurrence
 
-from tests.test_alarm_cli import ALARMS, ALARMS_XML, ROAM_L
+from tests.test_alarm_cli import ALARMS, ALARMS_XML, GONE, ROAM_L, ROAM_R, household
 
 IP = "10.0.0.11"
 _ORDER = ("ID", "StartTime", "Duration", "Recurrence", "Enabled", "RoomUUID",
@@ -457,3 +458,444 @@ def test_an_alarm_someone_else_recreates_is_not_credited_to_restore(fake):
     assert out.done == [] and out.id_map == {} and out.left == []
     [rec] = journal()[before:]
     assert rec["action"] == "alarm_restore" and rec["changes"] == 0 and rec["id_map"] == {}
+
+
+# ---- AVTransport: ringing, try, stop, snooze ----------------------------------
+#
+# Recorded 2026-10-04: GetRunningAlarmProperties' fault with nothing ringing
+# (a Roam and a Beam answered the same), the Roam's initial AVTransport
+# NOTIFY, trimmed to three of its variables but otherwise as sent, and
+# GetRunningAlarmProperties while alarm 34 rang after a real `alarm try 34`
+# (tests/fixtures/avtransport_running_alarm.xml, anonymised).
+
+SCPD = Path(__file__).parent / "fixtures" / "avtransport_alarm_scpd.xml"
+FAULT_800 = ('<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+             's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><s:Fault>'
+             '<faultcode>s:Client</faultcode><faultstring>UPnPError</faultstring><detail>'
+             '<UPnPError xmlns="urn:schemas-upnp-org:control-1-0"><errorCode>800</errorCode>'
+             '</UPnPError></detail></s:Fault></s:Body></s:Envelope>')
+NOTIFY = ('<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>'
+          '&lt;Event xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/AVT/&quot; '
+          'xmlns:r=&quot;urn:schemas-rinconnetworks-com:metadata-1-0/&quot;&gt;'
+          '&lt;InstanceID val=&quot;0&quot;&gt;&lt;TransportState val=&quot;STOPPED&quot;/&gt;'
+          '&lt;r:AlarmRunning val=&quot;0&quot;/&gt;&lt;r:SnoozeRunning val=&quot;0&quot;/&gt;'
+          '&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>')
+RUNNING_XML = (Path(__file__).parent / "fixtures" / "avtransport_running_alarm.xml").read_text()
+RUNNING = clock._response(RUNNING_XML, "GetRunningAlarmProperties")
+RINGING = {"AlarmRunning": "1", "SnoozeRunning": "0"}      # its LastChange, as read
+ROAM_IP, LIVING_IP = "10.0.0.11", "10.0.0.13"
+REAL_LAST_CHANGE = clock.last_change          # before any fixture replaces it
+
+
+def scpd_in_args(direction: str = "in") -> dict[str, list[str]]:
+    """Each action's in- (or out-) arguments, in the speaker's own order."""
+    ns = {"u": "urn:schemas-upnp-org:service-1-0"}
+    out = {}
+    for a in ET.parse(SCPD).getroot().iterfind(".//u:action", ns):
+        out[a.findtext("u:name", namespaces=ns)] = [
+            arg.findtext("u:name", namespaces=ns)
+            for arg in a.iterfind(".//u:argument", ns)
+            if arg.findtext("u:direction", namespaces=ns) == direction]
+    return out
+
+
+class FaultReply:
+    def __init__(self, text):
+        self.text = text
+
+
+class FakeTransport(FakeClock):
+    """The household's AlarmClock as above, plus each group coordinator's
+    AVTransport: what's going off where, and every call it is sent."""
+
+    def __init__(self):
+        super().__init__()
+        self.running: dict[str, dict] = {}          # ip -> GetRunningAlarmProperties
+        self.state: dict[str, dict] = {}            # ip -> LastChange variables
+        self.av: list[tuple[str, str, dict]] = []   # (ip, action, args)
+        self.refuse_av: set[str] = set()            # answer these with a UPnP fault
+
+    @property
+    def av_writes(self):
+        return [(ip, a, args) for ip, a, args in self.av if a in clock.AV_WRITES]
+
+    def post(self, url, data=None, headers=None, timeout=None):
+        if "/AVTransport/" not in url:
+            return super().post(url, data, headers, timeout)
+        ip = url.split("//", 1)[1].split(":", 1)[0]
+        call = ET.fromstring(data).find("{http://schemas.xmlsoap.org/soap/envelope/}Body")[0]
+        action = _local(call.tag)
+        args = [(_local(c.tag), c.text or "") for c in call]
+        assert [k for k, _ in args] == scpd_in_args()[action], action
+        self.av.append((ip, action, dict(args)))
+        if action in self.refuse_av:
+            raise requests.HTTPError("500 Server Error", response=FaultReply(
+                FAULT_800.replace(">800<", ">701<")))
+        if action in self.lose_reply:      # it acted, then the answer was lost
+            raise requests.Timeout("read timed out")
+        out = {}
+        if action == "GetRunningAlarmProperties":
+            if ip not in self.running:
+                raise requests.HTTPError("500 Server Error", response=FaultReply(FAULT_800))
+            out = self.running[ip]
+        inner = "".join(f"<{k}>{escape(v)}</{k}>" for k, v in out.items())
+        return Reply(f'<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
+                     f'<s:Body><u:{action}Response xmlns:u="urn:schemas-upnp-org:service:'
+                     f'AVTransport:1">{inner}</u:{action}Response></s:Body></s:Envelope>')
+
+    def GetTimeNow(self, args):
+        return {"CurrentUTCTime": "2026-10-04 15:20:01", "CurrentLocalTime": "2026-10-04 08:20:01",
+                "CurrentTimeZone": "x", "CurrentTimeGeneration": "1"}
+
+    def GetFormat(self, args):
+        return {"CurrentTimeFormat": "INV", "CurrentDateFormat": "INV"}
+
+
+@pytest.fixture
+def av(monkeypatch):
+    f = FakeTransport()
+    monkeypatch.setattr(devices.requests, "post", f.post)
+    monkeypatch.setattr(alarm_cli, "_household", lambda args: household())
+    monkeypatch.setattr(clock, "last_change", lambda ip, wait=3.0: f.state.get(ip))
+    return f
+
+
+def run(argv, capsys):
+    code = cli.main(argv)
+    out = capsys.readouterr()
+    return code, out.out, out.err
+
+
+def test_the_recorded_scpd_has_every_action_sent():
+    assert set(scpd_in_args()) >= clock.AV_READS | clock.AV_WRITES
+
+
+def test_the_recorded_running_response_has_the_scpds_out_arguments():
+    assert list(RUNNING) == scpd_in_args("out")["GetRunningAlarmProperties"]
+
+
+def test_the_recorded_running_alarm_parses():
+    got = clock.parse_running_alarm(RUNNING_XML)
+    assert (got.alarm_id, got.group_id, got.logged_start) == (
+        "34", f"{ROAM_R}:1000000001", "2026-10-04 14:58:15")
+
+
+def test_the_recorded_fault_800_means_nothing_is_ringing(av):
+    assert clock.upnp_error(FAULT_800) == "800"
+    assert clock.running_alarm(ROAM_IP) is None
+
+
+def test_any_other_fault_is_an_error(av, monkeypatch):
+    def broken(*a, **k):
+        raise requests.HTTPError("500", response=FaultReply(FAULT_800.replace(">800<", ">402<")))
+    monkeypatch.setattr(devices.requests, "post", broken)
+    with pytest.raises(requests.HTTPError):
+        clock.running_alarm(ROAM_IP)
+
+
+def test_the_recorded_last_change_gives_alarm_and_snooze_state():
+    state = clock.parse_last_change(NOTIFY)
+    assert state == {"TransportState": "STOPPED", "AlarmRunning": "0", "SnoozeRunning": "0"}
+
+
+# ---- alarm status (read-only) --------------------------------------------------
+
+def test_status_reports_the_ringing_room_and_alarm(av, capsys):
+    av.running[ROAM_IP] = RUNNING
+    av.state[ROAM_IP] = RINGING
+    code, out, _ = run(["alarm", "status", "--json"], capsys)
+    assert code == 0
+    payload = json.loads(out)
+    assert payload["ringing"] == ["Sonos Roam"]
+    roam = next(r for r in payload["rooms"] if r["group"] == "Sonos Roam")
+    assert (roam["alarm_id"], roam["room"], roam["ringing"]) == ("34", "Sonos Roam", True)
+    assert roam["logged_start"] == "2026-10-04 14:58:15"
+    living = next(r for r in payload["rooms"] if r["group"] == "Living Room")
+    assert living["ringing"] is False
+    # every group's coordinator was asked, and nothing was written or journalled
+    assert {ip for ip, a, _ in av.av} == {ROAM_IP, LIVING_IP}
+    assert av.av_writes == [] and av.writes == [] and journal() == []
+
+
+def test_status_names_the_alarm_in_words(av, capsys):
+    av.running[ROAM_IP] = RUNNING
+    code, out, _ = run(["alarm", "status"], capsys)
+    assert code == 0
+    assert "Sonos Roam: RINGING alarm 34: Sonos Roam 08:20:00" in out
+    assert "Living Room: nothing ringing" in out
+
+
+def test_status_with_nothing_ringing(av, capsys):
+    av.state[ROAM_IP] = clock.parse_last_change(NOTIFY)
+    code, out, _ = run(["alarm", "status", "--json"], capsys)
+    assert code == 0
+    assert json.loads(out)["ringing"] == []
+    assert "ListAlarms" not in av.sent                  # nothing to name
+
+
+def test_a_snoozed_alarm_known_only_from_last_change(av, capsys):
+    av.state[ROAM_IP] = {"AlarmRunning": "0", "SnoozeRunning": "1"}
+    code, out, _ = run(["alarm", "status", "--room", "Sonos Roam"], capsys)
+    assert code == 0
+    assert out.strip() == "Sonos Roam: snoozed an alarm"
+
+
+# ---- alarm try ------------------------------------------------------------------
+
+def test_try_fires_the_alarm_on_its_rooms_coordinator_and_journals_it(av, capsys):
+    code, out, _ = run(["alarm", "try", "34", "--json"], capsys)
+    assert code == 0, out
+    [(ip, action, args)] = av.av_writes
+    assert (ip, action) == (ROAM_IP, "RunAlarm")
+    alarm = next(a for a in ALARMS if a.id == "34")
+    assert args == {"InstanceID": "0", "AlarmID": "34",
+                    "LoggedStartTime": "2026-10-04 08:20:01", "Duration": "02:00:00",
+                    "ProgramURI": alarm.program_uri, "ProgramMetaData": alarm.program_metadata,
+                    "PlayMode": "SHUFFLE", "Volume": "25", "IncludeLinkedZones": "0"}
+    run_rec, start, end = journal()
+    assert (run_rec["action"], run_rec["alarm_id"], run_rec["ip"]) == ("alarm_run", "34", ROAM_IP)
+    assert run_rec["alarm"]["attributes"]["ID"] == "34"
+    assert (start["action"], end["action"]) == ("alarm_run_stop_start", "alarm_run_stop_end")
+    assert json.loads(out)["performed"] is True
+
+
+def test_try_a_bonded_followers_alarm_goes_to_the_groups_coordinator(av, capsys):
+    code, _, _ = run(["alarm", "try", "66"], capsys)
+    assert code == 0
+    assert [(ip, a) for ip, a, _ in av.av_writes] == [(ROAM_IP, "RunAlarm")]
+
+
+def test_try_dry_run_prints_and_writes_nothing(av, capsys):
+    code, out, _ = run(["alarm", "try", "34", "--dry-run"], capsys)
+    assert code == 0
+    assert out.startswith("[dry-run] would fire alarm 34 on Sonos Roam (L) [10.0.0.11]")
+    assert av.av == [] and journal() == []
+
+
+def test_try_an_alarm_aimed_at_a_vanished_speaker_is_refused(av, capsys):
+    av.alarms["34"]["RoomUUID"] = GONE
+    code, _, err = run(["alarm", "try", "34"], capsys)
+    assert code == 1
+    assert "isn't here (Kitchen)" in err
+    assert av.av == [] and journal() == []
+
+
+# ---- alarm stop / alarm snooze ----------------------------------------------------
+
+@pytest.mark.parametrize("argv, action", [
+    (["stop"], "Stop"), (["snooze"], "SnoozeAlarm")])
+def test_stop_and_snooze_journal_and_go_to_the_coordinator(av, capsys, argv, action):
+    av.running[ROAM_IP] = RUNNING
+    code, out, _ = run(["alarm", *argv, "--room", "Sonos Roam (R)", "--json"], capsys)
+    assert code == 0, out
+    assert [(ip, a) for ip, a, _ in av.av_writes] == [(ROAM_IP, action)]
+    payload = json.loads(out)
+    assert payload["performed"] is True and payload["redirected_from"].startswith("Sonos Roam (R)")
+    rec = journal()[0]
+    assert (rec["action"], rec["ip"], rec["alarm_id"]) == (
+        f"alarm_{argv[0]}", ROAM_IP, "34")
+
+
+@pytest.mark.parametrize("verb", ["stop", "snooze"])
+def test_stop_and_snooze_dry_run_print_and_write_nothing(av, capsys, verb):
+    av.running[ROAM_IP] = RUNNING
+    code, out, _ = run(["alarm", verb, "--room", "Sonos Roam", "--dry-run"], capsys)
+    assert code == 0
+    assert out.startswith(f"[dry-run] would {verb} the alarm in Sonos Roam")
+    assert av.av_writes == [] and journal() == []
+
+
+@pytest.mark.parametrize("verb", ["stop", "snooze"])
+def test_stop_and_snooze_refuse_when_nothing_is_ringing(av, capsys, verb):
+    av.state[ROAM_IP] = clock.parse_last_change(NOTIFY)
+    code, _, err = run(["alarm", verb, "--room", "Sonos Roam"], capsys)
+    assert code == 1
+    assert "no alarm is going off in Sonos Roam" in err
+    assert av.av_writes == [] and journal() == []
+
+
+def test_a_snoozed_alarm_can_be_stopped(av, capsys):
+    av.state[ROAM_IP] = {"AlarmRunning": "0", "SnoozeRunning": "1"}
+    code, _, _ = run(["alarm", "stop", "--room", "Sonos Roam"], capsys)
+    assert code == 0
+    assert [a for _, a, _ in av.av_writes] == ["Stop"]
+
+
+@pytest.mark.parametrize("extra, duration", [
+    ([], "00:10:00"), (["--minutes", "5"], "00:05:00"), (["--minutes", "15"], "00:15:00"),
+    (["--minutes", "30"], "00:30:00")])
+def test_snooze_defaults_to_10_minutes_and_takes_5_10_15_30(av, capsys, extra, duration):
+    av.running[ROAM_IP] = RUNNING
+    code, _, _ = run(["alarm", "snooze", "--room", "Sonos Roam", *extra], capsys)
+    assert code == 0
+    [(_, _, args)] = av.av_writes
+    assert args == {"InstanceID": "0", "Duration": duration}
+    snooze, start, end = journal()
+    assert snooze["minutes"] == int(duration[3:5])
+    assert (start["action"], end["action"]) == ("alarm_snooze_ring_start",
+                                                "alarm_snooze_ring_end")
+
+
+def test_snooze_refuses_any_other_length(av, capsys):
+    av.running[ROAM_IP] = RUNNING
+    with pytest.raises(SystemExit):
+        cli.main(["alarm", "snooze", "--room", "Sonos Roam", "--minutes", "7"])
+    with pytest.raises(ValueError):
+        clock.snooze_alarm(ROAM_IP, 7)
+    assert av.av_writes == [] and journal() == []
+
+
+def test_the_snooze_and_duration_spans_are_ones_analyse_pairs(av, capsys):
+    av.running[ROAM_IP] = RUNNING
+    run(["alarm", "snooze", "--room", "Sonos Roam"], capsys)
+    run(["alarm", "try", "34"], capsys)
+    points, spans = report._load_interventions(play.INTERVENTION_LOG)
+    assert sorted(name for _, _, name, _ in spans) == ["alarm_run_stop", "alarm_snooze_ring"]
+    assert all(end - start == 240 and ip == ROAM_IP for start, end, _, ip in spans)
+    assert {p[1] for p in points} >= {"alarm_snooze", "alarm_run"}
+
+
+def test_no_event_leaves_status_to_get_running_alarm_properties(av, capsys):
+    av.running[ROAM_IP] = RUNNING
+    code, out, _ = run(["alarm", "status", "--room", "Sonos Roam", "--json"], capsys)
+    [roam] = json.loads(out)["rooms"]
+    assert (code, roam["ringing"], roam["alarm_running"]) == (0, True, None)
+
+
+@pytest.mark.parametrize("state, ringing", [
+    ({"AlarmRunning": "0", "SnoozeRunning": "0"}, False),   # the event says plainly: no
+    ({"AlarmRunning": "1", "SnoozeRunning": "0"}, True),
+    (None, True)])                                          # no event: the ID decides
+def test_an_event_saying_nothing_runs_overrules_a_running_alarm_id(av, capsys, state, ringing):
+    av.running[ROAM_IP] = RUNNING
+    if state:
+        av.state[ROAM_IP] = state
+    assert (clock.alarm_now(ROAM_IP) is not None) is ringing
+    code, _, _ = run(["alarm", "stop", "--room", "Sonos Roam"], capsys)
+    assert code == (0 if ringing else 1)
+    assert [a for _, a, _ in av.av_writes] == (["Stop"] if ringing else [])
+
+
+# ---- last_change: one GENA event, on loopback only ----------------------------
+
+class Gena:
+    """`requests.request` for SUBSCRIBE/UNSUBSCRIBE. On SUBSCRIBE it posts
+    `notify` (if any) to the callback, as a speaker does, from this thread."""
+
+    def __init__(self, notify=NOTIFY, refuse=False, stall=False, trickle=False):
+        self.notify, self.refuse, self.stall, self.trickle = notify, refuse, stall, trickle
+        self.unsubscribed: list[str] = []
+        self.stalled = None                # the half-sent NOTIFY's socket
+
+    def __call__(self, method, url, headers=None, timeout=None):
+        import http.client
+        from urllib.parse import urlsplit
+        if self.refuse:
+            raise requests.ConnectionError("refused")
+        if method == "UNSUBSCRIBE":
+            self.unsubscribed.append(headers["SID"])
+            return type("R", (), {"headers": {}})()
+        assert method == "SUBSCRIBE" and url.endswith("/MediaRenderer/AVTransport/Event")
+        cb = urlsplit(headers["CALLBACK"].strip("<>"))
+        assert cb.hostname == "127.0.0.1"
+        if self.stall or self.trickle:     # headers promise a body that never comes
+            import socket
+            self.stalled = socket.create_connection((cb.hostname, cb.port), timeout=2)
+            self.stalled.sendall(b"NOTIFY / HTTP/1.1\r\nHost: x\r\n"
+                                 b"Content-Length: 100000\r\n\r\n<e:propertyset")
+            if self.trickle:               # ... a byte at a time, faster than `wait`
+                import threading
+                threading.Thread(target=self._drip, daemon=True).start()
+        elif self.notify is not None:
+            conn = http.client.HTTPConnection(cb.hostname, cb.port, timeout=2)
+            conn.request("NOTIFY", cb.path or "/", self.notify.encode(),
+                         {"NT": "upnp:event", "SID": "uuid:fake-sid", "SEQ": "0"})
+            conn.getresponse().read()
+            conn.close()
+        return type("R", (), {"headers": {"SID": "uuid:fake-sid"}})()
+
+    def _drip(self):
+        import time
+        try:
+            for _ in range(200):           # 10s of bytes, if nothing stops it
+                self.stalled.sendall(b" ")
+                time.sleep(0.05)
+        except OSError:
+            pass
+
+
+def test_last_change_takes_the_initial_event_and_unsubscribes(monkeypatch):
+    gena = Gena()
+    monkeypatch.setattr(clock.requests, "request", gena)
+    assert REAL_LAST_CHANGE("127.0.0.1", wait=2) == {
+        "TransportState": "STOPPED", "AlarmRunning": "0", "SnoozeRunning": "0"}
+    assert gena.unsubscribed == ["uuid:fake-sid"]
+
+
+def test_last_change_with_no_event_is_none_and_still_unsubscribes(monkeypatch):
+    gena = Gena(notify=None)
+    monkeypatch.setattr(clock.requests, "request", gena)
+    assert REAL_LAST_CHANGE("127.0.0.1", wait=0.2) is None
+    assert gena.unsubscribed == ["uuid:fake-sid"]
+
+
+def test_last_change_when_subscribing_fails_is_none(monkeypatch):
+    gena = Gena(refuse=True)
+    monkeypatch.setattr(clock.requests, "request", gena)
+    assert REAL_LAST_CHANGE("127.0.0.1", wait=0.2) is None
+    assert gena.unsubscribed == []
+
+
+@pytest.mark.parametrize("how", ["stall", "trickle"])
+def test_a_notify_that_stalls_or_trickles_cant_hang_the_command(monkeypatch, how):
+    import time
+    gena = Gena(**{how: True})
+    monkeypatch.setattr(clock.requests, "request", gena)
+    t0 = time.monotonic()
+    assert REAL_LAST_CHANGE("127.0.0.1", wait=0.3) is None
+    assert time.monotonic() - t0 < 2
+    assert gena.unsubscribed == ["uuid:fake-sid"]
+    gena.stalled.close()
+
+
+def test_the_callback_listens_only_on_the_address_facing_the_speaker(monkeypatch):
+    bound = []
+    real = clock_http_server()
+
+    class Spy(real):
+        def __init__(self, addr, handler, *a, **k):
+            bound.append(addr[0])
+            super().__init__(addr, handler)
+    monkeypatch.setattr("http.server.ThreadingHTTPServer", Spy)
+    monkeypatch.setattr(clock.requests, "request", Gena())
+    REAL_LAST_CHANGE("127.0.0.1", wait=1)
+    assert bound == ["127.0.0.1"]
+
+
+def clock_http_server():
+    from http.server import ThreadingHTTPServer
+    return ThreadingHTTPServer
+
+
+WRITES_WITH_A_LATER_ACT = [
+    (lambda: clock.run_alarm(ROAM_IP, ALARMS[4], "2026-10-04 14:58:15"), "RunAlarm",
+     "alarm_run", "alarm_run_stop"),
+    (lambda: clock.snooze_alarm(ROAM_IP, 10, "34"), "SnoozeAlarm",
+     "alarm_snooze", "alarm_snooze_ring")]
+
+
+@pytest.mark.parametrize("write, action, name, span", WRITES_WITH_A_LATER_ACT)
+def test_a_lost_reply_still_journals_the_later_span(av, write, action, name, span):
+    av.lose_reply.add(action)
+    with pytest.raises(requests.Timeout):
+        write()
+    assert [a for _, a, _ in av.av_writes] == [action]       # the speaker had it
+    assert [r["action"] for r in journal()] == [name, f"{span}_start", f"{span}_end"]
+
+
+@pytest.mark.parametrize("write, action, name, span", WRITES_WITH_A_LATER_ACT)
+def test_a_refused_write_journals_no_later_span(av, write, action, name, span):
+    av.refuse_av.add(action)
+    with pytest.raises(requests.HTTPError):
+        write()
+    assert [r["action"] for r in journal()] == [name]
