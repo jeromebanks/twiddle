@@ -358,19 +358,25 @@ def _about(house: Household, alarm: Alarm, found: clock.AlarmList) -> dict:
             "alarm": alarm.to_attributes(), "version": found.version}
 
 
-def _write_failed(args, doing: str, done, about: dict, exc: Exception) -> int:
+def _write_failed(args, doing: str, about: dict, exc: Exception, *, done: str,
+                  update: bool) -> int:
     """A write that raised: say whether it happened, as far as can be told.
-    One that landed (someone else edited another alarm in the same moment,
-    say) is reported done by `done(alarm read back)`, with what else happened
-    as a warning, and the alarm and list version as read back after it (the alarm is the one
-    deleted, for a delete; the version is null if the list couldn't be read)."""
+
+    One that landed (another alarm moved in the same moment, or the list
+    couldn't be read back) is reported done, `done` saying so, with why it
+    raised as a warning. The version is the list's after the write, null if
+    it couldn't be read. For an update, `alarm` becomes the alarm as read
+    back (null when it couldn't be) and `before` the one written over; for a
+    delete, `alarm` stays the alarm deleted.
+    """
     landed = getattr(exc, "landed", False)
     if landed is True:
         now = {"version": exc.current.version if exc.current else None}
-        if exc.alarm is not None:
-            now["alarm"] = exc.alarm.to_attributes()
+        if update:
+            now |= {"before": about["alarm"],
+                    "alarm": exc.alarm.to_attributes() if exc.alarm else None}
         return emit(args, about | now | {"performed": True, "warning": str(exc)},
-                    f"{done(exc.alarm)}\n  warning: {exc}")
+                    f"{done}\n  warning: {exc}")
     if landed is None:
         hint = "it may have happened anyway: check `twiddle alarm list`"
     elif isinstance(exc, clock.VersionChanged) and not landed:
@@ -395,10 +401,15 @@ def _set_enabled(args, on: bool) -> int:
     try:
         after, now = clock.update_alarm(ip, replace(alarm, enabled=on), found.version)
     except Exception as exc:
-        def done(after):
-            return (f"{verb}d alarm {alarm.id}: {brief(house, after)}" if after
-                    else f"{verb}d alarm {alarm.id}, but it isn't in the list read back")
-        return _write_failed(args, f"{verb} alarm {alarm.id}", done, about, exc)
+        seen = getattr(exc, "alarm", None)
+        if seen is not None:
+            done = f"{verb}d alarm {alarm.id}: {brief(house, seen)}"
+        elif getattr(exc, "current", None) is None:
+            done = f"{verb}d alarm {alarm.id} (the list couldn't be read back to show it)"
+        else:
+            done = f"{verb}d alarm {alarm.id}, but it isn't in the list read back"
+        return _write_failed(args, f"{verb} alarm {alarm.id}", about, exc,
+                             done=done, update=True)
     return emit(args, about | {"performed": True, "alarm": after.to_attributes(),
                                "version": now.version},
                 f"{verb}d alarm {alarm.id}: {brief(house, after)}")
@@ -449,8 +460,8 @@ def cmd_rm(args):
     try:
         now = clock.destroy_alarm(ip, alarm.id, found.version)
     except Exception as exc:
-        return _write_failed(args, f"delete alarm {alarm.id}",
-                             lambda _: f"deleted alarm {alarm.id}: {what}", about, exc)
+        return _write_failed(args, f"delete alarm {alarm.id}", about, exc,
+                             done=f"deleted alarm {alarm.id}: {what}", update=False)
     return emit(args, about | {"performed": True, "version": now.version},
                 f"deleted alarm {alarm.id}: {what}\n"
                 f"  journalled whole (alarm_destroy in {play.INTERVENTION_LOG}), "

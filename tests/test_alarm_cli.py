@@ -11,6 +11,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 import pytest
+import requests
 
 from twiddle import alarm_cli, cli, devices, play
 from twiddle.alarms import clock
@@ -568,6 +569,29 @@ def test_an_enable_that_landed_while_another_alarm_moved_shows_the_alarm_after(
     assert "warning: alarm 66 was written, but alarms 11 changed meanwhile" in out
 
 
+def test_an_enable_whose_list_couldnt_be_read_back_says_so(clockfake, capsys):
+    def quiet(f):                       # the write answered; the read-back times out
+        def ListAlarms(args):
+            raise requests.Timeout("read timed out")
+        f.ListAlarms = ListAlarms
+    clockfake.after_write = quiet
+    before = dict(clockfake.alarms["66"])
+    code, out, _ = run(["alarm", "enable", "66", "--json"], capsys)
+    payload = json.loads(out)
+    assert code == 0 and payload["performed"] is True
+    assert clockfake.alarms["66"]["Enabled"] == "1"
+    assert payload["alarm"] is None and payload["version"] is None
+    assert payload["before"] == before
+    assert "Timeout" in payload["warning"]
+    clockfake.after_write = None
+    clockfake.alarms["66"]["Enabled"] = "0"
+    del clockfake.ListAlarms
+    clockfake.after_write = quiet
+    code, out, _ = run(["alarm", "enable", "66"], capsys)
+    assert out.startswith("enabled alarm 66 (the list couldn't be read back to show it)")
+    assert "isn't in the list" not in out
+
+
 def test_rm_refuses_if_the_list_moved_while_asking(clockfake, capsys, monkeypatch):
     answers(monkeypatch)
     said = iter(["y", "66"])
@@ -593,19 +617,39 @@ def test_a_deleted_alarm_is_recreated_from_its_journal_entry(
     # From the journal on disk, not from anything still in memory.
     entry = json.loads(play.INTERVENTION_LOG.read_text().splitlines()[-1])
     assert clock.from_record(entry["before"]) == old
-    made, now = clock.recreate("10.0.0.11", aid, clockfake.version)
+    made, now, lost = clock.recreate("10.0.0.11", aid, clockfake.version)
+    assert lost == ([] if aid == "2" else ["its child elements (1)"])
     assert made.id != aid and made.id in clockfake.alarms
     assert made.program_uri == old.program_uri
     assert made.program_metadata == old.program_metadata
     assert clockfake.alarms[made.id]["ProgramMetaData"] == clockfake_before(aid)["ProgramMetaData"]
     # Every field equal but the ID. A Spotify alarm's <Content> child is the
-    # one exception: CreateAlarm has no argument for it (see model.py).
+    # exception: CreateAlarm has no argument for it (see model.py), and
+    # `lost` says so.
     assert replace(made, id=aid, children=old.children) == old
     assert made.children == ()
     assert [r["action"] for r in journal()] == ["alarm_destroy", "alarm_create"]
     with pytest.raises(ValueError, match=f"alarm {made.id} is already the same"):
         clock.recreate("10.0.0.11", aid, clockfake.version)
     assert clockfake.writes == ["DestroyAlarm", "CreateAlarm"]
+
+
+def test_an_attribute_the_model_doesnt_know_is_journalled_but_cant_be_recreated(
+        clockfake, capsys, monkeypatch):
+    clockfake.alarms["300"] = dict(clockfake.alarms["2"], ID="300", StartTime="05:00:00",
+                                   FutureField="keep-me")
+    clockfake.children["300"] = []
+    clockfake.n += 1
+    answers(monkeypatch, "y", "300")
+    assert run(["alarm", "rm", "300"], capsys)[0] == 0
+    entry = json.loads(play.INTERVENTION_LOG.read_text().splitlines()[-1])
+    assert entry["before"]["attributes"]["FutureField"] == "keep-me"
+    old = clock.from_record(entry["before"])
+    assert old.extra == {"FutureField": "keep-me"}
+    made, _, lost = clock.recreate("10.0.0.11", "300", clockfake.version)
+    assert lost == ["attributes FutureField"]
+    assert replace(made, id="300", extra=old.extra) == old
+    assert "FutureField" not in clockfake.alarms[made.id]
 
 
 def test_only_a_delete_that_landed_can_be_recreated(clockfake, capsys, monkeypatch):

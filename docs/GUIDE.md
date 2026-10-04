@@ -177,12 +177,14 @@ element), so a deleted alarm can be made again from it, with a new ID
 
 ```bash
 uv run python -c "from twiddle.alarms import clock; ip = '<any speaker>'; \
-  print(clock.recreate(ip, '34', clock.list_alarms(ip).version)[0])"
+  print(clock.recreate(ip, '34', clock.list_alarms(ip).version))"
 ```
 
 That is a write too (journalled `alarm_create`); `alarm restore` from a
-snapshot taken before the delete brings it back as well. Either way a Spotify
-alarm's `<Content>` child can't be recreated (see above).
+snapshot taken before the delete brings it back as well. Every field
+`CreateAlarm` takes comes back exactly; what it has no argument for can't: a
+Spotify alarm's `<Content>` child (see above) and any attribute twiddle's
+model doesn't know. `recreate` returns a list of what it couldn't bring back.
 
 ### Relay: play anything on this Mac, including Spotify
 
