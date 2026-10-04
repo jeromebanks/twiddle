@@ -83,7 +83,9 @@ def _last_unquoted(text: str, sep: str) -> int | None:
     return found
 
 
-_WFMU_SONG = re.compile(r'^"(?P<song>.*)" by (?P<rest>.+)$', re.DOTALL)
+# The song runs to the first `" by `: later quotes belong to a credit or a
+# show, and the artist between them is what gets looked up.
+_WFMU_SONG = re.compile(r'^"(?P<song>.*?)" by (?P<rest>.+)$', re.DOTALL)
 _WFMU_CREDITED = re.compile(r'^(?P<artist>[^"]+? with "[^"]*") on ')
 _WFMU_SHOW = re.compile(r'^(?P<show>[^"]+?) with (?P<host>[^"]+?)(?: on WFMU)?$')
 
@@ -92,8 +94,9 @@ def wfmu(title: str) -> dict:
     """WFMU's `"Song" by Artist on Show on WFMU`, or a bare `Show with Host`
     at a show change; nothing for anything else ("Your DJ speaks over ...").
 
-    The song is everything inside the outer quotes, so its own " by " and
-    " on " are safe. Between artist and show, the first " on " after a
+    The song is the leading quoted run up to the first `" by `, so its own
+    " by ", " on " and inner quotes are safe (only a song containing `" by `
+    itself would end early). Between artist and show, the first " on " after a
     quoted `with "..."` credit, else the last " on " outside quotes: an
     artist with " on " in the name keeps it, and a show with one loses its
     first half instead. The artist is what gets looked up; the
