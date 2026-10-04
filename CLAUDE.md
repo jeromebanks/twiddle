@@ -44,9 +44,10 @@ aliases — the launchd plist depends on them.
 | `v` in `dial` / `scene`, `viz list/snapshot/demo` | **read-only — no speaker.** Its own ffmpeg decode of the playing stream (a second listener); on the relay only as an *observer* (`?observer`), never counted in `listeners`/`clients_total`/`dropped_chunks`; an older relay without `X-Twiddle-Observer` is not tapped at all. Shows the stream, **not** the speaker: never evidence that sound came out |
 | `dial` (TUI) | **writes only on `enter`/`s`/`D`/`R`/`d`/volume/mute** (`t` filters by tag: display only) — to the chosen Sonos room (journalled) or this Mac / a Bluetooth device (`ffmpeg` with dial's own live volume and mute, not the system's; Linux the same through `ffmpeg -f pulse`; only an ffmpeg without PulseAudio falls back to `ffplay` + the sink volume. The volume keys also work inside `v`). Spotify is consulted only when the room is on the relay; if music is playing through it, tuning asks twice, pauses Spotify, journals `spotify_paused_for_radio`; `R` puts it back. `d` moves a playing station to the new output and stops it on the old (only if that still plays what dial started; never the relay) |
 | `diag scan/ping/watch/analyse/baseline/baseline-diff`, `daemon status` | **read-only — safe any time** |
-| `alarm list` | **read-only — `ListAlarms` + the household's time and format from any speaker; no `AlarmClock`/`AVTransport` write, no journal entry** |
+| `alarm list`, `alarm snapshot` | **read-only — `ListAlarms` + the household's time and format from any speaker; no `AlarmClock`/`AVTransport` write, no journal entry** (`snapshot` saves the list to `logs/snapshots/alarms.json`) |
 | `play`, `pause`, `stop`, `next`, `prev`, `volume`/`vol`, `mute`, `bass`, `treble`, `balance`, `loudness`, `shuffle`, `repeat`, `stream`, `restore`, `group`, `ungroup`, `sleep <duration|off>` | **writes to a speaker** (bare `sleep` only reads the timer; setting one journals a span around when it will stop the room) |
 | `diag serve`, `diag radio`, `diag soak`, `relay start/up/down`, `tune`, `spotify play`, `spotify discover` | **writes transport + volume to a speaker** |
+| `alarm restore` | **writes alarms — a deferred transport + volume write**: `CreateAlarm`/`UpdateAlarm`/`DestroyAlarm` until the household's alarms match `alarm snapshot`. Each write is refused if the alarm list's version moved since it was read, and journalled with the alarm before and after; the old-to-new ID map is journalled too |
 | `comedy sleep` | **writes transport + a native Sonos sleep timer** — plays 2-3 whole albums back-to-back on the target room (default the room `roam`) and arms `ConfigureSleepTimer` to stop it; see `comedy.py` |
 
 Every writing command takes `--dry-run`, which resolves the target and prints
@@ -73,6 +74,10 @@ exactly that, so there is no excuse for drifting:
 uv run twiddle snapshot --room roam    # before you touch anything
 uv run twiddle restore  --room roam    # after
 ```
+
+`snapshot` covers one room's transport and volume, not alarms, which belong to
+the whole household. Before touching alarms, `uv run twiddle alarm snapshot`;
+after, `uv run twiddle alarm restore` (`--dry-run` first shows every change).
 
 **Do not assume what is playing — ask.** `uv run twiddle status` is the only
 trustworthy answer, and `snapshot` captures whatever is actually there rather
@@ -148,8 +153,8 @@ Under `src/twiddle/`:
 | `daemon.py` | launchd agent install/status |
 | `household.py` | speakers, groups, name resolution, snapshot/restore |
 | `control_cli.py` | the room-naming control commands |
-| `alarms/` | Sonos alarms, no UI. `model.py` = an `Alarm` that round-trips every ListAlarms field (program URI/metadata opaque, unknown attributes and children kept) + `Recurrence` (ONCE/DAILY/WEEKDAYS/WEEKENDS/ON_<days>); `clock.py` = the `AlarmClock` reads (`ListAlarms`, `GetTimeNow`, `GetFormat`) with pure parsers beside them |
-| `alarm_cli.py` | `alarm list` (read-only): every alarm under its room's name, bonded-follower / vanished / unknown rooms labelled, next fire in the household's time |
+| `alarms/` | Sonos alarms, no UI. `model.py` = an `Alarm` that round-trips every ListAlarms field (program URI/metadata opaque, unknown attributes and children kept) + `Recurrence` (ONCE/DAILY/WEEKDAYS/WEEKENDS/ON_<days>); `clock.py` = the `AlarmClock` reads (`ListAlarms`, `GetTimeNow`, `GetFormat`) with pure parsers beside them, and the writes (`create_alarm`/`update_alarm`/`destroy_alarm`: refused with `VersionChanged` if the list moved since it was read, journalled before and after, **write**); `baseline.py` = `AlarmSnapshot` (the raw `CurrentAlarmList`), `plan` (alarms compared by `key`, not ID) and `restore` (**writes**) |
+| `alarm_cli.py` | `alarm list`, `alarm snapshot` (read-only): every alarm under its room's name, bonded-follower / vanished / unknown rooms labelled, next fire in the household's time; `alarm restore [--dry-run]` (**writes**) |
 | `play.py` | HTTP file server + transport control (**writes**) |
 | `relay.py` | live audio -> paced PCM -> MP3 -> HTTP fan-out (no speaker writes) |
 | `relay_cli.py` | `relay doctor/login/measure/start` (**start writes**) |

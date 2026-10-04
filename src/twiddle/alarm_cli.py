@@ -5,19 +5,26 @@ display format, from any speaker (alarms are household-wide). Every alarm is
 shown under its room's name, including one aimed at a bonded follower or at a
 speaker that has vanished: labelled, never hidden.
 
+`alarm snapshot` is read-only too: it saves that `ListAlarms` to a file.
+`alarm restore` WRITES: it creates, updates and destroys alarms until the
+household matches the snapshot (`alarms/baseline.py`), journalled, and
+`--dry-run` prints the plan without writing.
+
 Follows the rest of the package: the `ok`/`error` envelope, `--json` anywhere.
 """
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 from datetime import datetime, time, timedelta
+from pathlib import Path
 
-from .alarms import clock
+from .alarms import baseline, clock
 from .alarms.model import Alarm, Recurrence
-from .control_cli import emit, fail
+from .control_cli import SNAPSHOT_DIR, add_write_args, emit, fail
 from .household import Household, Speaker
 
 CHIME = "Sonos chime"
+SNAPSHOT_FILE = SNAPSHOT_DIR / "alarms.json"
 # Monday first for reading; Sonos numbers the days from Sunday = 0.
 _READING_ORDER = (1, 2, 3, 4, 5, 6, 0)
 _DAY = {0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat"}
@@ -213,17 +220,39 @@ def human(rows: list[dict], hh: clock.HouseholdTime) -> str:
     return "\n".join(lines)
 
 
+def brief(house: Household, alarm: Alarm) -> str:
+    """One alarm in a line: where, when, which days, what."""
+    on = "on" if alarm.enabled else "off"
+    return (f"{aimed_at(house, alarm.room_uuid)['room']} {alarm.start_time} "
+            f"{days_text(alarm.recurrence)} ({on}, vol {alarm.volume}) {source_title(alarm)}")
+
+
+def change_text(house: Household, c: baseline.Change) -> str:
+    if c.op == "create":
+        return f"create  {brief(house, c.want)}  (was alarm {c.want.id})"
+    if c.op == "destroy":
+        return f"destroy alarm {c.have.id}: {brief(house, c.have)}"
+    return f"update  alarm {c.have.id}: {brief(house, c.want)}  ({', '.join(c.fields)})"
+
+
 # ---- commands --------------------------------------------------------------
 
-def cmd_list(args):
+def _anchor(args):
+    """The household and one speaker to ask, or (None, None, exit code)."""
     try:
         house = _household(args)
     except Exception as exc:
-        return fail(args, f"could not reach the household: {exc}",
-                    "check you are on the same LAN, or pass --anchor <ip>")
+        return None, None, fail(args, f"could not reach the household: {exc}",
+                                "check you are on the same LAN, or pass --anchor <ip>")
     if not house.groups:
-        return fail(args, "no speakers in the household")
-    ip = house.groups[0].coordinator.ip
+        return None, None, fail(args, "no speakers in the household")
+    return house, house.groups[0].coordinator.ip, None
+
+
+def cmd_list(args):
+    house, ip, err = _anchor(args)
+    if err is not None:
+        return err
     try:
         found = clock.list_alarms(ip)
         hh = clock.household_time(ip)
@@ -232,6 +261,69 @@ def cmd_list(args):
     rows = listing(house, found.alarms, hh)
     return emit(args, {"version": found.version, "household_time": hh.to_dict(),
                        "alarms": rows}, human(rows, hh))
+
+
+def cmd_snapshot(args):
+    """Save every alarm, exactly as ListAlarms gave it. Read-only."""
+    house, ip, err = _anchor(args)
+    if err is not None:
+        return err
+    try:
+        found = clock.list_alarms(ip)
+    except Exception as exc:
+        return fail(args, f"could not read the alarms from {ip}: {exc}")
+    snap = baseline.AlarmSnapshot.of(found)
+    path = snap.save(Path(args.out) if args.out else SNAPSHOT_FILE)
+    return emit(args, {"path": str(path), "snapshot": snap.to_dict(),
+                       "alarms": len(found.alarms)},
+                f"{len(found.alarms)} alarms (list version {found.version}) -> {path}")
+
+
+def cmd_restore(args):
+    """Make the household's alarms match a snapshot again."""
+    path = Path(args.path) if args.path else SNAPSHOT_FILE
+    if not path.exists():
+        return fail(args, f"no alarm snapshot at {path}",
+                    "take one first with `twiddle alarm snapshot`")
+    try:
+        snap = baseline.AlarmSnapshot.load(path)
+        want = snap.alarms
+    except Exception as exc:
+        return fail(args, f"could not read the snapshot {path}: {exc}")
+    house, ip, err = _anchor(args)
+    if err is not None:
+        return err
+    try:
+        found = clock.list_alarms(ip)
+    except Exception as exc:
+        return fail(args, f"could not read the alarms from {ip}: {exc}")
+    changes = baseline.plan(want, found.alarms)
+    lines = [change_text(house, c) for c in changes]
+    head = f"alarms as at {snap.taken_utc} ({path})"
+    if getattr(args, "dry_run", False) or not changes:
+        notes = [] if changes else baseline.leftovers(want, found.alarms)[1]
+        if not changes:
+            human = f"nothing to do: the alarms already match {head}"
+        else:
+            human = f"[dry-run] would restore {head}:\n  " + "\n  ".join(lines)
+        human += "".join(f"\n  note: {n}" for n in notes)
+        return emit(args, {"would": [c.to_dict() for c in changes], "performed": False,
+                           "notes": notes, "version": found.version,
+                           "taken_utc": snap.taken_utc}, human)
+    out = baseline.restore(ip, snap, found)
+    payload = {"ok": out.ok, "done": out.done, "id_map": out.id_map,
+               "left": [c.to_dict() for c in out.left], "notes": out.notes,
+               "error": out.error or None, "version": out.version,
+               "taken_utc": snap.taken_utc}
+    human = [f"restored {head}" if out.ok else f"restore of {head} is INCOMPLETE"]
+    human += [f"  {line}" for line in lines[:len(out.done)]]
+    human += [f"  alarm {old} is now alarm {new}" for old, new in out.id_map.items()]
+    if out.error:
+        human.append(f"  stopped: {out.error}")
+    human += [f"  STILL DIFFERENT: {change_text(house, c)}" for c in out.left]
+    human += [f"  note: {n}" for n in out.notes]
+    emit(args, payload, "\n".join(human))
+    return 0 if out.ok else 1
 
 
 def register(sub, parents=None):
@@ -243,3 +335,19 @@ def register(sub, parents=None):
     ls.add_argument("--anchor", default=None,
                     help="speaker IP to query instead of SSDP discovery")
     ls.set_defaults(func=cmd_list)
+
+    sn = asub.add_parser(**kw, name="snapshot",
+                         help="save every alarm to a file (read-only)")
+    sn.add_argument("--anchor", default=None,
+                    help="speaker IP to query instead of SSDP discovery")
+    sn.add_argument("--out", default=None, help=f"where to save it (default {SNAPSHOT_FILE})")
+    sn.set_defaults(func=cmd_snapshot)
+
+    rs = asub.add_parser(**kw, name="restore",
+                         help="make the alarms match a snapshot again (WRITES)")
+    rs.add_argument("--anchor", default=None,
+                    help="speaker IP to query instead of SSDP discovery")
+    rs.add_argument("--path", default=None,
+                    help=f"the snapshot to restore (default {SNAPSHOT_FILE})")
+    add_write_args(rs)
+    rs.set_defaults(func=cmd_restore)

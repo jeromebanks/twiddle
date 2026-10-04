@@ -117,6 +117,34 @@ that has vanished from the household, or at a UUID no speaker owns is listed
 with a `!` line saying so, never hidden. `alarm list` writes nothing: no
 `AlarmClock` or `AVTransport` write, no journal entry.
 
+```bash
+uv run twiddle alarm snapshot              # -> logs/snapshots/alarms.json (read-only)
+uv run twiddle alarm restore --dry-run     # every change it would make; writes nothing
+uv run twiddle alarm restore               # WRITES: make the alarms match the snapshot
+```
+
+`alarm snapshot` saves the `CurrentAlarmList` exactly as `ListAlarms` sent it,
+with its version; like `alarm list` it writes nothing to a speaker or the
+journal. `alarm restore` makes the household match it again: alarms the
+snapshot lacks are destroyed, deleted ones recreated, changed ones updated.
+A recreated alarm gets a new ID from the speaker, so alarms are compared by
+everything but their ID: time, days, duration, enabled, room, volume, play
+mode, include-grouped-rooms, and `ProgramURI`/`ProgramMetaData` as exact
+strings. An equal alarm under another ID is left alone, so restoring twice
+does nothing the second time. The old-to-new ID mapping is printed and
+journalled (`alarm_restore`).
+
+Every alarm write (`CreateAlarm`, `UpdateAlarm`, `DestroyAlarm`) first re-reads
+the list and is **refused if its version moved** since twiddle read it: someone
+changed an alarm in the Sonos app meanwhile, and that edit is not overwritten.
+Each write is journalled as `alarm_create`/`alarm_update`/`alarm_destroy` with
+the whole alarm before and after (or the error, if it failed), so a deleted or
+clobbered alarm can be recreated from `logs/interventions.jsonl`. A restore
+stops at the first write that fails or is refused, reads the list again and
+reports everything still different, exiting 1. Some Spotify alarms carry a
+`<Content>` child that `CreateAlarm` can't set: a recreated one comes back
+without it, and restore says so in a `note:` rather than failing.
+
 ### Relay: play anything on this Mac, including Spotify
 
 `serve` plays files off disk. `relay` widens the same pipe to *live* audio and
@@ -474,6 +502,9 @@ that half-worked is worse than one that failed loudly — the next measurement
 inherits the difference silently. A live stream has no seekable position, so
 restoring one re-issues the URI rather than seeking into it.
 
+Room snapshots don't cover alarms, which belong to the whole household:
+`alarm snapshot` before touching them, `alarm restore` after (see *Alarms*).
+
 ### Playback and long-running tests (these **write**)
 
 ```bash
@@ -674,8 +705,8 @@ you add analysis.
 | `report.py` | Findings, severities, hardware-vs-setup discriminators |
 | `household.py` | Speakers, groups, name resolution, snapshot/restore |
 | `control_cli.py` | The room-naming control commands |
-| `alarms/` | Sonos alarms: `model.py` (an `Alarm` that round-trips ListAlarms, its `Recurrence`), `clock.py` (the `AlarmClock` reads) |
-| `alarm_cli.py` | `alarm list` (read-only) |
+| `alarms/` | Sonos alarms: `model.py` (an `Alarm` that round-trips ListAlarms, its `Recurrence`), `clock.py` (the `AlarmClock` reads, and the version-checked, journalled writes), `baseline.py` (`AlarmSnapshot`, the restore plan and restore) |
+| `alarm_cli.py` | `alarm list`, `alarm snapshot` (read-only); `alarm restore` (writes) |
 | `play.py` | HTTP file server and transport control (writes) |
 | `tone.py` | Soak-test signal generator |
 | `spotify_ops.py` | Spotify playback logic with no CLI attached (shared by `spotify_cli` and `scene`) |
