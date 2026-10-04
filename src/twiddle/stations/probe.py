@@ -31,7 +31,7 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 
 from .. import streaminfo
-from . import icy, net
+from . import icy, net, titles
 from .directory import fetch_for_url
 from .fetchers import FETCHERS
 from .fetchers.spinitron import parse_spinitron
@@ -80,7 +80,7 @@ class Probe:
     icy_site: str | None = None
     icy_metadata: bool = False
     titles: list[str | None] = field(default_factory=list)
-    title_shape: str | None = None       # artist-song | iheart | show-like | blank
+    title_shape: str | None = None       # artist-song | a DETECTABLE shape | show-like | blank
     codec: str | None = None
     bitrate: int | None = None
     callsign: str | None = None
@@ -190,8 +190,26 @@ def bounded(fn, timeout: float):
     return out.get("v")
 
 
-def title_shape(titles: list[str | None], icy_name: str | None = None) -> str:
-    real = [t for t in titles if t]
+# The title shapes (`titles.SHAPES`) the probe may name from a few titles alone,
+# most specific first: each anchored on markers no other station's titles
+# carry. Never a permissive one (`artist-dot-song` splits any " · ") or one
+# that only makes sense for its own station (`kcrw`). `iheart-attrs` before
+# `iheart-space`, which reads comma attributes too.
+DETECTABLE = ("wfmu", "iheart-attrs", "iheart-space")
+
+
+def _has_shape(shape: str, real: list[str]) -> bool:
+    # Every title parses, and at least one to an artist: WFMU's bare
+    # `Show with Host` alone would match any "Morning Edition with Steve".
+    got = [titles.parse(shape, t) for t in real]
+    return all(got) and any(g.get("artist") for g in got)
+
+
+def title_shape(samples: list[str | None], icy_name: str | None = None) -> str:
+    """`blank`, `artist-song` (the default reading is enough), a shape in
+    DETECTABLE that every title has, or `show-like`: consistent titles in no
+    shape we know, which may still carry an artist a new shape could read."""
+    real = [t for t in samples if t]
     if not real:
         return "blank"
     # "90s90s - DIGITAL WEB" splits like Artist - Song but is only the
@@ -200,8 +218,9 @@ def title_shape(titles: list[str | None], icy_name: str | None = None) -> str:
         return re.sub(r"[^a-z0-9]", "", s.lower())
     if icy_name and all(bare(t) == bare(icy_name) for t in real):
         return "show-like"
-    if any('title="' in t and 'artist="' in t for t in real):
-        return "iheart"
+    for shape in DETECTABLE:
+        if _has_shape(shape, real):
+            return shape
     if all(icy.split_title(icy.tidy_title(t)) != (None, None) for t in real):
         return "artist-song"
     return "show-like"
@@ -360,7 +379,7 @@ def probe(url: str, *, callsign: str | None = None, homepage: str | None = None,
             p.fetch_args = {"callsign": p.callsign}
             if spin_logo:
                 logo_candidates.append(spin_logo)
-    if not p.fetch and p.title_shape in ("artist-song", "iheart"):
+    if not p.fetch and (p.title_shape == "artist-song" or p.title_shape in DETECTABLE):
         p.platform, p.fetch = "icy", "icy"
     if not p.fetch and re.search(r"news|talk", p.icy_genre or "", re.I):
         p.platform, p.fetch = "icy", "talk"
@@ -368,15 +387,20 @@ def probe(url: str, *, callsign: str | None = None, homepage: str | None = None,
         logo_candidates += homepage_logos(page, p.homepage)
     p.logos = [measure_logo(u) for u in list(dict.fromkeys(logo_candidates))[:6]]
 
-    if p.fetch and p.fetch in FETCHERS and not p.platform_note:
+    if p.fetch == "icy" and p.title_shape in DETECTABLE:
+        p.verdict = (f"ICY titles in the {p.title_shape!r} shape: data only -- fetch = 'icy' "
+                     f"with fetch_args titles = {p.title_shape!r}")
+    elif p.fetch and p.fetch in FETCHERS and not p.platform_note:
         p.verdict = f"known platform ({p.platform}): data only -- fetch = {p.fetch!r}"
     elif p.fetch and p.fetch in FETCHERS:
         p.verdict = f"known platform ({p.platform}): data only, but {p.platform_note}"
     elif p.platform:
         p.verdict = f"needs a custom fetcher: {p.platform_note}"
     elif p.title_shape == "show-like":
-        p.verdict = ("ICY only, and its titles aren't 'Artist - Song': fetch = 'icy' with "
-                     "fetch_args music = false, or look for a feed")
+        p.verdict = ("ICY only, and its titles fit no shape we know: if they name an artist, "
+                     "write a title shape for them (stations/titles.py, with a test) and use "
+                     "fetch_args titles; only if there's no artist to recover, music = false. "
+                     "Or look for a feed")
     else:
         p.verdict = ("needs a custom fetcher: ICY is blank and no known platform matched -- "
                      "look for a now-playing feed on the station's site")
@@ -405,7 +429,11 @@ def draft_toml(p: Probe, key: str | None = None) -> str:
                   if not (k == "callsign" and v.upper() == name.upper())}
     if p.fetch and p.fetch != "icy":
         lines.append(f"fetch = {q(p.fetch)}")
-    if p.fetch in (None, "icy") and p.title_shape == "show-like":
+    if p.fetch in (None, "icy") and p.title_shape in DETECTABLE:
+        fetch_args["titles"] = p.title_shape
+    elif p.fetch in (None, "icy") and p.title_shape == "show-like":
+        lines.append("# titles fit no known shape: write one if they name an artist, "
+                     "else keep music = false")
         fetch_args["music"] = False
     if fetch_args:
         lines.append("fetch_args = { " + ", ".join(

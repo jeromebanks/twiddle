@@ -1,7 +1,9 @@
 """`stations search` and `stations probe`: parsing the directories, spotting
 the platform, and drafting a catalog entry -- all against canned answers."""
+import pytest
+
 from twiddle import stations
-from twiddle.stations import directory, probe
+from twiddle.stations import directory, probe, titles
 
 # Trimmed from real answers, 2026-09-27.
 RADIO_BROWSER = [
@@ -110,14 +112,52 @@ def test_playlists_give_their_first_stream():
     assert probe.parse_playlist("nothing") is None
 
 
+# Read off stream0.wfmu.org/freeform-128k by `stations probe`, 2026-10-03.
+WFMU_TITLES = ['"At War With Satan" by Venom on Marty McSorley\'s show on WFMU',
+               '"Orgies - A Tool Of Witchcraft" by Louise Huebner with Louis and Bebe Barron '
+               'on Marty McSorley\'s show on WFMU']
+
+
 def test_title_shapes():
     assert probe.title_shape(["Low - Words", "Broadcast - Tears"]) == "artist-song"
-    assert probe.title_shape(['title="Plane",artist="JOHN MULANEY",url=""']) == "iheart"
+    assert probe.title_shape(['title="Plane",artist="JOHN MULANEY",url=""']) == "iheart-attrs"
     assert probe.title_shape([None, None]) == "blank"
     assert probe.title_shape(["Morning Edition"]) == "show-like"
     # The stream's own name, split on its dash, is not an artist.
     assert probe.title_shape(["90s90s - DIGITAL WEB"] * 2, "90s90s - DIGITAL WEB") == "show-like"
     assert probe.guess_callsign("90s90s - DIGITAL WEB") is None
+
+
+def test_titles_in_a_registered_shape_are_named():
+    assert probe.title_shape(WFMU_TITLES, "WFMU Freeform Radio") == "wfmu"
+    # A show change between songs is still WFMU's shape...
+    assert probe.title_shape([WFMU_TITLES[0], "Fool's Paradise with Rex"]) == "wfmu"
+    # ...but its filler isn't, and one of those means no shape is certain.
+    assert probe.title_shape([WFMU_TITLES[0],
+                              'Your DJ speaks over "X" on Bucci\'s show on WFMU']) == "show-like"
+    space = ('BOBCAT GOLDTHWAIT - text="The Game Of Love" song_spot="M" '
+             'amgArtworkURL="https://i.iheart.com/x.jpg" length="00:03:12"')
+    assert probe.title_shape([space]) == "iheart-space"
+    # iHeart's own comma attributes and a plain title: the default reads both.
+    assert probe.title_shape(['title="Plane",artist="JOHN MULANEY",url=""',
+                              "Low - Words"]) == "artist-song"
+
+
+def test_only_specific_shapes_are_ever_guessed():
+    assert set(probe.DETECTABLE) <= set(titles.SHAPES)
+    assert not {"artist-song", "artist-dot-song", "kcrw"} & set(probe.DETECTABLE)
+    # The most specific first: a comma-attribute title is iheart-attrs, never
+    # iheart-space (which reads those too).
+    assert probe.DETECTABLE.index("iheart-attrs") < probe.DETECTABLE.index("iheart-space")
+
+
+@pytest.mark.parametrize("samples", [
+    ["Good Food-Evan Kleiman-join.kcrw.com"] * 2,        # KCRW's, and only KCRW's
+    ["Namee · Scarecrow (1985)", "Low · Words"],            # artist-dot-song is permissive
+    ["Morning Edition with Steve Inskeep"] * 2,             # WFMU's show line, no song
+])
+def test_a_permissive_or_station_anchored_shape_is_never_guessed(samples):
+    assert probe.title_shape(samples) == "show-like"
 
 
 def test_platform_spotting_on_homepages():
@@ -192,7 +232,28 @@ def test_probe_show_titles_are_never_taken_for_artists(monkeypatch):
                  headers={"icy-metaint": "16000", "icy-name": "Talk Example"},
                  titles=["Morning Show", "Morning Show"])
     p = probe.probe("http://talk.example/live", sleep=lambda s: None)
-    assert "music = false" in probe.draft_toml(p)
+    draft = probe.draft_toml(p)
+    assert "music = false" in draft and "titles =" not in draft
+    # Write a shape first; music = false only when there's no artist in them.
+    assert "write a title shape" in p.verdict
+    assert p.verdict.index("title shape") < p.verdict.index("music = false")
+
+
+def test_probe_wfmu_names_its_shape_and_drafts_it(monkeypatch):
+    _fake_stream(monkeypatch, final="http://stream0.wfmu.org/freeform-128k",
+                 headers={"icy-metaint": "8192", "icy-name": "WFMU Freeform Radio",
+                          "icy-url": "http://wfmu.org"}, titles=WFMU_TITLES)
+    monkeypatch.setattr(probe, "fetch_capped", lambda url, kinds, cap=0: b"<html></html>")
+    p = probe.probe("http://stream0.wfmu.org/freeform-128k", sleep=lambda s: None)
+    assert (p.title_shape, p.fetch) == ("wfmu", "icy")
+    assert p.verdict.startswith("ICY titles in the 'wfmu' shape: data only")
+    draft = probe.draft_toml(p, "wfmu")
+    assert 'fetch_args = { titles = "wfmu" }' in draft and "music" not in draft
+    assert "fetch =" not in draft                       # icy is the default
+    import tomllib
+    data = tomllib.loads(draft.replace('"City -- what it is"', '"Jersey City -- x"')
+                         .replace("tags  = []", 'tags = ["freeform"]'))
+    assert stations.model.station_from("wfmu", data).name == "WFMU Freeform Radio"
 
 
 def test_a_stalled_read_times_out_instead_of_hanging():
