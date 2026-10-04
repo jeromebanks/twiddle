@@ -416,18 +416,28 @@ def last_change(ip: str, wait: float = 3.0) -> dict[str, str] | None:
     NOTIFY (it carries every variable), unsubscribe. Read-only, the same
     subscription `monitor` keeps on the anchor. None if no event came.
 
-    The callback listens only on the address facing the speaker, and every
-    read on it is bounded by `wait`, so a NOTIFY that stalls halfway can't
-    hold the command up: it returns within a few `wait`s whatever happens."""
+    The callback listens only on the address facing the speaker. Whatever a
+    NOTIFY does (stall halfway, trickle bytes forever), this returns once
+    `wait` is up: each request is handled on a daemon thread, and at the end
+    every connection still open is shut, so nothing is waited for."""
     import socket
     import threading
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     got: list[str] = []
     arrived = threading.Event()
+    live: set[socket.socket] = set()
 
     class Handler(BaseHTTPRequestHandler):
         timeout = wait                       # each socket read, the body's included
+
+        def setup(self):
+            live.add(self.request)
+            super().setup()
+
+        def finish(self):
+            live.discard(self.request)
+            super().finish()
 
         def do_NOTIFY(self):  # noqa: N802 - UPnP verb
             n = int(self.headers.get("Content-Length", 0) or 0)
@@ -439,13 +449,20 @@ def last_change(ip: str, wait: float = 3.0) -> dict[str, str] | None:
         def log_message(self, *_args):
             pass
 
+    class Server(ThreadingHTTPServer):
+        daemon_threads = True
+        block_on_close = False
+
+        def handle_error(self, request, client_address):
+            pass                             # a connection we shut, or a bad NOTIFY
+
     path = f"http://{ip}:{PORT}/MediaRenderer/AVTransport/Event"
     server, sid = None, ""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect((ip, PORT))
             me = s.getsockname()[0]
-        server = HTTPServer((me, 0), Handler)
+        server = Server((me, 0), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         r = requests.request("SUBSCRIBE", path, timeout=wait,
                              headers={"CALLBACK": f"<http://{me}:{server.server_port}/>",
@@ -463,6 +480,11 @@ def last_change(ip: str, wait: float = 3.0) -> dict[str, str] | None:
                 pass
         if server is not None:
             server.shutdown()
+            for conn in list(live):
+                try:
+                    conn.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
             server.server_close()
     try:
         return parse_last_change(got[0]) if got else None
@@ -522,8 +544,9 @@ def run_args(alarm: Alarm, logged_start: str) -> list[tuple[str, str]]:
 def run_alarm(ip: str, alarm: Alarm, logged_start: str) -> datetime | None:
     """Fire `alarm` now on the group `ip` coordinates (**writes** transport
     and volume). `logged_start` is the household's local time, as GetTimeNow
-    writes it (the format RunAlarm wants is not documented; unverified).
-    Returns when its duration will stop it, or None if it has none."""
+    writes it; the Roam took that and reported it back the same way from
+    GetRunningAlarmProperties (2026-10-04). Returns when its duration will
+    stop it, or None if it has none."""
     _av_write(ip, "RunAlarm", run_args(alarm, logged_start), "alarm_run",
               alarm_id=alarm.id, alarm=_record(alarm))
     seconds = play.parse_hms(alarm.duration)

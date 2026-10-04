@@ -257,8 +257,10 @@ writes nothing and journals nothing.
 on the coordinator of the alarm's room, so a bonded follower's alarm fires on
 its pair's coordinator. It is refused for an alarm aimed at a speaker that
 isn't here. `LoggedStartTime` is sent as the household's local time
-`YYYY-MM-DD HH:MM:SS`, from `GetTimeNow`; the speaker doesn't document the
-format, so that is unverified until an alarm has been tried for real.
+`YYYY-MM-DD HH:MM:SS`, from `GetTimeNow`. Tried on the Roam (2026-10-04,
+alarm 34): it rang, `GetRunningAlarmProperties` named alarm 34 with that
+`LoggedStartTime` and the group's ID, LastChange had `AlarmRunning=1`, and
+`alarm stop` ended it (`status` then read nothing ringing).
 
 `stop` and `snooze` resolve the room the way transport commands do (a bonded
 follower goes to its coordinator, and the output says so) and send the
@@ -268,6 +270,10 @@ whatever the room is playing, and `twiddle stop --room` is the command for
 that. A snoozed alarm (`SnoozeRunning`) can still be stopped. Whether a snoozed
 alarm also answers `GetRunningAlarmProperties`, and whether `Stop` ends a
 snooze, are unverified.
+
+A tried alarm stopped early leaves its duration-stop span in the journal: a
+few minutes wrongly discounted two hours on, the cheaper mistake (as with a
+cancelled sleep timer).
 
 All three writes are journalled (`alarm_run` with the whole alarm,
 `alarm_stop`, `alarm_snooze` with its minutes). The speaker acts again later

@@ -19,7 +19,7 @@ from twiddle import alarm_cli, cli, devices, play, report
 from twiddle.alarms import baseline, clock
 from twiddle.alarms.model import Alarm, Recurrence
 
-from tests.test_alarm_cli import ALARMS, ALARMS_XML, GONE, ROAM_L, household
+from tests.test_alarm_cli import ALARMS, ALARMS_XML, GONE, ROAM_L, ROAM_R, household
 
 IP = "10.0.0.11"
 _ORDER = ("ID", "StartTime", "Duration", "Recurrence", "Enabled", "RoomUUID",
@@ -462,12 +462,11 @@ def test_an_alarm_someone_else_recreates_is_not_credited_to_restore(fake):
 
 # ---- AVTransport: ringing, try, stop, snooze ----------------------------------
 #
-# Recorded 2026-10-04 with nothing ringing: GetRunningAlarmProperties' fault
-# (a Roam and a Beam answered the same), and the initial AVTransport NOTIFY
-# from a Roam, trimmed to three of its variables but otherwise as sent.
-# RUNNING is NOT recorded: getting one needs an alarm to go off, which is the
-# slice's demo. It is built from the out-arguments of the recorded SCPD
-# (tests/fixtures/avtransport_alarm_scpd.xml); the values are made up.
+# Recorded 2026-10-04: GetRunningAlarmProperties' fault with nothing ringing
+# (a Roam and a Beam answered the same), the Roam's initial AVTransport
+# NOTIFY, trimmed to three of its variables but otherwise as sent, and
+# GetRunningAlarmProperties while alarm 34 rang after a real `alarm try 34`
+# (tests/fixtures/avtransport_running_alarm.xml, anonymised).
 
 SCPD = Path(__file__).parent / "fixtures" / "avtransport_alarm_scpd.xml"
 FAULT_800 = ('<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
@@ -481,8 +480,9 @@ NOTIFY = ('<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><
           '&lt;InstanceID val=&quot;0&quot;&gt;&lt;TransportState val=&quot;STOPPED&quot;/&gt;'
           '&lt;r:AlarmRunning val=&quot;0&quot;/&gt;&lt;r:SnoozeRunning val=&quot;0&quot;/&gt;'
           '&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>')
-RUNNING = {"AlarmID": "34", "GroupID": f"{ROAM_L}:12",
-           "LoggedStartTime": "2026-10-04 08:20:00"}
+RUNNING_XML = (Path(__file__).parent / "fixtures" / "avtransport_running_alarm.xml").read_text()
+RUNNING = clock._response(RUNNING_XML, "GetRunningAlarmProperties")
+RINGING = {"AlarmRunning": "1", "SnoozeRunning": "0"}      # its LastChange, as read
 ROAM_IP, LIVING_IP = "10.0.0.11", "10.0.0.13"
 REAL_LAST_CHANGE = clock.last_change          # before any fixture replaces it
 
@@ -564,18 +564,14 @@ def test_the_recorded_scpd_has_every_action_sent():
     assert set(scpd_in_args()) >= clock.AV_READS | clock.AV_WRITES
 
 
-def test_the_built_running_response_has_exactly_the_recorded_out_arguments():
+def test_the_recorded_running_response_has_the_scpds_out_arguments():
     assert list(RUNNING) == scpd_in_args("out")["GetRunningAlarmProperties"]
 
 
-def test_a_running_alarm_parses_from_its_response():
-    xml = (f'<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>'
-           f'<u:GetRunningAlarmPropertiesResponse xmlns:u="x">'
-           + "".join(f"<{k}>{v}</{k}>" for k, v in RUNNING.items())
-           + "</u:GetRunningAlarmPropertiesResponse></s:Body></s:Envelope>")
-    got = clock.parse_running_alarm(xml)
-    assert (got.alarm_id, got.group_id, got.logged_start) == ("34", f"{ROAM_L}:12",
-                                                              "2026-10-04 08:20:00")
+def test_the_recorded_running_alarm_parses():
+    got = clock.parse_running_alarm(RUNNING_XML)
+    assert (got.alarm_id, got.group_id, got.logged_start) == (
+        "34", f"{ROAM_R}:1000000001", "2026-10-04 14:58:15")
 
 
 def test_the_recorded_fault_800_means_nothing_is_ringing(av):
@@ -600,14 +596,14 @@ def test_the_recorded_last_change_gives_alarm_and_snooze_state():
 
 def test_status_reports_the_ringing_room_and_alarm(av, capsys):
     av.running[ROAM_IP] = RUNNING
-    av.state[ROAM_IP] = {"AlarmRunning": "1", "SnoozeRunning": "0"}
+    av.state[ROAM_IP] = RINGING
     code, out, _ = run(["alarm", "status", "--json"], capsys)
     assert code == 0
     payload = json.loads(out)
     assert payload["ringing"] == ["Sonos Roam"]
     roam = next(r for r in payload["rooms"] if r["group"] == "Sonos Roam")
     assert (roam["alarm_id"], roam["room"], roam["ringing"]) == ("34", "Sonos Roam", True)
-    assert roam["logged_start"] == "2026-10-04 08:20:00"
+    assert roam["logged_start"] == "2026-10-04 14:58:15"
     living = next(r for r in payload["rooms"] if r["group"] == "Living Room")
     assert living["ringing"] is False
     # every group's coordinator was asked, and nothing was written or journalled
@@ -780,8 +776,8 @@ class Gena:
     """`requests.request` for SUBSCRIBE/UNSUBSCRIBE. On SUBSCRIBE it posts
     `notify` (if any) to the callback, as a speaker does, from this thread."""
 
-    def __init__(self, notify=NOTIFY, refuse=False, stall=False):
-        self.notify, self.refuse, self.stall = notify, refuse, stall
+    def __init__(self, notify=NOTIFY, refuse=False, stall=False, trickle=False):
+        self.notify, self.refuse, self.stall, self.trickle = notify, refuse, stall, trickle
         self.unsubscribed: list[str] = []
         self.stalled = None                # the half-sent NOTIFY's socket
 
@@ -796,11 +792,14 @@ class Gena:
         assert method == "SUBSCRIBE" and url.endswith("/MediaRenderer/AVTransport/Event")
         cb = urlsplit(headers["CALLBACK"].strip("<>"))
         assert cb.hostname == "127.0.0.1"
-        if self.stall:                     # headers promise a body that never comes
+        if self.stall or self.trickle:     # headers promise a body that never comes
             import socket
             self.stalled = socket.create_connection((cb.hostname, cb.port), timeout=2)
             self.stalled.sendall(b"NOTIFY / HTTP/1.1\r\nHost: x\r\n"
-                                 b"Content-Length: 500\r\n\r\n<e:propertyset")
+                                 b"Content-Length: 100000\r\n\r\n<e:propertyset")
+            if self.trickle:               # ... a byte at a time, faster than `wait`
+                import threading
+                threading.Thread(target=self._drip, daemon=True).start()
         elif self.notify is not None:
             conn = http.client.HTTPConnection(cb.hostname, cb.port, timeout=2)
             conn.request("NOTIFY", cb.path or "/", self.notify.encode(),
@@ -808,6 +807,15 @@ class Gena:
             conn.getresponse().read()
             conn.close()
         return type("R", (), {"headers": {"SID": "uuid:fake-sid"}})()
+
+    def _drip(self):
+        import time
+        try:
+            for _ in range(200):           # 10s of bytes, if nothing stops it
+                self.stalled.sendall(b" ")
+                time.sleep(0.05)
+        except OSError:
+            pass
 
 
 def test_last_change_takes_the_initial_event_and_unsubscribes(monkeypatch):
@@ -832,9 +840,10 @@ def test_last_change_when_subscribing_fails_is_none(monkeypatch):
     assert gena.unsubscribed == []
 
 
-def test_a_notify_that_stalls_halfway_cant_hang_the_command(monkeypatch):
+@pytest.mark.parametrize("how", ["stall", "trickle"])
+def test_a_notify_that_stalls_or_trickles_cant_hang_the_command(monkeypatch, how):
     import time
-    gena = Gena(stall=True)
+    gena = Gena(**{how: True})
     monkeypatch.setattr(clock.requests, "request", gena)
     t0 = time.monotonic()
     assert REAL_LAST_CHANGE("127.0.0.1", wait=0.3) is None
@@ -848,15 +857,15 @@ def test_the_callback_listens_only_on_the_address_facing_the_speaker(monkeypatch
     real = clock_http_server()
 
     class Spy(real):
-        def __init__(self, addr, handler):
+        def __init__(self, addr, handler, *a, **k):
             bound.append(addr[0])
             super().__init__(addr, handler)
-    monkeypatch.setattr("http.server.HTTPServer", Spy)
+    monkeypatch.setattr("http.server.ThreadingHTTPServer", Spy)
     monkeypatch.setattr(clock.requests, "request", Gena())
     REAL_LAST_CHANGE("127.0.0.1", wait=1)
     assert bound == ["127.0.0.1"]
 
 
 def clock_http_server():
-    from http.server import HTTPServer
-    return HTTPServer
+    from http.server import ThreadingHTTPServer
+    return ThreadingHTTPServer
