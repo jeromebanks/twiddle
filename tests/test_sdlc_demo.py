@@ -1,0 +1,260 @@
+"""tools/sdlc.py milestone demos: the pause, the poster's answer, publishing checks. No network."""
+import json
+import subprocess
+
+import pytest
+
+from tools import sdlc
+
+CONFIG = sdlc.load_config()
+OWNER, POSTER, STRANGER = "owner", "poster", "stranger"
+TRUSTED = {OWNER}
+_ids = iter(range(1, 10_000))
+
+
+def issue(labels=(), state="open"):
+    return {"number": 12, "title": "Alarm manager", "state": state, "author": POSTER, "labels": list(labels)}
+
+
+def comment(author, body, ts):
+    return {"id": next(_ids), "author": author, "body": body, "created_at": f"2026-10-04T00:{ts:02d}:00Z",
+            "url": f"https://example/c{ts}"}
+
+
+def agent(kind, rev, ts, body="text", **extra):
+    return comment(OWNER, sdlc.marker(kind, rev, **extra) + "\n" + body, ts)
+
+
+# a feature that went through triage and planning: PRD rev 1 approved, plan rev 1 created
+HISTORY = [agent("prd", 1, 1), agent("approval", 1, 2, by=POSTER), agent("plan", 1, 3),
+           agent("plan-review", 1, 4, verdict="approve", round="1"), agent("plan-created", 1, 5)]
+
+
+def derive(labels, comments=()):
+    return sdlc.derive_state(issue(labels), HISTORY + list(comments), TRUSTED, CONFIG)
+
+
+def ms(key, done, total):
+    return {"title": f"#12 {key}: x", "key": key, "done": done, "total": total}
+
+
+def progress(*milestones, open_=1, ready=(30,)):
+    return {"ready": list(ready), "in_flight": [], "escalated": [], "waiting": [], "open": open_,
+            "milestones": list(milestones)}
+
+
+# --- the pause --------------------------------------------------------------
+
+def test_a_complete_milestone_comes_before_ready_slices():
+    st = derive(["sdlc:in-progress"])
+    p = progress(ms("M1", 3, 3), ms("M2", 1, 4))
+    assert sdlc.next_command(st, p).startswith("/milestone-demo 12: #12 M1: x is complete")
+    accepted = derive(["sdlc:in-progress"], [agent("demo", 1, 10, milestone="M1", sha="a" * 40),
+                                             agent("demo-approval", 1, 12, milestone="M1", by=POSTER)])
+    assert sdlc.next_command(accepted, p) == "/work-slice 30"
+
+
+def test_milestones_in_natural_order():
+    leaves = [{"number": i, "key": f"T{i}", "state": "closed", "state_reason": "completed", "assignees": [],
+               "labels": [], "milestone": f"#12 M{m}: x"} for i, m in ((1, 10), (2, 2))]
+    p = sdlc.summarise_progress(leaves, {})
+    assert [m["key"] for m in p["milestones"]] == ["M2", "M10"]
+    assert sdlc.due_milestone({}, p)["key"] == "M2"
+
+
+def test_an_epic_without_milestones_has_one_demo():
+    assert sdlc.milestone_key(None) == sdlc.milestone_key("(no milestone)") == "all"
+    assert sdlc.milestone_key("#47 M3: Something: else") == "M3"
+    st = derive(["sdlc:in-progress"])
+    assert "every unit of work is merged" in sdlc.next_command(st, progress(ms("all", 5, 5) | {"title": "(no milestone)"}, open_=0, ready=()))
+
+
+def test_claims_pause_but_resume_does_not():
+    st = derive(["sdlc:in-progress"])
+    assert "M1" in sdlc.claim_pause_errors(st, progress(ms("M1", 3, 3), ms("M2", 0, 2)))[0]
+    assert sdlc.claim_pause_errors(st, progress(ms("M1", 2, 3))) == []
+    review = derive(["sdlc:demo-review"], [agent("demo", 1, 10, milestone="M1", sha="a" * 40)])
+    assert "demo review" in sdlc.claim_pause_errors(review, None)[0]
+    body = sdlc.marker("slice", None, epic="12", key="T2.1") + "\n"
+    b = {"issue": {"number": 30, "body": body}, "trusted": [OWNER], "epic_state": st,
+         "epic_progress": progress(ms("M1", 3, 3))}
+    assert sdlc.epic_pause_errors(b, CONFIG, resume=False)
+    assert sdlc.epic_pause_errors(b, CONFIG, resume=True) == []
+
+
+# --- the poster's answer -----------------------------------------------------
+
+DEMO = agent("demo", 1, 10, milestone="M1", sha="a" * 40)
+
+
+def test_demo_review_is_the_posters_move_until_they_reply():
+    st = derive(["sdlc:demo-review"], [DEMO])
+    assert (st["turn"], st["action"]) == ("poster", "wait_for_poster")
+    assert st["approved_rev"] == 1 and st["doc_approved"]          # a demo never voids the PRD sign-off
+    q = derive(["sdlc:demo-review"], [DEMO, comment(POSTER, "what does the bell icon mean?", 11)])
+    assert (q["action"], sdlc.next_command(q)) == ("demo_reply", "/milestone-demo 12")
+
+
+def test_approve_binds_to_the_latest_demo():
+    st = derive(["sdlc:demo-review"], [DEMO, comment(POSTER, "/approve", 11)])
+    assert st["action"] == "record_demo_acceptance"
+    assert (st["decision"]["milestone"], st["decision"]["rev"]) == ("M1", 1)
+    spoof = derive(["sdlc:demo-review"], [DEMO, comment(STRANGER, "/approve", 11)])
+    assert spoof["action"] == "demo_reply"
+    # a newer revision of the demo voids an approval of the older one
+    st = derive(["sdlc:in-progress"], [DEMO, agent("demo-approval", 1, 12, milestone="M1", by=POSTER),
+                                       agent("demo", 2, 13, milestone="M1", sha="b" * 40)])
+    assert not st["demos"]["M1"]["accepted"] and st["demos"]["M1"]["rev"] == 2
+
+
+def test_acceptance_target():
+    demos = {"M1": {"accepted": True}, "M2": {"accepted": True}}
+    assert sdlc.acceptance_target(progress(ms("M1", 1, 1), ms("M2", 1, 1), open_=0), demos) == "done"
+    assert sdlc.acceptance_target(progress(ms("M1", 1, 1), ms("M2", 0, 1)), {"M1": {"accepted": True}}) == "in-progress"
+    assert sdlc.acceptance_target(progress(ms("M1", 1, 1), ms("M2", 1, 1), open_=0), {"M1": {"accepted": True}}) == "in-progress"
+
+
+def _bundle(tmp_path, labels, comments, prog=None):
+    f = tmp_path / "bundle.json"
+    f.write_text(json.dumps({"issue": issue(labels), "comments": HISTORY + comments, "trusted": [OWNER],
+                             "progress": prog}))
+    return str(f)
+
+
+def test_demo_accept_dry_run(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    b = _bundle(tmp_path, ["sdlc:demo-review"], [DEMO, comment(POSTER, "/approve", 11)],
+                progress(ms("M1", 3, 3), ms("M2", 0, 2)))
+    assert sdlc.main(["demo-accept", "12", "--from-file", b, "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "demo-review -> in-progress" in out and "kind=demo-approval rev=1 milestone=M1 by=poster" in out
+    last = _bundle(tmp_path, ["sdlc:demo-review"], [DEMO, comment(POSTER, "/approve", 11)],
+                   progress(ms("M1", 3, 3), open_=0, ready=()))
+    assert sdlc.main(["demo-accept", "12", "--from-file", last, "--dry-run"]) == 0
+    assert "demo-review -> done and close the issue" in capsys.readouterr().out
+    nothing = _bundle(tmp_path, ["sdlc:demo-review"], [DEMO])
+    assert sdlc.main(["demo-accept", "12", "--from-file", nothing, "--dry-run"]) == 1
+
+
+# --- /changes become new slices ------------------------------------------------
+
+def test_changes_send_the_epic_back_to_planning():
+    changes = [DEMO, comment(POSTER, "/changes the list should show the source", 11),
+               agent("demo-changes", 1, 12, milestone="M1")]
+    st = derive(["sdlc:in-progress"], changes)
+    assert (st["action"], st["feedback"], st["plan_rounds"]) == ("plan", True, 0)
+    assert sdlc.next_command(st) == "/plan-issue 12"
+    posted = derive(["sdlc:in-progress"], changes + [agent("plan", 2, 13)])
+    assert posted["action"] == "continue_plan"
+    agreed = derive(["sdlc:in-progress"], changes + [agent("plan", 2, 13), agent("plan-review", 2, 14, verdict="approve", round="1")])
+    assert agreed["action"] == "create_plan_issues"
+    built = derive(["sdlc:in-progress"], changes + [agent("plan", 2, 13), agent("plan-review", 2, 14, verdict="approve", round="1"),
+                                                    agent("plan-created", 2, 15)])
+    assert (built["action"], built["feedback"]) == ("work_slices", False)
+    assert not built["demos"]["M1"]["accepted"]       # its next demo is rev 2
+
+
+def test_an_amended_plan_keeps_what_was_created(tmp_path, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("must not call gh"))
+    leaf = {"key": "T1", "title": "t", "covers": [1], "outcome": "o", "scope": "s", "acceptance": ["a"],
+            "validation": "v", "demo": "d", "non_goals": "n", "context": "c"}
+    old = {"issue": 12, "summary": "s", "subtasks": [leaf]}
+    new = {"issue": 12, "summary": "s", "subtasks": [{**leaf, "key": "F1"}]}
+    plan_comment = comment(OWNER, sdlc.render_comment("plan", 1, sdlc.render_plan(old), CONFIG), 3)
+    history = [agent("prd", 1, 1), agent("approval", 1, 2, by=POSTER), plan_comment,
+               agent("plan-review", 1, 4, verdict="approve", round="1"), agent("plan-created", 1, 5),
+               DEMO, comment(POSTER, "/changes more", 11), agent("demo-changes", 1, 12, milestone="M1")]
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps({"issue": issue(["sdlc:in-progress"]), "comments": history, "trusted": [OWNER]}))
+    p = tmp_path / "plan.json"
+    p.write_text(json.dumps(new))
+    monkeypatch.setattr(sdlc, "check_plan", lambda plan: [])
+    with pytest.raises(sdlc.SdlcError, match="drops T1"):
+        sdlc.command_plan_post(sdlc.argparse.Namespace(number=12, file=str(p), from_file=str(f), dry_run=True), CONFIG)
+
+
+def test_superseding_keeps_the_milestone():
+    old = sdlc.render_comment("demo", 1, "body", CONFIG, milestone="M1", sha="a" * 40)
+    mk = sdlc.parse_marker(sdlc.render_superseded(old, 2, "https://x"))
+    assert (mk["kind"], mk["rev"], mk["milestone"], mk["superseded"]) == ("demo", "1", "M1", "2")
+
+
+# --- publishing -------------------------------------------------------------
+
+@pytest.mark.parametrize("text,hit", [
+    ("speaker at 192.168.1.23", "IP"), ("mac 5C:AA:FD:01:02:03", "MAC"), ("serial 5C-AA-FD-01-02-03:E", "MAC"),
+    ("uuid RINCON_5CAAFD010203", "player"), ("hh Sonos_abcdefghijklmnop.qrst", "household"),
+    ("Authorization: Bearer abcdefghijklmnop", "bearer"), ("secret 0123456789abcdef0123456789abcdef", "hex"),
+])
+def test_identifier_hits(text, hit):
+    assert any(hit.lower() in h.lower() for h in sdlc.identifier_hits(text)), sdlc.identifier_hits(text)
+
+
+def test_harmless_text_is_not_an_identifier():
+    assert sdlc.identifier_hits("version 1.2.3, 127.0.0.1, commit " + "a" * 40 + ", 07:00 weekdays") == []
+
+
+def _demo_dir(tmp_path, readme="# M1\n", files=None):
+    d = tmp_path / "demo"
+    d.mkdir(parents=True)
+    (d / "README.md").write_text(readme)
+    for name, text in (files or {"list.svg": "<svg>alarms</svg>"}).items():
+        (d / name).write_text(text)
+    return d
+
+
+def test_demo_post_errors(tmp_path):
+    d = _demo_dir(tmp_path, files={"list.svg": "<svg>192.168.1.9</svg>", "notes.txt": "x"})
+    errs = sdlc.demo_post_errors("![list](list.svg) ![gone](missing.svg) [doc](../secret.md)", d)
+    assert any("list.svg contains an IP" in e for e in errs)
+    assert any("notes.txt" in e for e in errs)
+    assert any("missing.svg" in e for e in errs) and any("../secret.md" in e for e in errs)
+    ok = _demo_dir(tmp_path / "ok")
+    assert sdlc.demo_post_errors("![list](list.svg)\n[the write-up](README.md)\n[PR](https://github.com/x/y/pull/1)", ok) == []
+
+
+def test_rewrite_demo_links():
+    body = '![list](list.svg) [doc](README.md) [pr](https://x/pull/1) <img src="tui.svg" width="600">'
+    out = sdlc.rewrite_demo_links(body, "RAW", "BLOB")
+    assert out == '![list](RAW/list.svg) [doc](BLOB/README.md) [pr](https://x/pull/1) <img src="RAW/tui.svg" width="600">'
+
+
+def test_demo_post_dry_run(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    monkeypatch.setattr(sdlc, "git", lambda *a, **k: pytest.fail("dry run must not touch git"))
+    d = _demo_dir(tmp_path)
+    body = tmp_path / "comment.md"
+    body.write_text("You can now see every alarm.\n\n![list](list.svg)\n")
+    b = _bundle(tmp_path, ["sdlc:in-progress"], [], progress(ms("M1", 3, 3), ms("M2", 0, 2)))
+    args = ["demo-post", "12", "--milestone", "M1", "--dir", str(d), "--body-file", str(body), "--from-file", b, "--dry-run"]
+    assert sdlc.main(args) == 0
+    out = capsys.readouterr().out
+    assert "kind=demo rev=1 milestone=M1" in out and "/<commit>/epic-12/M1/rev-1/list.svg" in out
+    assert sdlc.main(args[:3] + ["M2"] + args[4:]) == 1          # M2 isn't complete
+    assert "not complete" in capsys.readouterr().err
+
+
+def _git(*args, cwd):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def test_publish_demo_to_an_orphan_branch(tmp_path):
+    origin, root = tmp_path / "origin.git", tmp_path / "repo"
+    _git("init", "-q", "--bare", str(origin), cwd=tmp_path)
+    _git("init", "-q", "-b", "main", str(root), cwd=tmp_path)
+    for k, v in (("user.name", "t"), ("user.email", "t@example.com")):
+        _git("config", k, v, cwd=root)
+    (root / "code.py").write_text("x = 1\n")
+    (root / ".gitignore").write_text(".worktrees/\n")
+    _git("add", ".", cwd=root)
+    _git("commit", "-q", "-m", "main", cwd=root)
+    _git("remote", "add", "origin", str(origin), cwd=root)
+    _git("push", "-q", "origin", "main", cwd=root)
+    d = _demo_dir(tmp_path)
+    sha1 = sdlc.publish_demo(d, "epic-12/M1/rev-1", "demo 1", CONFIG, root=root)
+    sha2 = sdlc.publish_demo(d, "epic-12/M1/rev-2", "demo 2", CONFIG, root=root)
+    files = subprocess.run(["git", "ls-tree", "-r", "--name-only", sha2], cwd=origin, capture_output=True, text=True).stdout
+    assert files.split() == ["epic-12/M1/rev-1/README.md", "epic-12/M1/rev-1/list.svg",
+                             "epic-12/M1/rev-2/README.md", "epic-12/M1/rev-2/list.svg"]   # main's files never land there
+    assert sha1 != sha2
+    assert subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True).stdout == ""
