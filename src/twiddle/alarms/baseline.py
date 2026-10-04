@@ -155,6 +155,7 @@ def restore(ip: str, snap: AlarmSnapshot, found: clock.AlarmList) -> Restored:
     map is journalled either way."""
     out = Restored()
     version = found.version
+    changes = plan(snap.alarms, found.alarms)
 
     def did(c: Change, alarm_id: str | None, uncertain: bool = False) -> None:
         rec = c.to_dict()
@@ -165,7 +166,7 @@ def restore(ip: str, snap: AlarmSnapshot, found: clock.AlarmList) -> Restored:
         out.done.append(rec)
 
     try:
-        for c in plan(snap.alarms, found.alarms):
+        for c in changes:
             try:
                 if c.op == "create":
                     made, now = clock.create_alarm(ip, c.want, version)
@@ -188,6 +189,7 @@ def restore(ip: str, snap: AlarmSnapshot, found: clock.AlarmList) -> Restored:
         final = clock.list_alarms(ip)
         out.version = final.version
         out.left, out.notes = leftovers(snap.alarms, final.alarms)
+        _recover_ids(out, changes, found, final)
     except Exception as exc:
         out.error = (out.error + "; " if out.error else "") + \
             f"could not read the alarms back: {type(exc).__name__}: {exc}"
@@ -195,3 +197,22 @@ def restore(ip: str, snap: AlarmSnapshot, found: clock.AlarmList) -> Restored:
                   baseline_version=snap.version, changes=len(out.done),
                   id_map=out.id_map, left=len(out.left), error=out.error or None)
     return out
+
+
+def _recover_ids(out: Restored, changes: list[Change], found: clock.AlarmList,
+                 final: clock.AlarmList) -> None:
+    """Map a create whose new ID never came back (its answer and its read-back
+    both failed) from the final read: one new alarm equal to it is its copy."""
+    for c in changes:
+        if c.op != "create" or c.want.id in out.id_map:
+            continue
+        new = [a for a in final.alarms if found.get(a.id) is None
+               and a.id not in out.id_map.values() and key(a) == key(c.want)]
+        if len(new) != 1:
+            continue
+        out.id_map[c.want.id] = new[0].id
+        rec = next((d for d in out.done if d["op"] == "create"
+                    and d["baseline_id"] == c.want.id), None)
+        if rec is None:
+            out.done.append(rec := c.to_dict())
+        rec |= {"new_id": new[0].id, "recovered": True}

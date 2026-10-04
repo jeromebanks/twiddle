@@ -413,3 +413,26 @@ def test_restore_counts_a_create_whose_answer_was_lost(fake):
     assert "Timeout" in out.error
     assert out.id_map == {"2": "200"} and out.left == []
     assert journal()[-1]["id_map"] == {"2": "200"}
+
+
+def test_restore_maps_a_create_whose_answer_and_read_back_were_both_lost(fake):
+    snap = snapshot(fake)
+    clock.destroy_alarm(IP, "2", fake.version)
+    fake.lose_reply = {"CreateAlarm"}
+    reads = []
+
+    def lose_read_back(f):         # restore's first read, its pre-check, then the read-back
+        reads.append(1)
+        if len(reads) == 3:
+            raise requests.Timeout("read timed out")
+    fake.after_read = lose_read_back
+
+    out = baseline.restore(IP, snap, clock.list_alarms(IP))
+
+    assert "Timeout" in out.error
+    create = next(r for r in journal() if r["action"] == "alarm_create")
+    assert create["written"] is None and create["alarm_id"] is None
+    assert out.id_map == {"2": "200"} and out.left == []
+    assert out.done == [out.done[0]] and out.done[0]["new_id"] == "200"
+    assert out.done[0]["recovered"] and out.done[0]["uncertain"]
+    assert journal()[-1]["id_map"] == {"2": "200"}
