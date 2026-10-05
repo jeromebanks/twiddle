@@ -110,8 +110,7 @@ Alarms are household-wide, so any speaker answers for all of them: one
 and how it writes it (a format of `INV`, i.e. unset, prints 24-hour). Each
 alarm shows its time, days, on/off, volume, duration (the auto-stop), play
 mode, the source's title from the alarm's own metadata, and when it next goes
-off in the household's local time, and its ID (`#34`), which the writing
-verbs below take.
+off in the household's local time.
 
 An alarm aimed at a bonded follower (the right Roam, a surround), at a speaker
 that has vanished from the household, or at a UUID no speaker owns is listed
@@ -150,41 +149,6 @@ stops at the first write that fails or is refused, reads the list again and
 reports everything still different, exiting 1. Some Spotify alarms carry a
 `<Content>` child that `CreateAlarm` can't set: a recreated one comes back
 without it, and restore says so in a `note:` rather than failing.
-
-```bash
-uv run twiddle alarm disable 34 --dry-run   # the room and alarm it resolves to; writes nothing
-uv run twiddle alarm disable 34             # WRITES: switch alarm 34 off
-uv run twiddle alarm enable 34              # WRITES: and on again
-uv run twiddle alarm rm 34                  # WRITES: delete it, after asking twice
-```
-
-`enable` and `disable` send one `UpdateAlarm` that changes `Enabled` and
-nothing else: every other field goes back exactly as `ListAlarms` gave it, so
-an alarm whose source twiddle doesn't recognise (an iHeart station, say) keeps
-its `ProgramURI` and `ProgramMetaData` byte-for-byte. An alarm already in the
-state asked for is left alone, with nothing written or journalled. That is
-what is *sent*: whether a real speaker keeps a Spotify alarm's `<Content>`
-child through an `UpdateAlarm` is unverified, and the journal entry's
-`before`/`after` children show it.
-
-`rm` asks twice, on the terminal: `y`, then the alarm's ID typed out. Anything
-else, or no terminal to ask (answers piped in, a script), deletes nothing. The prompts go
-to stderr, so `--json` still prints one envelope. If someone changed an alarm
-in the Sonos app while it was asking, the delete is refused. The
-`alarm_destroy` journal entry keeps the whole alarm (every attribute and child
-element), so a deleted alarm can be made again from it, with a new ID
-(refused if an equal alarm is already there):
-
-```bash
-uv run python -c "from twiddle.alarms import clock; ip = '<any speaker>'; \
-  print(clock.recreate(ip, '34', clock.list_alarms(ip).version))"
-```
-
-That is a write too (journalled `alarm_create`); `alarm restore` from a
-snapshot taken before the delete brings it back as well. Every field
-`CreateAlarm` takes comes back exactly; what it has no argument for can't: a
-Spotify alarm's `<Content>` child (see above) and any attribute twiddle's
-model doesn't know. `recreate` returns a list of what it couldn't bring back.
 
 ### Relay: play anything on this Mac, including Spotify
 

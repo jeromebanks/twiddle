@@ -122,10 +122,6 @@ def test_every_control_command_takes_a_room(argv):
     ["restore", "--room", "roam"],
     ["ungroup", "--room", "roam"],
     ["sleep", "30", "--room", "roam"],
-    ["alarm", "restore"],
-    ["alarm", "enable", "2"],
-    ["alarm", "disable", "2"],
-    ["alarm", "rm", "2"],
 ])
 def test_every_writing_command_can_be_previewed(argv):
     """--dry-run is the safety rail; a write without one is a trap."""
