@@ -231,58 +231,6 @@ leaves the alarm where it is, even on a follower (`alarm list` labels those).
 like every alarm write, the real thing is refused if the list moved since it
 was read, and journalled (`alarm_create`/`alarm_update`) before and after.
 
-```bash
-uv run twiddle alarm status                          # is one going off, and where (read-only)
-uv run twiddle alarm try 34 --dry-run                # the room and alarm it would fire; writes nothing
-uv run twiddle alarm try 34                          # WRITES: fire alarm 34 now, to hear it
-uv run twiddle alarm snooze --room roam              # WRITES: the speaker's own snooze, 10 minutes
-uv run twiddle alarm snooze --room roam --minutes 5  # 5, 10, 15 or 30
-uv run twiddle alarm stop --room roam                # WRITES: stop it
-```
-
-Ringing belongs to a group's transport, so these go to `AVTransport` on a
-group coordinator, not to `AlarmClock`. `status` asks every group's
-coordinator `GetRunningAlarmProperties`, which names the alarm going off
-(`AlarmID`, `GroupID`, `LoggedStartTime`) and answers UPnP error 800 when
-none is. It also takes one GENA event from each (the subscription the daemon
-keeps on its anchor) for `AlarmRunning` and `SnoozeRunning`, which no action
-returns; without an event it still answers from `GetRunningAlarmProperties`.
-An event that says plainly neither is running wins over an alarm ID
-`GetRunningAlarmProperties` still names: `stop` acts on this answer, and
-refusing wrongly costs less than stopping ordinary playback.
-The alarm is named from `ListAlarms` by its ID, under its own room. `status`
-writes nothing and journals nothing.
-
-`try` is the speaker's `RunAlarm` with every field of the alarm (time aside),
-on the coordinator of the alarm's room, so a bonded follower's alarm fires on
-its pair's coordinator. It is refused for an alarm aimed at a speaker that
-isn't here. `LoggedStartTime` is sent as the household's local time
-`YYYY-MM-DD HH:MM:SS`, from `GetTimeNow`. Tried on the Roam (2026-10-04,
-alarm 34): it rang, `GetRunningAlarmProperties` named alarm 34 with that
-`LoggedStartTime` and the group's ID, LastChange had `AlarmRunning=1`, and
-`alarm stop` ended it (`status` then read nothing ringing).
-
-`stop` and `snooze` resolve the room the way transport commands do (a bonded
-follower goes to its coordinator, and the output says so) and send the
-group's own `Stop` or `SnoozeAlarm` (`Duration` `00:10:00`). Both are
-**refused when no alarm is going off there**: a bare `Stop` would silence
-whatever the room is playing, and `twiddle stop --room` is the command for
-that. A snoozed alarm (`SnoozeRunning`) can still be stopped. Whether a snoozed
-alarm also answers `GetRunningAlarmProperties`, and whether `Stop` ends a
-snooze, are unverified.
-
-A tried alarm stopped early leaves its duration-stop span in the journal: a
-few minutes wrongly discounted two hours on, the cheaper mistake (as with a
-cancelled sleep timer).
-
-All three writes are journalled (`alarm_run` with the whole alarm,
-`alarm_stop`, `alarm_snooze` with its minutes). The speaker acts again later
-on its own when a tried alarm's duration runs out or a snooze ends, so a span
-is journalled around each of those moments (`alarm_run_stop_*`,
-`alarm_snooze_ring_*`, a minute before to three after) for `analyse` to
-discount, as with the sleep timer. Each takes `--dry-run`, which reads
-whether anything is ringing but writes and journals nothing.
-
 ### Relay: play anything on this Mac, including Spotify
 
 `serve` plays files off disk. `relay` widens the same pipe to *live* audio and
