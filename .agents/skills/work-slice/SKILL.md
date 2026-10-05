@@ -136,19 +136,21 @@ cd <WORKTREE> && codex exec --sandbox read-only --skip-git-repo-check "$(cat <SC
 noise. If `codex.md` is empty, or has no `HEAD:` line or verdict, the run failed:
 read `codex.err` and run it again.
 
-Answer every finding in `<SCRATCH>/response.md`:
+Answer every finding in `<SCRATCH>/response.md`, numbered like the findings:
 
-- **Fix it**: commit, push, then `test-record` again.
-- **Rebut it**: give the evidence (a test, a line of code, the slice's Non-goals).
+- **Accepted**: say what you will change ("fixing in the next commit").
+- **Rebutted**: give the evidence (a test, a line of code, the slice's Non-goals).
 
-Then record the round:
+**Record the round before you push anything**, on the head Codex reviewed:
 
 ```bash
 uv run python tools/sdlc.py pr-review PR --report <SCRATCH>/codex.md --response <SCRATCH>/response.md
 ```
 
-`pr-review` refuses a report whose `HEAD:` line isn't the PR's current head. If you
-pushed a fix, Codex reviews again: that's a new round on the new head.
+`pr-review` refuses a report whose `HEAD:` line isn't the PR's current head, so a
+round recorded after the fix is pushed is lost. Only then make the fixes you
+accepted: commit, push, `test-record`, and run the next Codex round on the new
+head, giving it this `response.md`.
 
 Repeat until Codex says `VERDICT: approve` **on the current head**. Only reviews
 that ask for changes spend the budget; re-approving a rebased head is free. After

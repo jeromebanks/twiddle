@@ -1756,7 +1756,8 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if not m:
         raise SdlcError("the Codex report has no `HEAD: <40-hex sha>` line: it can't show what it reviewed; run it again")
     if m.group(1) != pr["headRefOid"]:
-        raise SdlcError(f"Codex reviewed {m.group(1)[:12]} but the PR head is {pr['headRefOid'][:12]}: review the current head")
+        raise SdlcError(f"Codex reviewed {m.group(1)[:12]} but the PR head is {pr['headRefOid'][:12]}: "
+                        "review the current head (record each round before pushing its fixes)")
     response = Path(args.response).read_text().strip() if args.response else ""
     rnd = len(reviews) + 1
     body = (f"**Review {rnd} — Codex on `{pr['headRefOid'][:12]}`: `{verdict}`** "
