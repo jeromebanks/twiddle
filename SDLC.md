@@ -1,5 +1,8 @@
 # SDLC: how an issue becomes shipped work
 
+For people new to it, [`docs/sdlc.html`](docs/sdlc.html) walks through the same workflow with
+diagrams: every state from filing to closing, and the skill that moves each one on.
+
 GitHub is the audit trail. Every step is a comment or a label on the issue, so
 the state of any issue can be read off the issue, and a Claude Code (or Codex)
 session can pick up whatever needs doing next.

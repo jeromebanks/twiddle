@@ -15,7 +15,7 @@ anything or anybody's speakers.
 | Playing Spotify through a relay instead of Sonos's cloud | `docs/SPOTIFY.md` |
 | Twiddle and any other characters | `CHARACTERS.md` |
 | Adding a station / a venue / a visualizer | skills `add-radio-station`, `add-venue-source`, `add-visualizer` |
-| Handling a GitHub issue (triage, PRD, planning, building slices, milestone demos) | `SDLC.md`, skills `triage-issue` / `plan-issue` / `work-slice` / `milestone-demo`, `tools/sdlc.py` (`state N` prints what to run next) |
+| Handling a GitHub issue (triage, PRD, planning, building slices, milestone demos) | `SDLC.md` (`docs/sdlc.html` for people), skills `triage-issue` / `plan-issue` / `work-slice` / `milestone-demo`, `tools/sdlc.py` (`state N` prints what to run next) |
 
 `uv sync` then `uv run pytest` (about 1220 tests, a minute). Nothing in the
 tests touches the network, a speaker or Spotify.

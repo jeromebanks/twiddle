@@ -228,6 +228,7 @@ def test_the_checks_catch_a_broken_rule(monkeypatch, helper, fake):
                          f"{'.'.join(c[3]['M1'])}/{'.'.join(c[3]['M2'])}|debt={c[4]}|cleanup={c[5]}")
 def test_next_and_the_gates_agree(case):
     st, progress, nxt, problems = check(case)
+    assert st["action"] in sdlc.ALL_ACTIONS
     assert not problems, (nxt, problems)
 
 

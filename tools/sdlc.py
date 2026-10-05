@@ -85,6 +85,11 @@ PLAN_KINDS = {"plan", "plan-review", "plan-created"}
 # Milestone demos (milestone-demo), also kept out of DOC_KINDS: a demo never voids the PRD's sign-off.
 DEMO_KINDS = {"demo", "demo-approval", "demo-changes", "demo-request"}
 DEMO_ACTIONS = {"record_demo_acceptance", "demo_reply", "demo_heard"}
+# every action derive_state can return (docs/sdlc.html explains each; tests hold both to this list)
+ALL_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label",
+               "plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone", "escalate_plan",
+               "record_demo_acceptance", "demo_reply", "demo_heard",
+               "work_slices", "wait_for_poster", "human", "fix_conflict", "none"}
 NO_MILESTONE = "all"     # an epic planned without milestones has one demo, for all of it
 # from-state -> states the triage skill may move to. `escalated` is open from anywhere.
 TRANSITIONS = {
