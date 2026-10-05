@@ -14,17 +14,18 @@ issue ─► sdlc:triage ─► sdlc:needs-info ◄─► (poster answers)
                   sdlc:approved ─► (plan: advisor, then Codex rounds until VERDICT: approve)
                         │      └─ no consensus ─► sdlc:needs-info (a plain-language question to the poster)
                         ▼
-                  sdlc:planned ─► sdlc:in-progress ─► sdlc:demo-review ─► sdlc:done
-                     (work-slice: one slice per session) └─ milestone-demo (not built yet) ┘
+                  sdlc:planned ─► sdlc:in-progress ◄─► sdlc:demo-review ─► sdlc:done
+                     (work-slice: one slice     (milestone-demo:    poster: /approve
+                      per session)               one per milestone)  (the last milestone)
    any stage ─► sdlc:escalated  (a human is needed: no consensus, or the agent is stuck)
 ```
 
-Built so far: `triage-issue` (to `approved`), `plan-issue` (to `planned`) and `work-slice`
-(builds the slices; the epic is `in-progress` from the first claim).
+The skills: `triage-issue` (to `approved`), `plan-issue` (to `planned`), `work-slice`
+(builds the slices; the epic is `in-progress` from the first claim) and `milestone-demo`
+(shows the poster each finished milestone; their `/approve` of the last one is `done`).
 
 **What to run next is always printed:** `uv run python tools/sdlc.py state N` (or `next`)
 ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every skill ends its report with it.
-The later labels exist already so they never need renaming.
 
 ## Whose move
 
@@ -34,7 +35,9 @@ The later labels exist already so they never need renaming.
 | `sdlc:needs-info`, `sdlc:prd-review`, `sdlc:diagnosis-review` | the poster, until they reply; then the agent |
 | `sdlc:approved` | the agent: `plan-issue` (the poster is not asked to review the plan) |
 | `sdlc:needs-info` after a PRD approval | the poster, answering a planning question; then the agent replans |
-| `sdlc:planned`, `sdlc:in-progress` | the agent: `/work-slice <ready slice>` (state's `next:`) |
+| `sdlc:planned`, `sdlc:in-progress` | the agent: `/work-slice <ready slice>`, or `/milestone-demo N` once a milestone's units are all merged (state's `next:`) |
+| `sdlc:demo-review` | the poster, until they reply to the demo; then the agent (`/milestone-demo N`) |
+| `sdlc:in-progress` after a demo's `/changes` | the agent: `/plan-issue N` plans them as new slices |
 | `plan:slice` / `plan:subtask` issues | never triaged; a slice's state is `slice-status N` |
 | `sdlc:escalated` | a human |
 
@@ -44,7 +47,7 @@ The later labels exist already so they never need renaming.
 ## What you can type (posters and maintainers)
 
 - **Reply in a comment** to answer a question or react to a PRD.
-- **`/approve`** on its own line signs off on the *latest* PRD/diagnosis revision.
+- **`/approve`** on its own line signs off on the *latest* PRD/diagnosis revision, or accepts the latest milestone demo.
 - **`/changes <what>`** asks for changes. Any other reply is treated as feedback.
 - A maintainer may instead add the **`sdlc:approved`** label; the next run records it as an approval comment.
 
@@ -112,6 +115,33 @@ several can run at once. A slice's state is read off GitHub:
    the agent squash-merges. A new commit voids both records. Humans review at milestone demos,
    not per PR.
 6. `cleanup N`, run from the primary checkout, removes the worktree and the branch.
+
+## Milestone demos (`milestone-demo`)
+
+When every unit of work in a milestone has merged (for an epic without milestones,
+every unit), the poster sees it working. **New slices of the epic wait** until they
+accept it: `next:` says `/milestone-demo N` and `claim` refuses. Slices already
+claimed can finish.
+
+1. The agent runs the milestone's demo steps. Read-only and `--dry-run` steps run
+   freely. A real speaker write runs only with the user present and saying yes,
+   between `snapshot` and `restore`, and what they heard is recorded with `observe.py`.
+2. `tools/demo_shot.py` draws the real output and TUI screens as SVG. A bug fix shows
+   before (the commit before its first merge) and after.
+3. `demo-post` commits the pictures and a full write-up to the orphan branch
+   **`sdlc-demos`** (`epic-N/M1/rev-K/`; never merged), pins every link to that commit,
+   posts the demo on the epic (`kind=demo milestone=M1 rev=K`), and moves it to
+   `sdlc:demo-review`. The repo is public, so it refuses anything that looks like an
+   IP, a MAC, a Sonos ID or a secret.
+4. The poster answers on the issue:
+   - `/approve`: `demo-accept` records it, closes the GitHub milestone, and moves the epic
+     back to `in-progress`. After the last milestone it moves to `done` and closes the issue.
+   - `/changes`: `demo-changes` records them in plain words, the epic returns to
+     `in-progress`, and `plan-issue` amends the plan with new slices (Codex-reviewed;
+     nothing already created is dropped). When they merge, the milestone gets demo rev 2.
+   - A question: answered with a note, and the demo stays in review.
+
+A demo, like a plan revision, never voids the PRD's sign-off.
 
 ## First-time setup
 

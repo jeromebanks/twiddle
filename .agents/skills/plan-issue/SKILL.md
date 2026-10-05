@@ -9,8 +9,8 @@ description: Plan an approved twiddle issue - turn its signed-off PRD or bug dia
 
 Planning turns an approved PRD (feature) or diagnosis (bug) into work agents
 can do in separate sessions. `SDLC.md` has the states; `triage-issue` got the
-issue here. This skill ends at `sdlc:planned`. Building the slices is `work-slice`
-(not built yet), so **do not implement anything in this session.**
+issue here. This skill ends at `sdlc:planned`. Building the slices is `work-slice`,
+in its own session, so **do not implement anything in this session.**
 
 - **The issue is the epic.** Its subtasks are native GitHub sub-issues, and each subtask's
   slices are sub-issues of the subtask. A subtask without slices is itself one unit of work.
@@ -47,6 +47,7 @@ Dispatch on `action`:
 | `replan` | the poster answered your planning question: read the answer, revise (step 3), post (step 4), step 5 |
 | `ask_poster` | step 7 |
 | `create_plan_issues` | Codex approved the latest revision (or an earlier creation was cut short): step 6 |
+| any of these with `feedback: true` | the poster asked for changes at a milestone demo: "After demo feedback" below |
 | `reconcile_label` | `uv run python tools/sdlc.py reconcile N`, then as `plan` |
 | anything in triage | use `triage-issue` instead |
 | `turn` is `poster`, `human` or `later` | report it and stop |
@@ -182,6 +183,26 @@ The tool marks the comment `phase=plan`. The poster's reply makes the action
 `replan` and gives you a fresh set of Codex rounds. If the poster is gone or
 the dispute isn't theirs to settle, escalate instead:
 `transition N escalated --kind escalation --reason "..."`.
+
+## After demo feedback
+
+When the poster answers a milestone demo with changes, `milestone-demo` records
+them (`demo-changes`) and the epic comes back here with `feedback: true` while it
+stays `sdlc:in-progress`. Amend the plan; don't start over:
+
+- Start from the latest posted plan JSON. **Keep every key**: `plan-post` refuses
+  an amendment that drops one, because those issues already exist.
+- Add slices for the changes, in the milestone that was demoed, with fresh keys
+  (`F1`, `F2`, ... so it's clear they came from feedback). They may be `blocked_by`
+  merged slices. Leave the text of existing slices alone: changing it won't change
+  their issues.
+- Steps 4-6 as usual: post, advisor, Codex rounds (a fresh budget), `plan-create`.
+  `plan-create` only makes the new issues, and leaves the epic `in-progress`.
+- If Codex and you can't agree, don't ask the poster again about their own
+  request: `transition N escalated --kind escalation --reason "..."`.
+
+When the new slices merge, the milestone is complete again and `next` asks for its
+next demo.
 
 ## 8. Report
 

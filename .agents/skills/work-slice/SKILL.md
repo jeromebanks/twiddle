@@ -37,6 +37,8 @@ uv run python tools/sdlc.py slice-check N          # add --resume when it says c
 - `claimed` or `in-review`: this is a resume. Use `claim N --resume` below, then pick
   up where the PR and its review comments left off.
 - `blocked`, `escalated` or closed: report it and the `next` line, then stop.
+- `slice-check` says a milestone demo comes first: report it and stop. `/milestone-demo <epic>`
+  is next; a slice you already claimed can still be resumed.
 - `slice-check` complains about missing sections, or the brief can't be built as
   written: don't guess. Report it. Splitting or fixing a slice is a planning job.
 
@@ -198,5 +200,6 @@ End with:
 - any non-blocking findings or adjacent issues you left alone;
 - whether a milestone completed;
 - **Next:** the `next:` line `merge` printed (or `uv run python tools/sdlc.py state <epic>`).
-  It names the next `/work-slice N`, or the milestone demo once every unit is merged.
+  It names the next `/work-slice N`, or `/milestone-demo <epic>` once a milestone's units are all
+  merged: new slices of that epic wait (`claim` refuses) until the poster accepts its demo.
   If it says "in progress", another session holds that slice.
