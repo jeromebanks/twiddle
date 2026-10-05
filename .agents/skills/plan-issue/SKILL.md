@@ -81,6 +81,9 @@ Write `plan.json` in your scratchpad. The format is in `references/plan-schema.m
   poster can see. A small plan has none.
 - **Bugs:** the subtasks are the diagnosis's proposed fix tasks. Slices are only
   needed when a task is bigger than one session.
+- **Rate each unit's complexity** (`routine`, `judgment`, `novel`, with a one-line
+  reason; see the schema). You've read the PRD and the code it touches, so you're the
+  best placed to say. The rating picks the model that builds it.
 
 ```bash
 uv run python tools/sdlc.py plan-validate plan.json

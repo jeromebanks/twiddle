@@ -27,7 +27,9 @@ Context) are the whole brief. `SDLC.md` explains how the epic got here.
   sees the result at the milestone demo, so the gate and the reviews must be honest.
 
 `/work-slice [N]`. With no `N`, run `uv run python tools/sdlc.py state <epic>` (or
-`next`) and take the `/work-slice N` it suggests.
+`next`) and take the `/work-slice N` it suggests. That line names the model the planner's
+rating maps to, e.g. `/work-slice 29 (sonnet: routine)`: a coordinator runs the
+slice on that model.
 
 ## 1. Check
 
@@ -48,13 +50,14 @@ uv run python tools/sdlc.py slice-check N          # add --resume when it says c
 ## 2. Claim and move into the worktree
 
 ```bash
-uv run python tools/sdlc.py claim N                # or: claim N --resume
+uv run python tools/sdlc.py claim N --model <the model you are>   # or: claim N --resume
 ```
 
 It prints `WORKTREE=`, `PRIMARY=`, `BRANCH=slice/N` and `BASE=origin/epic/E`. Write `BASE`
 down too. Its other effects:
 
-- the claim is posted on the slice, and you're assigned to it;
+- the claim is posted on the slice (with your model, so it shows over time whether
+  the ratings held up), and you're assigned to it;
 - on the first claim, the epic moves from `planned` to `in-progress`.
 
 If it says origin has no `epic/E`, the epic was planned before epic branches:
@@ -167,7 +170,11 @@ that ask for changes spend the budget; re-approving a rebased head is free. Afte
 uv run python tools/sdlc.py escalate-slice N --reason "<what is disputed, in a sentence>"
 ```
 
-Then report and stop.
+Then report and stop. **If you ran on a cheaper model than the strongest one in
+`.sdlc/config.json`'s `models`**, say so in the reason: the coordinator's next move is
+to retry the slice once on the strongest model (it removes the `sdlc:escalated` label,
+`release`s the claim, and starts a fresh `/work-slice N` that claims with
+`--model <strongest>`), and only then hand it to a human.
 
 ## 9. Merge and clean up
 

@@ -38,7 +38,7 @@ def review(rev, ts, verdict):
 def leaf(key, blocked_by=(), covers=(1,)):
     return {"key": key, "title": f"do {key}", "blocked_by": list(blocked_by), "covers": list(covers),
             "outcome": "o", "scope": "s", "acceptance": ["a"], "validation": "v", "demo": "d",
-            "non_goals": "n", "context": "c"}
+            "non_goals": "n", "context": "c", "complexity": "routine", "complexity_reason": "follows T0"}
 
 
 def make_plan():
@@ -326,3 +326,62 @@ def test_ready_needs_every_blocker_completed():
     ready, waiting = sdlc.ready_leaves(leaves, blockers)
     assert [r["key"] for r in ready] == ["T1.1", "T1.2"]
     assert [(w["key"], w["unmet"]) for w in waiting] == [("T2", [42, 45])]
+
+
+# --- complexity and the model that builds a slice (#49) ---------------------------
+
+def test_every_unit_needs_a_complexity_and_a_reason():
+    plan = make_plan()
+    plan["subtasks"][0]["slices"][0]["complexity"] = "hard"
+    del plan["subtasks"][1]["complexity_reason"]
+    errs = sdlc.validate_plan(plan)
+    assert "T1.1 needs a complexity: one of routine, judgment, novel" in errs
+    assert any(e.startswith("T2 needs a complexity_reason") for e in errs)
+
+
+def test_complexity_reaches_the_slice_body_and_the_plan_comment():
+    l = {**leaf("T1.1"), "complexity": "judgment", "complexity_reason": "touches the\n journal"}
+    body = sdlc.render_leaf_body(12, l, 24, {}, None)
+    assert "Complexity: judgment — touches the journal" in body.splitlines()[2]
+    assert "*routine*" in sdlc.render_plan(make_plan())
+
+
+def test_the_model_comes_from_the_config():
+    cfg = {**CONFIG, "models": {"routine": "haiku", "judgment": "opus"}}
+    assert sdlc.model_for("routine", cfg) == "haiku" and sdlc.model_for("novel", cfg) is None
+    leaves = [{"number": 30, "key": "T1", "state": "open", "assignees": [], "labels": ["plan:slice", "complexity:routine"],
+               "complexity": "routine", "milestone": None}]
+    p = sdlc.summarise_progress(leaves, {})
+    assert p["units"][30] == {"key": "T1", "complexity": "routine"}
+    p["units"][30]["model"] = sdlc.model_for("routine", cfg)
+    epic = {"number": 12, "action": "work_slices", "state": "in-progress", "conflicts": []}
+    assert sdlc.next_command(epic, p) == "/work-slice 30 (haiku: routine)"
+    assert sdlc.complexity_of(["plan:slice", "complexity:novel"]) == "novel"
+    assert sdlc.complexity_of(["complexity:weird"]) is None
+
+
+def test_claim_records_the_model():
+    claim = agent("claim", None, 1, branch="slice/28", model="sonnet")
+    assert sdlc.claim_status([claim], {OWNER})["model"] == "sonnet"
+
+
+def test_plan_annotate_backfills_once():
+    body = sdlc.render_leaf_body(12, {k: v for k, v in leaf("T1.1").items() if not k.startswith("complexity")}, 24, {}, None)
+    assert "Complexity:" not in body
+    records = [{"kind": "slice", "number": 28, "key": "T1.1", "labels": ["plan:slice"], "body": body},
+               {"kind": "slice", "number": 29, "key": "T9", "labels": ["plan:slice"], "body": body}]
+    acts = sdlc.annotate_actions(records, {"T1.1": ("judgment", "the journal")})
+    assert [(a["number"], a["add"], a["drop"]) for a in acts] == [(28, ["complexity:judgment"], [])]
+    new = acts[0]["body"]
+    assert new.splitlines()[2] == "Complexity: judgment — the journal"
+    assert new.replace("Complexity: judgment — the journal\n", "") == body       # nothing else touched
+    done = [{**records[0], "labels": ["plan:slice", "complexity:judgment"], "body": new}]
+    assert sdlc.annotate_actions(done, {"T1.1": ("judgment", "the journal")}) == []
+    changed = sdlc.annotate_actions(done, {"T1.1": ("novel", "unknown API")})
+    assert changed[0]["add"] == ["complexity:novel"] and changed[0]["drop"] == ["complexity:judgment"]
+    assert "Complexity: novel — unknown API" in changed[0]["body"] and changed[0]["body"].count("Complexity:") == 1
+
+
+def test_bootstrap_creates_the_complexity_labels():
+    names = {l["name"] for l in CONFIG["extra_labels"]}
+    assert {f"complexity:{c}" for c in sdlc.COMPLEXITY} <= names

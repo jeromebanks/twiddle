@@ -118,6 +118,13 @@ earns a fresh set of rounds. A plan revision never voids the PRD's sign-off.
 `uv run python tools/sdlc.py ready --epic N` lists the units of work whose
 blockers have all closed as completed.
 
+The planner rates each unit `routine`, `judgment` or `novel` (with a reason Codex
+checks). It becomes a `complexity:<level>` label and a line in the slice, and
+`.sdlc/config.json`'s `models` maps it to the model that builds it: `next:` says e.g.
+`/work-slice 29 (sonnet: routine)`. `plan-annotate N` backfills ratings onto an epic
+created before them. A slice that escalates on a cheaper model is retried once on the
+strongest before a human gets it.
+
 ## Building (`work-slice`)
 
 One slice per session, in its own git worktree (`.worktrees/slice-N`, branch `slice/N`), so

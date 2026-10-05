@@ -362,7 +362,9 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
         if behind and not progress["ready"] and not progress["in_flight"]:
             return f"`uv run python tools/sdlc.py sync {n}`: {epic_branch(n)} is {behind} commit(s) behind main"
         if progress["ready"]:
-            return f"/work-slice {progress['ready'][0]}"
+            first = progress["ready"][0]
+            u = (progress.get("units") or {}).get(first) or {}
+            return f"/work-slice {first}" + (f" ({u['model']}: {u['complexity']})" if u.get("model") else "")
         if progress["in_flight"]:
             return ("nothing new to start: in progress " + ", ".join(f"#{x}" for x in progress["in_flight"])
                     + f" (`/work-slice {progress['in_flight'][0]}` resumes one)")
@@ -627,7 +629,7 @@ def print_state(st: dict[str, Any]) -> None:
 
 def command_bootstrap_labels(args: argparse.Namespace, config: dict[str, Any]) -> int:
     repo = repo_of(config)
-    for l in config["labels"] + config.get("plan_labels", []):
+    for l in config["labels"] + config.get("plan_labels", []) + config.get("extra_labels", []):
         cmd = ["label", "create", l["name"], "--repo", repo, "--color", l["color"],
                "--description", l["description"], "--force"]
         if args.dry_run:
@@ -814,6 +816,33 @@ PLAN_JSON_RE = re.compile(r"<!-- plan-json -->\s*(`{3,})json\n(.*?)\n\1", re.DOT
 VERDICT_RE = re.compile(r"\A[*_`]*VERDICT:[*_`\s]*(approve|changes)[*_`.\s]*\Z", re.IGNORECASE)
 COMMENT_LIMIT = 65000   # GitHub refuses comments over 65536 characters
 LEAF_LABEL, CONTAINER_LABEL = "plan:slice", "plan:subtask"
+# How hard a unit of work is, rated by the planner; `.sdlc/config.json` maps it to the model that builds it.
+COMPLEXITY = ("routine", "judgment", "novel")
+COMPLEXITY_PREFIX = "complexity:"
+COMPLEXITY_LINE_RE = re.compile(r"^Complexity: (\w+) — .*$", re.MULTILINE)
+
+
+def complexity_of(labels: list[str]) -> str | None:
+    return next((l[len(COMPLEXITY_PREFIX):] for l in labels if l.startswith(COMPLEXITY_PREFIX)
+                 and l[len(COMPLEXITY_PREFIX):] in COMPLEXITY), None)
+
+
+def model_for(level: str | None, config: dict[str, Any]) -> str | None:
+    return (config.get("models") or {}).get(level) if level else None
+
+
+def complexity_line(level: str, reason: str) -> str:
+    return f"Complexity: {level} — {' '.join(reason.split())}"
+
+
+def annotate_body(body: str, level: str, reason: str) -> str:
+    """A slice body with its `Complexity:` line set (after the `Epic:` line), touching nothing else."""
+    line = complexity_line(level, reason)
+    if COMPLEXITY_LINE_RE.search(body):
+        return COMPLEXITY_LINE_RE.sub(lambda m: line, body, count=1)
+    lines = body.split("\n")
+    at = next((i for i, l in enumerate(lines) if l.startswith("Epic: #")), 0)
+    return "\n".join(lines[:at + 1] + [line] + lines[at + 1:])
 
 
 def natural_key(key: str) -> list[Any]:
@@ -937,6 +966,10 @@ def validate_plan(plan: Any, criteria: set[int] | None = None) -> list[str]:
             ok = (isinstance(v, list) and v and all(_text(x) for x in v)) if field == "acceptance" else _text(v)
             if not ok:
                 errs.append(f"{k} has no {name}" + (" (a non-empty list)" if field == "acceptance" else ""))
+        if l.get("complexity") not in COMPLEXITY:
+            errs.append(f"{k} needs a complexity: one of {', '.join(COMPLEXITY)}")
+        if not _text(l.get("complexity_reason")):
+            errs.append(f"{k} needs a complexity_reason (one line: why that rating)")
         for b in l.get("blocked_by") or []:
             if b == k:
                 errs.append(f"{k} is blocked by itself")
@@ -1002,6 +1035,8 @@ def render_plan(plan: dict[str, Any]) -> str:
 
     def leaf_line(l: dict[str, Any]) -> str:
         bits = [f"`{l['key']}` {l['title']}"]
+        if l.get("complexity"):
+            bits.append(f"*{l['complexity']}*")
         if l.get("covers"):
             bits.append("AC " + ", ".join(map(str, l["covers"])))
         if l.get("blocked_by"):
@@ -1077,6 +1112,8 @@ def render_leaf_body(epic: int, leaf: dict[str, Any], parent: int | None, number
         ac = "acceptance criteria " + ", ".join(map(str, leaf["covers"]))
         head.append(f"Covers {ac} of [the PRD]({prd_url})" if prd_url else f"Covers {ac}")
     out = [marker("slice", epic=str(epic), key=leaf["key"]), " · ".join(head)]
+    if leaf.get("complexity"):
+        out.append(complexity_line(leaf["complexity"], leaf.get("complexity_reason", "")))
     for field, name in LEAF_SECTIONS.items():
         v = leaf[field]
         out += ["", f"## {name}", "", "\n".join(f"- [ ] {x}" for x in v) if field == "acceptance" else v.strip()]
@@ -1162,6 +1199,7 @@ def fetch_plan_issues(epic: int | None, config: dict[str, Any], trusted: set[str
                         "id": raw["id"], "title": raw.get("title", ""), "state": raw.get("state", "open"),
                         "state_reason": raw.get("state_reason"), "labels": [l["name"] for l in raw.get("labels", [])],
                         "assignees": [a["login"] for a in raw.get("assignees") or []],
+                        "complexity": complexity_of([l["name"] for l in raw.get("labels", [])]),
                         "milestone": (raw.get("milestone") or {}).get("title"), "body": raw.get("body") or ""})
     return out
 
@@ -1297,7 +1335,8 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
     prd_url = f"https://github.com/{repo}/blob/{config.get('default_branch', 'main')}/{path.relative_to(ROOT)}" if path else None
     if acts and not offline and not args.dry_run:
         have = {l["name"] for l in gh_json(["label", "list", "--repo", repo, "--limit", "200", "--json", "name"])}
-        if missing := [l for l in (LEAF_LABEL, CONTAINER_LABEL) if l not in have]:
+        need = [LEAF_LABEL, CONTAINER_LABEL] + [COMPLEXITY_PREFIX + c for c in COMPLEXITY]
+        if missing := [l for l in need if l not in have]:
             # without them a rerun can't find what it made and would duplicate every issue
             raise SdlcError(f"labels {missing} do not exist: run `bootstrap-labels` first (nothing was created)")
     have_ms = {} if offline or not acts else {
@@ -1322,6 +1361,8 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
                                      numbers, prd_url))
             payload: dict[str, Any] = {"title": issue_title(epic, item), "body": body,
                                        "labels": [CONTAINER_LABEL if container else LEAF_LABEL]}
+            if not container and item.get("complexity"):
+                payload["labels"].append(COMPLEXITY_PREFIX + item["complexity"])
             mkey = item.get("milestone") if container else item.get("_milestone")
             if mkey and ms.get(mkey):
                 payload["milestone"] = ms[mkey]
@@ -1376,6 +1417,66 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
     return 0
 
 
+def annotate_actions(records: list[dict[str, Any]], ratings: dict[str, tuple[str, str]]) -> list[dict[str, Any]]:
+    """What `plan-annotate` changes: per slice, the complexity label and body line it lacks. Idempotent."""
+    out = []
+    for r in records:
+        if r["kind"] != "slice" or r["key"] not in ratings:
+            continue
+        level, reason = ratings[r["key"]]
+        have = [l for l in r.get("labels", []) if l.startswith(COMPLEXITY_PREFIX)]
+        body = annotate_body(r.get("body", ""), level, reason)
+        add = [] if COMPLEXITY_PREFIX + level in have else [COMPLEXITY_PREFIX + level]
+        drop = [l for l in have if l != COMPLEXITY_PREFIX + level]
+        if add or drop or body != r.get("body", ""):
+            out.append({"number": r["number"], "key": r["key"], "level": level, "add": add, "drop": drop,
+                        "body": body if body != r.get("body", "") else None})
+    return out
+
+
+def plan_ratings(plan: dict[str, Any]) -> dict[str, tuple[str, str]]:
+    return {l["key"]: (l["complexity"], l.get("complexity_reason", "")) for l in plan_leaves(plan)
+            if l.get("complexity") in COMPLEXITY}
+
+
+def command_plan_annotate(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Backfill complexity onto an epic's existing slices: the label and the body line, nothing else."""
+    trusted = fetch_trusted(config)
+    if args.map:
+        raw = json.loads(Path(args.map).read_text())
+        ratings = {k: (v[0], v[1]) for k, v in raw.items()}
+    else:
+        bundle = fetch_bundle(args.number, config, trusted)
+        ratings = plan_ratings(latest_plan_of(bundle, bundle_state(bundle, config))[1])
+    if bad := [k for k, (lv, why) in ratings.items() if lv not in COMPLEXITY or not why.strip()]:
+        raise SdlcError(f"ratings need a level ({', '.join(COMPLEXITY)}) and a reason: {', '.join(bad)}")
+    records = fetch_plan_issues(args.number, config, trusted)
+    acts = annotate_actions(records, ratings)
+    unrated = sorted((r["key"] for r in records if r["kind"] == "slice" and r["key"] not in ratings), key=natural_key)
+    repo = repo_of(config)
+    for a in acts:
+        print(("would " if args.dry_run else "") + f"set #{a['number']} ({a['key']}) to {a['level']}"
+              + (" (label)" if a["add"] or a["drop"] else "") + (" (body line)" if a["body"] else ""))
+        if args.dry_run:
+            continue
+        cmd = ["issue", "edit", str(a["number"]), "--repo", repo]
+        cmd += [x for l in a["add"] for x in ("--add-label", l)] + [x for l in a["drop"] for x in ("--remove-label", l)]
+        if a["body"]:
+            with tempfile.NamedTemporaryFile("w", suffix=".md") as fh:
+                fh.write(a["body"])
+                fh.flush()
+                gh(cmd + ["--body-file", fh.name])
+        else:
+            gh(cmd)
+    if not ratings:
+        print(f"#{args.number}: the latest plan revision rates nothing: pass `--map ratings.json`")
+    elif not acts:
+        print(f"#{args.number}: every rated slice already carries its complexity")
+    if unrated:
+        print("no rating for: " + ", ".join(unrated))
+    return 0
+
+
 def command_ready(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Units of work whose blockers have all closed as completed: what `work-slice` may start."""
     leaves = [r for r in fetch_plan_issues(args.epic, config, fetch_trusted(config)) if r["kind"] == "slice"]
@@ -1386,6 +1487,10 @@ def command_ready(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if args.epic:
         trusted = fetch_trusted(config)
         paused = claim_pause_errors(bundle_state(fetch_bundle(args.epic, config, trusted), config), progress)
+    for r in ready + waiting:
+        r["model"] = model_for(r.get("complexity"), config)
+    for u in progress["units"].values():
+        u["model"] = model_for(u["complexity"], config)
     if args.json:
         strip = lambda rs: [{k: v for k, v in r.items() if k != "body"} for r in rs]  # noqa: E731
         print(json.dumps({"ready": strip(ready), "waiting": strip(waiting), "progress": progress,
@@ -1396,7 +1501,8 @@ def command_ready(args: argparse.Namespace, config: dict[str, Any]) -> int:
     for r in ready + waiting:
         tag = ("escalated" if r["number"] in progress["escalated"] else "claimed" if r["number"] in progress["in_flight"]
                else "ready" if not r["unmet"] else "waiting")
-        print(f"{tag:<9} #{r['number']:<4} {r['title']}" + (f"  (on {', '.join('#%d' % n for n in r['unmet'])})" if r["unmet"] else ""))
+        print(f"{tag:<9} #{r['number']:<4} {r['title']}" + (f"  [{r['model']}: {r['complexity']}]" if r["model"] else "")
+              + (f"  (on {', '.join('#%d' % n for n in r['unmet'])})" if r["unmet"] else ""))
     if not ready and not waiting:
         print("no open units of work" + (f" under #{args.epic}" if args.epic else ""))
     return 0
@@ -1442,7 +1548,7 @@ def claim_status(comments: list[dict[str, Any]], trusted: set[str]) -> dict[str,
     active = None
     for mk, c in _marked(comments, trusted):
         if mk.get("kind") == "claim":
-            active = {"branch": mk.get("branch"), "url": c.get("url"), "at": c.get("created_at")}
+            active = {"branch": mk.get("branch"), "url": c.get("url"), "at": c.get("created_at"), "model": mk.get("model")}
         elif mk.get("kind") == "release":
             active = None
     return active
@@ -1532,6 +1638,7 @@ def derive_slice(issue: dict[str, Any], comments: list[dict[str, Any]], trusted:
     else:
         nxt = f"`uv run python tools/sdlc.py state {epic}` (the epic's next)" if epic else "nothing"
     return {"number": n, "title": issue.get("title"), "epic": epic, "key": mk.get("key"), "state": state,
+            "complexity": complexity_of(issue.get("labels", [])),
             "claim": claim, "unmet": unmet, "pr": (pr or {}).get("number"), "pr_state": (pr or {}).get("state"),
             "head": (pr or {}).get("headRefOid"), "tests_on_head": t, "review_on_head": r,
             "pr_rounds": changes_rounds(reviews), "next": nxt}
@@ -1615,6 +1722,7 @@ def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[di
                    "done": sum(1 for l in ls if l.get("state") == "closed" and l.get("state_reason") == "completed")}
                   for t, ls in sorted(by_ms.items(), key=lambda kv: natural_key(milestone_key(kv[0])))]
     return {"ready": free, "in_flight": in_flight, "escalated": escalated,
+            "units": {l["number"]: {"key": l["key"], "complexity": l.get("complexity")} for l in leaves},
             "waiting": [l["number"] for l in waiting if l["number"] not in in_flight],
             "open": sum(1 for l in leaves if l.get("state") == "open"), "milestones": milestones}
 
@@ -1675,7 +1783,10 @@ def epic_progress(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[
                          ).get("ahead_by")
     except SdlcError:
         behind = None
-    return {**summarise_progress(leaves, blockers), "behind_main": behind}
+    progress = summarise_progress(leaves, blockers)
+    for u in progress["units"].values():
+        u["model"] = model_for(u["complexity"], config)
+    return {**progress, "behind_main": behind}
 
 
 def slice_bundle(n: int, config: dict[str, Any]) -> dict[str, Any]:
@@ -1695,12 +1806,15 @@ def bundle_slice(b: dict[str, Any]) -> dict[str, Any]:
 def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> int:
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(args.number, config)
     st = bundle_slice(b)
+    st["model"] = model_for(st["complexity"], config)
     if args.json:
         print(json.dumps(st, indent=2))
         return 0
-    print(f"#{st['number']} {st['title']}\n  state: {st['state']}   epic: #{st['epic']}   key: {st['key']}")
+    print(f"#{st['number']} {st['title']}\n  state: {st['state']}   epic: #{st['epic']}   key: {st['key']}"
+          + (f"   complexity: {st['complexity']} (model {st['model']})" if st["complexity"] else ""))
     if st["claim"]:
-        print(f"  claimed: {st['claim']['url']} (branch {st['claim']['branch']})")
+        print(f"  claimed: {st['claim']['url']} (branch {st['claim']['branch']}"
+              + (f", model {st['claim']['model']})" if st["claim"].get("model") else ")"))
     if st["pr"]:
         t, r = st["tests_on_head"], st["review_on_head"]
         print(f"  PR #{st['pr']} ({st['pr_state']}) head {(st['head'] or '')[:12]}: tests {t['result'] if t else 'not run'}, "
@@ -1763,8 +1877,10 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
     else:
         git(["worktree", "add", "-b", branch, str(wt), f"origin/{base}"], cwd=root)
     if not claim:
-        post_comment(n, render_comment("claim", None, f"Working on this in `{branch}`, from `{base}`.", config,
-                                       branch=branch, base=base), config)
+        model = {"model": args.model} if getattr(args, "model", None) else {}
+        post_comment(n, render_comment("claim", None, f"Working on this in `{branch}`, from `{base}`"
+                                       + (f", with {args.model}." if model else "."), config,
+                                       branch=branch, base=base, **model), config)
         gh(["issue", "edit", str(n), "--repo", repo_of(config), "--add-assignee", "@me"])
     ep = fetch_bundle(epic, config, set(b["trusted"]))["issue"]
     if f"{PREFIX}planned" in ep["labels"]:
@@ -2701,6 +2817,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--from-file")
     p.set_defaults(fn=command_plan_create)
 
+    p = sub.add_parser("plan-annotate", help="backfill complexity labels and lines onto an epic's slices")
+    p.add_argument("number", type=int)
+    p.add_argument("--map", help='{"T1.1": ["routine", "why"], ...} instead of the latest plan revision')
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=command_plan_annotate)
+
     p = sub.add_parser("slice-status", help="a slice's build state and what to run next")
     p.add_argument("number", type=int)
     p.add_argument("--json", action="store_true")
@@ -2716,6 +2838,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("claim", help="claim a ready slice and make its worktree")
     p.add_argument("number", type=int)
     p.add_argument("--resume", action="store_true", help="reattach to this slice's existing claim and branch")
+    p.add_argument("--model", help="the model building it (recorded on the claim)")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_claim)
 

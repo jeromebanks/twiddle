@@ -20,6 +20,12 @@
     {"name": "sdlc:done", "color": "0E8A16", "description": "SDLC: shipped and accepted (reserved)"},
     {"name": "sdlc:escalated", "color": "B60205", "description": "SDLC: a human is needed (no consensus, or the agent is stuck)"}
   ],
+  "models": {"routine": "sonnet", "judgment": "opus", "novel": "opus"},
+  "extra_labels": [
+    {"name": "complexity:routine", "color": "C2E0C6", "description": "SDLC plan: a clear pattern to follow, little design"},
+    {"name": "complexity:judgment", "color": "FEF2C0", "description": "SDLC plan: real design choices, safety or the evidence path"},
+    {"name": "complexity:novel", "color": "F9D0C4", "description": "SDLC plan: unknowns that need investigating first"}
+  ],
   "plan_labels": [
     {"name": "plan:subtask", "color": "C5DEF5", "description": "SDLC plan: a subtask of an epic; its slices are sub-issues"},
     {"name": "plan:slice", "color": "BFD4F2", "description": "SDLC plan: one unit of work, one agent session"}
