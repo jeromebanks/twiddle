@@ -46,6 +46,8 @@ poster a plain-language question (`kind=question phase=plan`).
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import html
 import json
 import re
@@ -555,10 +557,10 @@ def milestone_phases(st: dict[str, Any], progress: dict[str, Any]) -> list[dict[
             phase = "shipped"
         elif k not in known:
             phase = "uncreated"
+        elif not (m["total"] and m["done"] == m["total"]):
+            phase = "building"           # even if accepted: a reopened slice (a revert) is being built again
         elif d.get("accepted"):
             phase = "accepted"
-        elif not (m["total"] and m["done"] == m["total"]):
-            phase = "building"
         elif d and not d.get("voided") and not d.get("changes"):
             phase = "demoed"
         else:
@@ -1671,7 +1673,8 @@ def command_plan_review(args: argparse.Namespace, config: dict[str, Any]) -> int
         raise SdlcError(f"#{st['number']} has no plan under review (state {st['state']}, action {st['action']})")
     if st["plan_rounds"] >= st["max_plan_rounds"]:
         raise SdlcError(f"Codex rounds spent ({st['plan_rounds']}/{st['max_plan_rounds']}) without consensus: "
-                        "ask the poster (`transition N needs-info --kind question`)")
+                        + ("escalate it (`transition N escalated --kind escalation --reason ...`): the epic is being built"
+                           if st["state"] in BUILD_STATES else "ask the poster (`transition N needs-info --kind question`)"))
     _, posted_plan = latest_plan_of(bundle, st)
     if json.loads(Path(args.plan).read_text()) != posted_plan:
         raise SdlcError(f"{args.plan} is not plan rev {st['latest_plan']['rev']} as posted: Codex must review exactly "
@@ -2537,6 +2540,23 @@ def ensure_epic_branch(n: int, config: dict[str, Any], root: Path | None = None,
     return sha, True
 
 
+@contextlib.contextmanager
+def epic_lock(n: int, config: dict[str, Any], root: Path | None = None):
+    """One sync or revert at a time on `.worktrees/epic-N`: they reset, test and push from it."""
+    root = root or primary_root()
+    lock = root / config.get("worktree_dir", ".worktrees") / f"epic-{n}.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock, "w") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SdlcError(f"another sync or revert is using {epic_branch(n)}'s worktree: wait for it, then rerun")
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def epic_worktree(n: int, config: dict[str, Any], root: Path | None = None) -> Path:
     """`.worktrees/epic-N`, detached at a fresh origin/epic/N. It only ever holds what was pushed."""
     root = root or primary_root()
@@ -2573,7 +2593,13 @@ def sync_epic(n: int, config: dict[str, Any], root: Path | None = None, test=run
     """Merge origin/main into epic/N (never a rebase: slice branches are built on it), test, push on a pass.
 
     Returns {merged, conflict, files, head, main, run, pushed}. A conflict is aborted and nothing is pushed.
+    Holds the epic's lock throughout, and pushes exactly the commit it tested.
     """
+    with epic_lock(n, config, root):
+        return _sync_epic(n, config, root, test)
+
+
+def _sync_epic(n: int, config: dict[str, Any], root: Path | None, test) -> dict[str, Any]:
     wt = epic_worktree(n, config, root)
     main = f"origin/{config.get('default_branch', 'main')}"
     main_sha = git(["rev-parse", main], cwd=wt)
@@ -2589,7 +2615,7 @@ def sync_epic(n: int, config: dict[str, Any], root: Path | None = None, test=run
     out["head"] = git(["rev-parse", "HEAD"], cwd=wt)
     out["run"] = test(wt)
     if out["merged"] and out["run"]["result"] == "pass":
-        git(["push", "-q", "origin", f"HEAD:refs/heads/{epic_branch(n)}"], cwd=wt)
+        git(["push", "-q", "origin", f"{out['head']}:refs/heads/{epic_branch(n)}"], cwd=wt)
         out["pushed"] = True
     return out
 
@@ -2993,18 +3019,30 @@ def command_revert_slice(args: argparse.Namespace, config: dict[str, Any]) -> in
                if done else f"would revert {oid[:12]} (#{n}, PR #{pr['number']}) on {branch}, test, push")
               + f"; reopen #{n}; void {key}'s demo")
         return 0
+    bundle = fetch_bundle(epic, config)
+    st = bundle_state(bundle, config)
+
+    def void_demo() -> None:   # before anything is published: an acceptance must never outlive its slice
+        demo = (st.get("demos") or {}).get(key)
+        if demo and not demo.get("voided"):
+            post_comment(epic, render_comment("demo-void", None, f"#{n} was reverted, so {key} needs a new demo once "
+                                              "it is built again.", config, milestone=key), config)
+            demo["voided"] = True
+
     run = None
     if not done:
-        wt = epic_worktree(epic, config, root)
-        proc = subprocess.run(["git", "revert", "--no-edit", oid], cwd=wt, capture_output=True, text=True)
-        if proc.returncode != 0:
-            git(["revert", "--abort"], cwd=wt, check=False)
-            raise SdlcError(f"reverting {oid[:12]} conflicts with later slices: {proc.stderr.strip()[:300]}")
-        done = git(["rev-parse", "HEAD"], cwd=wt)
-        run = run_suite(wt)
-        if run["result"] != "pass":
-            raise SdlcError(f"the suite fails after the revert ({run['failed']} failed): nothing pushed")
-        git(["push", "-q", "origin", f"HEAD:refs/heads/{branch}"], cwd=wt)
+        with epic_lock(epic, config, root):
+            wt = epic_worktree(epic, config, root)
+            proc = subprocess.run(["git", "revert", "--no-edit", oid], cwd=wt, capture_output=True, text=True)
+            if proc.returncode != 0:
+                git(["revert", "--abort"], cwd=wt, check=False)
+                raise SdlcError(f"reverting {oid[:12]} conflicts with later slices: {proc.stderr.strip()[:300]}")
+            done = git(["rev-parse", "HEAD"], cwd=wt)
+            run = run_suite(wt)
+            if run["result"] != "pass":
+                raise SdlcError(f"the suite fails after the revert ({run['failed']} failed): nothing pushed")
+            void_demo()
+            git(["push", "-q", "origin", f"{done}:refs/heads/{branch}"], cwd=wt)
     # the records, each only if missing: a rerun finishes what an interrupted run left
     trusted = fetch_trusted(config)
     marks = [mk for mk, _ in _marked(comments, trusted)]
@@ -3017,15 +3055,10 @@ def command_revert_slice(args: argparse.Namespace, config: dict[str, Any]) -> in
     if claim_status(comments, trusted):
         post_comment(n, render_comment("release", None, "The old claim ends with the revert.", config), config)
     gh(["issue", "edit", str(n), "--repo", repo, "--remove-assignee", "@me"], check=False)
-    bundle = fetch_bundle(epic, config)
-    st = bundle_state(bundle, config)
     if run:
         post_comment(epic, render_comment("epic-tests", None, suite_body("the epic branch after a revert", done, run), config,
                                           sha=done, result=run["result"], passed=str(run["passed"])), config)
-    demo = (st.get("demos") or {}).get(key)
-    if demo and not demo.get("voided"):
-        post_comment(epic, render_comment("demo-void", None, f"#{n} was reverted, so {key} needs a new demo once it is "
-                                          "built again.", config, milestone=key), config)
+    void_demo()
     if st["state"] == "demo-review" and (st.get("latest_demo") or {}).get("milestone") == key:
         set_state_label(epic, bundle["issue"]["labels"], "in-progress", config)
     print(f"#{n}: reverted on {branch} at {done[:12]} and reopened\nnext: /work-slice {n}")
@@ -3095,15 +3128,28 @@ SVG_MIN_TEXT = 40   # a command line alone is ~25 characters: anything less show
 
 
 def svg_text(svg: str) -> str:
-    """What a demo_shot picture shows, whitespace removed: its rows of text, without the window title or
-    the `$ command` row (a command that printed nothing is still a blank picture)."""
-    rows: dict[str, str] = {}
+    """What a demo_shot picture shows, whitespace removed: its text in reading order, without the window
+    title or the `$ command` prompt, however many rows it wraps to (a command that printed nothing is
+    still a blank picture). demo_shot titles the window with the command it ran."""
+    title, rows = "", {}
     for attrs, t in SVG_TEXT_RE.findall(svg):
+        text = html.unescape(re.sub(r"<[^>]+>", "", t))
         if "-title" in attrs:
+            title += text
             continue
-        y = (re.search(r'\by="([^"]*)"', attrs) or [None, "?"])[1]
-        rows[y] = rows.get(y, "") + html.unescape(re.sub(r"<[^>]+>", "", t))
-    return "".join("".join(r.split()) for r in rows.values() if not r.lstrip().startswith("$"))
+        y = (re.search(r'\by="([^"]*)"', attrs) or [None, "0"])[1]
+        rows[y] = rows.get(y, "") + text
+    def at(y: str) -> float:
+        try:
+            return float(y)
+        except ValueError:
+            return 0.0
+    body = "".join("".join(rows[y].split()) for y in sorted(rows, key=at))
+    for prompt in ("$" + "".join(title.split()), "$"):
+        if body.startswith(prompt):
+            body = body[len(prompt):]
+            break
+    return body
 
 
 def demo_post_errors(body: str, folder: Path) -> list[str]:

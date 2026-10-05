@@ -460,7 +460,8 @@ def test_revert_slice_pushes_only_a_tested_revert(repo, monkeypatch, capsys):
     assert head != bad and sdlc.is_ancestor(bad, head, repo)
     assert not (sdlc.epic_worktree(12, CONFIG, repo) / "bad.py").exists()
     assert ["issue", "reopen", "28", "--repo", CONFIG["repository"]] in gh.calls
-    assert gh.kinds() == [(28, "revert"), (28, "release"), (12, "epic-tests"), (12, "demo-void")]
+    # the demo is voided before the revert is pushed: an acceptance never outlives its slice
+    assert gh.kinds() == [(12, "demo-void"), (28, "revert"), (28, "release"), (12, "epic-tests")]
 
 
 def test_revert_slice_finishes_a_run_cut_short_after_its_push(repo, monkeypatch, capsys):
@@ -470,13 +471,15 @@ def test_revert_slice_finishes_a_run_cut_short_after_its_push(repo, monkeypatch,
     stub_revert(monkeypatch, repo, bad, [DEMO1, ACCEPT1])
     monkeypatch.setattr(sdlc, "run_suite", PASS)
     gh.fail_reopen = True
-    assert sdlc.main(["revert-slice", "28"]) == 1                 # pushed, then GitHub failed
+    assert sdlc.main(["revert-slice", "28"]) == 1                 # voided and pushed, then GitHub failed
     pushed = origin_sha(repo, "epic/12")
-    assert pushed != bad and gh.posted == []
+    assert pushed != bad and gh.kinds() == [(12, "demo-void")]
+    gh.posted.clear()
+    stub_revert(monkeypatch, repo, bad, [DEMO1, ACCEPT1, agent("demo-void", None, 14, milestone="M1")])
     monkeypatch.setattr(sdlc, "run_suite", lambda wt: pytest.fail("the revert is already tested and pushed"))
     assert sdlc.main(["revert-slice", "28"]) == 0                 # a rerun only finishes the records
-    assert origin_sha(repo, "epic/12") == pushed                  # no second revert
-    assert gh.kinds() == [(28, "revert"), (28, "release"), (12, "demo-void")]
+    assert origin_sha(repo, "epic/12") == pushed                  # no second revert, no second void
+    assert gh.kinds() == [(28, "revert"), (28, "release")]
     # and once the slice is open again, a third run finds nothing missing but the void it already has
     stub_revert(monkeypatch, repo, bad, [DEMO1, ACCEPT1, agent("demo-void", None, 14, milestone="M1")], slice_state=("open",))
     gh.posted.clear()
@@ -585,3 +588,28 @@ def test_a_retry_gets_a_fresh_review_budget_once():
     assert sdlc.retry_errors(escalated, [], {OWNER}) == []
     assert "already retried" in sdlc.retry_errors(escalated, [agent("claim", None, 1, retry="1", model="opus")], {OWNER})[0]
     assert "isn't escalated" in sdlc.retry_errors({**escalated, "labels": ["plan:slice"]}, [], {OWNER})[0]
+
+
+def test_one_sync_at_a_time_and_it_pushes_what_it_tested(repo):
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    commit_on_epic(repo, "a.py", "a = 1\n")
+    commit_on_main(repo, "m.py", "m = 1\n")
+
+    def overlapping(wt):     # a second sync starting while the first is testing is refused, not interleaved
+        with pytest.raises(sdlc.SdlcError, match="another sync or revert"):
+            sdlc.sync_epic(12, CONFIG, repo, test=PASS)
+        (wt / "stray.py").write_text("x\n")                      # nothing done in the worktree now gets pushed
+        _git("add", "stray.py", cwd=wt)
+        _git("commit", "-q", "-m", "stray", cwd=wt)
+        return PASS(wt)
+
+    out = sdlc.sync_epic(12, CONFIG, repo, test=overlapping)
+    assert out["pushed"] and origin_sha(repo, "epic/12") == out["head"]
+
+
+def test_a_reopened_slice_beats_an_old_acceptance():
+    st = derive([DEMO1, ACCEPT1])
+    phases = sdlc.milestone_phases(st, progress(ms("M1", 2, 3)))
+    assert phases[0]["phase"] == "building"
+    with pytest.raises(sdlc.SdlcError, match="not complete"):
+        sdlc.ship_target(st, progress(ms("M1", 2, 3)))

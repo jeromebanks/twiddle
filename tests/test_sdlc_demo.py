@@ -299,8 +299,9 @@ def test_a_blank_picture_is_refused():
     assert len(sdlc.svg_text(SHOT)) >= sdlc.SVG_MIN_TEXT
     assert sdlc.svg_text(SHOT).startswith("Kitchen07:00weekdaysKALXon")       # one row from two pieces; no prompt
     # a long command that printed nothing is still blank: the `$` row doesn't count
-    prompt_only = ('<svg><text class="t-title">alarm</text><text class="t-r1" y="20">$&#160;twiddle&#160;alarm&#160;'
-                   'try&#160;--room&#160;Kitchen&#160;--alarm&#160;3&#160;--dry-run</text></svg>')
+    prompt_only = ('<svg><text class="t-title">twiddle alarm try --room Kitchen --alarm 3 --dry-run</text>'
+                   '<text class="t-r1" y="20">$&#160;twiddle&#160;alarm&#160;'
+                   'try&#160;--room&#160;Kitchen&#160;--alarm&#160;3&#160;--dry-run</text></svg>')   # demo_shot titles it so
     assert sdlc.svg_text(prompt_only) == ""
 
 
@@ -492,3 +493,13 @@ def test_cleanup_goes_first_only_within_its_milestone():
     bundle = {"issue": {"number": 45, "body": sdlc.marker("slice", None, epic="12", key="F1"), "milestone": "#12 M1: x"},
               "epic_state": derive(["sdlc:in-progress"]), "epic_progress": p, "trusted": [OWNER]}
     assert not any("cleanup" in e for e in sdlc.epic_pause_errors(bundle, CONFIG, resume=False))
+
+
+def test_a_wrapped_command_alone_is_still_blank():
+    """Rendered for real: demo_shot wraps a long command over several rows."""
+    from tools import demo_shot
+    cmd = "twiddle alarm try 3 --room Kitchen --dry-run --volume 20 --duration 00:01:00 --include-linked-zones --verbose"
+    svg = demo_shot.render_terminal(f"$ {cmd}\n", cmd, 60)
+    assert sdlc.svg_text(svg) == ""
+    shown = demo_shot.render_terminal(f"$ {cmd}\nwould ring Kitchen at 20% for a minute (dry run)\n", cmd, 60)
+    assert sdlc.svg_text(shown).startswith("wouldringKitchen")

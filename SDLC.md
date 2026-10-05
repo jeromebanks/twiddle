@@ -163,9 +163,11 @@ rest of the plan, with a `Lessons from M1` section, and Codex reviews it with a 
 budget. Only then does `plan-create` make the next milestone. `"create": "all"` keeps
 the old behaviour, creating everything at once.
 
-No consensus within `max_plan_rounds` means the planner asks the poster one
-plain-language question (`sdlc:needs-info`, marked `phase=plan`). Their answer
-earns a fresh set of rounds. A plan revision never voids the PRD's sign-off.
+No consensus within `max_plan_rounds` on the first plan means the planner asks the poster
+one plain-language question (`sdlc:needs-info`, marked `phase=plan`). Their answer earns a
+fresh set of rounds. An amendment while the epic is being built (demo changes, the next
+milestone, a cleanup pass) that runs out of rounds is escalated to a human instead
+(`escalate_plan`). A plan revision never voids the PRD's sign-off.
 
 `uv run python tools/sdlc.py ready --epic N` lists the units of work whose
 blockers have all closed as completed.
