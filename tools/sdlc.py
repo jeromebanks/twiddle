@@ -77,7 +77,8 @@ REVIEW_DOC = {"prd-review": "prd", "diagnosis-review": "diagnosis"}
 LATER_STATES = {"done"}
 BUILD_STATES = {"planned", "in-progress"}     # the epic's slices are being built (`work-slice`)
 TRIAGE_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label"}
-PLAN_ACTIONS = {"plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone"}
+PLAN_ACTIONS = {"plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone",
+                "escalate_plan"}
 # Planning comments: posted by plan-post / plan-review / plan-create, never by `transition`.
 PLAN_KINDS = {"plan", "plan-review", "plan-created"}
 # Milestone demos (milestone-demo), also kept out of DOC_KINDS: a demo never voids the PRD's sign-off.
@@ -326,7 +327,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         elif plan_verdict == "approve":
             action = "create_plan_issues"
         elif plan_rounds >= max_plan_rounds:
-            action = "ask_poster"
+            action = "escalate_plan"   # the epic is being built: a human settles it, not a question to the poster
         else:
             action = "continue_plan"
     elif state in BUILD_STATES and request:
@@ -397,6 +398,9 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
         return f"/triage-issue {n}"
     if a in DEMO_ACTIONS:
         return f"/milestone-demo {n}"
+    if a == "escalate_plan":
+        return (f"/plan-issue {n}: the Codex rounds on this amendment are spent; escalate it "
+                f"(`transition {n} escalated --kind escalation --reason ...`)")
     if a == "plan_next_milestone" and progress is not None:
         if (due := due_milestone(st.get("demos") or {}, progress, st.get("shipped"))) and due["ship"]:
             return f"/milestone-demo {n}: {due['key']} is accepted; ship it to main, then plan the next milestone"
@@ -1077,6 +1081,9 @@ def validate_plan(plan: Any, criteria: set[int] | None = None) -> list[str]:
         covers = l.get("covers") or []
         if not all(isinstance(c, int) for c in covers):
             errs.append(f"{k}: covers must be acceptance-criterion numbers")
+    if all(isinstance(k, str) for k in mkeys) and mkeys != sorted(mkeys, key=natural_key):
+        errs.append(f"list milestones in order ({', '.join(sorted(mkeys, key=natural_key))}): "
+                    "they are built and shipped in that order")
     if (co := plan.get("cleanup_of")) is not None and co not in mkeys:
         errs.append(f"`cleanup_of` names the accepted milestone whose tech debt this pays down, not {co!r}")
     for l in leaves:
@@ -1427,10 +1434,10 @@ def command_plan_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
             errs.append(f"an amended plan keeps every key already created; it drops {', '.join(sorted(dropped, key=natural_key))}")
         if plan.get("cleanup_of"):
             old = {l["key"] for l in plan_leaves(latest_plan_of(bundle, st)[1])}
-            new = [l["key"] for l in plan_leaves(plan) if l["key"] not in old]
+            new = [l["key"] for l in plan_leaves(plan) if l["key"] not in old and l.get("debt")]
             budget = config.get("cleanup_slices_per_milestone", 1)
             if len(new) > budget:
-                errs.append(f"a cleanup pass adds at most {budget} slice(s) (cleanup_slices_per_milestone); "
+                errs.append(f"a cleanup pass adds at most {budget} debt-paying slice(s) (cleanup_slices_per_milestone); "
                             f"this adds {', '.join(new)}: leave the rest filed")
     errs += lessons_errors(plan, st)
     if errs:
@@ -1458,7 +1465,7 @@ def command_plan_review(args: argparse.Namespace, config: dict[str, Any]) -> int
     """Record one Codex round on the latest plan revision, with Claude's answer to it."""
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
-    if st["action"] not in ("continue_plan", "create_plan_issues", "ask_poster") or not st["latest_plan"]:
+    if st["action"] not in ("continue_plan", "create_plan_issues", "ask_poster", "escalate_plan") or not st["latest_plan"]:
         raise SdlcError(f"#{st['number']} has no plan under review (state {st['state']}, action {st['action']})")
     if st["plan_rounds"] >= st["max_plan_rounds"]:
         raise SdlcError(f"Codex rounds spent ({st['plan_rounds']}/{st['max_plan_rounds']}) without consensus: "
@@ -1942,6 +1949,7 @@ def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[di
     # a budgeted cleanup pass (slices that pay down tech debt) goes before anything else,
     # except the open work a cleanup slice itself waits on (else neither could start)
     cleanup_open = [l["number"] for l in leaves if l.get("state", "open") == "open" and is_cleanup(l)]
+    cleanup_ms = {milestone_key(l.get("milestone")) for l in leaves if l["number"] in cleanup_open}
     needed, todo = set(cleanup_open), list(cleanup_open)
     while todo:
         for b in blockers.get(todo.pop(), []):
@@ -1950,7 +1958,7 @@ def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[di
                 todo.append(b["number"])
     by_order = lambda l: (natural_key(milestone_key(l.get("milestone"))), natural_key(l["key"]))  # noqa: E731
     free = [l["number"] for l in sorted(ready, key=by_order) if not l.get("assignees") and l["number"] not in escalated
-            and (not cleanup_open or l["number"] in needed)]
+            and (milestone_key(l.get("milestone")) not in cleanup_ms or l["number"] in needed)]
     in_flight = [l["number"] for l in ready + waiting if l.get("assignees") and l["number"] not in escalated]
     by_ms: dict[str, list[dict[str, Any]]] = {}
     for l in leaves:
@@ -2084,7 +2092,10 @@ def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -
     errs = claim_pause_errors(st, progress)
     if progress and not errs:
         errs += milestone_hold_errors(st, progress, b["issue"].get("milestone"))
-        cleanup = [n for n in progress.get("cleanup_open") or [] if n != b["issue"]["number"]]
+        units = progress.get("units") or {}
+        mine = milestone_key(b["issue"].get("milestone"))
+        cleanup = [n for n in progress.get("cleanup_open") or [] if n != b["issue"]["number"]
+                   and (units.get(n) or {}).get("milestone", mine) == mine]
         if cleanup and not is_cleanup(b["issue"]) and b["issue"]["number"] not in (progress.get("cleanup_needs") or []):
             errs.append("the cleanup pass comes first: " + ", ".join(f"#{n}" for n in cleanup))
     return errs
@@ -2423,21 +2434,50 @@ def on_main(prs: list[dict[str, Any] | None], reverted: set[str], main: str = "m
                              and ((p.get("mergeCommit") or {}).get("oid") or "") not in reverted for p in prs)
 
 
-def carried_slices(merged_prs: list[dict[str, Any]], leaves: list[dict[str, Any]], unreleased: set[str],
-                   allowed: set[str]) -> list[str]:
-    """Slice PRs merged into epic/N whose squash commit is in main..epic/N (`unreleased`) but whose milestone
-    isn't `allowed`. Read from the PRs, not the slice issues: a slice whose close failed after its squash
-    is still on the branch. A PR from a branch that isn't a known slice counts too."""
+PICKED_RE = re.compile(r"\(cherry picked from commit ([0-9a-f]{40})\)")
+
+
+def slice_commits(into_epic: list[dict[str, Any]], leaves: list[dict[str, Any]], config: dict[str, Any]
+                  ) -> dict[str, dict[str, Any]]:
+    """Squash commit -> slice, from the PRs merged into epic/N (by their slice/S branch) and each finished
+    slice's own PR (which, built before epic branches, merged into main)."""
     by_number = {l["number"]: l for l in leaves}
-    out = []
-    for pr in merged_prs:
-        oid = (pr.get("mergeCommit") or {}).get("oid")
-        if not oid or oid not in unreleased:
-            continue
+    out = {}
+    for pr in into_epic:
         m = re.fullmatch(r"slice/(\d+)", pr.get("headRefName", ""))
-        leaf = by_number.get(int(m.group(1))) if m else None
+        if m and (oid := (pr.get("mergeCommit") or {}).get("oid")) and int(m.group(1)) in by_number:
+            out[oid] = by_number[int(m.group(1))]
+    for n, pr in milestone_prs(leaves, config).items():
+        if oid := ((pr or {}).get("mergeCommit") or {}).get("oid"):
+            out.setdefault(oid, by_number[n])
+    return out
+
+
+def unreleased_commits(n: int, config: dict[str, Any], root: Path) -> list[dict[str, Any]]:
+    """main..epic/N, each as {sha, parents, body}."""
+    out = git(["log", "--format=%H%x1f%P%x1f%B%x1e", f"origin/{config.get('default_branch', 'main')}..origin/{epic_branch(n)}"],
+              cwd=root)
+    commits = []
+    for rec in out.split("\x1e"):
+        if rec.strip():
+            sha, parents, body = (rec.strip("\n").split("\x1f") + ["", ""])[:3]
+            commits.append({"sha": sha, "parents": parents.split(), "body": body})
+    return commits
+
+
+def carried_slices(commits: list[dict[str, Any]], slice_of: dict[str, dict[str, Any]], allowed: set[str]) -> list[str]:
+    """What in main..epic/N isn't the work of an accepted milestone. Every commit must trace to a slice: its
+    own squash, a cherry-pick of one (`-x`, as the #12 repair re-applied its slices), or a revert of one.
+    Merges (`sync` bringing main in) carry nothing new. Read from the commits, not the slice issues: a
+    slice whose close failed after its squash is still on the branch."""
+    out = []
+    for c in commits:
+        if len(c["parents"]) > 1:
+            continue
+        m = PICKED_RE.search(c["body"]) or REVERTS_RE.search(c["body"])
+        leaf = slice_of.get(c["sha"]) or (slice_of.get(m.group(1)) if m else None)
         if not leaf:
-            out.append(f"PR #{pr.get('number')} ({pr.get('headRefName')}, not a slice of this epic)")
+            out.append(f"{c['sha'][:12]} ({c['body'].strip().splitlines()[0][:50] if c['body'].strip() else '?'}: no slice)")
         elif milestone_key(leaf.get("milestone")) not in allowed:
             out.append(f"#{leaf['number']} {leaf['key']} ({milestone_key(leaf.get('milestone'))})")
     return out
@@ -2677,11 +2717,10 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
         git(["fetch", "-q", "origin", main, epic_branch(n)], cwd=root)
         head = git(["rev-parse", f"origin/{epic_branch(n)}"], cwd=root)
         main_sha = git(["rev-parse", f"origin/{main}"], cwd=root)
-        unreleased = set(git(["rev-list", f"origin/{main}..origin/{epic_branch(n)}"], cwd=root).split())
         allowed = {k for k, d in (st.get("demos") or {}).items() if d.get("accepted") and k not in shipped}
         into_epic = gh_json(["pr", "list", "--repo", repo, "--base", epic_branch(n), "--state", "merged",
                              "--limit", "500", "--json", "number,headRefName,mergeCommit"]) or []
-        carried = carried_slices(into_epic, leaves, unreleased, allowed)
+        carried = carried_slices(unreleased_commits(n, config, root), slice_commits(into_epic, leaves, config), allowed)
         synced = is_ancestor(main_sha, head, root)
         if errs := ship_gate_errors(st, key, head, synced, carried):
             raise SdlcError("; ".join(errs))
@@ -2882,9 +2921,15 @@ SVG_MIN_TEXT = 40   # a command line alone is ~25 characters: anything less show
 
 
 def svg_text(svg: str) -> str:
-    """The visible text of a demo_shot picture (the window title aside), whitespace removed."""
-    parts = [html.unescape(re.sub(r"<[^>]+>", "", t)) for attrs, t in SVG_TEXT_RE.findall(svg) if "-title" not in attrs]
-    return "".join("".join(parts).split())
+    """What a demo_shot picture shows, whitespace removed: its rows of text, without the window title or
+    the `$ command` row (a command that printed nothing is still a blank picture)."""
+    rows: dict[str, str] = {}
+    for attrs, t in SVG_TEXT_RE.findall(svg):
+        if "-title" in attrs:
+            continue
+        y = (re.search(r'\by="([^"]*)"', attrs) or [None, "?"])[1]
+        rows[y] = rows.get(y, "") + html.unescape(re.sub(r"<[^>]+>", "", t))
+    return "".join("".join(r.split()) for r in rows.values() if not r.lstrip().startswith("$"))
 
 
 def demo_post_errors(body: str, folder: Path) -> list[str]:

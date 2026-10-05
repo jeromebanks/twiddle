@@ -51,6 +51,7 @@ Dispatch on `action`:
 | `plan_next_milestone` | the latest created milestone was accepted and the plan has more: "The next milestone" below |
 | `work_slices` and `next` says `/plan-issue N --cleanup` | "Cleanup pass" below |
 | `continue_plan` / `create_plan_issues` while `sdlc:in-progress` | an amendment is under review: steps 5-6 |
+| `escalate_plan` | an amendment (feedback, the next milestone, cleanup) spent its Codex rounds: `transition N escalated --kind escalation --reason "..."`. The epic is being built, so a human settles it, not a question to the poster |
 | `reconcile_label` | `uv run python tools/sdlc.py reconcile N`, then as `plan` |
 | anything in triage | use `triage-issue` instead |
 | `turn` is `poster`, `human` or `later` | report it and stop |

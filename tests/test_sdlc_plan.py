@@ -502,3 +502,18 @@ def test_not_finished_while_milestones_are_uncreated():
     p = {"open": 0, "milestones": [{"key": "M1"}]}
     assert sdlc.finished(p, {"M1": {"accepted": True}}, {"M1": "x"})
     assert not sdlc.finished(p, {"M1": {"accepted": True}}, {"M1": "x"}, ["M2"])
+
+
+def test_milestones_are_listed_in_the_order_they_ship():
+    plan = two_milestones()
+    plan["milestones"].reverse()
+    assert any(e.startswith("list milestones in order (M1, M2)") for e in sdlc.validate_plan(plan))
+
+
+def test_spent_rounds_on_an_amendment_escalate_instead_of_asking_the_poster():
+    plan = two_milestones()
+    rounds = [review(2, 31 + i, "changes") for i in range(CONFIG["max_plan_rounds"])]
+    st = derive(["sdlc:in-progress"], created_m1(plan) + DEMO_M1 +
+                [plan_comment({**plan, "lessons": {"milestone": "M1", "text": "t"}}, 2, 30)] + rounds)
+    assert st["action"] == "escalate_plan"
+    assert "escalate it (`transition 12 escalated" in sdlc.next_command(st)

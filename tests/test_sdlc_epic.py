@@ -159,13 +159,27 @@ def test_on_main():
 
 
 def test_carried_slices():
-    leaves = [{"number": 28, "key": "T1.1", "milestone": "#12 M1: x"}, {"number": 31, "key": "T3.1", "milestone": "#12 M2: y"}]
-    prs = [{**merged_pr(HEAD, "epic/12"), "number": 55, "headRefName": "slice/28"},
-           {**merged_pr(OLD, "epic/12"), "number": 60, "headRefName": "slice/31"}]   # #31 may still be open
-    assert sdlc.carried_slices(prs, leaves, {HEAD}, {"M1"}) == []
-    assert sdlc.carried_slices(prs, leaves, {HEAD, OLD}, {"M1"}) == ["#31 T3.1 (M2)"]
-    stray = [{**merged_pr("c" * 40, "epic/12"), "number": 61, "headRefName": "hotfix"}]
-    assert sdlc.carried_slices(stray, leaves, {"c" * 40}, {"M1"}) == ["PR #61 (hotfix, not a slice of this epic)"]
+    t11, t31 = {"number": 28, "key": "T1.1", "milestone": "#12 M1: x"}, {"number": 31, "key": "T3.1", "milestone": "#12 M2: y"}
+    slice_of = {HEAD: t11, OLD: t31}
+    one = lambda sha, body="slice", parents=1: {"sha": sha, "parents": ["p"] * parents, "body": body}  # noqa: E731
+    assert sdlc.carried_slices([one(HEAD), one("m" * 40, "Merge main into epic/12", 2)], slice_of, {"M1"}) == []
+    assert sdlc.carried_slices([one(HEAD), one(OLD)], slice_of, {"M1"}) == ["#31 T3.1 (M2)"]
+    # the #12 repair: M2's slices re-applied with `cherry-pick -x` still trace to M2, and so do reverts
+    picked = one("c" * 40, f"T3.1: writes\n\n(cherry picked from commit {OLD})")
+    assert sdlc.carried_slices([picked], slice_of, {"M1"}) == ["#31 T3.1 (M2)"]
+    assert sdlc.carried_slices([picked], slice_of, {"M1", "M2"}) == []
+    assert sdlc.carried_slices([one("d" * 40, f'Revert "T3.1"\n\nThis reverts commit {OLD}.')], slice_of, {"M1"})
+    assert sdlc.carried_slices([one("e" * 40, "a hand edit")], slice_of, {"M1", "M2"}) == ["eeeeeeeeeeee (a hand edit: no slice)"]
+
+
+def test_unreleased_commits_reads_parents_and_messages(repo):
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    a = commit_on_epic(repo, "a.py", "a = 1\n")
+    commit_on_main(repo, "m.py", "m = 1\n")
+    sdlc.sync_epic(12, CONFIG, repo, test=PASS)
+    sdlc.epic_worktree(12, CONFIG, repo)
+    got = sdlc.unreleased_commits(12, CONFIG, repo)
+    assert [len(c["parents"]) for c in got] == [2, 1] and got[1]["sha"] == a and got[1]["body"].startswith("slice: a.py")
 
 
 # --- the ship gate -----------------------------------------------------------------
@@ -537,7 +551,8 @@ def test_ship_stops_when_main_moves_before_the_merge(repo, monkeypatch, capsys):
     monkeypatch.setattr(sdlc, "reverted_on_main", lambda cfg, root=None: set())
     open_pr = {"number": 70, "headRefOid": head, "mergeable": "MERGEABLE", "title": "Ship #12 M1: x"}
     monkeypatch.setattr(sdlc, "find_ship_pr", lambda n, cfg, state="open": [] if state == "merged" else [open_pr])
-    answers = {"pr list": [], "branches/main": {"commit": {"sha": "f" * 40}}}
+    answers = {"pr list": [{"number": 60, "headRefName": "slice/28", "mergeCommit": {"oid": head}}],
+               "branches/main": {"commit": {"sha": "f" * 40}}}
     monkeypatch.setattr(sdlc, "gh_json", lambda args: answers["pr list"] if args[:2] == ["pr", "list"] else answers["branches/main"])
     assert sdlc.main(["ship", "12"]) == 1
     assert "main moved during the ship" in capsys.readouterr().err

@@ -206,9 +206,10 @@ def test_harmless_text_is_not_an_identifier():
 
 # what demo_shot draws: a title, then a line of text per row of the terminal
 SHOT = ('<svg><text class="t-title">twiddle alarm list</text>'
-        '<text class="t-r1" x="0">$&#160;twiddle&#160;alarm&#160;list</text>'
-        '<text class="t-r2" x="0">Kitchen&#160;&#160;07:00&#160;weekdays&#160;&#160;KALX&#160;&#160;on</text>'
-        '<text class="t-r2" x="0">Bedroom&#160;&#160;06:30&#160;daily&#160;&#160;chime&#160;&#160;off</text></svg>')
+        '<text class="t-r1" x="0" y="20">$&#160;twiddle&#160;alarm&#160;list</text>'
+        '<text class="t-r2" x="0" y="44">Kitchen&#160;&#160;07:00&#160;weekdays</text>'
+        '<text class="t-r2" x="200" y="44">&#160;&#160;KALX&#160;&#160;on</text>'
+        '<text class="t-r2" x="0" y="68">Bedroom&#160;&#160;06:30&#160;daily&#160;&#160;chime&#160;&#160;off</text></svg>')
 
 
 def _demo_dir(tmp_path, readme="# M1\n", files=None):
@@ -296,13 +297,15 @@ def test_a_question_is_answered_with_a_note_and_changes_are_recorded(tmp_path, c
 
 def test_a_blank_picture_is_refused():
     assert len(sdlc.svg_text(SHOT)) >= sdlc.SVG_MIN_TEXT
-    prompt_only = '<svg><text class="t-title">np</text><text class="t-r1">$&#160;twiddle&#160;np&#160;wfmu</text></svg>'
-    assert sdlc.svg_text(prompt_only) == "$twiddlenpwfmu"
-    assert len(sdlc.svg_text(prompt_only)) < sdlc.SVG_MIN_TEXT
+    assert sdlc.svg_text(SHOT).startswith("Kitchen07:00weekdaysKALXon")       # one row from two pieces; no prompt
+    # a long command that printed nothing is still blank: the `$` row doesn't count
+    prompt_only = ('<svg><text class="t-title">alarm</text><text class="t-r1" y="20">$&#160;twiddle&#160;alarm&#160;'
+                   'try&#160;--room&#160;Kitchen&#160;--alarm&#160;3&#160;--dry-run</text></svg>')
+    assert sdlc.svg_text(prompt_only) == ""
 
 
 def test_blank_picture_blocks_the_post(tmp_path):
-    d = _demo_dir(tmp_path, files={"np.svg": '<svg><text class="x-r1">$&#160;twiddle&#160;np</text></svg>'})
+    d = _demo_dir(tmp_path, files={"np.svg": '<svg><text class="x-r1" y="20">$&#160;twiddle&#160;np</text></svg>'})
     assert any("np.svg shows almost no text" in e for e in sdlc.demo_post_errors("![np](np.svg)", d))
 
 
@@ -416,8 +419,12 @@ def test_a_cleanup_plan_is_held_to_its_budget(tmp_path, capsys, monkeypatch):
                                                                      {**unit("C2", "M2"), "debt": [102]}]}
     pf.write_text(json.dumps(two))
     assert sdlc.main(["plan-post", "12", str(pf), "--from-file", str(f), "--dry-run"]) == 1
-    assert "adds at most 1 slice" in capsys.readouterr().err
+    assert "adds at most 1 debt-paying slice" in capsys.readouterr().err
     pf.write_text(json.dumps({**two, "subtasks": two["subtasks"][:3]}))
+    assert sdlc.main(["plan-post", "12", str(pf), "--from-file", str(f), "--dry-run"]) == 0
+    # the budget counts debt-paying slices only: a replan may split ordinary work freely alongside
+    split = {**two, "subtasks": [unit("T1", "M1"), unit("T2", "M2"), unit("T2b", "M2"), {**unit("C1", "M2"), "debt": [101]}]}
+    pf.write_text(json.dumps(split))
     assert sdlc.main(["plan-post", "12", str(pf), "--from-file", str(f), "--dry-run"]) == 0
     body = sdlc.render_leaf_body(12, {**unit("C1", "M2"), "debt": [101]}, None, {}, None)
     assert "## Pays down\n\n#101: tech debt" in body
@@ -473,3 +480,14 @@ def test_a_cleanup_slice_can_wait_on_ordinary_work_without_a_deadlock():
     bundle = {"issue": {"number": 40, "body": sdlc.marker("slice", None, epic="12", key="T2"), "milestone": "#12 M2: x"},
               "epic_state": derive(["sdlc:in-progress"]), "epic_progress": p, "trusted": [OWNER]}
     assert sdlc.epic_pause_errors(bundle, CONFIG, resume=False) == []
+
+
+def test_cleanup_goes_first_only_within_its_milestone():
+    pays = "## Pays down\n\n#81: tech debt filed against this epic."
+    leaves = [{"number": 45, "key": "F1", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M1: x", "body": ""},
+              {"number": 44, "key": "C1", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": pays}]
+    p = sdlc.summarise_progress(leaves, {})
+    assert p["ready"] == [45, 44]                       # M1's fix slice isn't held behind M2's cleanup
+    bundle = {"issue": {"number": 45, "body": sdlc.marker("slice", None, epic="12", key="F1"), "milestone": "#12 M1: x"},
+              "epic_state": derive(["sdlc:in-progress"]), "epic_progress": p, "trusted": [OWNER]}
+    assert not any("cleanup" in e for e in sdlc.epic_pause_errors(bundle, CONFIG, resume=False))

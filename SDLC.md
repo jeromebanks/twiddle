@@ -44,7 +44,9 @@ main ──●────────────────────●─
 - **`ship N`** releases one accepted milestone, in order: a pull request `epic/N -> main`, merged
   with a merge commit. It needs `epic/N` to contain `main`, a passing run and Codex's approval of
   the milestone's diff (`ship-review`), both on the head that ships, and no slice of an unaccepted
-  milestone on the branch. After the last milestone, `epic/N` is deleted.
+  milestone on the branch. Every commit on `epic/N` must trace to a slice: its squash, a
+  `git cherry-pick -x` of one, or a revert of one (merges of `main` aside). Anything else
+  stops the ship. After the last milestone, `epic/N` is deleted.
 - **One milestone at a time on the branch.** Only the earliest milestone that hasn't shipped
   is built: `next:` offers only its slices, and `claim` and `merge` refuse a later milestone's,
   so nothing unseen rides along to `main`. Once it's complete, new slices wait for its demo and
