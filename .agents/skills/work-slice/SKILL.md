@@ -134,6 +134,13 @@ about a minute and a half.
 
 ## 8. Codex rounds
 
+**First, does this slice get its own review?** `slice-status N` says `Codex review: on the PR`
+or `Codex review: with the milestone`. It comes from the slice's complexity label and
+`.sdlc/config.json`'s `slice_review` (here, routine slices are reviewed with their milestone;
+judgment, novel and unrated slices on their own PR). **With the milestone**: skip this
+section and go to §9. `merge` records that the review is owed, and Codex reviews the slice
+with its milestone, before the demo.
+
 Save the slice brief where Codex can read it, since its sandbox has no network:
 `gh issue view N --json title,body -q '.title + "\n\n" + .body' > <SCRATCH>/slice.md`. Fill
 `references/codex-pr-prompt.md` into `<SCRATCH>/prompt.md` and run Codex **from
@@ -147,6 +154,20 @@ cd <WORKTREE> && codex exec --sandbox read-only --skip-git-repo-check "$(cat <SC
 `< /dev/null` stops `codex exec` waiting on stdin forever. stderr is progress
 noise. If `codex.md` is empty, or has no `HEAD:` line or verdict, the run failed:
 read `codex.err` and run it again.
+
+**If Codex can't run, defer its review to the milestone.** "Can't run" means one of these:
+`codex` isn't on the PATH; it fails to sign in or says to log in; it reports a quota, usage or
+rate limit; a network error; it times out twice; or `codex.md` still has no `HEAD:` line after
+one retry. Then, with the failure copied from `codex.err`:
+
+```bash
+uv run python tools/sdlc.py review-defer PR --reason "<the error, verbatim>"
+```
+
+and go to §9. The deferral is bound to this head: a rebase needs a new one. It is refused
+after Codex has asked for changes that no later round approved; answer those findings
+and wait for Codex, or escalate. A slow review, or one you disagree with, is not
+"can't run".
 
 Answer every finding in `<SCRATCH>/response.md`, numbered like the findings:
 
@@ -189,7 +210,9 @@ cd <PRIMARY> && uv run python tools/sdlc.py cleanup N
 `merge` refuses unless all of these hold:
 
 - the PR closes exactly this one slice;
-- Codex's latest review of the **current head** approves;
+- Codex's latest review of the **current head** approves, or the slice's review is
+  owed to its milestone (a routine slice, or `review-defer` on this head). A review asking for
+  changes always blocks;
 - a passing test run is recorded on that head;
 - the PR targets `epic/E`, and its head is **not behind `epic/E`**;
 - the slice belongs to the epic's current milestone, the earliest one not yet shipped;
@@ -201,7 +224,8 @@ How to clear each refusal:
   this branch with it. Rebase:
   `git -C <WORKTREE> fetch origin epic/E && git -C <WORKTREE> rebase origin/epic/E`,
   then push with `--force-with-lease`. Then `test-record`, then a Codex round on
-  the new head. A rebase changes the head, which voids both records.
+  the new head (or a new `review-defer`, if Codex still can't run; nothing, for a slice
+  reviewed with its milestone). A rebase changes the head, which voids both records.
 - **Conflicts.** The same rebase, and resolve them.
 - **UNKNOWN.** GitHub is still computing mergeability after a push. Wait a few
   seconds and run `merge` again. Don't rebase.

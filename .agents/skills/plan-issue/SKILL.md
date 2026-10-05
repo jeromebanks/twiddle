@@ -87,7 +87,9 @@ Write `plan.json` in your scratchpad. The format is in `references/plan-schema.m
   needed when a task is bigger than one session.
 - **Rate each unit's complexity** (`routine`, `judgment`, `novel`, with a one-line
   reason; see the schema). You've read the PRD and the code it touches, so you're the
-  best placed to say. The rating picks the model that builds it.
+  best placed to say. The rating picks the model that builds it, and where Codex
+  reviews it: a `routine` slice gets no review of its own, only its milestone's, so
+  rate anything touching safety, a speaker write or the evidence path `judgment`.
 
 ```bash
 uv run python tools/sdlc.py plan-validate plan.json
