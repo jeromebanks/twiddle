@@ -41,9 +41,11 @@ uv run python tools/sdlc.py slice-check N          # add --resume when it says c
 - `ready`: carry on.
 - `claimed` or `in-review`: this is a resume. Use `claim N --resume` below, then pick
   up where the PR and its review comments left off.
+- `escalated`, and you were started as its retry on a stronger model: `claim N --retry
+  --model <you>` below, then pick up where the PR left off. Otherwise:
 - `blocked`, `escalated` or closed: report it and the `next` line, then stop.
-- `slice-check` says a milestone demo comes first: report it and stop. `/milestone-demo <epic>`
-  is next; a slice you already claimed can still be resumed.
+- `slice-check` says a milestone demo or release comes first, a later milestone waits, or the
+  cleanup pass comes first: report it and stop. A slice you already claimed can still be resumed.
 - `slice-check` complains about missing sections, or the brief can't be built as
   written: don't guess. Report it. Splitting or fixing a slice is a planning job.
 
@@ -172,9 +174,10 @@ uv run python tools/sdlc.py escalate-slice N --reason "<what is disputed, in a s
 
 Then report and stop. **If you ran on a cheaper model than the strongest one in
 `.sdlc/config.json`'s `models`**, say so in the reason: the coordinator's next move is
-to retry the slice once on the strongest model (it removes the `sdlc:escalated` label,
-`release`s the claim, and starts a fresh `/work-slice N` that claims with
-`--model <strongest>`), and only then hand it to a human.
+to retry the slice once on the strongest model: a fresh `/work-slice N` session on that
+model that claims with `claim N --retry --model <strongest>`. That lifts the escalation,
+keeps the branch, the worktree and the open PR, and gives its Codex rounds a fresh
+budget. A second escalation goes to a human (`--retry` refuses twice).
 
 ## 9. Merge and clean up
 
@@ -189,7 +192,7 @@ cd <PRIMARY> && uv run python tools/sdlc.py cleanup N
 - Codex's latest review of the **current head** approves;
 - a passing test run is recorded on that head;
 - the PR targets `epic/E`, and its head is **not behind `epic/E`**;
-- no other milestone of the epic is waiting for its demo or its release to `main`;
+- the slice belongs to the epic's current milestone, the earliest one not yet shipped;
 - GitHub says the PR is mergeable.
 
 How to clear each refusal:
@@ -202,9 +205,8 @@ How to clear each refusal:
 - **Conflicts.** The same rebase, and resolve them.
 - **UNKNOWN.** GitHub is still computing mergeability after a push. Wait a few
   seconds and run `merge` again. Don't rebase.
-- **Another milestone is waiting for its demo or release.** This slice was claimed
-  before that milestone finished. Leave the PR open and report it: it can merge
-  once that milestone ships (`/milestone-demo <epic>`).
+- **An earlier milestone hasn't shipped.** Leave the PR open and report it: it can merge
+  once that milestone ships (`state <epic>` says what it waits for).
 
 **Before merging, file what you're leaving behind**, so it isn't lost in PR text.
 That means the non-blocking findings from the Codex rounds, the ones the advisor

@@ -19,8 +19,9 @@ posted on the epic issue, with real screenshots, and ends with their answer:
 
 Slices land on the epic's branch, `epic/N`, so the demo shows `epic/N`, and `main`
 is the "before". While a milestone is complete but not yet accepted **and shipped**,
-**new slices of the epic wait**: `claim` refuses, `merge` refuses a slice of any
-other milestone, and `state`'s `next:` names this skill.
+**new slices of the epic wait**: `claim` refuses, and `state`'s `next:` names this skill.
+Only one milestone is ever on `epic/N` ahead of `main`: a later milestone's slices
+can't land until this one ships.
 
 - **`tools/sdlc.py` owns every post, label and push.** You run the demo, take the
   pictures, and write two markdown files.

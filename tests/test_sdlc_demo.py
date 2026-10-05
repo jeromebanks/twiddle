@@ -433,3 +433,31 @@ def test_a_demo_request_ends_when_the_milestone_goes_back_to_being_built():
     assert voided["demo_request"] is None and voided["action"] == "work_slices"
     other = derive(["sdlc:in-progress"], [REQUEST, comment(POSTER, "rang", 10), agent("demo-void", None, 11, milestone="M1")])
     assert other["action"] == "demo_heard"
+
+
+def test_tech_debt_waits_for_its_epics_cleanup_pass():
+    st = sdlc.derive_state({"number": 81, "title": "t", "state": "open", "author": OWNER, "labels": ["tech-debt"]},
+                           [], TRUSTED, CONFIG)
+    assert (st["turn"], st["plan_kind"]) == ("none", "debt")
+    assert sdlc.next_command(st).startswith("nothing: #81 is tech debt, planned by its epic's cleanup pass")
+    assert sdlc.check_transition(st, "triage", "note", CONFIG)
+
+
+def test_cleanup_slices_go_first():
+    pays = "## Pays down\n\n#81: tech debt filed against this epic."
+    leaves = [{"number": 40, "key": "A1", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": ""},
+              {"number": 44, "key": "C1", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": pays}]
+    p = sdlc.summarise_progress(leaves, {})
+    assert (p["ready"], p["cleanup_open"]) == ([44], [44])
+    epic = derive(["sdlc:in-progress"])
+    bundle = {"issue": {"number": 40, "body": sdlc.marker("slice", None, epic="12", key="A1"), "milestone": "#12 M2: x"},
+              "epic_state": epic, "epic_progress": p, "trusted": [OWNER]}
+    assert "the cleanup pass comes first: #44" in sdlc.epic_pause_errors(bundle, CONFIG, resume=False)
+    bundle["issue"] = {"number": 44, "body": sdlc.marker("slice", None, epic="12", key="C1") + "\n" + pays,
+                       "milestone": "#12 M2: x"}
+    assert sdlc.epic_pause_errors(bundle, CONFIG, resume=False) == []
+
+
+def test_only_svg_pictures_are_published(tmp_path):
+    d = _demo_dir(tmp_path, files={"list.svg": SHOT, "photo.png": ""})
+    assert any("photo.png: only .md, .svg files are published" in e for e in sdlc.demo_post_errors("![l](list.svg)", d))

@@ -160,9 +160,12 @@ def test_on_main():
 
 def test_carried_slices():
     leaves = [{"number": 28, "key": "T1.1", "milestone": "#12 M1: x"}, {"number": 31, "key": "T3.1", "milestone": "#12 M2: y"}]
-    prs = {28: merged_pr(HEAD, "epic/12"), 31: merged_pr(OLD, "epic/12")}
-    assert sdlc.carried_slices(leaves, prs, {HEAD}, {"M1"}) == []
-    assert sdlc.carried_slices(leaves, prs, {HEAD, OLD}, {"M1"}) == ["#31 T3.1 (M2)"]
+    prs = [{**merged_pr(HEAD, "epic/12"), "number": 55, "headRefName": "slice/28"},
+           {**merged_pr(OLD, "epic/12"), "number": 60, "headRefName": "slice/31"}]   # #31 may still be open
+    assert sdlc.carried_slices(prs, leaves, {HEAD}, {"M1"}) == []
+    assert sdlc.carried_slices(prs, leaves, {HEAD, OLD}, {"M1"}) == ["#31 T3.1 (M2)"]
+    stray = [{**merged_pr("c" * 40, "epic/12"), "number": 61, "headRefName": "hotfix"}]
+    assert sdlc.carried_slices(stray, leaves, {"c" * 40}, {"M1"}) == ["PR #61 (hotfix, not a slice of this epic)"]
 
 
 # --- the ship gate -----------------------------------------------------------------
@@ -238,15 +241,46 @@ def test_merge_gate_wants_the_epic_branch():
         {**pr, "baseRefName": "epic/12"}, issue, ok, ok, "epic/12", 3))
 
 
-def test_a_waiting_milestone_holds_back_other_milestones_slices():
+def test_only_the_earliest_unshipped_milestone_lands():
+    building = progress(ms("M1", 1, 3), ms("M2", 0, 4))
+    # even before M1 is complete (`create: all`), nothing of M2 may land: shipping M1 would carry it
+    assert "M2 waits: #12 M1: x is still being built" in sdlc.milestone_hold_errors(derive(), building, "#12 M2: y")[0]
     p = progress(ms("M1", 3, 3), ms("M2", 1, 4))
-    waiting = derive([DEMO1])
-    assert sdlc.milestone_hold_errors(waiting, p, "#12 M1: x") == []          # M1's own fix slices still land
-    assert "waiting for its demo" in sdlc.milestone_hold_errors(waiting, p, "#12 M2: y")[0]
-    unshipped = derive([DEMO1, ACCEPT1])
-    assert "release to main" in sdlc.milestone_hold_errors(unshipped, p, "#12 M2: y")[0]
+    for st in (derive([DEMO1]), derive([DEMO1, ACCEPT1])):        # waiting for its demo, or for its release
+        assert sdlc.milestone_hold_errors(st, p, "#12 M1: x") == []           # M1's own fix slices still land
+        assert sdlc.milestone_hold_errors(st, p, "#12 M2: y")
     shipped = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)])
     assert sdlc.milestone_hold_errors(shipped, p, "#12 M2: y") == []
+
+
+def test_next_offers_only_the_current_milestones_slices():
+    st = derive()
+    units = {30: {"key": "T1.3", "milestone": "M1"}, 35: {"key": "T4.1", "milestone": "M2"}}
+    p = {**progress(ms("M1", 2, 3), ms("M2", 0, 4), ready=(35,), in_flight=(30,)), "units": units}
+    assert sdlc.next_command(st, p).startswith("nothing new to start: in progress #30")
+    stuck = {**p, "in_flight": []}
+    assert sdlc.next_command(st, stuck).startswith("nothing ready in #12 M1: x: later milestones' slices wait")
+    assert sdlc.next_command(st, {**p, "ready": [30, 35], "in_flight": []}) == "/work-slice 30"
+
+
+def test_findings_after_acceptance_void_it_and_hold_the_release():
+    st = derive([DEMO1, ACCEPT1, agent("demo-changes", None, 13, milestone="M1", found="agent")])
+    assert not st["demos"]["M1"]["accepted"] and st["action"] == "plan"
+    with pytest.raises(sdlc.SdlcError, match="changes being planned"):
+        sdlc.ship_target(st, progress(ms("M1", 3, 3)))
+    fixed = derive([DEMO1, ACCEPT1, agent("demo-changes", None, 13, milestone="M1", found="agent"),
+                    agent("plan", 2, 14), agent("plan-review", 2, 15, verdict="approve"), agent("plan-created", 2, 16)])
+    with pytest.raises(sdlc.SdlcError, match="isn't accepted yet"):               # a new demo comes first
+        sdlc.ship_target(fixed, progress(ms("M1", 4, 4)))
+
+
+def test_an_interrupted_ship_is_recorded_from_its_merged_pr():
+    merged = [{"title": "Ship #12 M1: See every alarm", "mergeCommit": {"oid": HEAD}},
+              {"title": "Ship #13 M1: other epic", "mergeCommit": {"oid": OLD}},
+              {"title": "Ship #12 M2: Set alarms", "mergeCommit": {"oid": OLD}}]
+    assert sdlc.unrecorded_ships(merged, 12, {"M2": OLD}) == {"M1": HEAD}
+    done = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)])
+    assert sdlc.ship_target(done, progress(ms("M1", 3, 3), open_=0)) is None     # then `ship` finishes the epic
 
 
 def test_next_asks_for_a_sync_only_when_idle():
@@ -283,3 +317,214 @@ def test_revert_on_the_epic_worktree(repo):
     _git("push", "-q", "origin", "HEAD:refs/heads/epic/12", cwd=wt)
     wt = sdlc.epic_worktree(12, CONFIG, repo)                      # a fresh checkout of what was pushed
     assert not (wt / "bad.py").exists() and sdlc.is_ancestor(bad, "origin/epic/12", repo)
+
+
+# --- the commands themselves, GitHub stubbed, git real -----------------------------------
+
+class GitHub:
+    """Records every gh call and comment; answers the reads a test sets up."""
+
+    def __init__(self, monkeypatch, root=None):
+        self.calls, self.posted, self.labels = [], [], []
+        monkeypatch.setattr(sdlc, "gh", self.gh)
+        monkeypatch.setattr(sdlc, "post_comment", lambda n, body, cfg: self.posted.append((n, body)) or {"html_url": "u"})
+        monkeypatch.setattr(sdlc, "set_state_label", lambda n, cur, to, cfg: self.labels.append((n, to)))
+        monkeypatch.setattr(sdlc, "fetch_trusted", lambda cfg: {OWNER})
+        if root:
+            monkeypatch.setattr(sdlc, "primary_root", lambda: root)
+
+    def gh(self, args, check=True):
+        self.calls.append(args)
+        return ""
+
+    def kinds(self):
+        return [(n, sdlc.parse_marker(b)["kind"]) for n, b in self.posted]
+
+
+def epic_bundle(comments=(), labels=("sdlc:in-progress",)):
+    issue = {"number": 12, "title": "Alarm manager", "state": "open", "author": POSTER, "labels": list(labels)}
+    return {"issue": issue, "comments": HISTORY + list(comments), "trusted": [OWNER]}
+
+
+SLICE_BODY = sdlc.marker("slice", None, epic="12", key="T1.1") + "\nEpic: #12\n"
+
+
+def slice_issue(state="open", reason=None, body=SLICE_BODY, ms="#12 M1: x"):
+    return {"number": 28, "title": "#12 T1.1: t", "state": state, "state_reason": reason, "body": body,
+            "labels": ["plan:slice"], "assignees": [], "milestone": ms}
+
+
+def slice_pr(base="epic/12"):
+    return {"number": 50, "state": "OPEN", "isDraft": False, "baseRefName": base, "headRefName": "slice/28",
+            "headRefOid": HEAD, "mergeable": "MERGEABLE", "body": "Closes #28"}
+
+
+PR_RECORDS = [agent("tests", None, 1, sha=HEAD, result="pass", passed="9"),
+              agent("pr-review", None, 2, sha=HEAD, verdict="approve", round="1")]
+
+
+def stub_merge(monkeypatch, gh, reads, base="epic/12"):
+    seq = iter(reads)
+    monkeypatch.setattr(sdlc, "fetch_pr", lambda n, cfg: (slice_pr(base), PR_RECORDS))
+    monkeypatch.setattr(sdlc, "fetch_slice", lambda n, cfg: (next(seq), []))
+    monkeypatch.setattr(sdlc, "gh_json", lambda args: {"behind_by": 0})
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted=None: epic_bundle())
+    monkeypatch.setattr(sdlc, "epic_progress", lambda n, cfg, trusted: progress(ms("M1", 1, 3)))
+    monkeypatch.setattr(sdlc, "with_next", lambda st, cfg, offline=False, trusted=None: {**st, "next": "x", "progress": None})
+
+
+def test_merge_squashes_into_the_epic_then_closes_and_reads_back(monkeypatch, capsys):
+    gh = GitHub(monkeypatch)
+    stub_merge(monkeypatch, gh, [slice_issue(), slice_issue(), slice_issue("closed", "completed")])
+    assert sdlc.main(["merge", "50"]) == 0
+    assert ["pr", "merge", "50", "--repo", CONFIG["repository"], "--squash", "--match-head-commit", HEAD] in gh.calls
+    assert any(c[:3] == ["issue", "close", "28"] and "completed" in c for c in gh.calls)
+    assert "into epic/12; #28 closed" in capsys.readouterr().out
+
+
+def test_merge_fails_loudly_when_the_slice_wont_close(monkeypatch, capsys):
+    gh = GitHub(monkeypatch)
+    stub_merge(monkeypatch, gh, [slice_issue(), slice_issue(), slice_issue()])
+    assert sdlc.main(["merge", "50"]) == 1
+    assert "reads back open" in capsys.readouterr().err
+
+
+def test_merge_refuses_a_pr_aimed_at_main(monkeypatch, capsys):
+    gh = GitHub(monkeypatch)
+    stub_merge(monkeypatch, gh, [slice_issue()], base="main")
+    assert sdlc.main(["merge", "50"]) == 1
+    assert "PR targets main, not epic/12" in capsys.readouterr().err
+    assert not any(c[:2] == ["pr", "merge"] for c in gh.calls)
+
+
+def test_merge_closes_the_debt_a_cleanup_slice_pays_down(monkeypatch):
+    gh = GitHub(monkeypatch)
+    body = SLICE_BODY + "\n## Pays down\n\n#81, #84: tech debt filed against this epic.\n"
+    stub_merge(monkeypatch, gh, [slice_issue(body=body), slice_issue(body=body),
+                                 slice_issue("closed", "completed", body=body)])
+    assert sdlc.main(["merge", "50"]) == 0
+    closed = [c[2] for c in gh.calls if c[:2] == ["issue", "close"]]
+    assert closed == ["28", "81", "84"]
+
+
+def stub_revert(monkeypatch, repo, oid, comments=(), labels=("sdlc:in-progress",)):
+    monkeypatch.setattr(sdlc, "fetch_slice", lambda n, cfg: (slice_issue("closed", "completed"), []))
+    monkeypatch.setattr(sdlc, "find_slice_pr", lambda n, cfg: {"number": 50, "state": "MERGED", "baseRefName": "epic/12",
+                                                               "mergeCommit": {"oid": oid}})
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted=None: epic_bundle(comments, labels))
+
+
+def test_revert_slice_pushes_only_a_tested_revert(repo, monkeypatch, capsys):
+    gh = GitHub(monkeypatch, repo)
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    bad = commit_on_epic(repo, "bad.py", "bad = 1\n")
+    stub_revert(monkeypatch, repo, bad, [DEMO1, ACCEPT1])
+    monkeypatch.setattr(sdlc, "run_suite", FAIL)
+    assert sdlc.main(["revert-slice", "28"]) == 1
+    assert "nothing pushed" in capsys.readouterr().err
+    assert origin_sha(repo, "epic/12") == bad and gh.calls == [] and gh.posted == []
+    monkeypatch.setattr(sdlc, "run_suite", PASS)
+    assert sdlc.main(["revert-slice", "28", "--reason", "rang twice"]) == 0
+    head = origin_sha(repo, "epic/12")
+    assert head != bad and sdlc.is_ancestor(bad, head, repo)
+    assert not (sdlc.epic_worktree(12, CONFIG, repo) / "bad.py").exists()
+    assert ["issue", "reopen", "28", "--repo", CONFIG["repository"]] in gh.calls
+    assert gh.kinds() == [(28, "revert"), (28, "release"), (12, "epic-tests"), (12, "demo-void")]
+
+
+def test_revert_slice_refuses_what_has_shipped(repo, monkeypatch, capsys):
+    gh = GitHub(monkeypatch, repo)
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    on_main = _git("rev-parse", "HEAD", cwd=repo)
+    stub_revert(monkeypatch, repo, on_main)
+    assert sdlc.main(["revert-slice", "28"]) == 1
+    assert "already shipped to main" in capsys.readouterr().err and gh.calls == []
+
+
+def stub_ship(monkeypatch, comments, leaves, pr_base="main", merged_ships=()):
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted=None: epic_bundle(comments))
+    monkeypatch.setattr(sdlc, "fetch_plan_issues", lambda n, cfg, trusted: leaves)
+    monkeypatch.setattr(sdlc, "find_slice_pr", lambda n, cfg: {"number": 50 + n, "state": "MERGED", "baseRefName": pr_base,
+                                                               "mergeCommit": {"oid": f"{n:040d}"}})
+    monkeypatch.setattr(sdlc, "find_ship_pr", lambda n, cfg, state="open": list(merged_ships) if state == "merged" else [])
+    monkeypatch.setattr(sdlc, "with_next", lambda st, cfg, offline=False, trusted=None: {**st, "next": "x", "progress": None})
+
+
+def done_leaf(n, key, m="#12 M1: x"):
+    return {"kind": "slice", "number": n, "key": key, "state": "closed", "state_reason": "completed",
+            "labels": ["plan:slice"], "assignees": [], "milestone": m, "body": ""}
+
+
+def test_ship_records_a_milestone_already_on_main_without_merging(repo, monkeypatch, capsys):
+    gh = GitHub(monkeypatch, repo)
+    stub_ship(monkeypatch, [DEMO1, ACCEPT1], [done_leaf(28, "T1.1"), done_leaf(29, "T1.2"), done_leaf(31, "T3.1", "#12 M2: y")])
+    monkeypatch.setattr(sdlc, "reverted_on_main", lambda cfg, root=None: set())
+    assert sdlc.main(["ship", "12"]) == 0
+    assert "built straight onto main" in capsys.readouterr().out
+    assert gh.kinds() == [(12, "shipped")] and "noop=1" in gh.posted[0][1]
+    assert not any(c[:2] in (["pr", "merge"], ["pr", "create"]) for c in gh.calls)
+
+
+def test_ship_finishes_the_epic_and_can_finish_it_again(repo, monkeypatch, capsys):
+    gh = GitHub(monkeypatch, repo)
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    shipped = [DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)]
+    stub_ship(monkeypatch, shipped, [done_leaf(28, "T1.1")])
+    assert sdlc.main(["ship", "12"]) == 0           # the last ship's cleanup was interrupted: this finishes it
+    assert not sdlc.remote_has("epic/12", repo) and (12, "done") in gh.labels
+    assert any(c[:3] == ["issue", "close", "12"] for c in gh.calls)
+
+
+def test_ship_records_a_release_pr_that_merged_without_its_record(repo, monkeypatch, capsys):
+    gh = GitHub(monkeypatch, repo)
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    merged = [{"title": "Ship #12 M1: x", "mergeCommit": {"oid": HEAD}}]
+    stub_ship(monkeypatch, [DEMO1, ACCEPT1], [done_leaf(28, "T1.1")], pr_base="epic/12", merged_ships=merged)
+    assert sdlc.main(["ship", "12"]) == 0
+    assert gh.kinds() == [(12, "shipped")] and f"sha={HEAD}" in gh.posted[0][1]
+    assert (12, "done") in gh.labels
+
+
+def test_ship_stops_when_main_moves_before_the_merge(repo, monkeypatch, capsys):
+    gh = GitHub(monkeypatch, repo)
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    head = commit_on_epic(repo, "a.py", "a = 1\n")
+    records = [DEMO1, ACCEPT1, agent("epic-tests", None, 14, sha=head, result="pass", passed="9"),
+               agent("ship-review", None, 15, milestone="M1", sha=head, verdict="approve", round="1")]
+    stub_ship(monkeypatch, records, [done_leaf(28, "T1.1"), done_leaf(31, "T3.1", "#12 M2: y")], pr_base="epic/12")
+    monkeypatch.setattr(sdlc, "reverted_on_main", lambda cfg, root=None: set())
+    open_pr = {"number": 70, "headRefOid": head, "mergeable": "MERGEABLE", "title": "Ship #12 M1: x"}
+    monkeypatch.setattr(sdlc, "find_ship_pr", lambda n, cfg, state="open": [] if state == "merged" else [open_pr])
+    answers = {"pr list": [], "branches/main": {"commit": {"sha": "f" * 40}}}
+    monkeypatch.setattr(sdlc, "gh_json", lambda args: answers["pr list"] if args[:2] == ["pr", "list"] else answers["branches/main"])
+    assert sdlc.main(["ship", "12"]) == 1
+    assert "main moved during the ship" in capsys.readouterr().err
+    assert not any(c[:2] == ["pr", "merge"] for c in gh.calls) and gh.posted == []
+
+
+def test_ship_refuses_a_branch_carrying_a_later_milestone(repo, monkeypatch, capsys):
+    gh = GitHub(monkeypatch, repo)
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    later = commit_on_epic(repo, "m2.py", "m2 = 1\n")
+    records = [DEMO1, ACCEPT1, agent("epic-tests", None, 14, sha=later, result="pass", passed="9"),
+               agent("ship-review", None, 15, milestone="M1", sha=later, verdict="approve", round="1")]
+    stub_ship(monkeypatch, records, [done_leaf(28, "T1.1"), {**done_leaf(31, "T3.1", "#12 M2: y"), "state": "open"}],
+              pr_base="epic/12")
+    monkeypatch.setattr(sdlc, "reverted_on_main", lambda cfg, root=None: set())
+    into_epic = [{"number": 60, "headRefName": "slice/31", "mergeCommit": {"oid": later}}]   # its issue never closed
+    monkeypatch.setattr(sdlc, "gh_json", lambda args: into_epic)
+    assert sdlc.main(["ship", "12", "--dry-run"]) == 1
+    assert "carries slices of milestones that aren't accepted: #31 T3.1 (M2)" in capsys.readouterr().err
+
+
+def test_a_retry_gets_a_fresh_review_budget_once():
+    before = [agent("pr-review", None, i, sha=OLD, verdict="changes", round=str(i)) for i in range(1, 6)]
+    _, reviews = sdlc.pr_records(before + [agent("retry", None, 7, model="opus")], {OWNER})
+    assert sdlc.changes_rounds(reviews) == 0 and len(reviews) == 5
+    _, reviews = sdlc.pr_records(before + [agent("retry", None, 7, model="opus"),
+                                           agent("pr-review", None, 8, sha=HEAD, verdict="changes", round="6")], {OWNER})
+    assert sdlc.changes_rounds(reviews) == 1
+    escalated = {"number": 28, "state": "open", "labels": ["plan:slice", "sdlc:escalated"]}
+    assert sdlc.retry_errors(escalated, [], {OWNER}) == []
+    assert "already retried" in sdlc.retry_errors(escalated, [agent("claim", None, 1, retry="1", model="opus")], {OWNER})[0]
+    assert "isn't escalated" in sdlc.retry_errors({**escalated, "labels": ["plan:slice"]}, [], {OWNER})[0]

@@ -144,7 +144,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     `trusted` is who can write to the repo: their markers count, and (with the
     issue author) their keywords count.
     """
-    plan_kind = next((k for l, k in (("plan:slice", "slice"), ("plan:subtask", "subtask"))
+    plan_kind = next((k for l, k in (("plan:slice", "slice"), ("plan:subtask", "subtask"), (DEBT_LABEL, "debt"))
                       if l in issue.get("labels", [])), None)
     if plan_kind:
         # made by plan-create: built by work-slice (`slice-status`), never triaged
@@ -229,8 +229,10 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         elif kind == "demo-request":
             request = {"milestone": mk.get("milestone", NO_MILESTONE), "index": i, "url": c.get("url")}
         elif kind == "demo-changes" and mk.get("found") == "agent":
-            # the agent's own demo found the milestone broken: fix slices before any demo is posted
+            # the agent's own demo found the milestone broken: fix slices, then a new demo (an acceptance is void)
             feedback, feedback_plan, plan_rounds, plan_verdict = True, False, 0, None
+            if d := demos.get(mk.get("milestone", NO_MILESTONE)):
+                d["accepted"], d["voided"] = False, True
         elif kind == "demo" and rev is not None:
             m = mk.get("milestone", NO_MILESTONE)
             if request and request["milestone"] == m:
@@ -387,6 +389,8 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
     `progress` (from epic_progress) is needed for an epic whose slices are being built.
     """
     n, a = st["number"], st["action"]
+    if st.get("plan_kind") == "debt":
+        return f"nothing: #{n} is tech debt, planned by its epic's cleanup pass (remove `{DEBT_LABEL}` to triage it alone)"
     if st.get("plan_kind"):
         return f"`uv run python tools/sdlc.py slice-status {n}`"
     if a in TRIAGE_ACTIONS:
@@ -420,6 +424,13 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
         behind = progress.get("behind_main")
         if behind and not progress["ready"] and not progress["in_flight"]:
             return f"`uv run python tools/sdlc.py sync {n}`: {epic_branch(n)} is {behind} commit(s) behind main"
+        cur = current_milestone(st, progress)
+        units = progress.get("units") or {}
+        ready = [r for r in progress["ready"] if not cur or (units.get(r) or {}).get("milestone", cur["key"]) == cur["key"]]
+        if progress["ready"] and not ready and not progress["in_flight"]:
+            return (f"nothing ready in {cur['title']}: later milestones' slices wait until it ships "
+                    f"(its open units are blocked or escalated)")
+        progress = {**progress, "ready": ready}
         if progress["ready"]:
             first = progress["ready"][0]
             u = (progress.get("units") or {}).get(first) or {}
@@ -556,6 +567,7 @@ HEADERS = {
     "ship-review": "Codex review of the milestone",
     "shipped": "shipped to main",
     "revert": "reverted",
+    "retry": "retried on a stronger model",
 }
 FOOTERS = {
     "question": "Reply in a comment. Anything you leave unanswered, I will assume the stated default.",
@@ -756,8 +768,8 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
     trusted = fetch_trusted(config)
     out = []
     for raw in sorted(issues, key=lambda i: i["number"]):
-        if any(l["name"] in ("plan:slice", "plan:subtask") for l in raw.get("labels", [])):
-            continue   # an epic's units of work: reached through the epic's `next`
+        if any(l["name"] in ("plan:slice", "plan:subtask", DEBT_LABEL) for l in raw.get("labels", [])):
+            continue   # an epic's units of work, or its tech debt: reached through the epic's `next`
         st = bundle_state(fetch_bundle(raw["number"], config, trusted), config)
         if st["turn"] == "agent":
             out.append(with_next(st, config, trusted=trusted))
@@ -1743,18 +1755,35 @@ def claim_status(comments: list[dict[str, Any]], trusted: set[str]) -> dict[str,
 
 
 def pr_records(comments: list[dict[str, Any]], trusted: set[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """(test runs, Codex reviews) recorded on a pull request, oldest first."""
+    """(test runs, Codex reviews) recorded on a pull request, oldest first. Reviews before a `retry`
+    (a stronger model taking the slice over) are kept, but no longer spend the new attempt's budget."""
     tests, reviews = [], []
     for mk, c in _marked(comments, trusted):
         if mk.get("kind") == "tests":
             tests.append({"sha": mk.get("sha"), "result": mk.get("result"), "passed": mk.get("passed"), "url": c.get("url")})
         elif mk.get("kind") == "pr-review":
             reviews.append({"sha": mk.get("sha"), "verdict": mk.get("verdict"), "round": mk.get("round"), "url": c.get("url")})
+        elif mk.get("kind") == "retry":
+            for r in reviews:
+                r["before_retry"] = True
     return tests, reviews
 
 
 def changes_rounds(reviews: list[dict[str, Any]]) -> int:
-    return sum(1 for r in reviews if r.get("verdict") == "changes")
+    return sum(1 for r in reviews if r.get("verdict") == "changes" and not r.get("before_retry"))
+
+
+def retry_errors(issue: dict[str, Any], comments: list[dict[str, Any]], trusted: set[str]) -> list[str]:
+    """Why an escalated slice can't be retried on a stronger model (once only)."""
+    n = issue["number"]
+    if issue.get("state") != "open":
+        return [f"#{n} is closed"]
+    errs = []
+    if ESCALATED_LABEL not in issue.get("labels", []):
+        errs.append(f"#{n} isn't escalated: `claim {n}` or `claim {n} --resume`")
+    if any(mk.get("kind") == "claim" and mk.get("retry") for mk, _ in _marked(comments, trusted)):
+        errs.append(f"#{n} was already retried on a stronger model: it goes to a human now")
+    return errs
 
 
 def head_records(pr: dict[str, Any], tests: list[dict[str, Any]], reviews: list[dict[str, Any]]
@@ -1879,14 +1908,19 @@ def merge_gate_errors(pr: dict[str, Any], slice_issue: dict[str, Any] | None, te
     return errs
 
 
+def current_milestone(epic: dict[str, Any], progress: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The milestone being built: the earliest one not yet shipped. Only its slices may land on epic/N,
+    so shipping a milestone never carries a later one's work to main."""
+    shipped = epic.get("shipped") or {}
+    return next((m for m in (progress or {}).get("milestones", []) if m["key"] not in shipped), None)
+
+
 def milestone_hold_errors(epic: dict[str, Any], progress: dict[str, Any] | None, slice_milestone: str | None) -> list[str]:
-    """A slice of another milestone may not land on epic/N while a finished milestone waits for its demo or
-    its release: shipping epic/N would carry it to main unseen. That milestone's own fix slices may land."""
-    due = due_milestone(epic.get("demos") or {}, progress, epic.get("shipped")) if progress else None
-    if due and milestone_key(slice_milestone) != due["key"]:
-        why = "its release to main (`ship`)" if due["ship"] else "its demo"
-        return [f"{due['title']} is waiting for {why}: a slice of {milestone_key(slice_milestone)} can't land on "
-                f"{epic_branch(epic['number'])} until it ships"]
+    """A slice of a later milestone may not land on epic/N until every earlier milestone has shipped."""
+    cur = current_milestone(epic, progress)
+    if cur and milestone_key(slice_milestone) != cur["key"]:
+        return [f"{milestone_key(slice_milestone)} waits: {cur['title']} is still being built, shown or shipped, "
+                f"and only its slices land on {epic_branch(epic['number'])} until it ships"]
     return []
 
 
@@ -1897,12 +1931,19 @@ def parse_pytest_summary(text: str) -> tuple[int, int]:
     return num("passed"), num("failed") + num("errors?")
 
 
+def is_cleanup(leaf: dict[str, Any]) -> bool:
+    return bool(leaf_section(leaf.get("body", ""), "Pays down"))
+
+
 def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[dict[str, Any]]]) -> dict[str, Any]:
     """An epic's units of work: what can start, what is in flight, and each milestone's count."""
     ready, waiting = ready_leaves(leaves, blockers)
     escalated = [l["number"] for l in leaves if l.get("state") == "open" and ESCALATED_LABEL in l.get("labels", [])]
+    # a budgeted cleanup pass (slices that pay down tech debt) goes before anything else
+    cleanup_open = [l["number"] for l in leaves if l.get("state", "open") == "open" and is_cleanup(l)]
     by_order = lambda l: (natural_key(milestone_key(l.get("milestone"))), natural_key(l["key"]))  # noqa: E731
-    free = [l["number"] for l in sorted(ready, key=by_order) if not l.get("assignees") and l["number"] not in escalated]
+    free = [l["number"] for l in sorted(ready, key=by_order) if not l.get("assignees") and l["number"] not in escalated
+            and (not cleanup_open or l["number"] in cleanup_open)]
     in_flight = [l["number"] for l in ready + waiting if l.get("assignees") and l["number"] not in escalated]
     by_ms: dict[str, list[dict[str, Any]]] = {}
     for l in leaves:
@@ -1911,7 +1952,9 @@ def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[di
                    "done": sum(1 for l in ls if l.get("state") == "closed" and l.get("state_reason") == "completed")}
                   for t, ls in sorted(by_ms.items(), key=lambda kv: natural_key(milestone_key(kv[0])))]
     return {"ready": free, "in_flight": in_flight, "escalated": escalated,
-            "units": {l["number"]: {"key": l["key"], "complexity": l.get("complexity")} for l in leaves},
+            "units": {l["number"]: {"key": l["key"], "complexity": l.get("complexity"),
+                                    "milestone": milestone_key(l.get("milestone"))} for l in leaves},
+            "cleanup_open": cleanup_open,
             "waiting": [l["number"] for l in waiting if l["number"] not in in_flight],
             "open": sum(1 for l in leaves if l.get("state") == "open"), "milestones": milestones}
 
@@ -2026,11 +2069,18 @@ def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -
     if resume or not epic.isdigit():
         return []
     if "epic_state" in b:    # an offline bundle carries the epic's state and progress
-        return claim_pause_errors(b["epic_state"], b.get("epic_progress"))
-    trusted = set(b["trusted"])
-    st = bundle_state(fetch_bundle(int(epic), config, trusted), config)
-    progress = epic_progress(int(epic), config, trusted) if st["state"] in BUILD_STATES else None
-    return claim_pause_errors(st, progress)
+        st, progress = b["epic_state"], b.get("epic_progress")
+    else:
+        trusted = set(b["trusted"])
+        st = bundle_state(fetch_bundle(int(epic), config, trusted), config)
+        progress = epic_progress(int(epic), config, trusted) if st["state"] in BUILD_STATES else None
+    errs = claim_pause_errors(st, progress)
+    if progress and not errs:
+        errs += milestone_hold_errors(st, progress, b["issue"].get("milestone"))
+        cleanup = [n for n in progress.get("cleanup_open") or [] if n != b["issue"]["number"]]
+        if cleanup and not is_cleanup(b["issue"]):
+            errs.append("the cleanup pass comes first: " + ", ".join(f"#{n}" for n in cleanup))
+    return errs
 
 
 def command_slice_check(args: argparse.Namespace, config: dict[str, Any]) -> int:
@@ -2048,7 +2098,14 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
     n = args.number
     b = slice_bundle(n, config)
     claim = claim_status(b["comments"], set(b["trusted"]))
-    if errs := slice_check_errors(b["issue"], b["blockers"], claim, args.resume) + epic_pause_errors(b, config, args.resume):
+    if args.retry:
+        if not args.model:
+            raise SdlcError("--retry needs --model: the stronger model taking it over")
+        errs = retry_errors(b["issue"], b["comments"], set(b["trusted"]))
+        args.resume = True    # the branch, the worktree and the PR carry on
+    else:
+        errs = slice_check_errors(b["issue"], b["blockers"], claim, args.resume) + epic_pause_errors(b, config, args.resume)
+    if errs:
         raise SdlcError("; ".join(errs))
     root, wt, branch = primary_root(), worktree_path(n, config), slice_branch(n)
     epic = int((parse_marker(b["issue"]["body"]) or {})["epic"])
@@ -2073,7 +2130,16 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
         git(["worktree", "add", "-b", branch, str(wt), f"origin/{branch}"], cwd=root)
     else:
         git(["worktree", "add", "-b", branch, str(wt), f"origin/{base}"], cwd=root)
-    if not claim:
+    if args.retry:
+        gh(["issue", "edit", str(n), "--repo", repo_of(config), "--remove-label", ESCALATED_LABEL])
+        post_comment(n, render_comment("claim", None, f"Retrying on {args.model}: the slice escalated on a cheaper model. "
+                                       f"Carrying on in `{branch}`.", config, branch=branch, base=base, model=args.model,
+                                       retry="1"), config)
+        if b["pr"] and b["pr"].get("state") == "OPEN":
+            post_comment(b["pr"]["number"], render_comment("retry", None, f"{args.model} takes this over; its Codex rounds "
+                                                           "start a fresh budget.", config, model=args.model), config)
+        gh(["issue", "edit", str(n), "--repo", repo_of(config), "--add-assignee", "@me"], check=False)
+    elif not claim:
         model = {"model": args.model} if getattr(args, "model", None) else {}
         post_comment(n, render_comment("claim", None, f"Working on this in `{branch}`, from `{base}`"
                                        + (f", with {args.model}." if model else "."), config,
@@ -2350,20 +2416,33 @@ def on_main(prs: list[dict[str, Any] | None], reverted: set[str], main: str = "m
                              and ((p.get("mergeCommit") or {}).get("oid") or "") not in reverted for p in prs)
 
 
-def carried_slices(leaves: list[dict[str, Any]], prs: dict[int, dict[str, Any] | None], unreleased: set[str],
+def carried_slices(merged_prs: list[dict[str, Any]], leaves: list[dict[str, Any]], unreleased: set[str],
                    allowed: set[str]) -> list[str]:
-    """Merged slices whose squash commit is in main..epic/N (`unreleased`) but whose milestone isn't `allowed`."""
+    """Slice PRs merged into epic/N whose squash commit is in main..epic/N (`unreleased`) but whose milestone
+    isn't `allowed`. Read from the PRs, not the slice issues: a slice whose close failed after its squash
+    is still on the branch. A PR from a branch that isn't a known slice counts too."""
+    by_number = {l["number"]: l for l in leaves}
     out = []
-    for l in leaves:
-        oid = ((prs.get(l["number"]) or {}).get("mergeCommit") or {}).get("oid")
-        if oid and oid in unreleased and milestone_key(l.get("milestone")) not in allowed:
-            out.append(f"#{l['number']} {l['key']} ({milestone_key(l.get('milestone'))})")
+    for pr in merged_prs:
+        oid = (pr.get("mergeCommit") or {}).get("oid")
+        if not oid or oid not in unreleased:
+            continue
+        m = re.fullmatch(r"slice/(\d+)", pr.get("headRefName", ""))
+        leaf = by_number.get(int(m.group(1))) if m else None
+        if not leaf:
+            out.append(f"PR #{pr.get('number')} ({pr.get('headRefName')}, not a slice of this epic)")
+        elif milestone_key(leaf.get("milestone")) not in allowed:
+            out.append(f"#{leaf['number']} {leaf['key']} ({milestone_key(leaf.get('milestone'))})")
     return out
 
 
-def ship_target(st: dict[str, Any], progress: dict[str, Any], key: str | None = None) -> dict[str, Any]:
-    """The milestone `ship` releases: the earliest accepted one not yet shipped (milestones ship in order)."""
+def ship_target(st: dict[str, Any], progress: dict[str, Any], key: str | None = None) -> dict[str, Any] | None:
+    """The milestone `ship` releases: the earliest accepted one not yet shipped (milestones ship in order).
+    None when every milestone has shipped."""
     demos, shipped = st.get("demos") or {}, st.get("shipped") or {}
+    if st.get("feedback") or st.get("action") in PLAN_ACTIONS - {"plan_next_milestone"}:
+        raise SdlcError(f"#{st['number']} has changes being planned or built (action {st['action']}): "
+                        "they come before any release")
     for m in progress.get("milestones", []):
         if m["key"] in shipped:
             continue
@@ -2374,7 +2453,7 @@ def ship_target(st: dict[str, Any], progress: dict[str, Any], key: str | None = 
         if m["done"] != m["total"]:
             raise SdlcError(f"{m['title']} is not complete ({m['done']}/{m['total']} merged)")
         return m
-    raise SdlcError(f"#{st['number']}: every milestone has shipped")
+    return None
 
 
 def ship_gate_errors(st: dict[str, Any], key: str, head: str, synced: bool, carried: list[str]) -> list[str]:
@@ -2470,7 +2549,9 @@ def command_ship_review(args: argparse.Namespace, config: dict[str, Any]) -> int
         progress = epic_progress(args.number, config, set(bundle["trusted"]))
         head = epic_head(args.number, config)
     st = bundle_state(bundle, config)
-    key = ship_target(st, progress, args.milestone)["key"]
+    if not (target := ship_target(st, progress, args.milestone)):
+        raise SdlcError(f"#{st['number']}: every milestone has shipped")
+    key = target["key"]
     reviews = [r for r in st["ship_reviews"] if r["milestone"] == key]
     limit = config.get("max_pr_rounds", 5)
     if (spent := sum(1 for r in reviews if r["verdict"] == "changes")) >= limit:
@@ -2506,10 +2587,36 @@ def milestone_prs(leaves: list[dict[str, Any]], config: dict[str, Any]) -> dict[
             if l.get("state") == "closed" and l.get("state_reason") == "completed"}
 
 
-def find_ship_pr(n: int, config: dict[str, Any]) -> dict[str, Any] | None:
-    prs = gh_json(["pr", "list", "--repo", repo_of(config), "--head", epic_branch(n), "--base",
-                   config.get("default_branch", "main"), "--state", "open", "--json", PR_FIELDS]) or []
-    return prs[0] if prs else None
+def find_ship_pr(n: int, config: dict[str, Any], state: str = "open") -> list[dict[str, Any]]:
+    return gh_json(["pr", "list", "--repo", repo_of(config), "--head", epic_branch(n), "--base",
+                    config.get("default_branch", "main"), "--state", state, "--json", PR_FIELDS + ",title"]) or []
+
+
+SHIP_TITLE_RE = re.compile(r"\AShip #(\d+) (\S+):")
+
+
+def unrecorded_ships(merged: list[dict[str, Any]], n: int, shipped: dict[str, str]) -> dict[str, str]:
+    """Release PRs that merged without their `shipped` record (an interrupted `ship`): milestone -> merge commit."""
+    out = {}
+    for pr in merged:
+        m = SHIP_TITLE_RE.match(pr.get("title", ""))
+        sha = (pr.get("mergeCommit") or {}).get("oid")
+        if m and int(m.group(1)) == n and m.group(2) not in shipped and sha:
+            out[m.group(2)] = sha
+    return out
+
+
+def finish_epic(n: int, labels: list[str], config: dict[str, Any], root: Path) -> None:
+    """After the last ship: delete epic/N, drop its worktree, mark the epic done and close it. Safe to rerun."""
+    if remote_has(epic_branch(n), root):
+        git(["push", "-q", "origin", "--delete", epic_branch(n)], cwd=root)
+    wt = root / config.get("worktree_dir", ".worktrees") / f"epic-{n}"
+    if wt.exists():
+        git(["worktree", "remove", "--force", str(wt)], cwd=root)
+    if f"{PREFIX}done" not in labels:
+        set_state_label(n, labels, "done", config)
+    gh(["issue", "close", str(n), "--repo", repo_of(config), "--reason", "completed"], check=False)
+    print(f"#{n}: every milestone shipped: done, {epic_branch(n)} deleted")
 
 
 def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
@@ -2519,16 +2626,34 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
     bundle = fetch_bundle(n, config)
     trusted = set(bundle["trusted"])
     st = bundle_state(bundle, config)
-    if st["conflicts"] or st["state"] not in BUILD_STATES:
+    if st["conflicts"] or st["state"] not in BUILD_STATES | {"done"}:
         raise SdlcError(f"#{n} is {st['state']}: nothing to ship")
     records = fetch_plan_issues(n, config, trusted)
     leaves = [r for r in records if r["kind"] == "slice"]
     progress = summarise_progress(leaves, {})
+    shipped = {**st["shipped"]}
+    # a release PR that merged but whose record never got posted (an interrupted run): record it now
+    for key, sha in unrecorded_ships(find_ship_pr(n, config, "merged"), n, shipped).items():
+        print(f"#{n}: {key} merged to {main} earlier ({sha[:12]}) without its record" + (": would record it" if args.dry_run else ""))
+        if not args.dry_run:
+            post_comment(n, render_comment("shipped", None, f"**{key}** shipped to `{main}` (`{sha[:12]}`); "
+                                           "recorded after an interrupted `ship`.", config, milestone=key, sha=sha), config)
+        shipped[key] = sha
+    st = {**st, "shipped": shipped}
     m = ship_target(st, progress, args.milestone)
+    if m is None:
+        if not finished(progress, st.get("demos") or {}, shipped, st.get("uncreated_milestones")):
+            raise SdlcError(f"#{n}: every created milestone has shipped; the rest isn't built yet")
+        if args.dry_run:
+            print(f"#{n}: every milestone has shipped: would finish the epic (delete {epic_branch(n)}, done)")
+        elif st["state"] != "done" or remote_has(epic_branch(n), root):
+            finish_epic(n, bundle["issue"]["labels"], config, root)
+        else:
+            print(f"#{n}: already done")
+        return 0
     key = m["key"]
     mine = [l for l in leaves if (l.get("milestone") or "(no milestone)") == m["title"]]
-    prs = milestone_prs(leaves, config)
-    shipped = {**st["shipped"]}
+    prs = milestone_prs(mine, config)
     if on_main([prs.get(l["number"]) for l in mine], reverted_on_main(config, root), main):
         sha = git(["rev-parse", f"origin/{main}"], cwd=root)
         print(f"#{n}: {m['title']} was built straight onto {main} and is all there: nothing to merge")
@@ -2539,52 +2664,62 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
             raise SdlcError(f"origin has no {epic_branch(n)}: `epic-branch {n}`")
         git(["fetch", "-q", "origin", main, epic_branch(n)], cwd=root)
         head = git(["rev-parse", f"origin/{epic_branch(n)}"], cwd=root)
+        main_sha = git(["rev-parse", f"origin/{main}"], cwd=root)
         unreleased = set(git(["rev-list", f"origin/{main}..origin/{epic_branch(n)}"], cwd=root).split())
-        allowed = {k for k, d in (st.get("demos") or {}).items() if d.get("accepted")}
-        carried = carried_slices(leaves, prs, unreleased, allowed)
-        synced = is_ancestor(f"origin/{main}", head, root)
+        allowed = {k for k, d in (st.get("demos") or {}).items() if d.get("accepted") and k not in shipped}
+        into_epic = gh_json(["pr", "list", "--repo", repo, "--base", epic_branch(n), "--state", "merged",
+                             "--limit", "500", "--json", "number,headRefName,mergeCommit"]) or []
+        carried = carried_slices(into_epic, leaves, unreleased, allowed)
+        synced = is_ancestor(main_sha, head, root)
         if errs := ship_gate_errors(st, key, head, synced, carried):
             raise SdlcError("; ".join(errs))
         if args.dry_run:
             print(f"would open (or reuse) a pull request {epic_branch(n)} -> {main} and merge {head[:12]} with a merge commit")
             return 0
-        pr = find_ship_pr(n, config)
-        if not pr:
+        open_prs = find_ship_pr(n, config)
+        if not open_prs:
             body_pr = (f"Ships **{m['title']}** of #{n} to `{main}`: accepted at its demo, tested and reviewed on "
                        f"`{head[:12]}`.\n\nPart of #{n}. Created by `tools/sdlc.py ship`.")
             gh(["pr", "create", "--repo", repo, "--base", main, "--head", epic_branch(n),
                 "--title", f"Ship #{n} {key}: {m['title'].split(': ', 1)[-1]}", "--body", body_pr])
-            for _ in range(10):
-                pr = find_ship_pr(n, config)
-                if pr and pr.get("mergeable") != "UNKNOWN":
-                    break
-                time.sleep(3)
+        pr: dict[str, Any] | None = None
+        for _ in range(10):
+            pr = (find_ship_pr(n, config) or [None])[0]
+            if pr and pr.get("mergeable") != "UNKNOWN":
+                break
+            time.sleep(3)
         if not pr or pr["headRefOid"] != head:
             raise SdlcError(f"the release pull request isn't at {head[:12]}: run `ship {n}` again")
         if pr.get("mergeable") != "MERGEABLE":
             raise SdlcError(f"GitHub says PR #{pr['number']} is {pr.get('mergeable')}: `sync {n}`, then ship again")
+        # main must not have moved since the gate: the merge would hold commits the recorded run never saw.
+        # Checked again right before merging; GitHub can't hold main still, so the merge is checked after too.
+        now = gh_json(["api", f"repos/{repo}/branches/{main}"])["commit"]["sha"]
+        if now != main_sha:
+            raise SdlcError(f"{main} moved during the ship ({main_sha[:12]} -> {now[:12]}): `sync {n}`, then ship again")
         gh(["pr", "merge", str(pr["number"]), "--repo", repo, "--merge", "--match-head-commit", head])
         merged = gh_json(["pr", "view", str(pr["number"]), "--repo", repo, "--json", "state,mergeCommit"])
         if merged.get("state") != "MERGED":
             raise SdlcError(f"PR #{pr['number']} did not merge")
         sha = merged["mergeCommit"]["oid"]
+        parents = [x["sha"] for x in gh_json(["api", f"repos/{repo}/commits/{sha}"]).get("parents", [])]
         body = f"**{m['title']}** shipped to `{main}` in #{pr['number']} (merge `{sha[:12]}` of `{epic_branch(n)}` at `{head[:12]}`)."
         extra = {}
+        if parents[:1] != [main_sha]:
+            body += (f"\n\n**{main} moved during the merge** (it was `{main_sha[:12]}`), so this merge holds commits the "
+                     "recorded test run never saw. Run the suite on main now.")
+            extra = {"untested": "1"}
     if args.dry_run:
         print(f"would record {key} as shipped at {sha[:12]}")
         return 0
     shipped[key] = sha
     post_comment(n, render_comment("shipped", None, body, config, milestone=key, sha=sha, **extra), config)
     print(f"#{n}: {key} shipped ({sha[:12]})")
+    if extra.get("untested"):
+        escalate_epic(n, f"{main} moved while {key} shipped: run the suite on {main} (`{sha[:12]}`)", config)
+        return 1
     if finished(summarise_progress(leaves, {}), st.get("demos") or {}, shipped, st.get("uncreated_milestones")):
-        if remote_has(epic_branch(n), root):
-            git(["push", "-q", "origin", "--delete", epic_branch(n)], cwd=root)
-        wt = root / config.get("worktree_dir", ".worktrees") / f"epic-{n}"
-        if wt.exists():
-            git(["worktree", "remove", "--force", str(wt)], cwd=root)
-        set_state_label(n, bundle["issue"]["labels"], "done", config)
-        gh(["issue", "close", str(n), "--repo", repo, "--reason", "completed"])
-        print(f"#{n}: every milestone shipped: done, {epic_branch(n)} deleted")
+        finish_epic(n, bundle["issue"]["labels"], config, root)
         return 0
     st = with_next(bundle_state(fetch_bundle(n, config, trusted), config), config, trusted=trusted)
     print(f"next: {st['next']}")
@@ -2663,7 +2798,7 @@ def command_revert_slice(args: argparse.Namespace, config: dict[str, Any]) -> in
 # household ID, an address or a secret.
 
 DEMO_BRANCH = "sdlc-demos"
-DEMO_EXTS = {".svg", ".png", ".md"}
+DEMO_EXTS = {".svg", ".md"}   # pictures are demo_shot SVGs, whose text the blank-picture check can read
 DEMO_FILE_LIMIT = 2_000_000
 IDENTIFIERS = [
     ("an IP address", re.compile(r"\b(?!127\.0\.0\.1\b|0\.0\.0\.0\b)(?:\d{1,3}\.){3}\d{1,3}\b")),
@@ -2975,6 +3110,8 @@ def record_agent_findings(args: argparse.Namespace, bundle: dict[str, Any], st: 
     n, key = st["number"], args.milestone
     if not key:
         raise SdlcError("--found needs --milestone: the milestone the demo found broken")
+    if key in (st.get("shipped") or {}):
+        raise SdlcError(f"{key} has shipped to main: file what's wrong with `file-issue {n}` instead")
     if st["conflicts"] or st["state"] not in BUILD_STATES | {"demo-review"}:
         raise SdlcError(f"#{n} is {st['state']}: no milestone is being demoed")
     if st.get("feedback"):
@@ -3134,6 +3271,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("number", type=int)
     p.add_argument("--resume", action="store_true", help="reattach to this slice's existing claim and branch")
     p.add_argument("--model", help="the model building it (recorded on the claim)")
+    p.add_argument("--retry", action="store_true",
+                   help="once: an escalated slice taken over by a stronger --model, keeping its branch and PR")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_claim)
 

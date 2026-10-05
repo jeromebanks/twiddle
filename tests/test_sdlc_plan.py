@@ -352,7 +352,7 @@ def test_the_model_comes_from_the_config():
     leaves = [{"number": 30, "key": "T1", "state": "open", "assignees": [], "labels": ["plan:slice", "complexity:routine"],
                "complexity": "routine", "milestone": None}]
     p = sdlc.summarise_progress(leaves, {})
-    assert p["units"][30] == {"key": "T1", "complexity": "routine"}
+    assert p["units"][30] == {"key": "T1", "complexity": "routine", "milestone": "all"}
     p["units"][30]["model"] = sdlc.model_for("routine", cfg)
     epic = {"number": 12, "action": "work_slices", "state": "in-progress", "conflicts": []}
     assert sdlc.next_command(epic, p) == "/work-slice 30 (haiku: routine)"

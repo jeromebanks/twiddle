@@ -45,8 +45,15 @@ main ──●────────────────────●─
   with a merge commit. It needs `epic/N` to contain `main`, a passing run and Codex's approval of
   the milestone's diff (`ship-review`), both on the head that ships, and no slice of an unaccepted
   milestone on the branch. After the last milestone, `epic/N` is deleted.
-- Until a finished milestone has shipped, new slices of the epic wait, and `merge` refuses a
-  slice of any other milestone, so nothing unseen rides along to `main`.
+- **One milestone at a time on the branch.** Only the earliest milestone that hasn't shipped
+  is built: `next:` offers only its slices, and `claim` and `merge` refuse a later milestone's,
+  so nothing unseen rides along to `main`. Once it's complete, new slices wait for its demo and
+  its release. `ship` also refuses while changes are being planned or built, or a release PR
+  would carry a merged slice of an unaccepted milestone (read from the PRs into `epic/N`).
+- `ship` checks `main` again right before it merges, and after. A `main` that moved in between
+  escalates, because the merge then holds commits the recorded run never saw. Rerunning `ship`
+  records a release PR that merged without its record, and finishes an epic whose last ship
+  was cut short.
 
 **What to run next is always printed:** `uv run python tools/sdlc.py state N` (or `next`)
 ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every skill ends its report with it.
@@ -163,7 +170,8 @@ checks). It becomes a `complexity:<level>` label and a line in the slice, and
 `.sdlc/config.json`'s `models` maps it to the model that builds it: `next:` says e.g.
 `/work-slice 29 (sonnet: routine)`. `plan-annotate N` backfills ratings onto an epic
 created before them. A slice that escalates on a cheaper model is retried once on the
-strongest before a human gets it.
+strongest before a human gets it: `claim N --retry --model <strongest>` lifts the
+escalation, keeps the branch and PR, and gives the retry a fresh Codex budget.
 
 ## Building (`work-slice`)
 
@@ -194,7 +202,7 @@ several can run at once. A slice's state is read off GitHub:
 When every unit of work in a milestone has merged (for an epic without milestones,
 every unit), the poster sees it working. **New slices of the epic wait** until they
 accept it and it ships: `next:` says `/milestone-demo N` and `claim` refuses. Slices
-already claimed can finish, but `merge` holds back any of another milestone.
+already claimed of the same milestone can finish; nothing of a later milestone lands.
 
 1. The agent runs the milestone's demo steps. Read-only and `--dry-run` steps run
    freely. A real speaker write is never run by the agent: it asks on the issue
