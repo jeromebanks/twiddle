@@ -395,7 +395,8 @@ and records it, and pushes only on a pass. A conflict or a failure goes to a hum
   It rechecks <code>main</code> right before merging, and checks the merge afterwards. If <code>main</code> moved in that moment,
   the release is marked untested and the epic is escalated. Nothing more happens until <code>verify-main N</code>
   passes on <code>main</code>.</li>
-<li>A milestone built before epic branches existed, straight onto <code>main</code>, ships as a recorded no-op.</li>
+<li>A milestone built before epic branches existed, straight onto <code>main</code>, ships as a recorded no-op, with no sync and
+no Codex review: nothing of it is on the branch, so a review would judge a later milestone's code.</li>
 </ul>
 
 <h2 id="findings">8. Problems found along the way</h2>
