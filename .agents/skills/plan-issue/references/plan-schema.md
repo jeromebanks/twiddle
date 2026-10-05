@@ -56,6 +56,11 @@ Two optional top-level fields:
   from M1`, and is required on every revision after a milestone was created while
   others are still to come.
 
+A cleanup pass (`plan-issue --cleanup`) adds `"cleanup_of": "M1"`, the accepted
+milestone whose tech debt it pays down. Its new slices carry `"debt": [81, 84]`,
+the `tech-debt` issues they close (rendered as a `Pays down` section; `merge`
+closes them). It adds at most `cleanup_slices_per_milestone` new slices.
+
 ## Rules the validator enforces
 
 - `issue` is the epic (the triaged issue itself). `kind` is `feature` or `bug`.

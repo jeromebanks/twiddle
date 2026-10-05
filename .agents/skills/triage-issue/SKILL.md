@@ -99,8 +99,9 @@ Use `references/diagnosis-template.md`.
 
 - Reproduce with **read-only commands and `--dry-run` only**, or a scratch
   test that touches no network or speaker. Never run a writing command against
-  a real speaker without asking the user in this session, and never assume what
-  is playing.
+  a real speaker, and never assume what is playing. If only a write would
+  reproduce it, ask the poster on the issue (step 3) to run it, with its
+  `--dry-run` output and the `snapshot`/`restore` bracket.
 - Can't reproduce and the report is thin -> ask (step 3).
 - Can't reproduce because the environment isn't available (a particular speaker,
   an OS) -> read the code and list candidate root causes with `file:line`, saying plainly that it is unreproduced.

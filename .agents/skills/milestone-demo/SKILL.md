@@ -27,8 +27,12 @@ other milestone, and `state`'s `next:` names this skill.
 - **The demo branch is public.** `demo-post` refuses anything that looks like an IP,
   a MAC or serial, a Sonos player or household ID, or a secret. `demo_shot.py`
   masks them as it draws. Still, look at every picture before you publish.
-- **Never invent an outcome.** Whether an alarm rang, or how it sounded, is what the
-  user tells you, not what a command printed.
+- **Never invent an outcome.** Whether an alarm rang, or how it sounded, is what a
+  person tells you, not what a command printed.
+- **People are reached only through the issue.** This skill may run with nobody in
+  the chat (an orchestrator), so never ask a question in the session and never wait
+  for an OK there. Steps only a person can run go in a `demo-request` comment, and
+  their reply on the issue is what you act on.
 
 `/milestone-demo [N]`. With no `N`, take the first `/milestone-demo` line of
 `uv run python tools/sdlc.py next`.
@@ -56,6 +60,7 @@ uv run python tools/sdlc.py demo-status N          # --json for the full brief
 | `record_demo_acceptance` | the poster said `/approve`: step 8, then step 10 |
 | `next` says `... is accepted; ship it` | step 10 |
 | `demo_reply` | the poster replied: step 9 |
+| `demo_heard` | someone answered your `demo-request`: step 3 (record what they heard), then steps 4-7 |
 | `turn` is `poster` | the demo is waiting on them: report it and stop |
 | anything else | report the `next:` line and stop |
 
@@ -67,7 +72,7 @@ script of the steps, each one tagged:
 
 - **read-only**: you run it, e.g. `alarm list`, `np`, `stations probe`, or a TUI that you only look at;
 - **dry-run**: you run it, e.g. `alarm add ... --dry-run`;
-- **write**: something fires on a real speaker. You run it only with the user present, and only after they say yes.
+- **write**: something fires on a real speaker. You never run it: a person does, asked on the issue (step 3).
 
 For each step, plan the picture that shows it. A **bug fix** shows **before and
 after**: the same command at `before` and at `after`, captured one right
@@ -77,37 +82,51 @@ from the plan (compare the slices' Outcomes with the PRs).
 
 Have the `advisor` check the script.
 
-## 3. Run it with the user
+## 3. Run the steps
 
-You're in the session with the person running it. They may not be the poster.
+- Read-only and `--dry-run` steps: run them yourself.
+- **Writes** (anything that fires on a real speaker) are never run by you. Several
+  ask for confirmation at a terminal (`alarm rm` asks twice; with no terminal the
+  answer is no), and nobody may be watching. Ask for them **on the issue**, all at
+  once, in `<SCRATCH>/request.md`. For each step give:
+  1. what it shows, in the poster's terms;
+  2. its `--dry-run` output, which you ran;
+  3. the bracket: `uv run twiddle snapshot --room <room>` (and `uv run twiddle alarm
+     snapshot` if alarms change) before, then `uv run twiddle restore --room <room>`
+     (and `alarm restore`) after;
+  4. the command to run;
+  5. "reply with what you heard and saw".
 
-- Read-only and `--dry-run` steps: run them.
-- **Writes**, one at a time. **The user runs them, not you**: several ask
-  for confirmation at a terminal (`alarm rm` asks twice, and with no terminal
-  the answer is no), and your shell has none.
-  1. Before the first write, the user runs `! uv run twiddle snapshot --room <room>` (and
-     `! uv run twiddle alarm snapshot` if alarms change).
-  2. You run the step with `--dry-run` and show them what it will do.
-  3. They run the real command themselves, as `! uv run twiddle ...`, so it lands in
-     this session.
-  4. Afterwards, ask what they heard or saw, and record it:
-     `uv run python tools/observe.py add --heard "<their words>"`.
-  5. When done, they restore: `! uv run twiddle restore --room <room>`, then
-     `alarm restore --dry-run` (you can run that), then `! uv run twiddle alarm restore`.
+  ```bash
+  uv run python tools/sdlc.py demo-request N --milestone M2 --body-file <SCRATCH>/request.md
+  ```
 
-  The pictures of a write are its `--dry-run` and the read-only state afterwards
-  (e.g. `alarm list`), never the write itself.
-- If the user isn't available for writes, demo what you can and say plainly which
-  steps weren't shown and why. Never fake one.
-- If a step fails, that's a finding, not something to hide. Note it for "Known gaps",
-  or stop and report if the milestone clearly doesn't work.
+  The epic then waits on a person (`state` says `wait_for_poster`). Carry on with the
+  read-only pictures if you like, then stop and report. When someone replies,
+  `state` says `demo_heard` and this skill runs again. Record their words with
+  `uv run python tools/observe.py add --heard "<their words>"`, quote them in the
+  demo, and take the read-only pictures of the state afterwards (e.g. `alarm list`).
+  The pictures of a write are its `--dry-run` and the state afterwards, never the write itself.
+- If nobody is going to run the writes (an unattended run with no request
+  wanted), demo what you can and say plainly in the demo which steps weren't
+  shown and why. Never fake one.
+- **What the demo finds** is sorted, never just reported:
+
+  | Finding | What to do |
+  |---|---|
+  | **Broken:** a demo step, or an acceptance criterion of this milestone, fails | Post **no** demo. `uv run python tools/sdlc.py demo-changes N --found --milestone M --body-file <SCRATCH>/found.md` (plain words, one bullet each). **Next:** `/plan-issue N` plans fix slices, each with an offline test that reproduces it; when they merge, the demo runs again. |
+  | **Non-blocking:** cosmetic, or an edge the poster isn't asked to check | `uv run python tools/sdlc.py file-issue N --debt --source demo --title "..." --body-file <SCRATCH>/x.md`, then list it under "Not done yet" with its number. |
+  | **Out of scope:** a bug that already existed, or one in an unrelated feature | The same without `--debt`: a new issue for `triage-issue`. Mention it in the demo. |
+  | **Environment:** network, a station down, a speaker asleep | Retry. If it still fails, say plainly what couldn't be shown. |
+
+  "Broken" means anything the plan promised for this milestone fails.
 
 ## 4. Take the pictures
 
 Put everything in `<SCRATCH>/demo/` (your scratchpad), not in the repo. **Every file
 in it is published**, so nothing else goes there. `demo_shot.py` takes **read-only and
 `--dry-run` commands only**: it runs what it's given, and a command's prompt would end
-up in the picture instead of in front of the user.
+up in the picture instead of in front of a person.
 
 
 ```bash
@@ -144,14 +163,20 @@ uv run python tools/demo_shot.py tui --out-dir <SCRATCH>/demo \
   `references/demo-comment.md`. Images and links are relative (`![...](alarms.svg)`,
   `[the full write-up](README.md)`): `demo-post` points them at the published commit.
 
-## 6. Show the user, then publish
+## 6. Publish
 
 ```bash
 uv run python tools/sdlc.py demo-post N --milestone M1 --dir <SCRATCH>/demo --body-file <SCRATCH>/comment.md --dry-run
 ```
 
-Show the user the comment and the pictures. **Publishing to a public branch is
-permanent**, so wait for their OK. Then run it again without `--dry-run`:
+**Publishing to a public branch is permanent.** The gate is `demo-post`'s own checks:
+nothing that looks like an address, a device or household ID or a secret, the size
+limits, every link pointing at a file in the folder, and **no blank picture** (an SVG
+with almost no text: a mid-load screen, or a command that printed nothing). You
+checked every picture yourself in step 4. The poster's review of the posted demo is
+the human check. With `--preview` (`/milestone-demo N --preview`) or
+`"confirm_before_posting": true` in the config, show the person in the session the
+`--dry-run` first. That's an opt-in, never the default. Then run it again without `--dry-run`:
 
 - it commits the folder to `sdlc-demos` under `epic-N/M1/rev-K/` (its own worktree);
 - it pushes, and pins every link to that commit;
@@ -164,7 +189,8 @@ If they don't, report it rather than carrying on.
 
 - The milestone, and the link to the demo.
 - What was shown, what wasn't, and why.
-- What the user heard (their words).
+- What people heard (their words, from the issue).
+- The issues you filed (debt and new ones).
 - **Next:** `nothing: waiting on the poster to reply on #N`.
 
 ## 8. The poster approved

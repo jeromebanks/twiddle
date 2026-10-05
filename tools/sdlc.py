@@ -46,6 +46,7 @@ poster a plain-language question (`kind=question phase=plan`).
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import re
 import shutil
@@ -80,8 +81,8 @@ PLAN_ACTIONS = {"plan", "continue_plan", "create_plan_issues", "ask_poster", "re
 # Planning comments: posted by plan-post / plan-review / plan-create, never by `transition`.
 PLAN_KINDS = {"plan", "plan-review", "plan-created"}
 # Milestone demos (milestone-demo), also kept out of DOC_KINDS: a demo never voids the PRD's sign-off.
-DEMO_KINDS = {"demo", "demo-approval", "demo-changes"}
-DEMO_ACTIONS = {"record_demo_acceptance", "demo_reply"}
+DEMO_KINDS = {"demo", "demo-approval", "demo-changes", "demo-request"}
+DEMO_ACTIONS = {"record_demo_acceptance", "demo_reply", "demo_heard"}
 NO_MILESTONE = "all"     # an epic planned without milestones has one demo, for all of it
 # from-state -> states the triage skill may move to. `escalated` is open from anywhere.
 TRANSITIONS = {
@@ -183,6 +184,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     feedback_plan = False     # a plan revision posted since that feedback
     plan_body = ""            # the latest plan revision's comment: its milestones and create mode
     created: set[str] | None = set()   # milestones whose issues exist (None: all of them, a legacy marker)
+    request: dict[str, Any] | None = None   # a demo step only a person can run, asked for on the issue
+    cleanups: set[str] = set()              # milestones whose tech-debt cleanup has been planned
     plan_after_created = False         # a plan revision posted since the last plan-created: an amendment
     for i, c in enumerate(ordered):
         mk = parse_marker(c.get("body", "")) if c.get("author") in trusted else None
@@ -213,14 +216,23 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
                 plan_verdict = mk.get("verdict")
         elif kind == "plan-created":
             feedback = feedback_plan = plan_after_created = False
+            if mk.get("cleanup"):
+                cleanups.add(mk["cleanup"])
             plan_rounds = 0   # the next amendment (a milestone's replan, demo changes) gets fresh rounds
             if "created" in mk:
                 if created is not None:
                     created |= {x for x in mk["created"].split(",") if x}
             else:
                 created = None
+        elif kind == "demo-request":
+            request = {"milestone": mk.get("milestone", NO_MILESTONE), "index": i, "url": c.get("url")}
+        elif kind == "demo-changes" and mk.get("found") == "agent":
+            # the agent's own demo found the milestone broken: fix slices before any demo is posted
+            feedback, feedback_plan, plan_rounds, plan_verdict = True, False, 0, None
         elif kind == "demo" and rev is not None:
             m = mk.get("milestone", NO_MILESTONE)
+            if request and request["milestone"] == m:
+                request = None
             latest_demo = demos[m] = {"milestone": m, "rev": rev, "id": c.get("id"), "url": c.get("url"),
                                       "sha": mk.get("sha"), "accepted": False, "changes": False}
         elif kind in ("demo-approval", "demo-changes") and rev is not None:
@@ -243,6 +255,10 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
 
     replies = [c for c in ordered[last_marked + 1:] if c.get("id") not in marked_ids]
     allowed = trusted | {issue.get("author", "")}
+    if request:   # what the person who ran the steps said, since the request (a later agent comment doesn't hide it)
+        request["replies"] = [{"id": c.get("id"), "by": c.get("author"), "url": c.get("url")}
+                              for c in ordered[request["index"] + 1:]
+                              if c.get("id") not in marked_ids and c.get("author") in allowed]
     decision: dict[str, Any] | None = None
     ignored: list[dict[str, str]] = []
     for c in replies:
@@ -309,6 +325,9 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
             action = "ask_poster"
         else:
             action = "continue_plan"
+    elif state in BUILD_STATES and request:
+        # a demo step that writes to a speaker, asked for on the issue: whoever runs it replies there
+        turn, action = ("agent", "demo_heard") if request["replies"] else ("poster", "wait_for_poster")
     elif state in BUILD_STATES:
         turn, action = "agent", "work_slices"   # whether a slice is ready needs GitHub: see epic_progress
     elif state == "demo-review":
@@ -354,6 +373,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "plan_verdict": plan_verdict, "plan_rounds": plan_rounds, "max_plan_rounds": max_plan_rounds,
         "demos": demos, "latest_demo": latest_demo, "feedback": feedback,
         "shipped": shipped, "ship_reviews": ship_reviews, "epic_tests": epic_tests,
+        "demo_request": request, "cleanups": sorted(cleanups),
         "planned_milestones": planned_ms, "created_milestones": sorted(created_ms, key=natural_key),
         "uncreated_milestones": uncreated, "create_mode": latest_plan_json.get("create") or config.get("create", "milestone"),
     }
@@ -375,7 +395,10 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
         if (due := due_milestone(st.get("demos") or {}, progress, st.get("shipped"))) and due["ship"]:
             return f"/milestone-demo {n}: {due['key']} is accepted; ship it to main, then plan the next milestone"
     if a == "plan_next_milestone":
-        return f"/plan-issue {n}: plan {st['uncreated_milestones'][0]} with what earlier milestones taught"
+        debt = (progress or {}).get("debt") or []
+        return (f"/plan-issue {n}: plan {st['uncreated_milestones'][0]} with what earlier milestones taught"
+                + (f" (and up to {progress['cleanup_budget']} of its {len(debt)} tech-debt issue(s))"
+                   if debt and (progress or {}).get("cleanup_budget") else ""))
     if a in PLAN_ACTIONS:
         return f"/plan-issue {n}"
     if a == "wait_for_poster":
@@ -389,6 +412,9 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
             if due["ship"]:
                 return f"/milestone-demo {n}: {due['key']} is accepted; ship it to main (new slices wait)"
             return f"/milestone-demo {n}: {done_phrase(due)}, and new slices wait for its demo"
+        if cm := cleanup_due(st, progress):
+            return (f"/plan-issue {n} --cleanup: {cm} is accepted and #{n} has {len(progress['debt'])} open tech-debt "
+                    f"issue(s); plan up to {progress['cleanup_budget']} before the next milestone's slices")
         behind = progress.get("behind_main")
         if behind and not progress["ready"] and not progress["in_flight"]:
             return f"`uv run python tools/sdlc.py sync {n}`: {epic_branch(n)} is {behind} commit(s) behind main"
@@ -407,6 +433,25 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
     if st["state"] in LATER_STATES:
         return f"nothing: #{n} is {st['state']}"
     return "nothing: the issue is closed" if a == "none" else f"? (action {a})"
+
+
+def cleanup_due(st: dict[str, Any], progress: dict[str, Any]) -> str | None:
+    """The accepted milestone whose tech-debt cleanup is still to plan, before the next milestone's slices.
+
+    Only with open debt, a budget, and a next milestone to put the cleanup slices in (after the
+    last one, the debt stays filed for triage).
+    """
+    if not progress.get("debt") or not progress.get("cleanup_budget"):
+        return None
+    keys = [m["key"] for m in progress.get("milestones", [])]
+    keys += [k for k in st.get("planned_milestones") or [] if k not in keys]
+    demos = st.get("demos") or {}
+    for i, k in enumerate(keys[:-1]):
+        if (demos.get(k) or {}).get("accepted") and k not in (st.get("cleanups") or []):
+            later = keys[i + 1:]
+            if not any((demos.get(x) or {}).get("accepted") for x in later):
+                return k
+    return None
 
 
 def milestone_key(title: str | None) -> str:
@@ -503,6 +548,7 @@ HEADERS = {
     "demo-approval": "milestone accepted",
     "demo-changes": "changes requested",
     "demo-void": "demo voided",
+    "demo-request": "demo steps for you to run",
     "epic-branch": "epic branch",
     "epic-tests": "test run on the epic branch",
     "ship-review": "Codex review of the milestone",
@@ -515,6 +561,8 @@ FOOTERS = {
     "diagnosis": "Reply `/approve` to sign off on this diagnosis, `/changes <what>` to ask for changes, or just comment.",
     "demo": ("Reply `/approve` to accept this milestone, `/changes <what>` to ask for something different, "
              "or just ask a question."),
+    "demo-request": ("Run them when you can, then reply here with what you heard and saw, in your own words. "
+                     "The demo continues from your reply."),
     "plan": ("Nothing for you to sign off: Claude and Codex review this plan until they agree. "
              "If they can't, I'll ask you here in plain terms."),
 }
@@ -653,6 +701,12 @@ def print_state(st: dict[str, Any]) -> None:
               f"   plan rounds: {st['plan_rounds']}/{st['max_plan_rounds']}")
     for m in (st.get("progress") or {}).get("milestones", []):
         print(f"  milestone {m['title']}: {m['done']}/{m['total']} merged" + ("  (complete)" if m["done"] == m["total"] else ""))
+    if (st.get("progress") or {}).get("debt"):
+        print("  open tech debt: " + ", ".join(f"#{d}" for d in st["progress"]["debt"]))
+    if st.get("demo_request"):
+        r = st["demo_request"]
+        print(f"  demo steps asked of a person for {r['milestone']}: {r['url']}"
+              + (f" (answered by {', '.join(x['by'] for x in r['replies'])})" if r["replies"] else " (no answer yet)"))
     if (st.get("progress") or {}).get("behind_main"):
         print(f"  {epic_branch(st['number'])} is {st['progress']['behind_main']} commit(s) behind main")
     print(f"  next: {st.get('next')}")
@@ -1009,6 +1063,11 @@ def validate_plan(plan: Any, criteria: set[int] | None = None) -> list[str]:
         covers = l.get("covers") or []
         if not all(isinstance(c, int) for c in covers):
             errs.append(f"{k}: covers must be acceptance-criterion numbers")
+    if (co := plan.get("cleanup_of")) is not None and co not in mkeys:
+        errs.append(f"`cleanup_of` names the accepted milestone whose tech debt this pays down, not {co!r}")
+    for l in leaves:
+        if not all(isinstance(d, int) for d in l.get("debt") or []):
+            errs.append(f"{l.get('key')}: debt lists the tech-debt issue numbers it pays down")
     if plan.get("create") not in (None, "milestone", "all"):
         errs.append("`create` is `milestone` (one milestone's issues at a time) or `all`")
     if (lessons := plan.get("lessons")) is not None and not (
@@ -1165,6 +1224,9 @@ def render_leaf_body(epic: int, leaf: dict[str, Any], parent: int | None, number
     for field, name in LEAF_SECTIONS.items():
         v = leaf[field]
         out += ["", f"## {name}", "", "\n".join(f"- [ ] {x}" for x in v) if field == "acceptance" else v.strip()]
+    if leaf.get("debt"):
+        out += ["", "## Pays down", "", ", ".join(f"#{d}" for d in leaf["debt"])
+                + ": tech debt filed against this epic. `merge` closes them with this slice."]
     if leaf.get("blocked_by"):
         refs = ", ".join(f"#{numbers[b]} ({b})" if b in numbers else b for b in leaf["blocked_by"])
         out += ["", "## Dependencies", "", f"Blocked by {refs}. GitHub's blocked-by links are the authority; "
@@ -1335,11 +1397,12 @@ def command_plan_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Post a plan revision (validated) for Codex to review. Collapses the previous one."""
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
-    if st["action"] not in ("plan", "continue_plan", "create_plan_issues", "replan", "plan_next_milestone"):
+    plan = json.loads(Path(args.file).read_text())
+    cleanup = st["action"] == "work_slices" and plan.get("cleanup_of")   # a cleanup pass between milestones
+    if st["action"] not in ("plan", "continue_plan", "create_plan_issues", "replan", "plan_next_milestone") and not cleanup:
         raise SdlcError(f"#{st['number']} is {st['state']} (action {st['action']}): not the time to post a plan"
                         + (" — the Codex rounds are spent; ask the poster (`transition N needs-info --kind question`)"
                            if st["action"] == "ask_poster" else ""))
-    plan = json.loads(Path(args.file).read_text())
     errs = check_plan(plan)
     if plan.get("issue") != st["number"]:
         errs.append(f"the plan is for #{plan.get('issue')}, not #{st['number']}")
@@ -1348,6 +1411,13 @@ def command_plan_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
         dropped = plan_keys(latest_plan_of(bundle, st)[1]) - plan_keys(plan)
         if dropped:
             errs.append(f"an amended plan keeps every key already created; it drops {', '.join(sorted(dropped, key=natural_key))}")
+        if plan.get("cleanup_of"):
+            old = {l["key"] for l in plan_leaves(latest_plan_of(bundle, st)[1])}
+            new = [l["key"] for l in plan_leaves(plan) if l["key"] not in old]
+            budget = config.get("cleanup_slices_per_milestone", 1)
+            if len(new) > budget:
+                errs.append(f"a cleanup pass adds at most {budget} slice(s) (cleanup_slices_per_milestone); "
+                            f"this adds {', '.join(new)}: leave the rest filed")
     errs += lessons_errors(plan, st)
     if errs:
         raise SdlcError("the plan does not validate (run plan-validate): " + "; ".join(errs))
@@ -1516,6 +1586,8 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
                 + (f"\n\n{', '.join(later)} will be planned again with what {created_after[-1]} teaches, "
                    "then created." if later and created_after else ""))
         extra = {"created": ",".join(created_after)} if target is not None else {}
+        if plan.get("cleanup_of") and plan["cleanup_of"] not in (st.get("cleanups") or []):
+            extra["cleanup"] = plan["cleanup_of"]
         post_comment(epic, render_comment("plan-created", rev, body, config, **extra), config)
     if st["state"] in BUILD_STATES:   # demo feedback or the next milestone: the epic is still being built
         if not offline:
@@ -1631,6 +1703,7 @@ def command_ready(args: argparse.Namespace, config: dict[str, Any]) -> int:
 HEAD_RE = re.compile(r"^\s*[*_`]*HEAD:[*_`\s]*([0-9a-f]{40})\b", re.MULTILINE | re.IGNORECASE)
 CLOSES_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b", re.IGNORECASE)
 ESCALATED_LABEL = f"{PREFIX}escalated"
+DEBT_LABEL = "tech-debt"
 
 
 def slice_branch(n: int) -> str:
@@ -1826,7 +1899,8 @@ def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[di
     """An epic's units of work: what can start, what is in flight, and each milestone's count."""
     ready, waiting = ready_leaves(leaves, blockers)
     escalated = [l["number"] for l in leaves if l.get("state") == "open" and ESCALATED_LABEL in l.get("labels", [])]
-    free = [l["number"] for l in ready if not l.get("assignees") and l["number"] not in escalated]
+    by_order = lambda l: (natural_key(milestone_key(l.get("milestone"))), natural_key(l["key"]))  # noqa: E731
+    free = [l["number"] for l in sorted(ready, key=by_order) if not l.get("assignees") and l["number"] not in escalated]
     in_flight = [l["number"] for l in ready + waiting if l.get("assignees") and l["number"] not in escalated]
     by_ms: dict[str, list[dict[str, Any]]] = {}
     for l in leaves:
@@ -1899,7 +1973,15 @@ def epic_progress(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[
     progress = summarise_progress(leaves, blockers)
     for u in progress["units"].values():
         u["model"] = model_for(u["complexity"], config)
-    return {**progress, "behind_main": behind}
+    return {**progress, "behind_main": behind, "debt": open_debt(epic, config, trusted),
+            "cleanup_budget": config.get("cleanup_slices_per_milestone", 1)}
+
+
+def open_debt(epic: int, config: dict[str, Any], trusted: set[str]) -> list[int]:
+    """Open tech-debt issues filed against this epic (`file-issue --debt`)."""
+    raw = gh_pages(f"repos/{repo_of(config)}/issues?labels={DEBT_LABEL.replace(':', '%3A')}&state=open&per_page=100")
+    return sorted(r["number"] for r in raw if "pull_request" not in r and (r.get("user") or {}).get("login") in trusted
+                  and (parse_marker(r.get("body") or "") or {}).get("epic") == str(epic))
 
 
 def slice_bundle(n: int, config: dict[str, Any]) -> dict[str, Any]:
@@ -2112,6 +2194,10 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
         raise SdlcError(f"merged PR #{args.pr}, but #{n} reads back {issue['state']} ({issue.get('state_reason')}): "
                         f"close it as completed (`gh issue close {n} --reason completed`)")
     print(f"merged PR #{args.pr} into {branch}; #{n} closed")
+    for d in re.findall(r"#(\d+)", leaf_section(issue["body"], "Pays down").split(":")[0]):
+        gh(["issue", "close", d, "--repo", repo, "--reason", "completed", "--comment",
+            f"Paid down by #{n} (PR #{args.pr})."], check=False)
+        print(f"#{d} (tech debt) closed")
     if epic:
         st = with_next(bundle_state(fetch_bundle(epic, config, trusted), config), config, trusted=trusted)
         for m in (st.get("progress") or {}).get("milestones", []):
@@ -2623,6 +2709,16 @@ def rewrite_demo_links(body: str, raw_base: str, blob_base: str) -> str:
     return IMG_SRC_RE.sub(src, LINK_RE.sub(link, body))
 
 
+SVG_TEXT_RE = re.compile(r"<text\b([^>]*)>(.*?)</text>", re.DOTALL)
+SVG_MIN_TEXT = 40   # a command line alone is ~25 characters: anything less shows nothing
+
+
+def svg_text(svg: str) -> str:
+    """The visible text of a demo_shot picture (the window title aside), whitespace removed."""
+    parts = [html.unescape(re.sub(r"<[^>]+>", "", t)) for attrs, t in SVG_TEXT_RE.findall(svg) if "-title" not in attrs]
+    return "".join("".join(parts).split())
+
+
 def demo_post_errors(body: str, folder: Path) -> list[str]:
     """Why this demo may not be published (empty list = fine). Runs before anything is pushed."""
     errs = []
@@ -2638,7 +2734,11 @@ def demo_post_errors(body: str, folder: Path) -> list[str]:
         elif f.stat().st_size > DEMO_FILE_LIMIT:
             errs.append(f"{rel}: {f.stat().st_size} bytes is over {DEMO_FILE_LIMIT}")
         elif f.suffix.lower() in (".svg", ".md"):
-            errs += [f"{rel} contains {h}" for h in identifier_hits(f.read_text(errors="replace"))]
+            text = f.read_text(errors="replace")
+            errs += [f"{rel} contains {h}" for h in identifier_hits(text)]
+            if f.suffix.lower() == ".svg" and len(svg_text(text)) < SVG_MIN_TEXT:
+                errs.append(f"{rel} shows almost no text ({len(svg_text(text))} characters): a blank or mid-load "
+                            "screen, or a command that printed nothing; retake it")
     errs += [f"the comment contains {h}" for h in identifier_hits(body)]
     for t in demo_links(body):
         path = (folder / t.split("#")[0]).resolve()
@@ -2846,6 +2946,8 @@ def command_demo_changes(args: argparse.Namespace, config: dict[str, Any]) -> in
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
     n, demo = st["number"], st["latest_demo"]
+    if args.found:
+        return record_agent_findings(args, bundle, st, config)
     if st["state"] != "demo-review" or not demo or st["action"] not in DEMO_ACTIONS:
         raise SdlcError(f"#{n} has no reply to a demo to act on (state {st['state']}, action {st['action']})")
     if args.milestone and args.milestone != demo["milestone"]:
@@ -2859,6 +2961,82 @@ def command_demo_changes(args: argparse.Namespace, config: dict[str, Any]) -> in
     posted = post_comment(n, comment, config)
     set_state_label(n, bundle["issue"]["labels"], "in-progress", config)
     print(f"#{n}: demo-review -> in-progress  {posted.get('html_url', '')}\nnext: /plan-issue {n}")
+    return 0
+
+
+def record_agent_findings(args: argparse.Namespace, bundle: dict[str, Any], st: dict[str, Any],
+                          config: dict[str, Any]) -> int:
+    """The agent's own demo run shows the milestone broken: record it, so plan-issue plans fix slices first.
+
+    No demo is posted for a broken milestone, so this doesn't wait for one (or for the poster).
+    """
+    n, key = st["number"], args.milestone
+    if not key:
+        raise SdlcError("--found needs --milestone: the milestone the demo found broken")
+    if st["conflicts"] or st["state"] not in BUILD_STATES | {"demo-review"}:
+        raise SdlcError(f"#{n} is {st['state']}: no milestone is being demoed")
+    if st.get("feedback"):
+        raise SdlcError(f"#{n} already has changes waiting to be planned: `/plan-issue {n}` first")
+    body = Path(args.body_file).read_text().strip()
+    if hits := identifier_hits(body):
+        raise SdlcError("the findings contain " + ", ".join(hits) + ": the issue is public")
+    body = (f"The demo of {key} found it doesn't do what the plan promised, so no demo is posted yet:\n\n{body}"
+            "\n\nNext: fix slices (each with an offline test that reproduces the problem), then the demo again.")
+    comment = render_comment("demo-changes", None, body, config, milestone=key, found="agent")
+    if args.dry_run:
+        print(f"DRY RUN #{n}: findings for {key}\n{comment}")
+        return 0
+    posted = post_comment(n, comment, config)
+    if st["state"] == "demo-review":
+        set_state_label(n, bundle["issue"]["labels"], "in-progress", config)
+    print(f"#{n}: {key} findings recorded  {posted.get('html_url', '')}\nnext: /plan-issue {n}")
+    return 0
+
+
+def command_demo_request(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Ask, on the issue, for the demo steps only a person can run (real speaker writes). Their reply resumes it."""
+    bundle = load_bundle(args, config)
+    st = bundle_state(bundle, config)
+    n = st["number"]
+    if st["conflicts"] or st["state"] not in BUILD_STATES:
+        raise SdlcError(f"#{n} is {st['state']}: not the time to ask for demo steps")
+    if (r := st.get("demo_request")) and not r["replies"]:
+        raise SdlcError(f"#{n} already has demo steps waiting for an answer: {r['url']}")
+    body = Path(args.body_file).read_text().strip()
+    if hits := identifier_hits(body):
+        raise SdlcError("the request contains " + ", ".join(hits) + ": the issue is public")
+    comment = render_comment("demo-request", None, body, config, milestone=args.milestone)
+    if len(comment) > COMMENT_LIMIT:
+        raise SdlcError("the request is over GitHub's comment limit")
+    if args.dry_run:
+        print(comment)
+        return 0
+    posted = post_comment(n, comment, config)
+    print(f"#{n}: demo steps for {args.milestone} asked for  {posted.get('html_url', '')}\n"
+          f"next: nothing: waiting on a reply on #{n}")
+    return 0
+
+
+def command_file_issue(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """File something found while building or demoing an epic as its own issue: tech debt, or new for triage."""
+    title, body = args.title.strip(), Path(args.body_file).read_text().strip()
+    if hits := identifier_hits(title + "\n" + body):
+        raise SdlcError("the issue would contain " + ", ".join(hits) + ": the repo is public")
+    kind = "debt" if args.debt else "finding"
+    lead = (f"Tech debt from #{args.number} ({args.source}): not blocking, budgeted into a cleanup pass after a "
+            "milestone is accepted." if args.debt else f"Found while working on #{args.number} ({args.source}).")
+    full = f"{marker(kind, None, epic=str(args.number), source=args.source)}\n{lead}\n\n{body}\n"
+    cmd = ["issue", "create", "--repo", repo_of(config), "--title", title]
+    if args.debt:
+        cmd += ["--label", DEBT_LABEL]
+    if args.dry_run:
+        print(f"would run: gh {' '.join(cmd)} --body-file <body>\n{full}")
+        return 0
+    with tempfile.NamedTemporaryFile("w", suffix=".md") as fh:
+        fh.write(full)
+        fh.flush()
+        url = gh(cmd + ["--body-file", fh.name])
+    print(url.strip())
     return 0
 
 
@@ -3042,6 +3220,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_demo_post)
 
+    p = sub.add_parser("demo-request", help="ask on the issue for the demo steps only a person can run")
+    p.add_argument("number", type=int)
+    p.add_argument("--milestone", required=True)
+    p.add_argument("--body-file", required=True, help="each step: its --dry-run output, the snapshot/restore bracket, the command")
+    p.add_argument("--from-file")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=command_demo_request)
+
+    p = sub.add_parser("file-issue", help="file a finding as its own issue: tech debt of an epic, or new for triage")
+    p.add_argument("number", type=int, help="the epic it was found in")
+    p.add_argument("--title", required=True)
+    p.add_argument("--body-file", required=True)
+    p.add_argument("--debt", action="store_true", help="non-blocking work on this epic (label tech-debt), not a new problem")
+    p.add_argument("--source", choices=["demo", "review", "advisor", "adjacent"], default="demo")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=command_file_issue)
+
     p = sub.add_parser("demo-accept", help="record the poster's /approve of a demo (the last one: done)")
     p.add_argument("number", type=int)
     p.add_argument("--milestone")
@@ -3053,6 +3248,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("number", type=int)
     p.add_argument("--milestone")
     p.add_argument("--body-file", required=True, help="what they asked for, in plain words")
+    p.add_argument("--found", action="store_true",
+                   help="the agent's own demo found the milestone broken (before any demo is posted)")
     p.add_argument("--from-file")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_demo_changes)

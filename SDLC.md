@@ -79,6 +79,38 @@ ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every sk
 repo, only when it starts a line (not in a quote or code block), and only for the
 latest revision: when a new revision is posted, earlier approvals no longer count.
 
+## People are reached through the issue
+
+The skills may be run by an orchestrator with nobody in the chat, so no skill asks
+a question in the session. Every human decision is an issue comment that
+`tools/sdlc.py` reads back:
+
+- a PRD's sign-off;
+- a planning question;
+- a demo's `/approve` or `/changes`;
+- what someone heard when they ran a demo step that writes to a speaker
+  (`demo-request`; their reply makes the action `demo_heard`).
+
+Publishing a demo is gated by `demo-post`'s checks, not by a person's OK.
+`--preview` and `confirm_before_posting` are opt-ins for an interactive run.
+
+**What a demo finds** is filed, never left in the chat:
+
+- **broken**, a promise of this milestone fails: `demo-changes --found`, no demo is
+  posted, and `plan-issue` plans fix slices;
+- **non-blocking**: `file-issue --debt`, linked from the demo;
+- **out of scope**: `file-issue`, a new issue for triage.
+
+`work-slice` files the non-blocking review findings and adjacent issues the same way
+when it merges.
+
+**Tech debt is budgeted.** After each accepted milestone, if the epic has open
+`tech-debt` issues, `next:` says `/plan-issue N --cleanup`. That plans up to
+`cleanup_slices_per_milestone` of them as slices in the next milestone, Codex-reviewed,
+before its other slices, and `merge` closes the debt they pay down. After the last
+milestone the rest stay filed for triage. Ready slices are always taken from the
+earliest milestone first, so fix slices go before later work.
+
 ## Rules the tooling enforces
 
 - Agent comments start with `<!-- sdlc:v1 kind=... rev=N -->`. The agent posts through
@@ -161,12 +193,14 @@ several can run at once. A slice's state is read off GitHub:
 
 When every unit of work in a milestone has merged (for an epic without milestones,
 every unit), the poster sees it working. **New slices of the epic wait** until they
-accept it: `next:` says `/milestone-demo N` and `claim` refuses. Slices already
-claimed can finish.
+accept it and it ships: `next:` says `/milestone-demo N` and `claim` refuses. Slices
+already claimed can finish, but `merge` holds back any of another milestone.
 
 1. The agent runs the milestone's demo steps. Read-only and `--dry-run` steps run
-   freely. A real speaker write runs only with the user present and saying yes,
-   between `snapshot` and `restore`, and what they heard is recorded with `observe.py`.
+   freely. A real speaker write is never run by the agent: it asks on the issue
+   (`demo-request`, each step with its dry run and the `snapshot`/`restore` bracket),
+   and what the person heard, in their reply, is recorded with `observe.py` and quoted.
+   A milestone the demo finds broken gets fix slices first (`demo-changes --found`).
 2. `tools/demo_shot.py` draws the real output and TUI screens as SVG, run in a worktree of
    `epic/N`. A bug fix shows before (`main`) and after (`epic/N`).
 3. `demo-post` commits the pictures and a full write-up to the orphan branch

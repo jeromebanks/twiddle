@@ -49,6 +49,7 @@ Dispatch on `action`:
 | `create_plan_issues` | Codex approved the latest revision (or an earlier creation was cut short): step 6 |
 | any of these with `feedback: true` | the poster asked for changes at a milestone demo: "After demo feedback" below |
 | `plan_next_milestone` | the latest created milestone was accepted and the plan has more: "The next milestone" below |
+| `work_slices` and `next` says `/plan-issue N --cleanup` | "Cleanup pass" below |
 | `continue_plan` / `create_plan_issues` while `sdlc:in-progress` | an amendment is under review: steps 5-6 |
 | `reconcile_label` | `uv run python tools/sdlc.py reconcile N`, then as `plan` |
 | anything in triage | use `triage-issue` instead |
@@ -212,16 +213,35 @@ Then revise the plan before anything more is created:
 - Steps 4-6 as usual: post, advisor, Codex rounds (a fresh budget for each milestone),
   then `plan-create N`, which creates the next milestone only. The epic stays `in-progress`.
 
+## Cleanup pass
+
+After a milestone is accepted, `next` asks for a cleanup pass when the epic has open
+tech debt (`file-issue --debt`). It runs before the next milestone's slices, and only
+up to `cleanup_slices_per_milestone` slices (`.sdlc/config.json`).
+
+- `gh issue list --label tech-debt --state open` and read the ones for this epic (`state` lists them).
+- Pick the most valuable that fit the budget: the ones that make the next milestone
+  safer or simpler first. The rest stay filed; nothing is lost.
+- Amend the latest plan JSON. Keep every key, set `"cleanup_of": "M1"` (the milestone just
+  accepted), and add slices `C1`, `C2`, ... in the **next** milestone. Each one gets
+  `"debt": [<issue numbers>]`, which `merge` closes with it, and the usual sections and
+  rating. `plan-post` refuses more new slices than the budget.
+- When the next milestone isn't created yet (`plan_next_milestone`), fold the cleanup
+  into that replan. Same fields.
+- Steps 4-6 as usual. `plan-create` records the pass (`cleanup=M1`), so it isn't asked for again.
+
 ## After demo feedback
 
-When the poster answers a milestone demo with changes, `milestone-demo` records
-them (`demo-changes`) and the epic comes back here with `feedback: true` while it
+When the poster answers a milestone demo with changes, or the agent's own demo run
+finds the milestone broken (`demo-changes --found`, before any demo is posted),
+`milestone-demo` records them (`demo-changes`) and the epic comes back here with `feedback: true` while it
 stays `sdlc:in-progress`. Amend the plan; don't start over:
 
 - Start from the latest posted plan JSON. **Keep every key**: `plan-post` refuses
   an amendment that drops one, because those issues already exist.
 - Add slices for the changes, in the milestone that was demoed, with fresh keys
-  (`F1`, `F2`, ... so it's clear they came from feedback). They may be `blocked_by`
+  (`F1`, `F2`, ... so it's clear they came from feedback). A fix for something the
+  demo found broken includes an offline test that reproduces it. They may be `blocked_by`
   merged slices. Leave the text of existing slices alone: changing it won't change
   their issues.
 - Steps 4-6 as usual: post, advisor, Codex rounds (a fresh budget), `plan-create`.

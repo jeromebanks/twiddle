@@ -206,6 +206,21 @@ How to clear each refusal:
   before that milestone finished. Leave the PR open and report it: it can merge
   once that milestone ships (`/milestone-demo <epic>`).
 
+**Before merging, file what you're leaving behind**, so it isn't lost in PR text.
+That means the non-blocking findings from the Codex rounds, the ones the advisor
+left alone, and the adjacent issues in your PR body. File one issue per item, in
+plain words, with where it is:
+
+```bash
+uv run python tools/sdlc.py file-issue E --debt --source review --title "..." --body-file <SCRATCH>/debt-1.md
+```
+
+Use `--source advisor` or `--source adjacent` as fits. A problem that isn't this
+epic's work (a bug that already existed elsewhere) goes without `--debt`, to triage.
+After each accepted milestone, a budgeted cleanup pass (`plan-issue --cleanup`) picks
+tech debt up as slices. A slice with a `Pays down` section is one of those: `merge`
+closes the debt issues it names.
+
 `merge` squash-merges into `epic/E` (one commit per slice, so a bad slice is one
 `revert-slice` later), deletes the remote branch, closes the slice itself (GitHub
 only honours `Closes #N` on `main`) and reads it back, and
@@ -219,7 +234,7 @@ End with:
 - the slice and its PR, now merged;
 - the test count on the merged head;
 - the Codex rounds and how each ended;
-- any non-blocking findings or adjacent issues you left alone;
+- the issues you filed for non-blocking findings and adjacent problems;
 - whether a milestone completed;
 - **Next:** the `next:` line `merge` printed (or `uv run python tools/sdlc.py state <epic>`).
   It names the next `/work-slice N`, or `/milestone-demo <epic>` once a milestone's units are all

@@ -204,11 +204,18 @@ def test_harmless_text_is_not_an_identifier():
     assert sdlc.identifier_hits("version 1.2.3, 127.0.0.1, commit " + "a" * 40 + ", 07:00 weekdays") == []
 
 
+# what demo_shot draws: a title, then a line of text per row of the terminal
+SHOT = ('<svg><text class="t-title">twiddle alarm list</text>'
+        '<text class="t-r1" x="0">$&#160;twiddle&#160;alarm&#160;list</text>'
+        '<text class="t-r2" x="0">Kitchen&#160;&#160;07:00&#160;weekdays&#160;&#160;KALX&#160;&#160;on</text>'
+        '<text class="t-r2" x="0">Bedroom&#160;&#160;06:30&#160;daily&#160;&#160;chime&#160;&#160;off</text></svg>')
+
+
 def _demo_dir(tmp_path, readme="# M1\n", files=None):
     d = tmp_path / "demo"
     d.mkdir(parents=True)
     (d / "README.md").write_text(readme)
-    for name, text in (files or {"list.svg": "<svg>alarms</svg>"}).items():
+    for name, text in (files or {"list.svg": SHOT}).items():
         (d / name).write_text(text)
     return d
 
@@ -283,3 +290,134 @@ def test_a_question_is_answered_with_a_note_and_changes_are_recorded(tmp_path, c
     assert "demo-review -> in-progress" in out and "kind=demo-changes rev=1 milestone=M1" in out
     waiting = _bundle(tmp_path, ["sdlc:demo-review"], [DEMO])        # nothing from the poster to act on
     assert sdlc.main(["demo-changes", "12", "--body-file", str(answer), "--from-file", waiting, "--dry-run"]) == 1
+
+
+# --- the poster is reached only through the issue (#69) -------------------------------
+
+def test_a_blank_picture_is_refused():
+    assert len(sdlc.svg_text(SHOT)) >= sdlc.SVG_MIN_TEXT
+    prompt_only = '<svg><text class="t-title">np</text><text class="t-r1">$&#160;twiddle&#160;np&#160;wfmu</text></svg>'
+    assert sdlc.svg_text(prompt_only) == "$twiddlenpwfmu"
+    assert len(sdlc.svg_text(prompt_only)) < sdlc.SVG_MIN_TEXT
+
+
+def test_blank_picture_blocks_the_post(tmp_path):
+    d = _demo_dir(tmp_path, files={"np.svg": '<svg><text class="x-r1">$&#160;twiddle&#160;np</text></svg>'})
+    assert any("np.svg shows almost no text" in e for e in sdlc.demo_post_errors("![np](np.svg)", d))
+
+
+REQUEST = agent("demo-request", None, 9, milestone="M2")
+
+
+def test_a_demo_request_waits_for_whoever_runs_the_steps():
+    st = derive(["sdlc:in-progress"], [REQUEST])
+    assert (st["turn"], st["action"]) == ("poster", "wait_for_poster")
+    heard = derive(["sdlc:in-progress"], [REQUEST, comment(POSTER, "It rang at 7:02, quite loud.", 10)])
+    assert (st := heard)["action"] == "demo_heard" and sdlc.next_command(st) == "/milestone-demo 12"
+    assert heard["demo_request"]["replies"][0]["by"] == POSTER
+    # an agent note after the reply doesn't hide it; a stranger's comment isn't an answer
+    noted = derive(["sdlc:in-progress"], [REQUEST, comment(POSTER, "rang", 10), agent("note", None, 11)])
+    assert noted["action"] == "demo_heard"
+    assert derive(["sdlc:in-progress"], [REQUEST, comment(STRANGER, "nice", 10)])["action"] == "wait_for_poster"
+    posted = derive(["sdlc:demo-review"], [REQUEST, comment(POSTER, "rang", 10),
+                                          agent("demo", 1, 12, milestone="M2", sha="a" * 40)])
+    assert posted["demo_request"] is None and posted["action"] == "wait_for_poster"
+
+
+def test_demo_request_dry_run(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    body = tmp_path / "steps.md"
+    body.write_text("1. `! uv run twiddle alarm try 3` (dry run: rings Kitchen at 20%)")
+    b = _bundle(tmp_path, ["sdlc:in-progress"], [])
+    assert sdlc.main(["demo-request", "12", "--milestone", "M2", "--body-file", str(body), "--from-file", b, "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "kind=demo-request milestone=M2" in out and "reply here with what you heard" in out
+    body.write_text("the Roam at 192.168.1.20")
+    assert sdlc.main(["demo-request", "12", "--milestone", "M2", "--body-file", str(body), "--from-file", b, "--dry-run"]) == 1
+    waiting = _bundle(tmp_path, ["sdlc:in-progress"], [REQUEST])
+    body.write_text("again")
+    assert sdlc.main(["demo-request", "12", "--milestone", "M2", "--body-file", str(body), "--from-file", waiting,
+                      "--dry-run"]) == 1
+
+
+def test_the_agents_own_findings_send_the_milestone_to_fix_slices(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    f = tmp_path / "found.md"
+    f.write_text("- `alarm list` misses alarms in a bonded room")
+    b = _bundle(tmp_path, ["sdlc:in-progress"], [], progress(ms("M1", 3, 3)))
+    assert sdlc.main(["demo-changes", "12", "--found", "--milestone", "M1", "--body-file", str(f), "--from-file", b,
+                      "--dry-run"]) == 0
+    assert "kind=demo-changes milestone=M1 found=agent" in capsys.readouterr().out
+    st = derive(["sdlc:in-progress"], [agent("demo-changes", None, 9, milestone="M1", found="agent")])
+    assert (st["action"], st["feedback"]) == ("plan", True) and sdlc.next_command(st) == "/plan-issue 12"
+    assert sdlc.main(["demo-changes", "12", "--found", "--body-file", str(f), "--from-file", b, "--dry-run"]) == 1
+
+
+def test_file_issue_dry_run(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    f = tmp_path / "debt.md"
+    f.write_text("`alarm list` sorts rooms case-sensitively.")
+    assert sdlc.main(["file-issue", "12", "--title", "alarm list: room order", "--body-file", str(f), "--debt",
+                      "--source", "review", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "--label tech-debt" in out and "kind=debt epic=12 source=review" in out
+    assert sdlc.main(["file-issue", "12", "--title", "x", "--body-file", str(f), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "tech-debt" not in out and "kind=finding epic=12 source=demo" in out
+    f.write_text("player RINCON_000E58123456 drops")
+    assert sdlc.main(["file-issue", "12", "--title", "x", "--body-file", str(f), "--dry-run"]) == 1
+
+
+# --- the order of work, and the cleanup budget ----------------------------------------
+
+def test_the_earliest_milestones_slices_come_first():
+    leaves = [{"number": n, "key": k, "state": "open", "assignees": [], "labels": [], "milestone": f"#12 {m}: x"}
+              for n, k, m in ((40, "A1", "M2"), (41, "F1", "M1"), (42, "B1", "M10"))]
+    assert sdlc.summarise_progress(leaves, {})["ready"] == [41, 40, 42]
+
+
+def debt_progress(*milestones, debt=(101, 102), budget=1, **kw):
+    return {**progress(*milestones, **kw), "debt": list(debt), "cleanup_budget": budget}
+
+
+def test_a_cleanup_pass_comes_after_an_accepted_milestone():
+    shipped_m1 = [DEMO, agent("demo-approval", 1, 12, milestone="M1", by=POSTER),
+                  agent("shipped", None, 13, milestone="M1", sha="c" * 40)]
+    st = derive(["sdlc:in-progress"], shipped_m1)
+    p = debt_progress(ms("M1", 3, 3), ms("M2", 0, 4), ready=(35,))
+    assert sdlc.next_command(st, p).startswith("/plan-issue 12 --cleanup: M1 is accepted and #12 has 2 open tech-debt")
+    assert sdlc.next_command(st, {**p, "debt": []}) == "/work-slice 35"
+    assert sdlc.next_command(st, {**p, "cleanup_budget": 0}) == "/work-slice 35"
+    done = derive(["sdlc:in-progress"], shipped_m1 + [agent("plan", 2, 14), agent("plan-review", 2, 15, verdict="approve"),
+                                                      agent("plan-created", 2, 16, cleanup="M1")])
+    assert done["cleanups"] == ["M1"] and sdlc.next_command(done, p) == "/work-slice 35"
+    last = debt_progress(ms("M1", 3, 3), ready=())       # after the last milestone the debt stays filed
+    assert sdlc.cleanup_due(st, last) is None
+
+
+def test_a_cleanup_plan_is_held_to_its_budget(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    monkeypatch.setattr(sdlc, "check_plan", lambda plan: [])
+    def unit(key, ms_key):
+        return {"key": key, "title": key, "covers": [1], "outcome": "o", "scope": "s", "acceptance": ["a"],
+                "validation": "v", "demo": "d", "non_goals": "n", "context": "c", "complexity": "routine",
+                "complexity_reason": "r", "milestone": ms_key}
+    old = {"issue": 12, "kind": "feature", "create": "all",
+           "milestones": [{"key": "M1", "title": "a", "demo": "d"}, {"key": "M2", "title": "b", "demo": "d"}],
+           "subtasks": [unit("T1", "M1"), unit("T2", "M2")]}
+    history = [agent("prd", 1, 1), agent("approval", 1, 2, by=POSTER),
+               comment(OWNER, sdlc.render_comment("plan", 1, sdlc.render_plan(old), CONFIG), 3),
+               agent("plan-review", 1, 4, verdict="approve", round="1"), agent("plan-created", 1, 5),
+               DEMO, agent("demo-approval", 1, 12, milestone="M1", by=POSTER)]
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps({"issue": issue(["sdlc:in-progress"]), "comments": history, "trusted": [OWNER]}))
+    pf = tmp_path / "plan.json"
+    two = {**old, "cleanup_of": "M1", "subtasks": old["subtasks"] + [{**unit("C1", "M2"), "debt": [101]},
+                                                                     {**unit("C2", "M2"), "debt": [102]}]}
+    pf.write_text(json.dumps(two))
+    assert sdlc.main(["plan-post", "12", str(pf), "--from-file", str(f), "--dry-run"]) == 1
+    assert "adds at most 1 slice" in capsys.readouterr().err
+    pf.write_text(json.dumps({**two, "subtasks": two["subtasks"][:3]}))
+    assert sdlc.main(["plan-post", "12", str(pf), "--from-file", str(f), "--dry-run"]) == 0
+    body = sdlc.render_leaf_body(12, {**unit("C1", "M2"), "debt": [101]}, None, {}, None)
+    assert "## Pays down\n\n#101: tech debt" in body
