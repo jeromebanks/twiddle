@@ -1939,11 +1939,18 @@ def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[di
     """An epic's units of work: what can start, what is in flight, and each milestone's count."""
     ready, waiting = ready_leaves(leaves, blockers)
     escalated = [l["number"] for l in leaves if l.get("state") == "open" and ESCALATED_LABEL in l.get("labels", [])]
-    # a budgeted cleanup pass (slices that pay down tech debt) goes before anything else
+    # a budgeted cleanup pass (slices that pay down tech debt) goes before anything else,
+    # except the open work a cleanup slice itself waits on (else neither could start)
     cleanup_open = [l["number"] for l in leaves if l.get("state", "open") == "open" and is_cleanup(l)]
+    needed, todo = set(cleanup_open), list(cleanup_open)
+    while todo:
+        for b in blockers.get(todo.pop(), []):
+            if b.get("state") != "closed" and b["number"] not in needed:
+                needed.add(b["number"])
+                todo.append(b["number"])
     by_order = lambda l: (natural_key(milestone_key(l.get("milestone"))), natural_key(l["key"]))  # noqa: E731
     free = [l["number"] for l in sorted(ready, key=by_order) if not l.get("assignees") and l["number"] not in escalated
-            and (not cleanup_open or l["number"] in cleanup_open)]
+            and (not cleanup_open or l["number"] in needed)]
     in_flight = [l["number"] for l in ready + waiting if l.get("assignees") and l["number"] not in escalated]
     by_ms: dict[str, list[dict[str, Any]]] = {}
     for l in leaves:
@@ -1954,7 +1961,7 @@ def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[di
     return {"ready": free, "in_flight": in_flight, "escalated": escalated,
             "units": {l["number"]: {"key": l["key"], "complexity": l.get("complexity"),
                                     "milestone": milestone_key(l.get("milestone"))} for l in leaves},
-            "cleanup_open": cleanup_open,
+            "cleanup_open": cleanup_open, "cleanup_needs": sorted(needed - set(cleanup_open)),
             "waiting": [l["number"] for l in waiting if l["number"] not in in_flight],
             "open": sum(1 for l in leaves if l.get("state") == "open"), "milestones": milestones}
 
@@ -2078,7 +2085,7 @@ def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -
     if progress and not errs:
         errs += milestone_hold_errors(st, progress, b["issue"].get("milestone"))
         cleanup = [n for n in progress.get("cleanup_open") or [] if n != b["issue"]["number"]]
-        if cleanup and not is_cleanup(b["issue"]):
+        if cleanup and not is_cleanup(b["issue"]) and b["issue"]["number"] not in (progress.get("cleanup_needs") or []):
             errs.append("the cleanup pass comes first: " + ", ".join(f"#{n}" for n in cleanup))
     return errs
 
@@ -2615,7 +2622,11 @@ def finish_epic(n: int, labels: list[str], config: dict[str, Any], root: Path) -
         git(["worktree", "remove", "--force", str(wt)], cwd=root)
     if f"{PREFIX}done" not in labels:
         set_state_label(n, labels, "done", config)
-    gh(["issue", "close", str(n), "--repo", repo_of(config), "--reason", "completed"], check=False)
+    repo = repo_of(config)
+    if gh_json(["issue", "view", str(n), "--repo", repo, "--json", "state"]).get("state") != "CLOSED":
+        gh(["issue", "close", str(n), "--repo", repo, "--reason", "completed"])
+        if gh_json(["issue", "view", str(n), "--repo", repo, "--json", "state"]).get("state") != "CLOSED":
+            raise SdlcError(f"#{n} is done but won't close: close it by hand, or run `ship {n}` again")
     print(f"#{n}: every milestone shipped: done, {epic_branch(n)} deleted")
 
 
@@ -2646,7 +2657,8 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
             raise SdlcError(f"#{n}: every created milestone has shipped; the rest isn't built yet")
         if args.dry_run:
             print(f"#{n}: every milestone has shipped: would finish the epic (delete {epic_branch(n)}, done)")
-        elif st["state"] != "done" or remote_has(epic_branch(n), root):
+        elif (st["state"] != "done" or remote_has(epic_branch(n), root)
+              or bundle["issue"].get("state", "open").lower() != "closed"):
             finish_epic(n, bundle["issue"]["labels"], config, root)
         else:
             print(f"#{n}: already done")
@@ -2741,50 +2753,69 @@ def revert_slice_errors(issue: dict[str, Any], pr: dict[str, Any] | None, on_epi
 
 
 def command_revert_slice(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """Undo one merged slice on epic/N (one revert commit, tested), reopen it, and void its milestone's demo."""
+    """Undo one merged slice on epic/N (one revert commit, tested), reopen it, and void its milestone's demo.
+
+    Safe to rerun: when the revert is already on epic/N (a run cut short after its push), it only
+    finishes the records: reopen, the revert and release markers, the demo voided.
+    """
     n, repo, root = args.number, repo_of(config), primary_root()
-    issue, _ = fetch_slice(n, config)
+    issue, comments = fetch_slice(n, config)
     epic = slice_epic(issue)
     if not epic:
         raise SdlcError(f"#{n} is not a slice of an epic")
     pr = find_slice_pr(n, config)
-    git(["fetch", "-q", "origin", config.get("default_branch", "main"), epic_branch(epic)], cwd=root)
+    branch = epic_branch(epic)
+    git(["fetch", "-q", "origin", config.get("default_branch", "main"), branch], cwd=root)
     oid = ((pr or {}).get("mergeCommit") or {}).get("oid") or ""
-    on_epic = bool(oid) and is_ancestor(oid, f"origin/{epic_branch(epic)}", root)
-    on_main_ = bool(oid) and is_ancestor(oid, f"origin/{config.get('default_branch', 'main')}", root)
-    if errs := revert_slice_errors(issue, pr, on_epic, on_main_):
-        raise SdlcError("; ".join(errs))
+    done = git(["log", f"origin/{branch}", "--format=%H", "-n1", "--grep", f"This reverts commit {oid}"],
+               cwd=root, check=False) if oid else ""
+    if not done:
+        on_epic = bool(oid) and is_ancestor(oid, f"origin/{branch}", root)
+        on_main_ = bool(oid) and is_ancestor(oid, f"origin/{config.get('default_branch', 'main')}", root)
+        if errs := revert_slice_errors(issue, pr, on_epic, on_main_):
+            raise SdlcError("; ".join(errs))
     key = milestone_key(issue.get("milestone"))
     if args.dry_run:
-        print(f"would revert {oid[:12]} (#{n}, PR #{pr['number']}) on {epic_branch(epic)}, test, push; reopen #{n}; "
-              f"void {key}'s demo")
+        print((f"{oid[:12]} is already reverted on {branch} ({done[:12]}): would finish the records"
+               if done else f"would revert {oid[:12]} (#{n}, PR #{pr['number']}) on {branch}, test, push")
+              + f"; reopen #{n}; void {key}'s demo")
         return 0
-    wt = epic_worktree(epic, config, root)
-    proc = subprocess.run(["git", "revert", "--no-edit", oid], cwd=wt, capture_output=True, text=True)
-    if proc.returncode != 0:
-        git(["revert", "--abort"], cwd=wt, check=False)
-        raise SdlcError(f"reverting {oid[:12]} conflicts with later slices: {proc.stderr.strip()[:300]}")
-    head = git(["rev-parse", "HEAD"], cwd=wt)
-    run = run_suite(wt)
-    if run["result"] != "pass":
-        raise SdlcError(f"the suite fails after the revert ({run['failed']} failed): nothing pushed")
-    git(["push", "-q", "origin", f"HEAD:refs/heads/{epic_branch(epic)}"], cwd=wt)
-    gh(["issue", "reopen", str(n), "--repo", repo])
-    why = f": {args.reason}" if args.reason else "."
-    post_comment(n, render_comment("revert", None, f"Reverted on `{epic_branch(epic)}` in `{head[:12]}` (PR #{pr['number']}){why} "
-                                   "The slice is open again.", config, sha=head, pr=str(pr["number"])), config)
-    post_comment(n, render_comment("release", None, "The old claim ends with the revert.", config), config)
+    run = None
+    if not done:
+        wt = epic_worktree(epic, config, root)
+        proc = subprocess.run(["git", "revert", "--no-edit", oid], cwd=wt, capture_output=True, text=True)
+        if proc.returncode != 0:
+            git(["revert", "--abort"], cwd=wt, check=False)
+            raise SdlcError(f"reverting {oid[:12]} conflicts with later slices: {proc.stderr.strip()[:300]}")
+        done = git(["rev-parse", "HEAD"], cwd=wt)
+        run = run_suite(wt)
+        if run["result"] != "pass":
+            raise SdlcError(f"the suite fails after the revert ({run['failed']} failed): nothing pushed")
+        git(["push", "-q", "origin", f"HEAD:refs/heads/{branch}"], cwd=wt)
+    # the records, each only if missing: a rerun finishes what an interrupted run left
+    trusted = fetch_trusted(config)
+    marks = [mk for mk, _ in _marked(comments, trusted)]
+    if issue.get("state") != "open":
+        gh(["issue", "reopen", str(n), "--repo", repo])
+    if not any(mk.get("kind") == "revert" and mk.get("pr") == str(pr["number"]) for mk in marks):
+        why = f": {args.reason}" if args.reason else "."
+        post_comment(n, render_comment("revert", None, f"Reverted on `{branch}` in `{done[:12]}` (PR #{pr['number']}){why} "
+                                       "The slice is open again.", config, sha=done, pr=str(pr["number"])), config)
+    if claim_status(comments, trusted):
+        post_comment(n, render_comment("release", None, "The old claim ends with the revert.", config), config)
     gh(["issue", "edit", str(n), "--repo", repo, "--remove-assignee", "@me"], check=False)
     bundle = fetch_bundle(epic, config)
     st = bundle_state(bundle, config)
-    post_comment(epic, render_comment("epic-tests", None, suite_body("the epic branch after a revert", head, run), config,
-                                      sha=head, result=run["result"], passed=str(run["passed"])), config)
-    if key in (st.get("demos") or {}):
+    if run:
+        post_comment(epic, render_comment("epic-tests", None, suite_body("the epic branch after a revert", done, run), config,
+                                          sha=done, result=run["result"], passed=str(run["passed"])), config)
+    demo = (st.get("demos") or {}).get(key)
+    if demo and not demo.get("voided"):
         post_comment(epic, render_comment("demo-void", None, f"#{n} was reverted, so {key} needs a new demo once it is "
                                           "built again.", config, milestone=key), config)
-        if st["state"] == "demo-review" and (st.get("latest_demo") or {}).get("milestone") == key:
-            set_state_label(epic, bundle["issue"]["labels"], "in-progress", config)
-    print(f"#{n}: reverted on {epic_branch(epic)} at {head[:12]} and reopened\nnext: /work-slice {n}")
+    if st["state"] == "demo-review" and (st.get("latest_demo") or {}).get("milestone") == key:
+        set_state_label(epic, bundle["issue"]["labels"], "in-progress", config)
+    print(f"#{n}: reverted on {branch} at {done[:12]} and reopened\nnext: /work-slice {n}")
     return 0
 
 
@@ -2923,7 +2954,7 @@ def demo_brief(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str
     due = due_milestone(st.get("demos") or {}, progress, st.get("shipped"))
     return {"epic": epic, "title": st["title"], "state": st["state"], "action": st["action"],
             "due": due["key"] if due else None, "milestones": out, "progress": progress,
-            "next": next_command(st, progress if st["action"] == "work_slices" else None)}
+            "next": next_command(st, progress if st["action"] in ("work_slices", "plan_next_milestone") else None)}
 
 
 def command_demo_status(args: argparse.Namespace, config: dict[str, Any]) -> int:

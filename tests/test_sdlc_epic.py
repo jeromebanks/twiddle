@@ -326,7 +326,9 @@ class GitHub:
 
     def __init__(self, monkeypatch, root=None):
         self.calls, self.posted, self.labels = [], [], []
+        self.issue_state = "OPEN"
         monkeypatch.setattr(sdlc, "gh", self.gh)
+        monkeypatch.setattr(sdlc, "gh_json", self.gh_json)
         monkeypatch.setattr(sdlc, "post_comment", lambda n, body, cfg: self.posted.append((n, body)) or {"html_url": "u"})
         monkeypatch.setattr(sdlc, "set_state_label", lambda n, cur, to, cfg: self.labels.append((n, to)))
         monkeypatch.setattr(sdlc, "fetch_trusted", lambda cfg: {OWNER})
@@ -335,7 +337,19 @@ class GitHub:
 
     def gh(self, args, check=True):
         self.calls.append(args)
+        if args[:2] == ["issue", "close"] and self.closes:
+            self.issue_state = "CLOSED"
+        if args[:2] == ["issue", "reopen"] and self.fail_reopen:
+            self.fail_reopen = False
+            raise sdlc.SdlcError("gh issue reopen failed: HTTP 502")
         return ""
+
+    closes, fail_reopen = True, False
+
+    def gh_json(self, args):
+        if args[:2] == ["issue", "view"]:
+            return {"state": self.issue_state}
+        return []
 
     def kinds(self):
         return [(n, sdlc.parse_marker(b)["kind"]) for n, b in self.posted]
@@ -407,8 +421,11 @@ def test_merge_closes_the_debt_a_cleanup_slice_pays_down(monkeypatch):
     assert closed == ["28", "81", "84"]
 
 
-def stub_revert(monkeypatch, repo, oid, comments=(), labels=("sdlc:in-progress",)):
-    monkeypatch.setattr(sdlc, "fetch_slice", lambda n, cfg: (slice_issue("closed", "completed"), []))
+CLAIMED = [agent("claim", None, 1, branch="slice/28")]
+
+
+def stub_revert(monkeypatch, repo, oid, comments=(), labels=("sdlc:in-progress",), slice_state=("closed", "completed")):
+    monkeypatch.setattr(sdlc, "fetch_slice", lambda n, cfg: (slice_issue(*slice_state), CLAIMED))
     monkeypatch.setattr(sdlc, "find_slice_pr", lambda n, cfg: {"number": 50, "state": "MERGED", "baseRefName": "epic/12",
                                                                "mergeCommit": {"oid": oid}})
     monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted=None: epic_bundle(comments, labels))
@@ -430,6 +447,26 @@ def test_revert_slice_pushes_only_a_tested_revert(repo, monkeypatch, capsys):
     assert not (sdlc.epic_worktree(12, CONFIG, repo) / "bad.py").exists()
     assert ["issue", "reopen", "28", "--repo", CONFIG["repository"]] in gh.calls
     assert gh.kinds() == [(28, "revert"), (28, "release"), (12, "epic-tests"), (12, "demo-void")]
+
+
+def test_revert_slice_finishes_a_run_cut_short_after_its_push(repo, monkeypatch, capsys):
+    gh = GitHub(monkeypatch, repo)
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    bad = commit_on_epic(repo, "bad.py", "bad = 1\n")
+    stub_revert(monkeypatch, repo, bad, [DEMO1, ACCEPT1])
+    monkeypatch.setattr(sdlc, "run_suite", PASS)
+    gh.fail_reopen = True
+    assert sdlc.main(["revert-slice", "28"]) == 1                 # pushed, then GitHub failed
+    pushed = origin_sha(repo, "epic/12")
+    assert pushed != bad and gh.posted == []
+    monkeypatch.setattr(sdlc, "run_suite", lambda wt: pytest.fail("the revert is already tested and pushed"))
+    assert sdlc.main(["revert-slice", "28"]) == 0                 # a rerun only finishes the records
+    assert origin_sha(repo, "epic/12") == pushed                  # no second revert
+    assert gh.kinds() == [(28, "revert"), (28, "release"), (12, "demo-void")]
+    # and once the slice is open again, a third run finds nothing missing but the void it already has
+    stub_revert(monkeypatch, repo, bad, [DEMO1, ACCEPT1, agent("demo-void", None, 14, milestone="M1")], slice_state=("open",))
+    gh.posted.clear()
+    assert sdlc.main(["revert-slice", "28"]) == 0 and gh.kinds() == [(28, "revert"), (28, "release")]
 
 
 def test_revert_slice_refuses_what_has_shipped(repo, monkeypatch, capsys):
@@ -470,9 +507,14 @@ def test_ship_finishes_the_epic_and_can_finish_it_again(repo, monkeypatch, capsy
     sdlc.ensure_epic_branch(12, CONFIG, repo)
     shipped = [DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)]
     stub_ship(monkeypatch, shipped, [done_leaf(28, "T1.1")])
-    assert sdlc.main(["ship", "12"]) == 0           # the last ship's cleanup was interrupted: this finishes it
-    assert not sdlc.remote_has("epic/12", repo) and (12, "done") in gh.labels
-    assert any(c[:3] == ["issue", "close", "12"] for c in gh.calls)
+    gh.closes = False                               # GitHub won't close it: that's an error, not "done"
+    assert sdlc.main(["ship", "12"]) == 1
+    assert "won't close" in capsys.readouterr().err and not sdlc.remote_has("epic/12", repo)
+    gh.closes = True
+    stub_ship(monkeypatch, shipped, [done_leaf(28, "T1.1")])
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted=None: epic_bundle(shipped, labels=("sdlc:done",)))
+    assert sdlc.main(["ship", "12"]) == 0           # done but still open: a rerun closes it
+    assert gh.issue_state == "CLOSED" and (12, "done") in gh.labels
 
 
 def test_ship_records_a_release_pr_that_merged_without_its_record(repo, monkeypatch, capsys):

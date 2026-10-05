@@ -461,3 +461,15 @@ def test_cleanup_slices_go_first():
 def test_only_svg_pictures_are_published(tmp_path):
     d = _demo_dir(tmp_path, files={"list.svg": SHOT, "photo.png": ""})
     assert any("photo.png: only .md, .svg files are published" in e for e in sdlc.demo_post_errors("![l](list.svg)", d))
+
+
+def test_a_cleanup_slice_can_wait_on_ordinary_work_without_a_deadlock():
+    pays = "## Pays down\n\n#81: tech debt filed against this epic."
+    leaves = [{"number": 40, "key": "T2", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": ""},
+              {"number": 41, "key": "T3", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": ""},
+              {"number": 44, "key": "C1", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": pays}]
+    p = sdlc.summarise_progress(leaves, {44: [{"number": 40, "state": "open"}]})
+    assert (p["ready"], p["cleanup_needs"]) == ([40], [40])         # C1's prerequisite goes first; T3 still waits
+    bundle = {"issue": {"number": 40, "body": sdlc.marker("slice", None, epic="12", key="T2"), "milestone": "#12 M2: x"},
+              "epic_state": derive(["sdlc:in-progress"]), "epic_progress": p, "trusted": [OWNER]}
+    assert sdlc.epic_pause_errors(bundle, CONFIG, resume=False) == []
