@@ -421,3 +421,15 @@ def test_a_cleanup_plan_is_held_to_its_budget(tmp_path, capsys, monkeypatch):
     assert sdlc.main(["plan-post", "12", str(pf), "--from-file", str(f), "--dry-run"]) == 0
     body = sdlc.render_leaf_body(12, {**unit("C1", "M2"), "debt": [101]}, None, {}, None)
     assert "## Pays down\n\n#101: tech debt" in body
+
+
+def test_a_demo_request_ends_when_the_milestone_goes_back_to_being_built():
+    found = [REQUEST, comment(POSTER, "it didn't ring", 10),
+             agent("demo-changes", None, 11, milestone="M2", found="agent"),
+             agent("plan", 2, 12), agent("plan-review", 2, 13, verdict="approve"), agent("plan-created", 2, 14)]
+    st = derive(["sdlc:in-progress"], found)
+    assert st["demo_request"] is None and st["action"] == "work_slices"
+    voided = derive(["sdlc:in-progress"], [REQUEST, comment(POSTER, "rang", 10), agent("demo-void", None, 11, milestone="M2")])
+    assert voided["demo_request"] is None and voided["action"] == "work_slices"
+    other = derive(["sdlc:in-progress"], [REQUEST, comment(POSTER, "rang", 10), agent("demo-void", None, 11, milestone="M1")])
+    assert other["action"] == "demo_heard"

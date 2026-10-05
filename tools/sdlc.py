@@ -195,6 +195,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         last_marked = i
         kind = mk.get("kind", "")
         rev = int(mk["rev"]) if mk.get("rev", "").isdigit() else None
+        if request and kind in ("demo-changes", "demo-void") and mk.get("milestone", NO_MILESTONE) == request["milestone"]:
+            request = None   # the milestone goes back to being built: a new demo will ask again
         if kind in ROUND_KINDS and mk.get("phase") != "plan":
             rounds += 1
         if kind == "question" and mk.get("phase") == "plan":
