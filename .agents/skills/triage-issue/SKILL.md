@@ -119,8 +119,10 @@ uv run python tools/sdlc.py transition N diagnosis-review --kind diagnosis --bod
 
 - `action` is `record_approval` -> an authorised `/approve` on the latest revision:
   `uv run python tools/sdlc.py transition N approved --kind approval`. Then commit the
-  approved text to `docs/prd/N-slug.md` on a branch cut from `main`, open a small PR
-  containing only that file, and merge it:
+  approved text to `docs/prd/N-slug.md` on a branch `prd/N` cut from `origin/main`, in a
+  worktree of its own (`git worktree add -b prd/N <SCRATCH>/prd origin/main`, never a
+  branch switch in the primary checkout, which other sessions share). Open a small PR
+  containing only that file, merge it, then `git worktree remove <SCRATCH>/prd`:
   `uv run python tools/sdlc.py merge-prd N PR` (it refuses unless the issue is approved and the PR
   changes nothing outside `docs/prd/`). Report that planning (`plan-issue`) is next.
 - `/changes <text>` or free-form feedback -> revise and post the next revision (step 4/5).

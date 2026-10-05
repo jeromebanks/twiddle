@@ -207,6 +207,56 @@ several can run at once. A slice's state is read off GitHub:
    milestone demos, not per PR.
 6. `cleanup N`, run from the primary checkout, removes the worktree and the branch.
 
+## Worktrees, and several sessions at once
+
+Every worktree here is a plain **git worktree** that `tools/sdlc.py` or a skill makes with
+`git worktree add`. None of them comes from Claude Code's own worktree feature (`EnterWorktree`,
+`claude --worktree`, an agent's `isolation: "worktree"`). That feature puts its worktrees under
+`.claude/worktrees/`, branches them from `origin/main` and names the branches itself. The SDLC
+needs `slice/S` cut from `origin/epic/N`, at a path that `claim`, `merge` and `cleanup` can find
+again from the issue. A session starts in the primary checkout and stays rooted there. The skill
+makes it work in the worktree by writing every path out in full (`work-slice` §2).
+
+| Worktree | Made by | For | Removed by |
+|---|---|---|---|
+| `.worktrees/slice-S`, on `slice/S` from `origin/epic/N` | `claim S` | building one slice | `cleanup S` |
+| `.worktrees/epic-N`, detached at `origin/epic/N` | `sync N`, `revert-slice S` | merging `main` in, reverting a slice, Codex's milestone review | nobody: reset to `origin/epic/N` before each use |
+| `.worktrees/sdlc-demos`, on `sdlc-demos` | `demo-post` | committing a demo's pictures | nobody: kept |
+| `.worktrees/verify-main-N`, detached at `origin/main` | `verify-main N` | the suite on `main` after an untested release | `verify-main N`, when it's done |
+| `<scratchpad>/before` and `after`, detached | `milestone-demo` | the pictures of `main` and `epic/N` | the skill (`git worktree remove`) |
+| a throwaway worktree on `prd/N`, from `origin/main` | `triage-issue` | the approved PRD's one-file PR | the skill |
+
+`.worktrees/` is gitignored. **The primary checkout stays on `main`, and stays clean.** Every
+session runs `tools/sdlc.py` from it, and the tool adds and removes worktrees from it, so nothing
+switches its branch or edits files in it.
+
+### Running issues in parallel
+
+Run one Claude Code session per piece of work, each started in the primary checkout, and give
+each a different issue or slice: for example `/work-slice 35` in one terminal and
+`/triage-issue 80` in another. `ready` lists every slice that can be claimed, across all epics.
+
+- **Different issues share nothing but the primary checkout.** Each epic has its own `epic/N`.
+  Each slice has its own worktree, branch and `.venv`, so its first `uv sync` and suite run are
+  slower. Triage and planning write only to GitHub and to the session's scratchpad.
+- **Slices of one epic** run in parallel only within the milestone being built: one milestone
+  is built at a time. `blocked_by` holds back any slice that needs another's merged code.
+- **Two sessions can't take the same slice.** `claim` refuses a slice with an active claim, which
+  it reads off GitHub. On one machine the worktree also guards it: a second `claim S` finds
+  `.worktrees/slice-S` and stops before posting anything. Across two machines, the GitHub check
+  is the only guard. It reads and then posts, so two claims seconds apart could both land. Claim
+  from one machine.
+- **Merges into `epic/N` happen one at a time.** The gate refuses a PR that is behind `epic/N`.
+  The second slice to finish rebases onto `origin/epic/N`. Its new head needs a fresh
+  `test-record` and Codex review, because both records are bound to the head SHA. A review of a
+  rebased head doesn't spend the round budget.
+- **`sync` and `revert-slice` share `.worktrees/epic-N`** and take a lock on it. A second one
+  started meanwhile refuses ("wait for it, then rerun") and doesn't queue.
+- **Only one session touches a speaker at a time.** Slices never touch one (tests are offline).
+  A milestone demo writes to the real household with the user present, so run one demo at a time.
+- **The machine is shared.** Each full suite takes about two minutes, and parallel runs slow
+  each other down. Give the Bash call `timeout: 600000`, as the skills say.
+
 ## Milestone demos (`milestone-demo`)
 
 When every unit of work in a milestone has merged (for an epic without milestones,
