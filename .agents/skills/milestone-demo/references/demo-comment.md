@@ -32,8 +32,8 @@ where you set it.">
 |---|---|
 | ![before: WFMU's title as one string](before-np.svg) | ![after: artist and song separated](after-np.svg) |
 
-<What the user confirmed, for anything that fired on a speaker, e.g.
-"At 7:02 the Roam rang with KALX: confirmed by ear in the kitchen.">
+<What the person who ran it said on the issue, for anything that fired on a speaker,
+quoted, e.g. "At 7:02 the Roam rang with KALX" (@poster, in reply to the demo steps).>
 
 ### Try it yourself
 
@@ -48,6 +48,7 @@ where you set it.">
 ### Not done yet
 
 - <Known gaps, and what comes in the next milestone.>
+- <Each finding you filed, by number: "#81: the list sorts rooms case-sensitively (tech debt)".>
 
 <details><summary>How it was built</summary>
 

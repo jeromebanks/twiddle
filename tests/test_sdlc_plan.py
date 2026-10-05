@@ -38,7 +38,7 @@ def review(rev, ts, verdict):
 def leaf(key, blocked_by=(), covers=(1,)):
     return {"key": key, "title": f"do {key}", "blocked_by": list(blocked_by), "covers": list(covers),
             "outcome": "o", "scope": "s", "acceptance": ["a"], "validation": "v", "demo": "d",
-            "non_goals": "n", "context": "c"}
+            "non_goals": "n", "context": "c", "complexity": "routine", "complexity_reason": "follows T0"}
 
 
 def make_plan():
@@ -326,3 +326,200 @@ def test_ready_needs_every_blocker_completed():
     ready, waiting = sdlc.ready_leaves(leaves, blockers)
     assert [r["key"] for r in ready] == ["T1.1", "T1.2"]
     assert [(w["key"], w["unmet"]) for w in waiting] == [("T2", [42, 45])]
+
+
+# --- complexity and the model that builds a slice (#49) ---------------------------
+
+def test_every_unit_needs_a_complexity_and_a_reason():
+    plan = make_plan()
+    plan["subtasks"][0]["slices"][0]["complexity"] = "hard"
+    del plan["subtasks"][1]["complexity_reason"]
+    errs = sdlc.validate_plan(plan)
+    assert "T1.1 needs a complexity: one of routine, judgment, novel" in errs
+    assert any(e.startswith("T2 needs a complexity_reason") for e in errs)
+
+
+def test_complexity_reaches_the_slice_body_and_the_plan_comment():
+    l = {**leaf("T1.1"), "complexity": "judgment", "complexity_reason": "touches the\n journal"}
+    body = sdlc.render_leaf_body(12, l, 24, {}, None)
+    assert "Complexity: judgment — touches the journal" in body.splitlines()[2]
+    assert "*routine*" in sdlc.render_plan(make_plan())
+
+
+def test_the_model_comes_from_the_config():
+    cfg = {**CONFIG, "models": {"routine": "haiku", "judgment": "opus"}}
+    assert sdlc.model_for("routine", cfg) == "haiku" and sdlc.model_for("novel", cfg) is None
+    leaves = [{"number": 30, "key": "T1", "state": "open", "assignees": [], "labels": ["plan:slice", "complexity:routine"],
+               "complexity": "routine", "milestone": None}]
+    p = sdlc.summarise_progress(leaves, {})
+    assert p["units"][30] == {"key": "T1", "complexity": "routine", "milestone": "all"}
+    p["units"][30]["model"] = sdlc.model_for("routine", cfg)
+    epic = {"number": 12, "action": "work_slices", "state": "in-progress", "conflicts": []}
+    assert sdlc.next_command(epic, p) == "/work-slice 30 (haiku: routine)"
+    assert sdlc.complexity_of(["plan:slice", "complexity:novel"]) == "novel"
+    assert sdlc.complexity_of(["complexity:weird"]) is None
+
+
+def test_claim_records_the_model():
+    claim = agent("claim", None, 1, branch="slice/28", model="sonnet")
+    assert sdlc.claim_status([claim], {OWNER})["model"] == "sonnet"
+
+
+def test_plan_annotate_backfills_once():
+    body = sdlc.render_leaf_body(12, {k: v for k, v in leaf("T1.1").items() if not k.startswith("complexity")}, 24, {}, None)
+    assert "Complexity:" not in body
+    records = [{"kind": "slice", "number": 28, "key": "T1.1", "labels": ["plan:slice"], "body": body},
+               {"kind": "slice", "number": 29, "key": "T9", "labels": ["plan:slice"], "body": body}]
+    acts = sdlc.annotate_actions(records, {"T1.1": ("judgment", "the journal")})
+    assert [(a["number"], a["add"], a["drop"]) for a in acts] == [(28, ["complexity:judgment"], [])]
+    new = acts[0]["body"]
+    assert new.splitlines()[2] == "Complexity: judgment — the journal"
+    assert new.replace("Complexity: judgment — the journal\n", "") == body       # nothing else touched
+    done = [{**records[0], "labels": ["plan:slice", "complexity:judgment"], "body": new}]
+    assert sdlc.annotate_actions(done, {"T1.1": ("judgment", "the journal")}) == []
+    changed = sdlc.annotate_actions(done, {"T1.1": ("novel", "unknown API")})
+    assert changed[0]["add"] == ["complexity:novel"] and changed[0]["drop"] == ["complexity:judgment"]
+    assert "Complexity: novel — unknown API" in changed[0]["body"] and changed[0]["body"].count("Complexity:") == 1
+
+
+def test_bootstrap_creates_the_complexity_labels():
+    names = {l["name"] for l in CONFIG["extra_labels"]}
+    assert {f"complexity:{c}" for c in sdlc.COMPLEXITY} <= names
+
+
+# --- one milestone's issues at a time (#44) -----------------------------------------
+
+def two_milestones(**extra):
+    plan = make_plan()
+    plan["milestones"].append({"key": "M2", "title": "write", "demo": "add an alarm"})
+    plan["subtasks"].append({**leaf("T3", ["T2"], covers=(5,)), "milestone": "M2"})
+    return {**plan, **extra}
+
+
+def plan_comment(plan, rev, ts):
+    return comment(OWNER, sdlc.render_comment("plan", rev, sdlc.render_plan(plan), CONFIG), ts)
+
+
+DEMO_M1 = [agent("demo", 1, 20, milestone="M1", sha="d" * 40), agent("demo-approval", 1, 21, milestone="M1", by=POSTER)]
+
+
+def created_m1(plan):
+    return APPROVED + [plan_comment(plan, 1, 3), review(1, 4, "approve"), agent("plan-created", 1, 5, created="M1")]
+
+
+def test_plan_create_makes_only_the_first_milestone_by_default(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    monkeypatch.setattr(sdlc, "check_plan", lambda plan: [])
+    f = _bundle(tmp_path, APPROVED + [plan_comment(two_milestones(), 1, 3), review(1, 4, "approve")])
+    assert sdlc.main(["plan-create", "12", "--from-file", f, "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "#12: creating M1; later: M2" in out and "'#12 T2: do T2'" in out
+    assert "M2" not in out.split("later: M2")[1] and "T3" not in out           # nothing of M2 yet
+    assert sdlc.main(["plan-create", "12", "--from-file", f, "--dry-run", "--milestone", "M2"]) == 1
+    assert "M2 comes after M1, which aren't created yet" in capsys.readouterr().err
+
+
+def test_create_all_keeps_the_old_behaviour(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    monkeypatch.setattr(sdlc, "check_plan", lambda plan: [])
+    f = _bundle(tmp_path, APPROVED + [plan_comment(two_milestones(create="all"), 1, 3), review(1, 4, "approve")])
+    assert sdlc.main(["plan-create", "12", "--from-file", f, "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "'#12 T3: do T3'" in out and "creating" not in out
+    cfg = {**CONFIG, "create": "all"}
+    st = derive(["sdlc:approved"], APPROVED + [plan_comment(two_milestones(), 1, 3), review(1, 4, "approve")])
+    assert sdlc.creation_target(two_milestones(), st, cfg) == (None, ["M1", "M2"])
+
+
+def test_the_next_milestone_is_replanned_after_the_last_ones_demo():
+    plan = two_milestones()
+    building = derive(["sdlc:in-progress"], created_m1(plan))
+    assert (building["action"], building["created_milestones"], building["uncreated_milestones"]) == ("work_slices", ["M1"], ["M2"])
+    due = derive(["sdlc:in-progress"], created_m1(plan) + DEMO_M1)
+    assert due["action"] == "plan_next_milestone" and due["plan_rounds"] == 0      # a fresh round budget
+    assert sdlc.next_command(due) == "/plan-issue 12: plan M2 with what earlier milestones taught"
+    unshipped = {"ready": [], "in_flight": [], "escalated": [], "waiting": [], "open": 0,
+                 "milestones": [{"title": "#12 M1: read", "key": "M1", "done": 3, "total": 3}]}
+    assert sdlc.next_command(due, unshipped).startswith("/milestone-demo 12: M1 is accepted; ship it")
+    replan = created_m1(plan) + DEMO_M1 + [plan_comment({**plan, "lessons": {"milestone": "M1", "text": "t"}}, 2, 30)]
+    assert derive(["sdlc:in-progress"], replan)["action"] == "continue_plan"
+    agreed = derive(["sdlc:in-progress"], replan + [review(2, 31, "approve")])
+    assert agreed["action"] == "create_plan_issues"
+    assert sdlc.creation_target(plan, agreed, CONFIG) == ({"M1", "M2"}, ["M1", "M2"])
+    built = derive(["sdlc:in-progress"], replan + [review(2, 31, "approve"), agent("plan-created", 2, 32, created="M1,M2")])
+    assert (built["action"], built["uncreated_milestones"]) == ("work_slices", [])
+
+
+def test_demo_changes_before_acceptance_dont_create_the_next_milestone():
+    plan = two_milestones()
+    st = derive(["sdlc:in-progress"], created_m1(plan) + [agent("demo", 1, 20, milestone="M1", sha="d" * 40)])
+    assert sdlc.creation_target(plan, st, CONFIG) == ({"M1"}, ["M1"])     # only new issues of M1 (fix slices)
+
+
+def test_a_legacy_plan_created_marker_means_everything_exists():
+    st = derive(["sdlc:in-progress"], APPROVED + [plan_comment(two_milestones(), 1, 3), review(1, 4, "approve"),
+                                                  agent("plan-created", 1, 5)] + DEMO_M1)
+    assert (st["uncreated_milestones"], st["action"]) == ([], "work_slices")
+
+
+def test_a_replan_needs_its_lessons(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    monkeypatch.setattr(sdlc, "check_plan", lambda plan: [])
+    f = _bundle(tmp_path, created_m1(two_milestones()) + DEMO_M1, labels=("sdlc:in-progress",))
+    pf = tmp_path / "plan.json"
+    pf.write_text(json.dumps(two_milestones()))
+    assert sdlc.main(["plan-post", "12", str(pf), "--from-file", f, "--dry-run"]) == 1
+    assert "needs `lessons`" in capsys.readouterr().err
+    pf.write_text(json.dumps(two_milestones(lessons={"milestone": "M1", "text": "Reads were slow; M2 caches them."})))
+    assert sdlc.main(["plan-post", "12", str(pf), "--from-file", f, "--dry-run"]) == 0
+    assert "## Lessons from M1\n\nReads were slow" in capsys.readouterr().out
+
+
+def test_validation_of_create_lessons_and_later_milestone_blockers():
+    plan = two_milestones(create="some", lessons={"milestone": "M9", "text": "x"})
+    plan["subtasks"][0]["slices"][0]["blocked_by"] = ["T3"]
+    errs = sdlc.validate_plan(plan)
+    assert any("`create` is" in e for e in errs) and any("`lessons` is" in e for e in errs)
+    assert any(e.startswith("T1.1 (M1) is blocked by T3 of a later milestone (M2)") for e in errs)
+    assert sdlc.validate_plan(two_milestones()) == []        # M2 waiting on M1 is fine
+
+
+def test_create_actions_for_one_milestone_resume_and_link_back():
+    plan = two_milestones()
+    m1 = sdlc.plan_create_actions(plan, {}, {}, {}, {"M1"})
+    assert ("create", "T3") not in m1 and ("create", "T2") in m1
+    # M2 after M1 exists: only T3, attached and blocked by M1's T2; a rerun after a failure finishes it
+    existing = {"T1": 1, "T1.1": 2, "T1.2": 3, "T2": 4}
+    attached = {12: {1, 4}, 1: {2, 3}}
+    blocked = {3: {2}, 4: {3}}
+    m2 = sdlc.plan_create_actions(plan, existing, attached, blocked, {"M1", "M2"})
+    assert m2 == [("milestone", "M1"), ("milestone", "M2"), ("create", "T3"), ("attach", None, "T3"), ("block", "T3", "T2")]
+    half = sdlc.plan_create_actions(plan, {**existing, "T3": 5}, {12: {1, 4, 5}, 1: {2, 3}}, blocked, {"M1", "M2"})
+    assert [a for a in half if a[0] != "milestone"] == [("block", "T3", "T2")]
+
+
+def test_not_finished_while_milestones_are_uncreated():
+    p = {"open": 0, "milestones": [{"key": "M1"}]}
+    assert sdlc.finished(p, {"M1": {"accepted": True}}, {"M1": "x"})
+    assert not sdlc.finished(p, {"M1": {"accepted": True}}, {"M1": "x"}, ["M2"])
+
+
+def test_milestones_are_listed_in_the_order_they_ship():
+    plan = two_milestones()
+    plan["milestones"].reverse()
+    assert any(e.startswith("list milestones in order (M1, M2)") for e in sdlc.validate_plan(plan))
+
+
+def test_spent_rounds_on_an_amendment_escalate_instead_of_asking_the_poster():
+    plan = two_milestones()
+    rounds = [review(2, 31 + i, "changes") for i in range(CONFIG["max_plan_rounds"])]
+    st = derive(["sdlc:in-progress"], created_m1(plan) + DEMO_M1 +
+                [plan_comment({**plan, "lessons": {"milestone": "M1", "text": "t"}}, 2, 30)] + rounds)
+    assert st["action"] == "escalate_plan"
+    assert "escalate it (`transition 12 escalated" in sdlc.next_command(st)
+
+
+def test_a_milestone_needs_units_of_work():
+    plan = two_milestones()
+    plan["subtasks"] = [{**t, "milestone": "M2"} for t in plan["subtasks"]]
+    assert "milestone M1 has no units of work: give it some, or drop it" in sdlc.validate_plan(plan)

@@ -6,6 +6,8 @@
   "max_plan_rounds": 3,
   "max_pr_rounds": 5,
   "worktree_dir": ".worktrees",
+  "create": "milestone",
+  "cleanup_slices_per_milestone": 1,
   "confirm_before_posting": false,
   "agent_name": "twiddle triage",
   "labels": [
@@ -19,6 +21,13 @@
     {"name": "sdlc:demo-review", "color": "1D76DB", "description": "SDLC: milestone demo posted, waiting for the poster (reserved)"},
     {"name": "sdlc:done", "color": "0E8A16", "description": "SDLC: shipped and accepted (reserved)"},
     {"name": "sdlc:escalated", "color": "B60205", "description": "SDLC: a human is needed (no consensus, or the agent is stuck)"}
+  ],
+  "models": {"routine": "sonnet", "judgment": "opus", "novel": "opus"},
+  "extra_labels": [
+    {"name": "complexity:routine", "color": "C2E0C6", "description": "SDLC plan: a clear pattern to follow, little design"},
+    {"name": "complexity:judgment", "color": "FEF2C0", "description": "SDLC plan: real design choices, safety or the evidence path"},
+    {"name": "tech-debt", "color": "D4C5F9", "description": "SDLC: non-blocking work found while building an epic (cleanup pass)"},
+    {"name": "complexity:novel", "color": "F9D0C4", "description": "SDLC plan: unknowns that need investigating first"}
   ],
   "plan_labels": [
     {"name": "plan:subtask", "color": "C5DEF5", "description": "SDLC plan: a subtask of an epic; its slices are sub-issues"},

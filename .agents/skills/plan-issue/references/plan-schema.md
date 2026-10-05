@@ -26,7 +26,9 @@ exactly what gets created.
           "validation": "Exact commands: `uv run pytest tests/test_alarms.py -q` ...",
           "demo": "What the poster sees, or 'none: internal, enables T1.2'.",
           "non_goals": "Adjacent work this session must not absorb.",
-          "context": "The minimum a fresh session reads: docs/prd/12-...md §Scope, src/twiddle/household.py ..."
+          "context": "The minimum a fresh session reads: docs/prd/12-...md §Scope, src/twiddle/household.py ...",
+          "complexity": "routine",
+          "complexity_reason": "Follows the ListZones parser in household.py; no design choices."
         }
       ]
     },
@@ -34,11 +36,30 @@ exactly what gets created.
       "key": "T2", "title": "Discount alarms in analyse", "milestone": "M1",
       "blocked_by": ["T1.1"], "covers": [18],
       "outcome": "...", "scope": "...", "acceptance": ["..."], "validation": "...",
-      "demo": "...", "non_goals": "...", "context": "..."
+      "demo": "...", "non_goals": "...", "context": "...",
+      "complexity": "judgment", "complexity_reason": "Touches the evidence path: what analyse discounts."
     }
   ]
 }
 ```
+
+Two optional top-level fields:
+
+- `"create": "milestone"` (the default, from `.sdlc/config.json`) or `"all"`. With
+  `milestone`, `plan-create` makes one milestone's issues at a time: the first now,
+  each next one only after the previous one's demo is accepted and the plan is
+  revised with what it taught. `all` makes everything at once. It suits a batch of
+  independent, well-understood slices, like stations or venue sources. A plan with
+  one milestone, or none, is the same either way.
+- `"lessons": {"milestone": "M1", "text": "..."}`: what the last created milestone
+  taught, and what this revision changes because of it. It is shown as `Lessons
+  from M1`, and is required on every revision after a milestone was created while
+  others are still to come.
+
+A cleanup pass (`plan-issue --cleanup`) adds `"cleanup_of": "M1"`, the accepted
+milestone whose tech debt it pays down. Its new slices carry `"debt": [81, 84]`,
+the `tech-debt` issues they close (rendered as a `Pays down` section; `merge`
+closes them). It adds at most `cleanup_slices_per_milestone` new slices.
 
 ## Rules the validator enforces
 
@@ -48,11 +69,20 @@ exactly what gets created.
 - **Units of work** are slices, plus subtasks that have no slices. Every unit needs:
   - a non-empty `title`;
   - `outcome`, `scope`, `validation`, `demo`, `non_goals` and `context`;
-  - `acceptance`, a non-empty list (it becomes a checkbox list).
+  - `acceptance`, a non-empty list (it becomes a checkbox list);
+  - `complexity`, how hard it is, and `complexity_reason`, one line on why:
+    - `routine`: a clear pattern to follow, little design;
+    - `judgment`: real design choices, safety-sensitive code (anything that writes to a
+      speaker or Spotify), or the evidence path (the journal, `analyse`);
+    - `novel`: unknowns that need investigating first.
+
+    Rate the work, not the model: `.sdlc/config.json`'s `models` maps each level to the
+    model that builds it, so changing models never means editing issues.
 - A subtask that has slices needs a `summary`, and may not carry `blocked_by`: put
   it on its slices.
 - `blocked_by` names other units of work, not a subtask that has slices, and
-  never the unit itself. The graph has no cycles.
+  never the unit itself. The graph has no cycles. A unit may wait on an earlier
+  milestone's unit, never on a later one's: that one may not exist yet.
 - With `milestones`, every subtask names one. Without them, none does.
 - `covers` lists PRD acceptance-criterion numbers: the numbered items under
   `## Acceptance criteria` and `## Addendum` in `docs/prd/N-*.md`. Together, the
@@ -70,6 +100,7 @@ exactly what gets created.
 | slice | issue `#N T1.1: <title>`, label `plan:slice`, sub-issue of its subtask |
 | subtask without slices | issue labelled `plan:slice`, sub-issue of the epic |
 | `blocked_by` | a native issue dependency |
+| `complexity` | a `complexity:<level>` label, and a `Complexity: <level> — <reason>` line in the body |
 
 Each unit's body starts with `<!-- sdlc:v1 kind=slice epic=N key=T1.1 -->`, then
 `Epic: #N · Parent: #P · Covers acceptance criteria …`, then the seven sections

@@ -48,6 +48,10 @@ Dispatch on `action`:
 | `ask_poster` | step 7 |
 | `create_plan_issues` | Codex approved the latest revision (or an earlier creation was cut short): step 6 |
 | any of these with `feedback: true` | the poster asked for changes at a milestone demo: "After demo feedback" below |
+| `plan_next_milestone` | the latest created milestone was accepted and the plan has more: "The next milestone" below |
+| `work_slices` and `next` says `/plan-issue N --cleanup` | "Cleanup pass" below |
+| `continue_plan` / `create_plan_issues` while `sdlc:in-progress` | an amendment is under review: steps 5-6 |
+| `escalate_plan` | an amendment (feedback, the next milestone, cleanup) spent its Codex rounds: `transition N escalated --kind escalation --reason "..."`. The epic is being built, so a human settles it, not a question to the poster |
 | `reconcile_label` | `uv run python tools/sdlc.py reconcile N`, then as `plan` |
 | anything in triage | use `triage-issue` instead |
 | `turn` is `poster`, `human` or `later` | report it and stop |
@@ -81,6 +85,9 @@ Write `plan.json` in your scratchpad. The format is in `references/plan-schema.m
   poster can see. A small plan has none.
 - **Bugs:** the subtasks are the diagnosis's proposed fix tasks. Slices are only
   needed when a task is bigger than one session.
+- **Rate each unit's complexity** (`routine`, `judgment`, `novel`, with a one-line
+  reason; see the schema). You've read the PRD and the code it touches, so you're the
+  best placed to say. The rating picks the model that builds it.
 
 ```bash
 uv run python tools/sdlc.py plan-validate plan.json
@@ -159,10 +166,16 @@ uv run python tools/sdlc.py plan-create N
 ```
 
 `plan-create` reads the plan from the **reviewed comment**, not from your file.
-It creates the milestones, the subtasks, then the slices in dependency order.
+By default (`"create": "milestone"`) it creates **only the first milestone**, and
+says which, plus what's left for later. Later milestones are created one at a time,
+each after the previous one's demo is accepted and the plan is revised with what
+it taught ("The next milestone" below). It creates the milestone, the subtasks, then
+the slices in dependency order.
 Each slice has the required sections and a hidden key marker. It attaches every
 issue as a sub-issue, adds the `blocked_by` links, reads them all back, posts a
-key → issue table on the epic, and moves it to `sdlc:planned`. If it fails
+key → issue table on the epic, creates the epic's branch `epic/N` from `main`
+(slices land there, and each accepted milestone ships to `main`), and moves it to
+`sdlc:planned`. If it fails
 partway, run it again: it finds what exists by marker and does only the rest.
 
 ## 7. No consensus: ask the poster
@@ -184,16 +197,52 @@ The tool marks the comment `phase=plan`. The poster's reply makes the action
 the dispute isn't theirs to settle, escalate instead:
 `transition N escalated --kind escalation --reason "..."`.
 
+## The next milestone
+
+With the default `"create": "milestone"`, the later milestones exist only in the
+plan. When the latest created one's demo is accepted, `state` says
+`plan_next_milestone`. If `next` says to ship it first, `/milestone-demo N` does that.
+Then revise the plan before anything more is created:
+
+- Start from the latest posted plan JSON and **keep every key**.
+- Read what the milestone taught. Sources: the demo and the poster's answer,
+  the merged PRs and their "adjacent issues", and the code as it now is. Then
+  revise the later milestones' slices: their scope, Context, dependencies and
+  ratings, or new and split slices.
+- Add `"lessons": {"milestone": "M1", "text": "..."}`. `plan-post` refuses a revision
+  without it: say what was learnt and what changed because of it, or that nothing did.
+- Steps 4-6 as usual: post, advisor, Codex rounds (a fresh budget for each milestone),
+  then `plan-create N`, which creates the next milestone only. The epic stays `in-progress`.
+
+## Cleanup pass
+
+After a milestone is accepted, `next` asks for a cleanup pass when the epic has open
+tech debt (`file-issue --debt`). It runs before the next milestone's slices, and only
+up to `cleanup_slices_per_milestone` slices (`.sdlc/config.json`).
+
+- `gh issue list --label tech-debt --state open` and read the ones for this epic (`state` lists them).
+- Pick the most valuable that fit the budget: the ones that make the next milestone
+  safer or simpler first. The rest stay filed; nothing is lost.
+- Amend the latest plan JSON. Keep every key, set `"cleanup_of": "M1"` (the milestone just
+  accepted), and add slices `C1`, `C2`, ... in the **next** milestone. Each one gets
+  `"debt": [<issue numbers>]`, which `merge` closes with it, and the usual sections and
+  rating. `plan-post` refuses more new slices than the budget.
+- When the next milestone isn't created yet (`plan_next_milestone`), fold the cleanup
+  into that replan. Same fields.
+- Steps 4-6 as usual. `plan-create` records the pass (`cleanup=M1`), so it isn't asked for again.
+
 ## After demo feedback
 
-When the poster answers a milestone demo with changes, `milestone-demo` records
-them (`demo-changes`) and the epic comes back here with `feedback: true` while it
+When the poster answers a milestone demo with changes, or the agent's own demo run
+finds the milestone broken (`demo-changes --found`, before any demo is posted),
+`milestone-demo` records them (`demo-changes`) and the epic comes back here with `feedback: true` while it
 stays `sdlc:in-progress`. Amend the plan; don't start over:
 
 - Start from the latest posted plan JSON. **Keep every key**: `plan-post` refuses
   an amendment that drops one, because those issues already exist.
 - Add slices for the changes, in the milestone that was demoed, with fresh keys
-  (`F1`, `F2`, ... so it's clear they came from feedback). They may be `blocked_by`
+  (`F1`, `F2`, ... so it's clear they came from feedback). A fix for something the
+  demo found broken includes an offline test that reproduces it. They may be `blocked_by`
   merged slices. Leave the text of existing slices alone: changing it won't change
   their issues.
 - Steps 4-6 as usual: post, advisor, Codex rounds (a fresh budget), `plan-create`.

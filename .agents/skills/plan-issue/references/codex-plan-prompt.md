@@ -38,6 +38,10 @@ Check:
    concrete enough to pass or fail, and its Context section is enough for a
    fresh session to start without reading the whole repo. Non-goals stop scope creep.
 7. **Milestones.** If there are any, each ends in a demo the poster can see.
+8. **Complexity.** Each unit's `complexity` (routine / judgment / novel) fits the work
+   its brief describes, and its `complexity_reason` says why. Anything that writes to a
+   speaker or Spotify, or touches the journal or `analyse`, is at least `judgment`.
+   A unit rated too low gets a cheaper model than it needs: that is blocking.
 
 Reply with numbered findings. Mark each one **blocking** (the plan would build the
 wrong thing, miss a criterion, be unsafe, or have a slice that can't be done

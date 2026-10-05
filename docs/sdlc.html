@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How an issue ships</title>
+<meta name="description" content="twiddle's issue workflow for humans: every state from filing to closing, whose move it is, and the skill that moves it on.">
+<style>
+:root {
+  --bg: #fbfaf7; --panel: #ffffff; --ink: #1d1d1f; --muted: #5d5d66; --line: #d9d6cf;
+  --accent: #2f6fd0; --agent: #2f6fd0; --poster: #b8621b; --human: #b3261e; --done: #2e7d4f;
+  --chip: #eef2fa; --code: #f3f1ec; --shadow: 0 1px 2px rgba(0,0,0,.05), 0 4px 16px rgba(0,0,0,.04);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141416; --panel: #1c1c20; --ink: #ececf0; --muted: #a3a3ad; --line: #34343c;
+    --accent: #7aa7f0; --agent: #7aa7f0; --poster: #e59b55; --human: #f0857c; --done: #6cc596;
+    --chip: #232838; --code: #24242a; --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141416; --panel: #1c1c20; --ink: #ececf0; --muted: #a3a3ad; --line: #34343c;
+  --accent: #7aa7f0; --agent: #7aa7f0; --poster: #e59b55; --human: #f0857c; --done: #6cc596;
+  --chip: #232838; --code: #24242a; --shadow: none;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; }
+main { max-width: 920px; margin: 0 auto; padding: 32px 16px 96px; }
+h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 .25rem; letter-spacing: -.01em; }
+h2 { font-size: 1.35rem; margin: 3rem 0 .75rem; padding-top: .5rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.05rem; margin: 1.75rem 0 .5rem; }
+p, li { color: var(--ink); }
+.lede { color: var(--muted); font-size: 1.1rem; margin: 0 0 1.5rem; }
+a { color: var(--accent); }
+code, kbd { font: .88em/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--code);
+  padding: .1em .35em; border-radius: 4px; }
+pre { background: var(--code); padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: .85rem; }
+pre code { background: none; padding: 0; }
+nav.toc { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px;
+  box-shadow: var(--shadow); }
+nav.toc ol { margin: .25rem 0 0; padding-left: 1.25rem; columns: 2; column-gap: 2rem; }
+@media (max-width: 640px) { nav.toc ol { columns: 1; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+  box-shadow: var(--shadow); margin: 1rem 0; }
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.who { border-left: 4px solid var(--accent); }
+.who.poster { border-left-color: var(--poster); }
+.who.human { border-left-color: var(--human); }
+.who.tool { border-left-color: var(--muted); }
+.who h3 { margin-top: 0; }
+.chip { display: inline-block; font: 600 .78rem/1.6 ui-monospace, Menlo, monospace; padding: 0 .5em;
+  border-radius: 999px; background: var(--chip); color: var(--ink); white-space: nowrap; }
+.turn { font-weight: 600; }
+.turn.agent { color: var(--agent); } .turn.poster { color: var(--poster); } .turn.human { color: var(--human); }
+.turn.done { color: var(--done); }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; font-size: .82rem; text-transform: uppercase; letter-spacing: .03em; }
+figure { margin: 1rem 0; }
+figure svg { width: 100%; height: auto; display: block; }
+figcaption { color: var(--muted); font-size: .88rem; margin-top: .4rem; }
+svg text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; fill: var(--ink); }
+svg .box { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
+svg .box.agent { stroke: var(--agent); } svg .box.poster { stroke: var(--poster); }
+svg .box.human { stroke: var(--human); } svg .box.done { stroke: var(--done); }
+svg .edge { stroke: var(--muted); stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+svg .edge.back { stroke-dasharray: 5 4; }
+svg .label { font-size: 12px; fill: var(--muted); }
+svg .title { font-size: 14px; font-weight: 600; }
+svg .small { font-size: 11.5px; fill: var(--muted); }
+svg #arrow path, svg #arrow2 path { fill: var(--muted); }
+.steps { counter-reset: s; list-style: none; padding: 0; }
+.steps > li { counter-increment: s; position: relative; padding-left: 2.4rem; margin: 0 0 1rem; }
+.steps > li::before { content: counter(s); position: absolute; left: 0; top: .05rem; width: 1.7rem; height: 1.7rem;
+  border-radius: 50%; background: var(--chip); font-weight: 700; text-align: center; line-height: 1.7rem; }
+.note { color: var(--muted); font-size: .92rem; }
+.legend span { margin-right: 1rem; white-space: nowrap; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>How an issue ships</h1>
+<p class="lede">twiddle's issue workflow, for the people in it. Someone files an issue on GitHub, and it goes
+through a sequence of states until the change is on <code>main</code> and the issue is closed. This page
+covers every state, whose move each one is, and the skill that moves it on.</p>
+
+<nav class="toc" aria-label="Contents"><strong>Contents</strong>
+<ol>
+<li><a href="#who">Who's involved</a></li>
+<li><a href="#big-picture">The whole journey</a></li>
+<li><a href="#states">Every state, and what moves it on</a></li>
+<li><a href="#skills">The four skills</a></li>
+<li><a href="#slices">A slice, from ready to merged</a></li>
+<li><a href="#milestones">A milestone, from plan to <code>main</code></a></li>
+<li><a href="#branches">Branches: nothing unseen reaches <code>main</code></a></li>
+<li><a href="#findings">Problems found along the way</a></li>
+<li><a href="#you">What you can type</a></li>
+<li><a href="#where">Where is my issue?</a></li>
+<li><a href="#example">A worked example</a></li>
+<li><a href="#rules">The rules that hold it together</a></li>
+</ol></nav>
+
+<h2 id="who">1. Who's involved</h2>
+<div class="grid">
+  <div class="card who poster"><h3>The poster</h3>
+  <p>The person who filed the issue. They're treated as an end user: they answer questions, sign off a
+  plain-language spec, and say <code>/approve</code> or <code>/changes</code> to each demo.
+  They never review code or plans.</p></div>
+  <div class="card who"><h3>The agent</h3>
+  <p>A Claude Code session running one of four skills. It writes specs, plans, code and demos.
+  It only talks to people through comments on the issue, never in the chat, so an orchestrator
+  can run it unattended.</p></div>
+  <div class="card who"><h3>Codex, the reviewer</h3>
+  <p>A second, independent model that reviews read-only. It reviews every plan, every pull request,
+  and every milestone before it ships. Nothing it hasn't approved gets built, merged or shipped.</p></div>
+  <div class="card who tool"><h3><code>tools/sdlc.py</code></h3>
+  <p>The deterministic half. It derives an issue's state from its labels and comments, enforces every
+  gate, and makes every label change, comment, merge and release. Skills ask it what to do next,
+  and nobody works that out by hand.</p></div>
+  <div class="card who human"><h3>A maintainer</h3>
+  <p>Steps in only when the tooling says a human is needed (<span class="chip">sdlc:escalated</span>), or to
+  run a demo step that makes a real speaker play.</p></div>
+</div>
+
+<h2 id="big-picture">2. The whole journey</h2>
+<p>Each issue carries exactly one <span class="chip">sdlc:*</span> label, which says where it is.
+Blue boxes are the agent's move, orange are the poster's, and red needs a human.</p>
+<figure>
+<svg viewBox="0 0 900 560" role="img" aria-labelledby="bp-t bp-d">
+  <title id="bp-t">The states an issue moves through</title>
+  <desc id="bp-d">From a new issue, triage leads to questions, a PRD or a diagnosis; sign-off leads to approved, then planned,
+  then in progress with milestone demos, and finally done. Any state can escalate to a human.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <!-- row 1: triage -->
+  <rect class="box agent" x="20" y="30" width="150" height="56" rx="10"/>
+  <text class="title" x="95" y="55" text-anchor="middle">new issue</text>
+  <text class="small" x="95" y="74" text-anchor="middle">(no label)</text>
+  <rect class="box agent" x="220" y="30" width="150" height="56" rx="10"/>
+  <text class="title" x="295" y="55" text-anchor="middle">triage</text>
+  <text class="small" x="295" y="74" text-anchor="middle">/triage-issue</text>
+  <rect class="box poster" x="430" y="30" width="170" height="56" rx="10"/>
+  <text class="title" x="515" y="55" text-anchor="middle">needs-info</text>
+  <text class="small" x="515" y="74" text-anchor="middle">poster answers</text>
+  <rect class="box poster" x="660" y="10" width="220" height="48" rx="10"/>
+  <text class="title" x="770" y="32" text-anchor="middle">prd-review</text>
+  <text class="small" x="770" y="49" text-anchor="middle">a feature: what to build</text>
+  <rect class="box poster" x="660" y="70" width="220" height="48" rx="10"/>
+  <text class="title" x="770" y="92" text-anchor="middle">diagnosis-review</text>
+  <text class="small" x="770" y="109" text-anchor="middle">a bug: what's wrong, the fix</text>
+  <path class="edge" d="M170,58 H216"/>
+  <path class="edge" d="M370,58 H426"/>
+  <path class="edge" d="M600,50 C630,40 640,34 656,34"/>
+  <path class="edge" d="M600,66 C630,76 640,90 656,92"/>
+  <path class="edge back" d="M660,48 C620,110 560,110 540,90"/>
+  <text class="label" x="560" y="128">/changes or a question</text>
+  <!-- approval -->
+  <rect class="box agent" x="660" y="170" width="220" height="56" rx="10"/>
+  <text class="title" x="770" y="195" text-anchor="middle">approved</text>
+  <text class="small" x="770" y="214" text-anchor="middle">/plan-issue · Codex reviews the plan</text>
+  <path class="edge" d="M770,118 V166"/>
+  <text class="label" x="780" y="148">poster: /approve</text>
+  <!-- planned -->
+  <rect class="box agent" x="660" y="290" width="220" height="56" rx="10"/>
+  <text class="title" x="770" y="315" text-anchor="middle">planned</text>
+  <text class="small" x="770" y="334" text-anchor="middle">slices created · epic/N made</text>
+  <path class="edge" d="M770,226 V286"/>
+  <text class="label" x="760" y="262" text-anchor="end">Codex: VERDICT approve</text>
+  <path class="edge back" d="M660,198 C560,198 540,140 540,90"/>
+  <text class="label" x="552" y="160" text-anchor="end">plan: no agreement →</text>
+  <text class="label" x="552" y="174" text-anchor="end">a plain question to the poster</text>
+  <!-- in progress / demo loop -->
+  <rect class="box agent" x="360" y="290" width="220" height="56" rx="10"/>
+  <text class="title" x="470" y="315" text-anchor="middle">in-progress</text>
+  <text class="small" x="470" y="334" text-anchor="middle">/work-slice, one slice per session</text>
+  <path class="edge" d="M660,318 H584"/>
+  <text class="label" x="596" y="308">first claim</text>
+  <rect class="box poster" x="360" y="420" width="220" height="56" rx="10"/>
+  <text class="title" x="470" y="445" text-anchor="middle">demo-review</text>
+  <text class="small" x="470" y="464" text-anchor="middle">poster sees it working</text>
+  <path class="edge" d="M440,346 V416"/>
+  <text class="label" x="430" y="380" text-anchor="end">a milestone is complete:</text>
+  <text class="label" x="430" y="394" text-anchor="end">/milestone-demo posts it</text>
+  <path class="edge back" d="M500,420 V350"/>
+  <text class="label" x="510" y="378">/approve → ship to main</text>
+  <text class="label" x="510" y="392">/changes → fix slices</text>
+  <!-- done -->
+  <rect class="box done" x="40" y="290" width="200" height="56" rx="10"/>
+  <text class="title" x="140" y="315" text-anchor="middle">done</text>
+  <text class="small" x="140" y="334" text-anchor="middle">every milestone shipped · closed</text>
+  <path class="edge" d="M360,318 H244"/>
+  <text class="label" x="250" y="308">last ship</text>
+  <!-- escalated -->
+  <rect class="box human" x="40" y="440" width="220" height="56" rx="10"/>
+  <text class="title" x="150" y="465" text-anchor="middle">escalated</text>
+  <text class="small" x="150" y="484" text-anchor="middle">a human is needed</text>
+  <text class="label" x="40" y="525">from any state: rounds spent, a conflict, a failing suite on the epic branch</text>
+</svg>
+<figcaption>The issue's label at each step. Dashed arrows go back a step.</figcaption>
+</figure>
+
+<h2 id="states">3. Every state, and what moves it on</h2>
+<p>Whose move it is comes from <code>tools/sdlc.py</code>, which reads it off the label and the comments.
+"Action" is the name <code>state N</code> prints. The skill named under "next" is what to run.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Label</th><th>Whose move</th><th>What happens</th><th>Action → next</th></tr></thead>
+<tbody>
+<tr><td>(none) / <span class="chip">sdlc:triage</span></td><td class="turn agent">agent</td>
+<td>The agent reads the issue and the code. If it's unclear, it asks questions. If it's a feature, it writes a PRD. If it's a bug, it reproduces it read-only and writes a diagnosis.</td>
+<td><code>triage</code> → <code>/triage-issue N</code></td></tr>
+<tr><td><span class="chip">sdlc:needs-info</span></td><td class="turn poster">poster</td>
+<td>Questions are waiting for the poster. Their reply makes it the agent's move again.</td>
+<td><code>wait_for_poster</code>, then <code>respond_to_reply</code> → <code>/triage-issue N</code> (or <code>replan</code> → <code>/plan-issue N</code> for a planning question)</td></tr>
+<tr><td><span class="chip">sdlc:prd-review</span> / <span class="chip">sdlc:diagnosis-review</span></td><td class="turn poster">poster</td>
+<td>A revision is posted. The poster replies <code>/approve</code>, <code>/changes …</code>, or just comments. Each revision spends a round, up to <code>max_rounds</code>.</td>
+<td><code>record_approval</code> or <code>respond_to_reply</code> → <code>/triage-issue N</code></td></tr>
+<tr><td><span class="chip">sdlc:approved</span></td><td class="turn agent">agent</td>
+<td>The approved PRD is merged into <code>docs/prd/</code>. The agent plans the work as subtasks and one-session slices, grouped into milestones, each rated for complexity. Codex reviews the plan round by round until it approves. The poster isn't asked to review it.</td>
+<td><code>plan</code>, <code>continue_plan</code>, <code>create_plan_issues</code>, <code>ask_poster</code> → <code>/plan-issue N</code> (<code>reconcile_label</code> when a maintainer ticked the label by hand)</td></tr>
+<tr><td><span class="chip">sdlc:planned</span></td><td class="turn agent">agent</td>
+<td><code>plan-create</code> has made the first milestone's issues and the branch <code>epic/N</code>.</td>
+<td><code>work_slices</code> → <code>/work-slice S</code></td></tr>
+<tr><td><span class="chip">sdlc:in-progress</span></td><td class="turn agent">agent</td>
+<td>Slices are built one per session. When a milestone is complete, it's demoed. Once accepted, it ships to <code>main</code>. Then the next milestone is planned and built.</td>
+<td><code>work_slices</code> → <code>/work-slice S</code>, <code>/milestone-demo N</code>, <code>sync N</code>, or <code>/plan-issue N</code> (<code>plan_next_milestone</code>, <code>--cleanup</code>, or demo feedback)</td></tr>
+<tr><td><span class="chip">sdlc:in-progress</span> with a demo request</td><td class="turn poster">a person</td>
+<td>A demo step would make a real speaker play, so the agent asks on the issue for someone to run it and say what they heard.</td>
+<td><code>wait_for_poster</code>, then <code>demo_heard</code> → <code>/milestone-demo N</code></td></tr>
+<tr><td><span class="chip">sdlc:demo-review</span></td><td class="turn poster">poster</td>
+<td>A milestone demo is posted, with real screenshots. The poster tries it.</td>
+<td><code>record_demo_acceptance</code> or <code>demo_reply</code> → <code>/milestone-demo N</code></td></tr>
+<tr><td><span class="chip">sdlc:done</span></td><td class="turn done">nobody</td>
+<td>Every milestone was accepted and shipped. <code>epic/N</code> is deleted and the issue closed.</td>
+<td><code>none</code></td></tr>
+<tr><td><span class="chip">sdlc:escalated</span></td><td class="turn human">a human</td>
+<td>The agents couldn't agree, a merge of <code>main</code> conflicted, a suite failed on the epic branch, or a plan amendment ran out of rounds (<code>escalate_plan</code>). A human resolves it and moves it back to triage.</td>
+<td><code>human</code> (and <code>fix_conflict</code> when two labels clash)</td></tr>
+</tbody></table></div>
+<p class="note">The slices themselves (<span class="chip">plan:slice</span>, <span class="chip">plan:subtask</span>) and filed
+<span class="chip">tech-debt</span> are never triaged on their own. They move with their epic.</p>
+
+<h2 id="skills">4. The four skills</h2>
+<p>Each skill does one stage and ends by printing the <code>next:</code> line, so the next session (or an
+orchestrator) knows exactly what to run.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Skill</th><th>Runs when</th><th>Moves the issue</th><th>Through these tool steps</th></tr></thead>
+<tbody>
+<tr><td><code>triage-issue</code></td><td>new, <code>triage</code>, a reply in review</td>
+<td>untriaged → <span class="chip">triage</span> / <span class="chip">needs-info</span> → <span class="chip">prd-review</span> or <span class="chip">diagnosis-review</span> → <span class="chip">approved</span></td>
+<td><code>state</code>, <code>transition</code>, <code>reconcile</code>, <code>merge-prd</code></td></tr>
+<tr><td><code>plan-issue</code></td><td><span class="chip">approved</span>, the next milestone, demo changes, a cleanup pass</td>
+<td><span class="chip">approved</span> → <span class="chip">planned</span>, or adds issues while <span class="chip">in-progress</span></td>
+<td><code>plan-validate</code>, <code>plan-post</code>, <code>plan-review</code>, <code>plan-create</code>, <code>plan-annotate</code>, <code>bootstrap-labels</code></td></tr>
+<tr><td><code>work-slice</code></td><td>a slice is ready</td>
+<td><span class="chip">planned</span> → <span class="chip">in-progress</span> (first claim). The slice goes from ready to merged.</td>
+<td><code>slice-status</code>, <code>slice-check</code>, <code>claim</code>, <code>test-record</code>, <code>pr-review</code>, <code>merge</code>, <code>cleanup</code>, <code>release</code>, <code>escalate-slice</code>, <code>file-issue</code>, <code>ready</code></td></tr>
+<tr><td><code>milestone-demo</code></td><td>a milestone is complete, the poster replied, or an accepted one is due to ship</td>
+<td><span class="chip">in-progress</span> ⇄ <span class="chip">demo-review</span>. The last ship makes it <span class="chip">done</span>.</td>
+<td><code>demo-status</code>, <code>demo-request</code>, <code>demo-post</code>, <code>demo-accept</code>, <code>demo-changes</code>, <code>sync</code>, <code>ship-review</code>, <code>ship</code>, <code>verify-main</code>, <code>revert-slice</code>, <code>file-issue</code></td></tr>
+</tbody></table></div>
+<p class="note">Also: <code>epic-branch N</code> gives an older epic its branch, <code>next</code> lists every issue where it's the
+agent's move, and <code>state N</code> explains one.</p>
+
+<h2 id="slices">5. A slice, from ready to merged</h2>
+<p>A slice is one unit of work, sized for one session. Its issue is the whole brief: outcome, scope,
+acceptance criteria, how to validate it, the demo, the non-goals and the context.</p>
+<figure>
+<svg viewBox="0 0 900 200" role="img" aria-labelledby="sl-t">
+  <title id="sl-t">A slice's states: blocked, ready, claimed, in review, merged</title>
+  <defs><marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+  <g>
+  <rect class="box" x="10" y="40" width="130" height="50" rx="10"/><text class="title" x="75" y="70" text-anchor="middle">blocked</text>
+  <rect class="box agent" x="190" y="40" width="130" height="50" rx="10"/><text class="title" x="255" y="70" text-anchor="middle">ready</text>
+  <rect class="box agent" x="370" y="40" width="130" height="50" rx="10"/><text class="title" x="435" y="70" text-anchor="middle">claimed</text>
+  <rect class="box agent" x="550" y="40" width="150" height="50" rx="10"/><text class="title" x="625" y="70" text-anchor="middle">in-review</text>
+  <rect class="box done" x="750" y="40" width="130" height="50" rx="10"/><text class="title" x="815" y="70" text-anchor="middle">merged</text>
+  <rect class="box human" x="550" y="135" width="150" height="46" rx="10"/><text class="title" x="625" y="163" text-anchor="middle">escalated</text>
+  </g>
+  <path class="edge" style="marker-end:url(#arrow2)" d="M140,65 H186"/><text class="label" x="146" y="32">blockers merge</text>
+  <path class="edge" style="marker-end:url(#arrow2)" d="M320,65 H366"/><text class="label" x="330" y="32">claim</text>
+  <path class="edge" style="marker-end:url(#arrow2)" d="M500,65 H546"/><text class="label" x="506" y="32">PR open</text>
+  <path class="edge" style="marker-end:url(#arrow2)" d="M700,65 H746"/><text class="label" x="700" y="32">merge gate</text>
+  <path class="edge" style="marker-end:url(#arrow2)" d="M625,90 V131"/><text class="label" x="635" y="116">rounds spent</text>
+  <path class="edge back" style="marker-end:url(#arrow2)" d="M550,160 C450,160 450,95 435,92"/><text class="label" x="300" y="150">retry once on a stronger model</text>
+</svg>
+<figcaption>Read from GitHub by <code>slice-status S</code>. A reverted slice goes back to ready.</figcaption>
+</figure>
+<ol class="steps">
+<li><strong>Claim.</strong> <code>claim S --model …</code> posts the claim, assigns it, and makes a worktree on
+<code>slice/S</code> from <code>origin/epic/N</code>. It refuses while a demo or release is due, a slice of a
+later milestone is waiting, or the cleanup pass comes first.</li>
+<li><strong>Build.</strong> Only what the brief says, with offline tests. No test touches the network, a speaker or Spotify, and
+nothing fires on a real speaker.</li>
+<li><strong>Test.</strong> <code>test-record PR</code> runs the full suite on the pushed head and records the result on the PR.</li>
+<li><strong>Review.</strong> Codex reviews that exact head. Each round is recorded with <code>pr-review</code>
+<em>before</em> any fix is pushed. Fixing or rebutting continues until Codex approves the current head. After
+<code>max_pr_rounds</code> the slice escalates. If it was built on a cheaper model, it's retried once on the strongest.</li>
+<li><strong>Merge.</strong> <code>merge PR</code> is the gate: the PR targets <code>epic/N</code> and isn't behind it, Codex approved this
+head, tests passed on it, and it belongs to the current milestone. Then the slice is squash-merged into <code>epic/N</code>
+and its issue closed. Non-blocking findings are filed as <span class="chip">tech-debt</span> first.</li>
+</ol>
+
+<h2 id="milestones">6. A milestone, from plan to <code>main</code></h2>
+<p>A milestone is a group of slices that ends in something the poster can see. The epic works on
+<strong>one milestone at a time</strong>, the earliest one not yet shipped. Only its slices are offered,
+claimed or merged.</p>
+<figure>
+<svg viewBox="0 0 900 230" role="img" aria-labelledby="ms-t">
+  <title id="ms-t">A milestone's phases: uncreated, building, complete, demoed, accepted, shipped</title>
+  <rect class="box" x="10" y="60" width="120" height="50" rx="10"/><text class="title" x="70" y="90" text-anchor="middle">uncreated</text>
+  <rect class="box agent" x="160" y="60" width="120" height="50" rx="10"/><text class="title" x="220" y="90" text-anchor="middle">building</text>
+  <rect class="box agent" x="310" y="60" width="120" height="50" rx="10"/><text class="title" x="370" y="90" text-anchor="middle">complete</text>
+  <rect class="box poster" x="460" y="60" width="120" height="50" rx="10"/><text class="title" x="520" y="90" text-anchor="middle">demoed</text>
+  <rect class="box agent" x="610" y="60" width="120" height="50" rx="10"/><text class="title" x="670" y="90" text-anchor="middle">accepted</text>
+  <rect class="box done" x="760" y="60" width="120" height="50" rx="10"/><text class="title" x="820" y="90" text-anchor="middle">shipped</text>
+  <path class="edge" d="M130,85 H156"/><text class="label" x="104" y="44">plan-create</text>
+  <path class="edge" d="M280,85 H306"/><text class="label" x="252" y="44">all merged</text>
+  <path class="edge" d="M430,85 H456"/><text class="label" x="404" y="44">demo-post</text>
+  <path class="edge" d="M580,85 H606"/><text class="label" x="560" y="44">/approve</text>
+  <path class="edge" d="M730,85 H756"/><text class="label" x="722" y="44">ship</text>
+  <path class="edge back" d="M370,110 C370,145 255,145 255,114"/>
+  <path class="edge back" d="M520,110 C520,175 222,175 222,114"/>
+  <path class="edge back" d="M670,110 C670,212 190,212 190,114"/>
+  <text class="label" x="300" y="138" text-anchor="end">found broken</text>
+  <text class="label" x="452" y="168">/changes</text>
+  <text class="label" x="560" y="200">a revert, or later findings</text>
+</svg>
+<figcaption>These are the milestone phases the code works with (<code>MILESTONE_FLOW</code>). Tests walk each kind of
+journey (straight through, changes, findings, a revert) and hold its phase changes to these arrows.</figcaption>
+</figure>
+<h3>What's due, in order</h3>
+<p>For the current milestone, <code>next</code> always picks the first of these that applies:</p>
+<ol class="steps">
+<li><strong>Verify <code>main</code></strong>, if a release reached it with commits no recorded run saw, because
+<code>main</code> moved during <code>ship</code>. <code>verify-main N</code> runs the suite on <code>main</code>. Until it passes, nothing else
+starts and the epic can't finish.</li>
+<li><strong>Plan it</strong> (<code>uncreated</code>). By default only the first milestone's issues are created up front.
+Each later one is replanned with a <em>Lessons from M1</em> section and a fresh Codex review, then created.
+<code>/plan-issue N</code>.</li>
+<li><strong>Demo it</strong> (<code>complete</code> or <code>demoed</code>). <code>/milestone-demo N</code> runs the demo steps from
+<code>epic/N</code>, with <code>main</code> as the "before". It draws real screenshots and posts the demo for the poster.</li>
+<li><strong>Ship it</strong> (<code>accepted</code>). <code>sync N</code> merges <code>main</code> into <code>epic/N</code> and runs the suite.
+Codex reviews the milestone's whole diff (<code>ship-review</code>). Then <code>ship N</code> merges <code>epic/N</code> into <code>main</code>
+through a pull request, with a merge commit.</li>
+<li><strong>Pay down debt</strong> (just after the previous milestone shipped, when tech debt is open). <code>/plan-issue N --cleanup</code>
+plans up to <code>cleanup_slices_per_milestone</code> debt slices, and they go before the rest of this milestone.</li>
+<li><strong>Catch up</strong> with <code>main</code>. When nothing's ready or in flight and <code>epic/N</code> is behind, <code>sync N</code>.</li>
+<li><strong>Build it.</strong> <code>/work-slice S</code> for the first slice on offer, named with the model its rating maps to,
+e.g. <code>(sonnet: routine)</code>.</li>
+</ol>
+
+<h2 id="branches">7. Branches: nothing unseen reaches <code>main</code></h2>
+<figure>
+<svg viewBox="0 0 900 190" role="img" aria-labelledby="br-t">
+  <title id="br-t">main gets only accepted milestones; slices squash into epic/N</title>
+  <path d="M30,50 H870" stroke="var(--done)" stroke-width="3"/>
+  <text class="title" x="30" y="32">main</text>
+  <path d="M90,50 C120,50 120,130 150,130 H760" stroke="var(--accent)" stroke-width="3" fill="none"/>
+  <text class="title" x="160" y="160">epic/N</text>
+  <g fill="var(--accent)"><circle cx="210" cy="130" r="7"/><circle cx="280" cy="130" r="7"/><circle cx="350" cy="130" r="7"/>
+  <circle cx="560" cy="130" r="7"/><circle cx="630" cy="130" r="7"/></g>
+  <text class="small" x="196" y="112">s1</text><text class="small" x="266" y="112">s2</text><text class="small" x="336" y="112">s3</text>
+  <text class="small" x="546" y="112">s4</text><text class="small" x="616" y="112">s5</text>
+  <path d="M410,50 V130" stroke="var(--muted)" stroke-width="2" stroke-dasharray="4 4"/>
+  <text class="small" x="402" y="80" text-anchor="end">sync: main merged in</text>
+  <path d="M470,130 C490,130 490,50 510,50" stroke="var(--done)" stroke-width="2" fill="none"/>
+  <circle cx="510" cy="50" r="8" fill="var(--done)"/>
+  <text class="small" x="500" y="30">ship M1</text>
+  <path d="M700,130 C720,130 720,50 740,50" stroke="var(--done)" stroke-width="2" fill="none"/>
+  <circle cx="740" cy="50" r="8" fill="var(--done)"/>
+  <text class="small" x="880" y="30" text-anchor="end">ship M2, the last (epic/N deleted)</text>
+  <circle cx="90" cy="50" r="6" fill="var(--done)"/><text class="small" x="70" y="76">plan-create</text>
+</svg>
+<figcaption>Each slice is one squash commit on <code>epic/N</code>, and each accepted milestone is one merge commit on <code>main</code>.</figcaption>
+</figure>
+<ul>
+<li><strong>Slices never touch <code>main</code>.</strong> A slice's PR targets <code>epic/N</code>. A bad slice is undone with one
+revert commit there (<code>revert-slice S</code>, tested before it's pushed), which reopens the slice and voids its milestone's demo.</li>
+<li><strong><code>sync N</code> merges <code>main</code> in. It never rebases,</strong> because slice branches are built on <code>epic/N</code>. It runs the full suite
+and records it, and pushes only on a pass. A conflict or a failure goes to a human.</li>
+<li><strong><code>ship N</code> releases one accepted milestone.</strong> It needs all of these:
+  <ul>
+  <li><code>epic/N</code> contains <code>main</code>;</li>
+  <li>a passing run on its head;</li>
+  <li>Codex's approval of the milestone's diff on that same head;</li>
+  <li>every commit on the branch traces to a slice of an accepted milestone: its squash, a
+  <code>cherry-pick -x</code> of one, or a revert of one. A merge has to be a clean merge of <code>main</code>.
+  One that resolved a conflict ships only after a human has reviewed it (<code>--accept-merge</code>).</li>
+  </ul>
+  It rechecks <code>main</code> right before merging, and checks the merge afterwards. If <code>main</code> moved in that moment,
+  the release is marked untested and the epic is escalated. Nothing more happens until <code>verify-main N</code>
+  passes on <code>main</code>.</li>
+<li>A milestone built before epic branches existed, straight onto <code>main</code>, ships as a recorded no-op.</li>
+</ul>
+
+<h2 id="findings">8. Problems found along the way</h2>
+<p>Nothing found is left in a chat or buried in a PR. It's sorted, and each kind has its own path:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Found</th><th>What happens</th></tr></thead>
+<tbody>
+<tr><td><strong>Broken.</strong> Something this milestone promised fails at its demo.</td>
+<td>No demo is posted. <code>demo-changes N --found</code> records it, <code>plan-issue</code> plans fix slices (each with a test that
+reproduces it), and the demo runs again.</td></tr>
+<tr><td><strong>Non-blocking.</strong> A cosmetic problem, an edge case, a review suggestion, or an adjacent issue.</td>
+<td><code>file-issue N --debt</code> files it as <span class="chip">tech-debt</span>, linked to the epic. A budgeted cleanup pass picks it up
+after the milestone is accepted, and <code>merge</code> closes it with the slice that pays it down.</td></tr>
+<tr><td><strong>Out of scope.</strong> A bug that already existed, or one in another feature.</td>
+<td><code>file-issue N</code> makes a new issue, which starts its own journey at triage.</td></tr>
+<tr><td><strong>The poster wants something different.</strong></td>
+<td>Their <code>/changes</code> becomes new slices in the same milestone, then demo rev 2.</td></tr>
+</tbody></table></div>
+
+<h2 id="you">9. What you can type</h2>
+<div class="grid">
+  <div class="card"><h3><code>/approve</code></h3><p>On a line of its own. It signs off the <em>latest</em> PRD or diagnosis, or accepts
+  the latest milestone demo. A newer revision voids an earlier approval.</p></div>
+  <div class="card"><h3><code>/changes &lt;what&gt;</code></h3><p>Asks for something different. On a demo, it becomes new slices.</p></div>
+  <div class="card"><h3>Any reply</h3><p>It's read as feedback or an answer. Replying with what you heard is how a demo step
+  that plays on a real speaker gets confirmed.</p></div>
+</div>
+<p class="note">Only the issue's author or someone with write access can <code>/approve</code>. Quoted and code-block lines don't count.</p>
+
+<h2 id="where">10. Where is my issue?</h2>
+<pre><code>uv run python tools/sdlc.py state 12        # its state, whose move, and the next: line
+uv run python tools/sdlc.py next            # every issue where it's the agent's move
+uv run python tools/sdlc.py demo-status 12  # each milestone: its slices, before/after, demo and release
+uv run python tools/sdlc.py ready --epic 12 # the slices that can start now</code></pre>
+<p>The <code>next:</code> line is always the answer to "what now?". Every skill ends by printing it.</p>
+
+<h2 id="example">11. A worked example</h2>
+<ol class="steps">
+<li>Someone files <em>"Sonos alarm manager"</em> (#12). <code>/triage-issue 12</code> asks two questions, and the issue becomes <span class="chip">sdlc:needs-info</span>.</li>
+<li>They answer. The agent writes PRD rev 1 (<span class="chip">sdlc:prd-review</span>), and they reply <code>/approve</code>. The PRD is merged into <code>docs/prd/</code>, and the issue becomes <span class="chip">sdlc:approved</span>.</li>
+<li><code>/plan-issue 12</code> writes a plan with three milestones. Codex asks for changes twice and approves rev 3. <code>plan-create</code> makes M1's slices and <code>epic/12</code>, and the issue becomes <span class="chip">sdlc:planned</span>.</li>
+<li><code>/work-slice 28</code>, <code>29</code>, <code>30</code>: each slice is claimed, built, tested, reviewed by Codex, and squashed into <code>epic/12</code>. The issue is now <span class="chip">sdlc:in-progress</span>.</li>
+<li>M1 is complete, so <code>/milestone-demo 12</code> posts screenshots of <code>alarm list</code>, and the issue becomes <span class="chip">sdlc:demo-review</span>. The poster says <code>/approve</code>.</li>
+<li>The agent runs <code>sync 12</code>, Codex reviews M1's diff, and <code>ship 12</code> merges <code>epic/12</code> into <code>main</code>. M1 is on <code>main</code>.</li>
+<li><code>/plan-issue 12</code> replans M2 with <em>Lessons from M1</em>, plus one tech-debt cleanup slice. Then the loop repeats. One of M2's steps rings a real alarm, so the agent asks on the issue, and the poster replies "it rang at 7:02".</li>
+<li>When the last milestone ships, <code>epic/12</code> is deleted, the issue becomes <span class="chip">sdlc:done</span>, and it's closed.</li>
+</ol>
+
+<h2 id="rules">12. The rules that hold it together</h2>
+<ul>
+<li><strong>One label at a time.</strong> Every <span class="chip">sdlc:*</span> label is changed only by <code>tools/sdlc.py</code>. The labels are
+<span class="chip">sdlc:triage</span> <span class="chip">sdlc:needs-info</span> <span class="chip">sdlc:prd-review</span>
+<span class="chip">sdlc:diagnosis-review</span> <span class="chip">sdlc:approved</span> <span class="chip">sdlc:planned</span>
+<span class="chip">sdlc:in-progress</span> <span class="chip">sdlc:demo-review</span> <span class="chip">sdlc:done</span>
+<span class="chip">sdlc:escalated</span>.</li>
+<li><strong>Markers are the record.</strong> Every agent comment starts with a hidden <code>&lt;!-- sdlc:v1 kind=… --&gt;</code> marker. The state
+is read back from those markers, so any session can pick up an issue from GitHub alone.</li>
+<li><strong>Records are bound to commits.</strong> A test run or a Codex review counts only for the exact commit it saw. A new commit voids both.</li>
+<li><strong>People are reached through the issue.</strong> No skill asks a question in the chat. Publishing a demo is gated by automated checks
+(no device IDs, addresses or secrets, no blank pictures), and the poster's reply is the human check.</li>
+<li><strong>Speakers are safe.</strong> Tests are offline. Agents run only read-only and <code>--dry-run</code> commands. A real speaker plays only when a
+person runs the command, between <code>snapshot</code> and <code>restore</code>, and what they heard is recorded.</li>
+<li><strong>One view decides.</strong> <code>next</code> and every gate read the same <em>epic view</em>, so they can't disagree. A test checks
+that over thousands of generated histories.</li>
+</ul>
+<p class="note">Reference: <code>SDLC.md</code>, the skills under <code>.agents/skills/</code>, and <code>tools/sdlc.py</code>. This page is checked by
+<code>tests/test_sdlc_guide.py</code>: a new label, command, skill or milestone phase that isn't described here fails the suite.</p>
+
+</main>
+</body>
+</html>
