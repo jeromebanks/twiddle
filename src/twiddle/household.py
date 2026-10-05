@@ -577,25 +577,11 @@ class Household:
         raise NotFound(speaker.ip, self.names)
 
     def resolve(self, query: str) -> Resolution:
-        """Turn a human name or IP into the group that will act on it."""
-        q = (query or "").strip()
-        hits = self.matches(q)
-        if hits[0].ip == q:
-            return self._to_resolution(q, hits[0], "IP names a bonded follower")
-        gids = {self.group_of(s).gid for s in hits}
-        if len(gids) > 1:
-            raise Ambiguous(q, sorted({self.group_of(s).name for s in hits}))
-        # One group: prefer a visible member as "what you meant".
-        best = next((h for h in hits if h.addressable), hits[0])
-        return self._to_resolution(q, best, "named a bonded follower")
+        """Turn a human name or IP into the group that will act on it.
 
-    def matches(self, query: str) -> list[Speaker]:
-        """Every speaker a human name or IP names, before any choosing.
-
-        An IP names its one speaker. Otherwise matching widens in stages --
-        exact, prefix, substring -- and stops at the first stage that produces
-        a hit, so a room literally called "Roam" is never shadowed by
-        "Sonos Roam (L)" merely containing the word.
+        Matching widens in stages -- exact, prefix, substring -- and stops at
+        the first stage that produces a hit, so a room literally called "Roam"
+        is never shadowed by "Sonos Roam (L)" merely containing the word.
         """
         q = (query or "").strip()
         if not q:
@@ -603,7 +589,7 @@ class Household:
 
         by_ip = next((s for s in self.speakers if s.ip == q), None)
         if by_ip is not None:
-            return [by_ip]
+            return self._to_resolution(q, by_ip, "IP names a bonded follower")
 
         nq = _norm(q)
         stages = (
@@ -620,8 +606,14 @@ class Household:
         for match in stages:
             hits = [s for s in self.speakers
                     if any(match(_norm(f)) for f in (s.name, s.room, s.model) if f)]
-            if hits:
-                return hits
+            if not hits:
+                continue
+            gids = {self.group_of(s).gid for s in hits}
+            if len(gids) > 1:
+                raise Ambiguous(q, sorted({self.group_of(s).name for s in hits}))
+            # One group: prefer a visible member as "what you meant".
+            best = next((h for h in hits if h.addressable), hits[0])
+            return self._to_resolution(q, best, "named a bonded follower")
         raise NotFound(q, self.names)
 
     def _to_resolution(self, query: str, sp: Speaker, why: str) -> Resolution:
