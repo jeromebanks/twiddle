@@ -725,3 +725,25 @@ def test_an_owed_cleanup_pass_holds_ordinary_claims():
     view = sdlc.epic_view(st, p)
     assert view["due"] == "cleanup"
     assert "cleanup pass after M1 is owed" in sdlc.claim_errors(view, 35, "#12 M2: y", cleanup=False)[0]
+
+
+def test_changes_after_an_approve_void_it():
+    st = derive([DEMO1, ACCEPT1, comment(POSTER, "/changes the bell is too loud", 13),
+                 agent("demo-changes", 1, 14, milestone="M1")])
+    assert not st["demos"]["M1"]["accepted"] and st["feedback"]
+    fixed = derive([DEMO1, ACCEPT1, comment(POSTER, "/changes louder", 13), agent("demo-changes", 1, 14, milestone="M1"),
+                    agent("plan", 2, 15), agent("plan-review", 2, 16, verdict="approve"), agent("plan-created", 2, 17)])
+    with pytest.raises(sdlc.SdlcError, match="isn't accepted yet"):
+        sdlc.ship_target(fixed, progress(ms("M1", 4, 4)))
+
+
+def test_claims_wait_on_an_escalated_epic_and_an_unverified_main():
+    body = sdlc.marker("slice", None, epic="12", key="T4.1")
+    for labels, comments, needle in ((("sdlc:escalated",), [], "is escalated"),
+                                     (("sdlc:in-progress",), [agent("shipped", None, 13, milestone="M1", sha=HEAD,
+                                                                   untested="1")], "verify-main 12")):
+        st = sdlc.bundle_state(epic_bundle([DEMO1, ACCEPT1, *comments], labels), CONFIG)
+        b = {"issue": {"number": 35, "body": body, "milestone": "#12 M2: y"}, "epic_state": st,
+             "epic_progress": None, "trusted": [OWNER]}
+        errs = sdlc.epic_pause_errors(b, CONFIG, resume=False)
+        assert errs and needle in errs[0], errs

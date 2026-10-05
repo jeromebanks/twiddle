@@ -268,7 +268,7 @@ def _on_demo_changes(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -
         return
     d = L.demos.get(_ms(mk))
     if d and _rev(mk) is not None and d["rev"] == _rev(mk):
-        d["changes"] = True
+        d["changes"], d["accepted"] = True, False   # changes after an /approve void it: a new demo comes first
         _replan(L)   # the poster's changes become new slices
 
 
@@ -2295,7 +2295,8 @@ def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> in
 
 
 def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -> list[str]:
-    """A fresh claim waits while the slice's epic has a milestone demo due or in review."""
+    """Why a fresh claim of this slice must wait: its epic isn't being built (escalated, done...), main holds an
+    unverified release, a demo or release is due, a later milestone waits, or the cleanup pass comes first."""
     epic = (parse_marker(b["issue"].get("body", "")) or {}).get("epic", "")
     if resume or not epic.isdigit():
         return []
@@ -2305,6 +2306,10 @@ def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -
         trusted = set(b["trusted"])
         st = bundle_state(fetch_bundle(int(epic), config, trusted), config)
         progress = epic_progress(int(epic), config, trusted) if st["state"] in BUILD_STATES else None
+    if st["state"] not in BUILD_STATES | {"demo-review"}:
+        return [f"epic #{epic} is {st['state']}: no new slices until it's back in progress"]
+    if st.get("untested"):
+        return [f"main holds a release no recorded run saw ({', '.join(st['untested'])}): `verify-main {epic}` first"]
     errs = claim_pause_errors(st, progress)
     if progress and not errs:
         errs = claim_errors(epic_view(st, progress), b["issue"]["number"], b["issue"].get("milestone"), is_cleanup(b["issue"]))
@@ -3458,7 +3463,8 @@ def command_demo_accept(args: argparse.Namespace, config: dict[str, Any]) -> int
     target = "in-progress"    # the milestone ships to main next (`ship`); the last ship finishes the epic
     title = next((m["title"] for m in progress["milestones"] if m["key"] == key), key)
     body = (f"**{title}** accepted by @{d['by']} (demo rev {rev}). It ships to main next"
-            + (", and then this issue is done. Thank you!" if progress["open"] == 0 else "; work on the rest carries on."))
+            + (", and then this issue is done. Thank you!" if progress["open"] == 0 and not st.get("uncreated_milestones")
+               else "; work on the rest carries on."))
     comment = render_comment("demo-approval", rev, body, config, milestone=key, by=d["by"])
     if args.dry_run:
         print(f"DRY RUN #{n}: demo-review -> {target}; then `ship {n}`")
