@@ -225,6 +225,11 @@ Read their reply as an end user's, not a reviewer's.
 `main` gets the milestone now, as one merge commit of `epic/N`. Every step is a
 tool step; never merge or push by hand.
 
+0. **Is it already on `main`?** Run `uv run python tools/sdlc.py ship N --dry-run` first. If it says
+   the milestone was **built straight onto main** (before epic branches existed), there is
+   nothing to sync or review: `main...epic/N` holds a *later* milestone's work, not this one,
+   and Codex would judge the wrong code (`ship-review` refuses it). Run `ship N` (it records a
+   no-op release), report its `next:` line, and stop. Otherwise carry on from 1.
 1. **Bring `main` in and test the result:**
 
    ```bash

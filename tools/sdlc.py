@@ -2851,14 +2851,21 @@ def command_ship_review(args: argparse.Namespace, config: dict[str, Any]) -> int
     if args.from_file:
         b = json.loads(Path(args.from_file).read_text())
         bundle, progress, head = b, b["progress"], b["epic_head"]
+        already = lambda title: bool(b.get("on_main"))  # noqa: E731
     else:
         bundle = fetch_bundle(args.number, config)
         progress = epic_progress(args.number, config, set(bundle["trusted"]))
         head = epic_head(args.number, config)
+        leaves = [r for r in fetch_plan_issues(args.number, config, set(bundle["trusted"])) if r["kind"] == "slice"]
+        already = lambda title: milestone_on_main(title, leaves, config)  # noqa: E731
     st = bundle_state(bundle, config)
     if not (target := ship_target(st, progress, args.milestone)):
         raise SdlcError(f"#{st['number']}: every milestone has shipped")
     key = target["key"]
+    # main...epic/N holds none of a milestone built straight onto main (it would be a later milestone's diff)
+    if already(target["title"]):
+        raise SdlcError(f"{target['title']} was built straight onto {config.get('default_branch', 'main')}: "
+                        f"there is nothing of it to review; `ship {st['number']}` records it as shipped")
     reviews = [r for r in st["ship_reviews"] if r["milestone"] == key]
     limit = config.get("max_pr_rounds", 5)
     if (spent := sum(1 for r in reviews if r["verdict"] == "changes")) >= limit:
@@ -2887,6 +2894,13 @@ def command_ship_review(args: argparse.Namespace, config: dict[str, Any]) -> int
     posted = post_comment(st["number"], comment, config)
     print(f"#{st['number']} {key} round {rnd}: {verdict}  {posted.get('html_url', '')}")
     return 0
+
+
+def milestone_on_main(title: str, leaves: list[dict[str, Any]], config: dict[str, Any], root: Path | None = None) -> bool:
+    """The milestone titled `title` was built the old way, straight onto main, and is all still there."""
+    mine = [l for l in leaves if (l.get("milestone") or "(no milestone)") == title]
+    prs = milestone_prs(mine, config)
+    return on_main([prs.get(l["number"]) for l in mine], reverted_on_main(config, root), config.get("default_branch", "main"))
 
 
 def milestone_prs(leaves: list[dict[str, Any]], config: dict[str, Any]) -> dict[int, dict[str, Any] | None]:
@@ -2986,9 +3000,7 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
             print(f"#{n}: already done")
         return 0
     key = m["key"]
-    mine = [l for l in leaves if (l.get("milestone") or "(no milestone)") == m["title"]]
-    prs = milestone_prs(mine, config)
-    if on_main([prs.get(l["number"]) for l in mine], reverted_on_main(config, root), main):
+    if milestone_on_main(m["title"], leaves, config, root):
         sha = git(["rev-parse", f"origin/{main}"], cwd=root)
         print(f"#{n}: {m['title']} was built straight onto {main} and is all there: nothing to merge")
         body = f"**{m['title']}** was already on `{main}` (built before epic branches): recorded as shipped, no merge."

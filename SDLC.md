@@ -50,7 +50,10 @@ main ──●────────────────────●─
   milestone on the branch. Every commit on `epic/N` must trace to a slice: its squash, a
   `git cherry-pick -x` of one, or a revert of one. A merge must be a clean merge of `main`
   (exactly what git would make of its parents); one that resolved a conflict ships only with
-  `ship --accept-merge <sha>` after a human has looked at it. Anything else stops the ship. After the last milestone, `epic/N` is deleted.
+  `ship --accept-merge <sha>` after a human has looked at it. Anything else stops the ship.
+  A milestone built straight onto `main`, before epic branches, ships as a recorded no-op:
+  no sync, and no `ship-review`, which refuses it (`main...epic/N` would be a later milestone's diff).
+  After the last milestone, `epic/N` is deleted.
 - **One milestone at a time on the branch.** Only the earliest milestone that hasn't shipped
   is built: `next:` offers only its slices, and `claim` and `merge` refuse a later milestone's,
   so nothing unseen rides along to `main`. Once it's complete, new slices wait for its demo and
