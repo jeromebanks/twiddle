@@ -386,7 +386,8 @@ and records it, and pushes only on a pass. A conflict or a failure goes to a hum
   <li>a passing run on its head;</li>
   <li>Codex's approval of the milestone's diff on that same head;</li>
   <li>every commit on the branch traces to a slice of an accepted milestone: its squash, a
-  <code>cherry-pick -x</code> of one, or a revert of one.</li>
+  <code>cherry-pick -x</code> of one, or a revert of one. A merge has to be a clean merge of <code>main</code>.
+  One that resolved a conflict ships only after a human has reviewed it (<code>--accept-merge</code>).</li>
   </ul>
   It rechecks <code>main</code> right before merging, and checks the merge afterwards. If <code>main</code> moved in that moment,
   the epic is escalated, so someone runs the suite on <code>main</code>.</li>

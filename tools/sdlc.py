@@ -2660,15 +2660,24 @@ def unreleased_commits(n: int, config: dict[str, Any], root: Path) -> list[dict[
     """main..epic/N, each as {sha, parents, body}."""
     out = git(["log", "--format=%H%x1f%P%x1f%B%x1e", f"origin/{config.get('default_branch', 'main')}..origin/{epic_branch(n)}"],
               cwd=root)
+    main = f"origin/{config.get('default_branch', 'main')}"
     commits = []
     for rec in out.split("\x1e"):
         if rec.strip():
             sha, parents, body = (rec.strip("\n").split("\x1f") + ["", ""])[:3]
-            commits.append({"sha": sha, "parents": parents.split(), "body": body})
+            c = {"sha": sha, "parents": parents.split(), "body": body}
+            if len(c["parents"]) > 1:
+                # a merge carries nothing of its own only if it is exactly what git would make of its parents,
+                # and what it brings in is main's (sync)
+                redo = git(["merge-tree", "--write-tree", *c["parents"][:2]], cwd=root, check=False).split("\n")[0]
+                c["clean"] = redo == git(["rev-parse", f"{sha}^{{tree}}"], cwd=root)
+                c["from_main"] = all(is_ancestor(x, main, root) for x in c["parents"][1:])
+            commits.append(c)
     return commits
 
 
-def carried_slices(commits: list[dict[str, Any]], slice_of: dict[str, dict[str, Any]], allowed: set[str]) -> list[str]:
+def carried_slices(commits: list[dict[str, Any]], slice_of: dict[str, dict[str, Any]], allowed: set[str],
+                   accepted_merges: set[str] = frozenset()) -> list[str]:
     """What in main..epic/N isn't the work of an accepted milestone. Every commit must trace to a slice: its
     own squash, a cherry-pick of one (`-x`, as the #12 repair re-applied its slices), or a revert of one.
     Merges (`sync` bringing main in) carry nothing new. Read from the commits, not the slice issues: a
@@ -2676,6 +2685,13 @@ def carried_slices(commits: list[dict[str, Any]], slice_of: dict[str, dict[str, 
     out = []
     for c in commits:
         if len(c["parents"]) > 1:
+            if c["sha"] in accepted_merges or any(c["sha"].startswith(a) for a in accepted_merges if len(a) >= 7):
+                continue
+            if not c.get("clean", False):
+                out.append(f"{c['sha'][:12]} (a merge with changes of its own, e.g. a resolved conflict: review it, "
+                           "then `ship --accept-merge <sha>`)")
+            elif not c.get("from_main", False):
+                out.append(f"{c['sha'][:12]} (a merge of something other than main)")
             continue
         m = PICKED_RE.search(c["body"]) or REVERTS_RE.search(c["body"])
         leaf = slice_of.get(c["sha"]) or (slice_of.get(m.group(1)) if m else None)
@@ -2762,9 +2778,10 @@ def command_sync(args: argparse.Namespace, config: dict[str, Any]) -> int:
     n, root = args.number, primary_root()
     if not remote_has(epic_branch(n), root):
         raise SdlcError(f"origin has no {epic_branch(n)}: `epic-branch {n}`")
-    if args.dry_run:
-        wt = epic_worktree(n, config, root)
-        behind = git(["rev-list", "--count", f"HEAD..origin/{config.get('default_branch', 'main')}"], cwd=wt)
+    if args.dry_run:   # reads refs only: the worktree may be in use by a running sync
+        main = config.get("default_branch", "main")
+        git(["fetch", "-q", "origin", epic_branch(n), main], cwd=root)
+        behind = git(["rev-list", "--count", f"origin/{epic_branch(n)}..origin/{main}"], cwd=root)
         print(f"#{n}: {epic_branch(n)} is {behind} commit(s) behind main; would merge, test, record, push")
         return 0
     out = sync_epic(n, config, root)
@@ -2853,6 +2870,18 @@ def unrecorded_ships(merged: list[dict[str, Any]], n: int, shipped: dict[str, st
     return out
 
 
+def release_untested(repo: str, sha: str) -> bool:
+    """Whether a release merge holds more than the epic head it merged (main moved before it merged).
+
+    The epic head contained main when it was tested, so a merge of it is that very tree unless main moved."""
+    merge = gh_json(["api", f"repos/{repo}/commits/{sha}"])
+    parents = [x["sha"] for x in merge.get("parents", [])]
+    if len(parents) < 2:
+        return True
+    head = gh_json(["api", f"repos/{repo}/commits/{parents[1]}"])
+    return merge["commit"]["tree"]["sha"] != head["commit"]["tree"]["sha"]
+
+
 def finish_epic(n: int, labels: list[str], config: dict[str, Any], root: Path) -> None:
     """After the last ship: delete epic/N, drop its worktree, mark the epic done and close it. Safe to rerun."""
     if remote_has(epic_branch(n), root):
@@ -2885,10 +2914,17 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
     shipped = {**st["shipped"]}
     # a release PR that merged but whose record never got posted (an interrupted run): record it now
     for key, sha in unrecorded_ships(find_ship_pr(n, config, "merged"), n, shipped).items():
-        print(f"#{n}: {key} merged to {main} earlier ({sha[:12]}) without its record" + (": would record it" if args.dry_run else ""))
+        untested = release_untested(repo, sha)
+        print(f"#{n}: {key} merged to {main} earlier ({sha[:12]}) without its record" + (": would record it" if args.dry_run else "")
+              + (f"; {main} had moved, so it holds untested commits" if untested else ""))
         if not args.dry_run:
             post_comment(n, render_comment("shipped", None, f"**{key}** shipped to `{main}` (`{sha[:12]}`); "
-                                           "recorded after an interrupted `ship`.", config, milestone=key, sha=sha), config)
+                                           "recorded after an interrupted `ship`."
+                                           + (f" **{main} moved before it merged**: run the suite on {main}." if untested else ""),
+                                           config, milestone=key, sha=sha, **({"untested": "1"} if untested else {})), config)
+            if untested:
+                escalate_epic(n, f"{main} moved while {key} shipped: run the suite on {main} (`{sha[:12]}`)", config)
+                return 1
         shipped[key] = sha
     st = {**st, "shipped": shipped}
     m = ship_target(st, progress, args.milestone)
@@ -2920,7 +2956,8 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
         allowed = {k for k, d in (st.get("demos") or {}).items() if d.get("accepted") and k not in shipped}
         into_epic = gh_json(["pr", "list", "--repo", repo, "--base", epic_branch(n), "--state", "merged",
                              "--limit", "500", "--json", "number,headRefName,mergeCommit"]) or []
-        carried = carried_slices(unreleased_commits(n, config, root), slice_commits(into_epic, leaves, config), allowed)
+        carried = carried_slices(unreleased_commits(n, config, root), slice_commits(into_epic, leaves, config), allowed,
+                                 set(args.accept_merge or []))
         synced = is_ancestor(main_sha, head, root)
         if errs := ship_gate_errors(st, key, head, synced, carried):
             raise SdlcError("; ".join(errs))
@@ -2953,10 +2990,9 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
         if merged.get("state") != "MERGED":
             raise SdlcError(f"PR #{pr['number']} did not merge")
         sha = merged["mergeCommit"]["oid"]
-        parents = [x["sha"] for x in gh_json(["api", f"repos/{repo}/commits/{sha}"]).get("parents", [])]
         body = f"**{m['title']}** shipped to `{main}` in #{pr['number']} (merge `{sha[:12]}` of `{epic_branch(n)}` at `{head[:12]}`)."
         extra = {}
-        if parents[:1] != [main_sha]:
+        if release_untested(repo, sha):
             body += (f"\n\n**{main} moved during the merge** (it was `{main_sha[:12]}`), so this merge holds commits the "
                      "recorded test run never saw. Run the suite on main now.")
             extra = {"untested": "1"}
@@ -3192,7 +3228,7 @@ def demo_brief(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str
     st = bundle_state(fetch_bundle(epic, config, trusted), config)
     records = fetch_plan_issues(epic, config, trusted)
     leaves = [r for r in records if r["kind"] == "slice"]
-    progress = summarise_progress(leaves, {})
+    progress = epic_progress(epic, config, trusted)    # the same progress `state` uses, so `next` agrees
     gh_ms = {m["title"]: m for m in gh_pages(f"repos/{repo}/milestones?state=all&per_page=100")}
     main = config.get("default_branch", "main")
     reverted = reverted_on_main(config)
@@ -3242,6 +3278,8 @@ def command_demo_status(args: argparse.Namespace, config: dict[str, Any]) -> int
             print(f"  before: {m['before']}   after: {m['after']}" + ("   (built straight onto main)" if m["on_main"] else ""))
         if m["shipped"]:
             print(f"  shipped to main: {m['shipped'][:12]}")
+    if debt := (brief["progress"] or {}).get("debt"):
+        print("\nopen tech debt: " + ", ".join(f"#{d}" for d in debt))
     print(f"\nnext: {brief['next']}")
     return 0
 
@@ -3629,6 +3667,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("ship", help="release an accepted milestone: merge epic/N into main (a merge commit, via a PR)")
     p.add_argument("number", type=int)
     p.add_argument("--milestone", help="default: the next one to ship")
+    p.add_argument("--accept-merge", action="append", metavar="SHA",
+                   help="a merge on epic/N with changes of its own (a resolved conflict), reviewed by a human")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_ship)
 

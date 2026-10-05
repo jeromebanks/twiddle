@@ -161,7 +161,8 @@ def test_on_main():
 def test_carried_slices():
     t11, t31 = {"number": 28, "key": "T1.1", "milestone": "#12 M1: x"}, {"number": 31, "key": "T3.1", "milestone": "#12 M2: y"}
     slice_of = {HEAD: t11, OLD: t31}
-    one = lambda sha, body="slice", parents=1: {"sha": sha, "parents": ["p"] * parents, "body": body}  # noqa: E731
+    one = lambda sha, body="slice", parents=1: {"sha": sha, "parents": ["p"] * parents, "body": body,  # noqa: E731
+                                                 "clean": True, "from_main": True}
     assert sdlc.carried_slices([one(HEAD), one("m" * 40, "Merge main into epic/12", 2)], slice_of, {"M1"}) == []
     assert sdlc.carried_slices([one(HEAD), one(OLD)], slice_of, {"M1"}) == ["#31 T3.1 (M2)"]
     # the #12 repair: M2's slices re-applied with `cherry-pick -x` still trace to M2, and so do reverts
@@ -505,7 +506,7 @@ def stub_ship(monkeypatch, comments, leaves, pr_base="main", merged_ships=()):
 
 
 def done_leaf(n, key, m="#12 M1: x"):
-    return {"kind": "slice", "number": n, "key": key, "state": "closed", "state_reason": "completed",
+    return {"kind": "slice", "number": n, "key": key, "title": key, "state": "closed", "state_reason": "completed",
             "labels": ["plan:slice"], "assignees": [], "milestone": m, "body": ""}
 
 
@@ -539,6 +540,7 @@ def test_ship_records_a_release_pr_that_merged_without_its_record(repo, monkeypa
     sdlc.ensure_epic_branch(12, CONFIG, repo)
     merged = [{"title": "Ship #12 M1: x", "mergeCommit": {"oid": HEAD}}]
     stub_ship(monkeypatch, [DEMO1, ACCEPT1], [done_leaf(28, "T1.1")], pr_base="epic/12", merged_ships=merged)
+    monkeypatch.setattr(sdlc, "release_untested", lambda repo_, sha: False)
     assert sdlc.main(["ship", "12"]) == 0
     assert gh.kinds() == [(12, "shipped")] and f"sha={HEAD}" in gh.posted[0][1]
     assert (12, "done") in gh.labels
@@ -613,3 +615,79 @@ def test_a_reopened_slice_beats_an_old_acceptance():
     assert phases[0]["phase"] == "building"
     with pytest.raises(sdlc.SdlcError, match="not complete"):
         sdlc.ship_target(st, progress(ms("M1", 2, 3)))
+
+
+# --- round 5: merges, releases, dry runs, demo-status -----------------------------------------
+
+def test_a_merge_must_be_clean_and_of_main():
+    t11 = {"number": 28, "key": "T1.1", "milestone": "#12 M1: x"}
+    merge = lambda **kw: {"sha": "m" * 40, "parents": ["a" * 40, "b" * 40], "body": "Merge main", **kw}  # noqa: E731
+    assert sdlc.carried_slices([merge(clean=True, from_main=True)], {HEAD: t11}, {"M1"}) == []
+    assert "changes of its own" in sdlc.carried_slices([merge(clean=False, from_main=True)], {}, {"M1"})[0]
+    assert "other than main" in sdlc.carried_slices([merge(clean=True, from_main=False)], {}, {"M1"})[0]
+    assert sdlc.carried_slices([merge(clean=False, from_main=True)], {}, {"M1"}, {"m" * 12}) == []   # a human reviewed it
+
+
+def test_unreleased_commits_tells_a_clean_sync_from_an_evil_merge(repo):
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    commit_on_epic(repo, "a.py", "a = 1\n")
+    commit_on_main(repo, "m.py", "m = 1\n")
+    sdlc.sync_epic(12, CONFIG, repo, test=PASS)
+    clean = [c for c in sdlc.unreleased_commits(12, CONFIG, repo) if len(c["parents"]) > 1][0]
+    assert clean["clean"] and clean["from_main"]
+    wt = sdlc.epic_worktree(12, CONFIG, repo)          # the merge amended to smuggle in a file of its own
+    (wt / "extra.py").write_text("sneaky = 1\n")
+    _git("add", "extra.py", cwd=wt)
+    _git("commit", "-q", "--amend", "--no-edit", cwd=wt)
+    _git("push", "-q", "-f", "origin", "HEAD:refs/heads/epic/12", cwd=wt)
+    _git("fetch", "-q", "origin", "epic/12", cwd=repo)
+    evil = [c for c in sdlc.unreleased_commits(12, CONFIG, repo) if len(c["parents"]) > 1][0]
+    assert not evil["clean"]
+
+
+def test_a_release_holds_exactly_the_tested_head(monkeypatch):
+    trees = {"merge": "t1", "head": "t1"}
+    def fake(args):
+        sha = args[1].rsplit("/", 1)[1]
+        if sha == "merge":
+            return {"parents": [{"sha": "main"}, {"sha": "head"}], "commit": {"tree": {"sha": trees["merge"]}}}
+        return {"parents": [], "commit": {"tree": {"sha": trees["head"]}}}
+    monkeypatch.setattr(sdlc, "gh_json", fake)
+    assert not sdlc.release_untested("o/r", "merge")
+    trees["merge"] = "t2"                              # main moved: the merge holds more than was tested
+    assert sdlc.release_untested("o/r", "merge")
+
+
+def test_a_recovered_release_that_main_moved_under_is_escalated(repo, monkeypatch, capsys):
+    gh = GitHub(monkeypatch, repo)
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    merged = [{"title": "Ship #12 M1: x", "mergeCommit": {"oid": HEAD}}]
+    stub_ship(monkeypatch, [DEMO1, ACCEPT1], [done_leaf(28, "T1.1")], pr_base="epic/12", merged_ships=merged)
+    monkeypatch.setattr(sdlc, "release_untested", lambda repo_, sha: True)
+    assert sdlc.main(["ship", "12"]) == 1
+    assert [k for _, k in gh.kinds()] == ["shipped", "escalation"] and "untested=1" in gh.posted[0][1]
+    assert (12, "escalated") in gh.labels and sdlc.remote_has("epic/12", repo)     # not finished
+
+
+def test_sync_dry_run_leaves_the_worktree_alone(repo, monkeypatch, capsys):
+    GitHub(monkeypatch, repo)
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    commit_on_main(repo, "m.py", "m = 1\n")
+    assert sdlc.main(["sync", "12", "--dry-run"]) == 0
+    assert "1 commit(s) behind main" in capsys.readouterr().out
+    assert not (repo / ".worktrees" / "epic-12").exists()
+
+
+def test_demo_status_and_state_agree_on_next(monkeypatch):
+    shipped = [DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)]
+    leaves = [done_leaf(28, "T1.1"), {**done_leaf(31, "T3.1", "#12 M2: y"), "state": "open", "state_reason": None}]
+    p = {**sdlc.summarise_progress(leaves, {}), "behind_main": 0, "debt": [81], "cleanup_budget": 1}
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted=None: epic_bundle(shipped))
+    monkeypatch.setattr(sdlc, "fetch_plan_issues", lambda n, cfg, trusted: leaves)
+    monkeypatch.setattr(sdlc, "epic_progress", lambda n, cfg, trusted: p)
+    monkeypatch.setattr(sdlc, "gh_pages", lambda path: [])
+    monkeypatch.setattr(sdlc, "find_slice_pr", lambda n, cfg: None)
+    monkeypatch.setattr(sdlc, "reverted_on_main", lambda cfg, root=None: set())
+    brief = sdlc.demo_brief(12, CONFIG, {OWNER})
+    st = sdlc.with_next(sdlc.bundle_state(epic_bundle(shipped), CONFIG), CONFIG, trusted={OWNER})
+    assert brief["next"] == st["next"] and brief["next"].startswith("/plan-issue 12 --cleanup")
