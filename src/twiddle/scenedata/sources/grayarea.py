@@ -20,7 +20,7 @@ from datetime import date, timedelta
 
 import requests
 
-from ..model import Show
+from ...scenespec.model import Show
 from .base import SourceError
 
 URL = "https://grayarea.org/visit/events/"

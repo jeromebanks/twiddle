@@ -22,7 +22,6 @@ import webbrowser
 from collections.abc import Callable
 
 from rich.markup import escape
-from rich.style import Style
 from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
@@ -38,6 +37,7 @@ from ..scene.app import THEMES, ChoiceScreen, ImageWidget
 from ..scene.players import NeedsConfirmation
 from ..stations import STATIONS, TAGS, NowPlaying, Station, tag_counts, with_tag
 from . import art, output as output_mod, state
+from .gauge import gauge
 from .enrich import ArtistCard, Enricher, query_of
 from .feed import StationFeed, StationState
 
@@ -68,26 +68,6 @@ def song_line(np: NowPlaying | None) -> Text:
     if np.raw_title:
         return Text(f"‹{np.raw_title}›", style="italic")
     return Text("(no title from the station right now)", style="dim italic")
-
-
-def gauge(volume: int | None, muted: bool, color: str = "cyan", width: int = 20) -> Text:
-    """The volume bar. It is also the mouse control: the icon toggles mute,
-    and each of the bar's `width + 1` cells sets the volume it stands for."""
-    if volume is None:
-        return Text("♪ ?", style="dim")
-    filled = round(volume / 100 * width)
-    t = Text()
-    t.append("✕ muted " if muted else "♪ ",
-             style=Style.parse("bold red" if muted else "bold")
-             + Style(meta={"@click": "app.mute"}))
-    t.append(f"{volume:>3} ", style="dim" if muted else "bold")
-    for cell in range(width + 1):
-        char, style = (("━", "dim" if muted else f"bold {color}") if cell < filled
-                       else ("●", "dim" if muted else "bold") if cell == filled
-                       else ("─", "dim"))
-        t.append(char, style=Style.parse(style) + Style(
-            meta={"@click": f"app.set_volume({round(cell / width * 100)})"}))
-    return t
 
 
 class StationCard(Horizontal):

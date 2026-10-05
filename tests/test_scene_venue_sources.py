@@ -9,12 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from twiddle.scene import cache
-from twiddle.scene.model import Show, dedupe
-from twiddle.scene.sources import SourceError, fetch_all
-from twiddle.scene.sources import seetickets
-from twiddle.scene.sources.gilman import parse_widget, split_title
-from twiddle.scene.sources.seetickets import SeeTickets, parse_page
+from twiddle.scenespec.model import Show, dedupe
+from twiddle.scenedata.sources import SourceError, fetch_all
+from twiddle.scenedata.sources import seetickets
+from twiddle.scenedata.sources.gilman import parse_widget, split_title
+from twiddle.scenedata.sources.seetickets import SeeTickets, parse_page
 
 FIX = Path(__file__).parent / "fixtures"
 TODAY = date(2026, 9, 26)
@@ -244,19 +243,8 @@ def test_share_text_carries_the_tickets_and_flyer():
         "Freakyoke", "Mon Oct 5, 8pm", STORK, "free", "https://tix/5", "https://img/5"]
 
 
-def test_new_fields_round_trip_and_an_old_cache_still_loads(tmp_path, monkeypatch):
-    monkeypatch.setattr(cache, "CACHE_DIR", tmp_path)
-    s = Show(date(2026, 10, 5), STORK, ["X"], flyer="f", tickets="t", also=["storkclub"])
-    cache.save_listings([s])
-    assert cache.load_listings()[0] == [s]
-    (tmp_path / "listings.json").write_text(
-        '{"at": 1, "shows": [{"day": "2026-10-05", "venue": "V", "bands": ["X"]}]}')
-    [old] = cache.load_listings()[0]
-    assert old.flyer == "" and old.also == []
-
-
 def test_a_parser_crash_is_that_sources_error_not_everyones():
-    """The app's listings worker quits the app on an uncaught exception."""
+    """The builder would quit on an uncaught exception."""
     d = date(2026, 10, 23)
 
     class Broken:
@@ -284,7 +272,7 @@ def test_a_bandless_night_whose_name_was_only_a_date_does_not_crash():
 
 import json  # noqa: E402
 
-from twiddle.scene.sources import venuepilot  # noqa: E402
+from twiddle.scenedata.sources import venuepilot  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -337,15 +325,6 @@ def test_ivy_pages_until_total_pages_and_a_refused_query_is_an_error(monkeypatch
         venuepilot.VenuePilot(today=TODAY).fetch()
 
 
-def test_a_source_added_since_the_last_fetch_makes_the_cache_stale(tmp_path, monkeypatch):
-    monkeypatch.setattr(cache, "CACHE_DIR", tmp_path)
-    cache.save_listings([Show(date(2026, 10, 5), STORK, ["X"])], ["thelist", "yoshis"])
-    _, at = cache.load_listings()
-    assert cache.listings_fresh(at, ["thelist", "yoshis"])
-    assert not cache.listings_fresh(at, ["thelist", "yoshis", "ivyroom"])
-    assert cache.listings_fresh(at)                     # callers that don't say
-
-
 def test_see_tickets_serves_several_venues_with_the_same_parser():
     page = (FIX / "storkclub_list_page1.html").read_text()
     [s, *_] = parse_page(page, TODAY, "Chapel, S.F.", "chapel")
@@ -368,7 +347,7 @@ def test_a_joint_billing_matches_its_halves():
 
 # ---- TicketWeb ----------------------------------------------------------------
 
-from twiddle.scene.sources import ticketweb  # noqa: E402
+from twiddle.scenedata.sources import ticketweb  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -409,7 +388,7 @@ def test_ticketweb_names():
 
 # ---- 2026-09-26 additions: Ashkenaz, Sound Room, DeLuxe, Gray Area, Make-Out Room
 
-from twiddle.scene.sources import grayarea, makeoutroom, simplecal, squarespace  # noqa: E402
+from twiddle.scenedata.sources import grayarea, makeoutroom, simplecal, squarespace  # noqa: E402
 
 
 def test_venuepilot_serves_ashkenaz_too():
@@ -490,3 +469,126 @@ def test_make_out_room_month_and_blog_flyers():
              Show(date(2026, 9, 27), "Make-Out Room, S.F.", [], title="Unrelated Night")]
     makeoutroom.attach_flyers(night, flyers)
     assert "dad-co" in night[0].flyer and "dimensions" in night[1].flyer and not night[2].flyer
+
+
+# ---- KALX's weekly calendar --------------------------------------------------------------
+
+def _kalx_posts():
+    import json
+    return json.loads((FIX / "kalx_events.json").read_text())
+
+
+def test_kalx_reads_the_weekly_posts_into_shows():
+    from twiddle.scenedata.sources import kalx
+    shows = kalx.parse_posts(_kalx_posts(), date(2026, 9, 29))
+    assert shows and all(s.source == "kalx" and s.source_url.startswith("https://kalx.") for s in shows)
+    assert min(s.day for s in shows) == date(2026, 9, 29)         # nothing before today
+    fox = next(s for s in shows if s.day == date(2026, 9, 29) and s.venue.startswith("Fox"))
+    assert fox.venue == "Fox Theater, Oakland"
+    assert fox.bands == ["Social Distortion", "Descendents", "The Chats"]
+    assert fox.price is None and fox.flyer == "" and fox.tickets == ""   # KALX has none
+
+
+def test_kalx_rooms_resolve_to_watched_venues_including_the_two_new_ones():
+    from twiddle.scenedata import venues as v
+    from twiddle.scenespec import venue as vf
+    from twiddle.scenedata.sources import kalx
+    watched = v.watched()
+    shows = kalx.parse_posts(_kalx_posts(), date(2026, 9, 22))
+    by = {s.venue: vf.find(watched, s.venue) for s in shows}
+    for spelled, want in (("Thee Stork Club, East Bay", "Stork Club"),
+                          ("Cornerstone, Berkeley", "Cornerstone"),
+                          ("The Freight, Berkeley", "Freight"),
+                          ("Regency Ballroom, S.F.", "Regency"),
+                          ("Paramount Theatre, Oakland", "Paramount"),
+                          ("Hillside Club, Berkeley", "Hillside Club"),
+                          ("Sweetwater Music Hall, Mill Valley", "Sweetwater"),
+                          ("Bill Graham Civic Auditorium, S.F.", "Civic"),
+                          ("Eli’s Mile High Club, East Bay", "Eli's Mile High"),
+                          ("Yoshi’s, East Bay", "Yoshi's"), ("Cafe Du Nord, S.F.", "Cafe du Nord")):
+        assert spelled in by, spelled
+        assert by[spelled] is not None and by[spelled].name == want, spelled
+    assert "Hillside Club, Berkeley" in by and "Sweetwater Music Hall, Mill Valley" in by
+    assert vf.resolve(watched, "sweetwater").info.address.startswith("19 Corte Madera")
+    assert vf.resolve(watched, "hillside").info.url == "https://www.hillsideclub.org/"
+
+
+def test_kalx_tells_nights_from_lineups():
+    from twiddle.scenedata.sources.kalx import lineup
+    assert lineup("Thelma And The Sleaze, Hypnotic Pattern") == \
+        (["Thelma And The Sleaze", "Hypnotic Pattern"], "")
+    assert lineup("Open Mic") == ([], "Open Mic")
+    assert lineup("Karaokiki") == ([], "Karaokiki")
+    assert lineup("Irish Céili (“KAY-LEE”) Dance with live band")[0] == []
+    assert lineup("Monday Night Hubba: Damsels & Dragons") == \
+        ([], "Monday Night Hubba: Damsels & Dragons")
+    assert lineup("KALW’s 85th Birthday: Rozzi, DEATHX_XHEAD") == \
+        (["Rozzi", "DEATHX_XHEAD"], "KALW’s 85th Birthday")
+    assert lineup("Lukas Nelson & Friends, featuring Grahame Lesh, Holly Bowling") == \
+        (["Lukas Nelson & Friends", "Grahame Lesh", "Holly Bowling"], "")
+    assert lineup("Fred Wesley’s New JBs")[0] == ["Fred Wesley’s New JBs"]
+
+
+def test_kalx_merges_under_the_list_and_adds_what_it_lacks():
+    from twiddle.scenedata.sources import kalx
+    ivy = Show(date(2026, 9, 29), "Ivy Room, Albany", ["Thelma And The Sleaze", "Hypnotic Pattern"],
+               price="$15", source="thelist")
+    shows = [s for s in kalx.parse_posts(_kalx_posts(), date(2026, 9, 29))
+             if s.day == date(2026, 9, 29)]
+    merged = dedupe([ivy] + shows, room=lambda name: "Ivy Room" if "ivy room" in name.lower() else name)
+    [night] = [s for s in merged if "ivy" in s.venue.lower()]
+    assert night.source == "thelist" and night.price == "$15" and night.also == ["kalx"]
+    assert night.bands == ivy.bands                    # The List's lineup stands
+
+
+def test_kalx_says_so_when_the_page_changes_or_the_site_is_down(monkeypatch):
+    from twiddle.scenedata.sources import kalx
+    import pytest
+    with pytest.raises(SourceError, match="no day headings"):
+        kalx.parse_posts([{"date": "2026-09-24", "link": "u", "content": {"rendered": "<p>x</p>"}}],
+                         date(2026, 9, 29))
+
+    class Resp:
+        status_code = 503
+    monkeypatch.setattr(kalx.requests, "get", lambda *a, **k: Resp())
+    with pytest.raises(SourceError, match="HTTP 503"):
+        kalx.KALX().fetch()
+
+    def boom(*a, **k):
+        raise kalx.requests.ConnectionError("down")
+    monkeypatch.setattr(kalx.requests, "get", boom)
+    with pytest.raises(SourceError, match="could not reach"):
+        kalx.KALX().fetch()
+
+
+def test_kalx_past_weeks_only_is_not_an_error():
+    from twiddle.scenedata.sources import kalx
+    assert kalx.parse_posts(_kalx_posts(), date(2027, 3, 1)) == []
+
+
+def test_kalx_is_registered_last():
+    from twiddle.scenedata.sources import base
+    assert list(base._registry())[-1] == "kalx"
+
+
+def test_kalx_keeps_the_last_section_of_a_post_that_leaves_its_paragraph_unclosed():
+    """Codex: both posts end `...</strong> x</div>` with no </p>; the regex used to drop them."""
+    from twiddle.scenedata.sources import kalx
+    posts = _kalx_posts()
+    assert not posts[0]["content"]["rendered"].rstrip().endswith("</p>")     # the fixture is real
+    shows = kalx.parse_posts(posts, date(2026, 9, 29))
+    last = [s for s in shows if s.day == date(2026, 10, 4)]
+    venues = {s.venue for s in last}
+    assert {"The Chapel, S.F.", "The Independent, S.F.", "Rickshaw Stop, S.F.",
+            "SF Jazz Center, S.F."} <= venues                 # all in the unclosed paragraph
+    assert any("Rickshaw" in s.venue and s.bands == ["Ecca Vandal", "Speed of Light"] for s in shows)
+    assert any("SF Jazz" in s.venue for s in shows)
+
+
+def test_kalx_commas_inside_a_bracket_are_not_a_lineup():
+    # Codex: "Brotherhood: Love Your Neighbor (film, live music, storytelling)" came out as three bands
+    from twiddle.scenedata.sources import kalx
+    assert kalx.lineup("Brotherhood: Love Your Neighbor (film, live music, storytelling)") == \
+        ([], "Brotherhood: Love Your Neighbor (film, live music, storytelling)")
+    assert kalx.lineup("KALW's Birthday: Rozzi, DEATHX_XHEAD, DJ X") == (["Rozzi", "DEATHX_XHEAD", "DJ X"], "KALW's Birthday")
+    assert kalx.lineup("Rozzi (live, loud), Other")[0] == ["Rozzi (live, loud)", "Other"]

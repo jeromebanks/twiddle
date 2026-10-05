@@ -22,8 +22,8 @@ from datetime import date, timedelta
 
 import requests
 
-from ..model import Show
-from .base import SourceError
+from ...scenespec.model import Show
+from .base import SourceError, split_outside_parens
 from .seetickets import _day
 
 # source name -> (listing page, the venue as a watched venue matches it)
@@ -98,7 +98,14 @@ def _split(name: str) -> tuple[list[str], list[str]]:
     head, *rest = re.split(r"\s+[–—-]\s+", name, maxsplit=1)
     if rest:
         notes.append(rest[0])
-    bands = [b.strip() for b in re.split(r"\s*,\s*|\s*/\s+|\s+/\s*|\s+\+\s+", head) if b.strip()]
+    bands = []
+    for b in split_outside_parens(head, r"\s*,\s*|\s*/\s+|\s+/\s*|\s+\+\s+"):
+        if not b.strip():
+            continue
+        # "Crash Out (afrobeats, dancehall)": the bracket describes the night, not a band
+        bare = re.sub(r"\s+", " ", re.sub(r"\([^)]*\)", " ", b)).strip()
+        notes += [f"{bare}: {p.strip()}" for p in re.findall(r"\(([^)]*)\)", b) if p.strip()]
+        bands.append(bare or b.strip())
     return bands, notes
 
 
@@ -115,7 +122,7 @@ def parse_page(page: str, today: date, venue: str, source: str) -> list[Show]:
             continue
         bands, notes = _split(name)
         support = re.sub(r"^(?:with|w/)\s+", "", _div(block, "tw-attractions"), flags=re.IGNORECASE)
-        for b in re.split(r"\s*,\s*", support):
+        for b in split_outside_parens(support, r"\s*,\s*"):
             if b and b not in bands:
                 bands.append(b)
         notes = [x for x in (_div(block, "tw-prefix"), _div(block, "tw-name-presenting")) if x] + notes

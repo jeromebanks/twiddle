@@ -17,9 +17,48 @@ would each be one more module here.
 """
 from __future__ import annotations
 
+import re
 from typing import Protocol
 
-from ..model import Show, dedupe
+from ...scenespec.model import Show, dedupe
+
+
+def split_outside_parens(text: str, pattern: str | re.Pattern) -> list[str]:
+    """`re.split`, but never inside parentheses: "Crash Out (afrobeats, dancehall)"
+    is one billing with a note, not three bands. An unclosed "(" splits as usual."""
+    pat = re.compile(pattern) if isinstance(pattern, str) else pattern
+    depth_at = []
+    depth = 0
+    for ch in text:
+        depth_at.append(depth)
+        depth = max(0, depth + (ch == "(") - (ch == ")"))
+    closes = text.count(")") >= text.count("(")
+    out, last = [], 0
+    for m in pat.finditer(text):
+        if m.end() == m.start() or (closes and depth_at[m.start()] > 0):
+            continue
+        out.append(text[last:m.start()])
+        last = m.end()
+    out.append(text[last:])
+    return out
+
+
+def join_open_parens(parts: list[str], sep: str = ", ") -> list[str]:
+    """Re-join pieces that a split cut inside a "(": ["Black Flag (Greg Ginn",
+    "Max Zanelly)"] -> ["Black Flag (Greg Ginn, Max Zanelly)"]. A "(" never
+    closed later is left alone, so one stray bracket cannot swallow a lineup."""
+    out: list[str] = []
+    i = 0
+    while i < len(parts):
+        cur, j = parts[i], i
+        while cur.count("(") > cur.count(")") and j + 1 < len(parts):
+            j += 1
+            cur = cur + sep + parts[j]
+        if cur.count("(") > cur.count(")"):
+            cur, j = parts[i], i
+        out.append(cur)
+        i = j + 1
+    return out
 
 
 class SourceError(RuntimeError):
@@ -37,6 +76,7 @@ class EventSource(Protocol):
 def _registry() -> dict[str, EventSource]:
     from .gilman import Gilman
     from .grayarea import GrayArea
+    from .kalx import KALX
     from .makeoutroom import MakeOutRoom
     from .simplecal import VENUES as SIMPLECAL, SimpleCalendar
     from .squarespace import VENUES as SQUARESPACE, Squarespace
@@ -51,7 +91,9 @@ def _registry() -> dict[str, EventSource]:
             **{name: VenuePilot(name) for name in VENUEPILOT},
             **{name: Squarespace(name) for name in SQUARESPACE},
             **{name: SimpleCalendar(name) for name in SIMPLECAL},
-            "gilman": Gilman(), "grayarea": GrayArea(), "makeoutroom": MakeOutRoom()}
+            "gilman": Gilman(), "grayarea": GrayArea(), "makeoutroom": MakeOutRoom(),
+            # Last: no times, prices or links, so it only adds nights the others lack.
+            "kalx": KALX()}
 
 
 SOURCES: dict[str, EventSource] = {}
@@ -91,12 +133,13 @@ def fetch_all(chosen: list[EventSource] | None = None,
 def _room():
     """A source's venue spelling -> the watched venue's name, if it is one."""
     from .. import venues
+    from ...scenespec import venue
     try:
         watched = venues.watched()
     except ValueError:          # a broken config is reported elsewhere
         watched = venues.DEFAULT_VENUES
 
     def room(listed: str) -> str:
-        v = venues.find(watched, listed)
+        v = venue.find(watched, listed)
         return v.name if v else listed
     return room

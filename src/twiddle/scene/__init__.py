@@ -1,13 +1,17 @@
-"""`twiddle scene` -- who is playing locally, what they sound like.
+"""`twiddle scene` -- the client: browse tonight's local shows and who the bands are.
 
-Three layers, each one open to new implementations without touching the
-others, because this is meant to grow into a broader discovery tool:
+Three packages, one-way dependencies:
 
-  sources/   where shows come from      (EventSource: The List today)
-  bands.py   what we learn about a band (Enricher: MusicBrainz et al, Spotify)
-  players.py where the audio goes       (Player: Spotify Connect today)
+  scenespec/  the dataset's shape: what a producer writes and a client reads
+  scenedata/  one producer: sources, enrichers, `scene build` (the bespoke part)
+  scene/      this package, the client: it reads a dataset and plays music
 
-`model.py` holds the domain types all three share, and imports nothing from
-the UI, so a future non-TUI consumer (recommendations, a calendar export)
-can use them as they are.
+A client has only the dataset a producer published, so nothing here imports
+`scenedata` (a test enforces it; `cli.py` starts a build lazily). Who a band is
+comes from the dataset; the client applies your pin (`book.PinEnricher`) and
+fetches song lists (`book.TrackEnricher`), which need your own sign-in.
+
+  book.py     profiles seeded from the dataset; background pin + song-list work
+  players.py  where the audio goes (Spotify Connect today)
+  app.py      the Textual UI, presentation only; everything is injected
 """

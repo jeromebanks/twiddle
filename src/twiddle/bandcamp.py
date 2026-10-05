@@ -1,29 +1,18 @@
-"""Bandcamp, for the bands Spotify doesn't know: who they are, what they
-sound like (their tags), their photo, and songs you can play.
+"""Bandcamp's site as one polite guest: a throttled fetch, and a release's songs.
 
-Most bands on The List are local and small, and Bandcamp is where they
-are. Three things here share one search:
-
-  the band's photo and tags   (`pictures.py`, `genre.py`)
-  a playable release          (`BandcampEnricher` in `bands.py`)
-  the whole-listing genre scan (`app.py`)
+Bandcamp is where most bands on The List are. The *search* for who a band is
+lives with the producer (`scenedata/bandcamp.py`); this is the part both sides
+use -- the throttle, and the songs and fresh stream URLs of a release, which
+the client needs at the moment of playing.
 
 ## Being a polite guest
 
 The search is Bandcamp's own site autocomplete, not a published API, and
 the genre scan asks about every band in the listing. So every request goes
-through one throttle (`MIN_INTERVAL_S` apart), answers are cached on disk
-for weeks, and a 429 or a run of errors stops all of it for a while
+through one throttle (`MIN_INTERVAL_S` apart), and a 429 or a run of errors stops all of it for a while
 (`BlockedError`) instead of hammering. A block would also cost `dial` its
 Bandcamp photos and `lookup` its Bandcamp fallback -- the Spotify quota
 lockout of 2026-09-24 is the same lesson.
-
-## Which band is it?
-
-Names collide, so a band is chosen, not guessed:
-  the Bandcamp page MusicBrainz/Discogs link -> the only exact-name band
-  -> the only exact-name band in the Bay Area / California -> none.
-Labels are never a band.
 
 ## Songs
 
@@ -42,20 +31,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .. import lookup
-from . import cache
+from . import netstats
 
 MIN_INTERVAL_S = 1.0
-HIT_TTL_S = 14 * 86400
-MISS_TTL_S = 3 * 86400
 BLOCK_S = 15 * 60
 MAX_ERRORS = 3              # in a row, then back off as if blocked
 TIMEOUT = 10
 UA = "Mozilla/5.0 twiddle (personal use)"
-KEEP = ("name", "item_url_root", "location", "is_label", "tag_names", "img", "genre_name")
 
 _throttle = threading.Lock()
-_cache_lock = threading.Lock()
 _last = 0.0
 _blocked_until = 0.0
 _errors = 0
@@ -72,8 +56,14 @@ def _gate() -> None:
     with _throttle:
         wait = _last + MIN_INTERVAL_S - time.monotonic()
         if wait > 0:
+            netstats.record_wait("bandcamp", wait)
             time.sleep(wait)
         _last = time.monotonic()
+
+
+def blocked_for() -> float:
+    """Seconds until a back-off ends (0 when Bandcamp isn't resting)."""
+    return max(0.0, _blocked_until - time.monotonic())
 
 
 def _outcome(ok: bool, exc: Exception | None = None) -> None:
@@ -94,6 +84,8 @@ def _guarded(fn):
         out = fn()
     except urllib.error.HTTPError as exc:
         _outcome(exc.code == 404, exc)    # a missing page is an answer, not a failure
+        if exc.code == 429:               # it started the back-off: say so, as every later call will
+            raise BlockedError("Bandcamp answered 429 (too many requests); resting") from exc
         raise
     except Exception as exc:
         _outcome(False, exc)
@@ -105,60 +97,21 @@ def _guarded(fn):
 def _get(url: str) -> str:
     def go():
         req = urllib.request.Request(url, headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            return resp.read().decode("utf-8", "replace")
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                netstats.record("bandcamp", status=getattr(resp, "status", 200))
+                return resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            netstats.record("bandcamp", status=exc.code)
+            raise
+        except urllib.error.URLError:
+            netstats.record("bandcamp")
+            raise
     return _guarded(go)
-
-
-# ---- search ------------------------------------------------------------------------
-
-
-def cached(name: str) -> list[dict] | None:
-    """The remembered answer for `name`, or None if there isn't a fresh one."""
-    entry = cache._read("bandcamp.json").get(lookup.norm(name))
-    if not entry:
-        return None
-    ttl = HIT_TTL_S if entry.get("bands") else MISS_TTL_S
-    return entry["bands"] if time.time() - entry.get("at", 0) < ttl else None
-
-
-def search(name: str, *, offline: bool = False) -> list[dict] | None:
-    """Bandcamp bands named exactly `name` (trimmed search results), cached.
-
-    `offline` answers from the cache alone: None when it has no answer.
-    Raises on a network failure, BlockedError while backing off.
-    """
-    hit = cached(name)
-    if hit is not None or offline:
-        return hit
-    bands = [{k: b.get(k) for k in KEEP}
-             for b in _guarded(lambda: lookup.bandcamp_bands(name))]
-    with _cache_lock:
-        data = cache._read("bandcamp.json")
-        data[lookup.norm(name)] = {"at": time.time(), "bands": bands}
-        cache._write("bandcamp.json", data)
-    return bands
 
 
 def _host(url: str | None) -> str:
     return (urllib.parse.urlsplit(url or "").hostname or "").lower()
-
-
-def choose(bands: list[dict], linked: str | None = None,
-           is_local=None) -> dict | None:
-    """Which of the same-named bands is this one (see the module docstring)."""
-    bands = [b for b in bands if not b.get("is_label")]
-    if linked:
-        hit = next((b for b in bands if _host(b.get("item_url_root")) == _host(linked)), None)
-        if hit:
-            return hit
-    if len(bands) == 1:
-        return bands[0]
-    if is_local:
-        near = [b for b in bands if is_local(b.get("location") or "")]
-        if len(near) == 1:
-            return near[0]
-    return None
 
 
 # ---- releases and tracks ----------------------------------------------------------

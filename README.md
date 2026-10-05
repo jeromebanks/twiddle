@@ -37,7 +37,8 @@ git clone https://github.com/jeromebanks/twiddle.git
 cd twiddle
 uv sync
 uv run twiddle dial                  # radio
-uv run twiddle scene                 # local shows
+uv run twiddle scene build           # compile the local shows dataset (then: scene schedule)
+uv run twiddle scene                 # local shows (reads it; works offline)
 ```
 
 [docs/QUICKSTART.md](docs/QUICKSTART.md) walks through everything in about
@@ -70,6 +71,7 @@ and troubleshooting.
 | [docs/QUICKSTART.md](docs/QUICKSTART.md) | setting up on your own Mac, step by step |
 | [docs/GUIDE.md](docs/GUIDE.md) | every command; the Sonos tools and how they measure (and the traps that fooled them first) |
 | [docs/SCENE.md](docs/SCENE.md) | the `scene` app: keys, band identity, venue sources, extending it |
+| [docs/SCENE-ARCHITECTURE.md](docs/SCENE-ARCHITECTURE.md) | how `scene` works inside: the builder, the published dataset, what it pulls from where |
 | [docs/SPOTIFY.md](docs/SPOTIFY.md) | playing Spotify on Sonos through a local relay, and what that took |
 | [CHARACTERS.md](CHARACTERS.md) | Twiddle, and the cast to come |
 | [CLAUDE.md](CLAUDE.md) | working in the code (written for Claude Code, useful for humans too) |
