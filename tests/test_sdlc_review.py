@@ -249,3 +249,26 @@ def test_ship_review_runs_before_the_demo_when_a_review_is_owed(tmp_path, capsys
     assert sdlc.ship_gate_errors(ready, "M1", HEAD, True, []) == []
     owed = {**ready, "review_owed": {"M1": [{"slice": "T1.2"}]}}
     assert any("`ship-review` first" in e for e in sdlc.ship_gate_errors(owed, "M1", HEAD, True, []))
+
+
+def test_an_epic_without_milestones_owes_and_clears_the_same_way(monkeypatch):
+    # most bugs: no milestones, one demo `all`. merge's marker and the progress must agree on that key
+    gh = GitHub(monkeypatch)
+    stub_merge(monkeypatch, ROUTINE, TESTED)
+    monkeypatch.setattr(sdlc, "fetch_slice", lambda n, cfg, _r=iter([{**slice_issue(ROUTINE), "milestone": None},
+                                                                     {**slice_issue(ROUTINE), "milestone": None,
+                                                                      "state": "closed", "state_reason": "completed"}]):
+                        (next(_r), []))
+    monkeypatch.setattr(sdlc, "epic_progress", lambda n, cfg, trusted: progress(
+        {"title": "(no milestone)", "key": "all", "done": 0, "total": 1}))
+    assert sdlc.main(["merge", "50"]) == 0
+    marker = sdlc.parse_marker(gh.posted[0][1])
+    assert marker["milestone"] == sdlc.NO_MILESTONE == "all" and marker["slice"] == "T1.1"
+    owed = comment(OWNER, gh.posted[0][1], 20)
+    leaves = [{"number": 28, "key": "T1.1", "kind": "slice", "milestone": None, "state": "closed",
+               "state_reason": "completed", "assignees": [], "labels": ["plan:slice"], "body": ""}]
+    p = {**sdlc.summarise_progress(leaves, {}), "debt": [], "cleanup_budget": 1}
+    view = sdlc.epic_view(derive([owed]), p)
+    assert view["current"]["key"] == "all" and view["current"]["phase"] == "review" and view["due"] == "review"
+    cleared = agent("ship-review", None, 21, milestone="all", sha=HEAD, verdict="approve", round="1")
+    assert sdlc.epic_view(derive([owed, cleared]), p)["current"]["phase"] == "complete"

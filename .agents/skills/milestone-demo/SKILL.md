@@ -75,8 +75,10 @@ review (`review-defer`) is too. `demo-status` lists them under "Codex review owe
 1. `uv run python tools/sdlc.py sync N` (`timeout: 600000`): it brings `main` in, runs the
    suite on the head and records it, so the review and the demo see the same code. A
    conflict or a failure escalates, and you stop.
-2. Fill `references/codex-milestone-prompt.md` into `<SCRATCH>/ship-prompt.md`, **including
-   its deferred-slices part**: each owed slice's key, issue and squash commit on `epic/N`
+2. Save each owed slice's brief where Codex can read it (its sandbox has no network):
+   `gh issue view S --json title,body -q '.title + "\n\n" + .body' > <SCRATCH>/slice-S.md`, one per
+   slice. Fill `references/codex-milestone-prompt.md` into `<SCRATCH>/ship-prompt.md`, **including
+   its deferred-slices part** (`<SLICE_FILES>` = those files): each owed slice's key, issue and squash commit on `epic/N`
    (`git -C <PRIMARY>/.worktrees/epic-N log --oneline origin/main..HEAD` finds them). Run
    it from `<PRIMARY>/.worktrees/epic-N`, as in step 10.2, then record the round:
    `uv run python tools/sdlc.py ship-review N --report <SCRATCH>/ship-codex.md --response <SCRATCH>/ship-response.md`.
