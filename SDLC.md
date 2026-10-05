@@ -57,7 +57,9 @@ main ──●────────────────────●─
   its release. `ship` also refuses while changes are being planned or built, or a release PR
   would carry a merged slice of an unaccepted milestone (read from the PRs into `epic/N`).
 - `ship` checks `main` again right before it merges, and after. A `main` that moved in between
-  escalates, because the merge then holds commits the recorded run never saw. Rerunning `ship`
+  escalates, because the merge then holds commits the recorded run never saw: the release is
+  recorded `untested`, and nothing starts and the epic can't finish until `verify-main N`
+  passes on `main`. Rerunning `ship`
   records a release PR that merged without its record, and finishes an epic whose last ship
   was cut short.
 

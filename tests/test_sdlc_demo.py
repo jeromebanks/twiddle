@@ -420,7 +420,7 @@ def test_a_cleanup_plan_is_held_to_its_budget(tmp_path, capsys, monkeypatch):
                                                                      {**unit("C2", "M2"), "debt": [102]}]}
     pf.write_text(json.dumps(two))
     assert sdlc.main(["plan-post", "12", str(pf), "--from-file", str(f), "--dry-run"]) == 1
-    assert "adds at most 1 debt-paying slice" in capsys.readouterr().err
+    assert "has 2 debt-paying slice(s) (C1, C2) but 1 cleanup pass(es) of 1" in capsys.readouterr().err
     pf.write_text(json.dumps({**two, "subtasks": two["subtasks"][:3]}))
     assert sdlc.main(["plan-post", "12", str(pf), "--from-file", str(f), "--dry-run"]) == 0
     # the budget counts debt-paying slices only: a replan may split ordinary work freely alongside
@@ -503,3 +503,14 @@ def test_a_wrapped_command_alone_is_still_blank():
     assert sdlc.svg_text(svg) == ""
     shown = demo_shot.render_terminal(f"$ {cmd}\nwould ring Kitchen at 20% for a minute (dry run)\n", cmd, 60)
     assert sdlc.svg_text(shown).startswith("wouldringKitchen")
+
+
+def test_revisions_cant_add_up_past_the_cleanup_budget():
+    unit = lambda k, debt=None: {"key": k, "title": k, "milestone": "M2", **({"debt": debt} if debt else {})}  # noqa: E731
+    plan = {"milestones": [{"key": "M1"}, {"key": "M2"}], "cleanup_of": "M1",
+            "subtasks": [unit("T2"), unit("C1", [81])]}
+    st = {"cleanups": []}
+    assert sdlc.cleanup_budget_errors(plan, st, CONFIG) == []
+    plan["subtasks"].append(unit("C2", [82]))                      # a later revision keeps C1 and adds C2
+    assert sdlc.cleanup_budget_errors(plan, st, CONFIG)
+    assert sdlc.cleanup_budget_errors(plan, {"cleanups": ["M0"]}, CONFIG) == []   # two passes, two slices

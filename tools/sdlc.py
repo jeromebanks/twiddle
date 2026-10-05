@@ -173,6 +173,7 @@ class Ledger:
     latest_demo: dict[str, Any] | None = None
     request: dict[str, Any] | None = None    # demo steps only a person can run, asked for on the issue
     shipped: dict[str, str] = field(default_factory=dict)              # milestone -> the commit on main
+    untested: dict[str, str] = field(default_factory=dict)  # releases holding commits no run saw, until verified
     ship_reviews: list[dict[str, Any]] = field(default_factory=list)   # Codex on main...epic/N, per head
     epic_tests: list[dict[str, Any]] = field(default_factory=list)     # full runs on the epic head
 
@@ -281,6 +282,15 @@ def _on_demo_request(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -
 
 def _on_shipped(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     L.shipped[_ms(mk)] = mk.get("sha", "")
+    if mk.get("untested"):
+        L.untested[_ms(mk)] = mk.get("sha", "")
+
+
+def _on_main_tests(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    if mk.get("result") == "pass":   # a passing run on a main that contains these releases
+        for sha in (mk.get("covers") or "").split(","):
+            for k in [k for k, v in L.untested.items() if v == sha]:
+                del L.untested[k]
 
 
 def _on_ship_review(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
@@ -300,6 +310,7 @@ MARKERS = {
     "demo": _on_demo, "demo-approval": _on_demo_approval, "demo-changes": _on_demo_changes,
     "demo-void": _on_demo_void, "demo-request": _on_demo_request,
     "shipped": _on_shipped, "ship-review": _on_ship_review, "epic-tests": _on_epic_tests,
+    "main-tests": _on_main_tests,
 }
 
 
@@ -353,6 +364,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     feedback, feedback_plan, plan_after_created = L.feedback, L.feedback_plan, L.plan_after_created
     created, cleanups = L.created, L.cleanups
     shipped, ship_reviews, epic_tests = L.shipped, L.ship_reviews, L.epic_tests
+    untested = L.untested
 
     replies = [c for c in ordered[last_marked + 1:] if c.get("id") not in marked_ids]
     allowed = trusted | {issue.get("author", "")}
@@ -473,7 +485,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "conflicts": conflicts, "doc_approved": doc_approved, "latest_plan": latest_plan,
         "plan_verdict": plan_verdict, "plan_rounds": plan_rounds, "max_plan_rounds": max_plan_rounds,
         "demos": demos, "latest_demo": latest_demo, "feedback": feedback,
-        "shipped": shipped, "ship_reviews": ship_reviews, "epic_tests": epic_tests,
+        "shipped": shipped, "ship_reviews": ship_reviews, "epic_tests": epic_tests, "untested": untested,
         "demo_request": request, "cleanups": sorted(cleanups),
         "planned_milestones": planned_ms, "created_milestones": sorted(created_ms, key=natural_key),
         "uncreated_milestones": uncreated, "create_mode": latest_plan_json.get("create") or config.get("create", "milestone"),
@@ -604,7 +616,7 @@ def current_cleanup(progress: dict[str, Any], cur: dict[str, Any] | None) -> lis
 
 
 def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
-    """{phases, current, due, cleanup, offered, next}: due is one of done, plan_next, demo, ship,
+    """{phases, current, due, cleanup, offered, next}: due is one of verify, done, plan_next, demo, ship,
     cleanup, sync, build."""
     n = st["number"]
     phases = milestone_phases(st, progress)
@@ -613,7 +625,11 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
     cleanup = cleanup_owed(st, progress, phases, cur) if cur and cur["phase"] == "building" else None
     behind = progress.get("behind_main")
     units = progress.get("units") or {}
-    if cur is None:
+    if st.get("untested"):
+        due = "verify"
+        nxt = (f"`uv run python tools/sdlc.py verify-main {n}`: {', '.join(st['untested'])} reached main with commits "
+               "no recorded run saw; run the suite on main first")
+    elif cur is None:
         due = "done"
         nxt = (f"`uv run python tools/sdlc.py ship {n}`: every milestone has shipped; it finishes the epic" if phases
                else f"/milestone-demo {n}: every unit of work is merged")
@@ -659,8 +675,11 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
 
 
 def pause_errors(view: dict[str, Any]) -> list[str]:
-    """Why no fresh claim may start at all: the current milestone waits for its demo or its release."""
+    """Why no fresh claim may start at all: main needs verifying, or the current milestone waits for its
+    demo or its release."""
     cur, n = view["current"], view["number"]
+    if view["due"] == "verify":
+        return [f"main holds commits no recorded run saw: `verify-main {n}` first"]
     if view["due"] == "ship":
         return [f"{cur['title']} is accepted but not shipped to main: new slices wait (`/milestone-demo {n}`)"]
     if view["due"] == "demo":
@@ -671,6 +690,8 @@ def pause_errors(view: dict[str, Any]) -> list[str]:
 def claim_errors(view: dict[str, Any], number: int, milestone: str | None, cleanup: bool) -> list[str]:
     """Why a fresh claim of this slice must wait: a paused epic, a later milestone, or the cleanup pass first."""
     errs = pause_errors(view) or merge_errors(view, milestone)
+    if not errs and view["due"] == "cleanup" and not cleanup:
+        errs.append(f"the cleanup pass after {view['cleanup']} is owed: `/plan-issue {view['number']} --cleanup` first")
     held = [x for x in view["cleanup_open"] if x != number]
     if not errs and held and not cleanup and number not in view["cleanup_needs"]:
         errs.append("the cleanup pass comes first: " + ", ".join(f"#{x}" for x in held))
@@ -775,6 +796,7 @@ HEADERS = {
     "ship-review": "Codex review of the milestone",
     "shipped": "shipped to main",
     "revert": "reverted",
+    "main-tests": "test run on main",
     "retry": "retried on a stronger model",
 }
 FOOTERS = {
@@ -1606,6 +1628,19 @@ def command_plan_validate(args: argparse.Namespace, config: dict[str, Any]) -> i
     return 0
 
 
+def cleanup_budget_errors(plan: dict[str, Any], st: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    """The whole plan's debt-paying slices fit the passes so far: `cleanup_slices_per_milestone` per pass
+    (the passes already created, plus this one if the plan is one). Counted from the plan, not from one
+    revision's additions, so a series of revisions can't add up past it."""
+    budget = config.get("cleanup_slices_per_milestone", 1)
+    passes = set(st.get("cleanups") or []) | ({plan["cleanup_of"]} if plan.get("cleanup_of") else set())
+    debt = [l["key"] for l in plan_leaves(plan) if l.get("debt")]
+    if len(debt) > budget * len(passes):
+        return [f"the plan has {len(debt)} debt-paying slice(s) ({', '.join(debt)}) but {len(passes)} cleanup pass(es) "
+                f"of {budget} (cleanup_slices_per_milestone): leave the rest filed"]
+    return []
+
+
 def lessons_errors(plan: dict[str, Any], st: dict[str, Any]) -> list[str]:
     """Once a milestone exists and the plan still has milestones to create, every revision says what was learnt."""
     created = [k for k in st.get("planned_milestones") or [] if k in (st.get("created_milestones") or [])]
@@ -1636,13 +1671,7 @@ def command_plan_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
         dropped = plan_keys(latest_plan_of(bundle, st)[1]) - plan_keys(plan)
         if dropped:
             errs.append(f"an amended plan keeps every key already created; it drops {', '.join(sorted(dropped, key=natural_key))}")
-        if plan.get("cleanup_of"):
-            old = {l["key"] for l in plan_leaves(latest_plan_of(bundle, st)[1])}
-            new = [l["key"] for l in plan_leaves(plan) if l["key"] not in old and l.get("debt")]
-            budget = config.get("cleanup_slices_per_milestone", 1)
-            if len(new) > budget:
-                errs.append(f"a cleanup pass adds at most {budget} debt-paying slice(s) (cleanup_slices_per_milestone); "
-                            f"this adds {', '.join(new)}: leave the rest filed")
+    errs += cleanup_budget_errors(plan, st, config)
     errs += lessons_errors(plan, st)
     if errs:
         raise SdlcError("the plan does not validate (run plan-validate): " + "; ".join(errs))
@@ -1708,6 +1737,7 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
     plan_comment, plan = latest_plan_of(bundle, st)
     epic = st["number"]
     errs = check_plan(plan) + ([] if plan.get("issue") == epic else [f"the plan is for #{plan.get('issue')}"])
+    errs += cleanup_budget_errors(plan, st, config)
     if errs:
         raise SdlcError("the reviewed plan no longer validates: " + "; ".join(errs))
     repo = repo_of(config)
@@ -2740,9 +2770,9 @@ def ship_gate_errors(st: dict[str, Any], key: str, head: str, synced: bool, carr
 
 
 def finished(progress: dict[str, Any], demos: dict[str, dict[str, Any]], shipped: dict[str, str],
-             uncreated: list[str] | None = None) -> bool:
-    """Nothing is left to plan, build, show or release."""
-    return not uncreated and progress["open"] == 0 and all(
+             uncreated: list[str] | None = None, untested: dict[str, str] | None = None) -> bool:
+    """Nothing is left to plan, build, show, release or verify."""
+    return not uncreated and not untested and progress["open"] == 0 and all(
         (demos.get(m["key"]) or {}).get("accepted") and m["key"] in shipped for m in progress["milestones"])
 
 
@@ -2928,8 +2958,11 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
         shipped[key] = sha
     st = {**st, "shipped": shipped}
     m = ship_target(st, progress, args.milestone)
+    if m is None and st.get("untested"):
+        raise SdlcError(f"#{n}: {', '.join(st['untested'])} reached {main} with commits no run saw: "
+                        f"`verify-main {n}` before the epic can finish")
     if m is None:
-        if not finished(progress, st.get("demos") or {}, shipped, st.get("uncreated_milestones")):
+        if not finished(progress, st.get("demos") or {}, shipped, st.get("uncreated_milestones"), st.get("untested")):
             raise SdlcError(f"#{n}: every created milestone has shipped; the rest isn't built yet")
         if args.dry_run:
             print(f"#{n}: every milestone has shipped: would finish the epic (delete {epic_branch(n)}, done)")
@@ -3005,11 +3038,44 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if extra.get("untested"):
         escalate_epic(n, f"{main} moved while {key} shipped: run the suite on {main} (`{sha[:12]}`)", config)
         return 1
-    if finished(summarise_progress(leaves, {}), st.get("demos") or {}, shipped, st.get("uncreated_milestones")):
+    if finished(summarise_progress(leaves, {}), st.get("demos") or {}, shipped, st.get("uncreated_milestones"),
+                st.get("untested")):
         finish_epic(n, bundle["issue"]["labels"], config, root)
         return 0
     st = with_next(bundle_state(fetch_bundle(n, config, trusted), config), config, trusted=trusted)
     print(f"next: {st['next']}")
+    return 0
+
+
+def command_verify_main(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Run the full suite on main when a release reached it untested (main moved during `ship`); record it."""
+    n, root = args.number, primary_root()
+    main = config.get("default_branch", "main")
+    st = bundle_state(fetch_bundle(n, config), config)
+    if not st.get("untested"):
+        print(f"#{n}: no release is waiting to be verified")
+        return 0
+    git(["fetch", "-q", "origin", main], cwd=root)
+    main_sha = git(["rev-parse", f"origin/{main}"], cwd=root)
+    covers = [sha for sha in st["untested"].values() if is_ancestor(sha, main_sha, root)]
+    if args.dry_run:
+        print(f"would run the suite on {main} at {main_sha[:12]}, covering {', '.join(c[:12] for c in covers) or 'nothing'}")
+        return 0
+    wt = root / config.get("worktree_dir", ".worktrees") / f"verify-main-{n}"
+    git(["worktree", "prune"], cwd=root)
+    if wt.exists():
+        git(["worktree", "remove", "--force", str(wt)], cwd=root)
+    git(["worktree", "add", "-q", "--detach", str(wt), main_sha], cwd=root)
+    try:
+        run = run_suite(wt)
+    finally:
+        git(["worktree", "remove", "--force", str(wt)], cwd=root, check=False)
+    post_comment(n, render_comment("main-tests", None, suite_body(main, main_sha, run), config, sha=main_sha,
+                                   result=run["result"], passed=str(run["passed"]), covers=",".join(covers)), config)
+    if run["result"] != "pass":
+        escalate_epic(n, f"the suite fails on {main} at `{main_sha[:12]}` after a release", config)
+        return 1
+    print(f"#{n}: {main} at {main_sha[:12]} passes ({run['passed']}); the release is verified")
     return 0
 
 
@@ -3377,7 +3443,7 @@ def close_finished_containers(epic: int, title: str | None, config: dict[str, An
 
 
 def command_demo_accept(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """Record the poster's /approve of a milestone demo; the last one finishes the epic."""
+    """Record the poster's /approve of a milestone demo. The epic stays in progress: `ship` releases it."""
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
     n = st["number"]
@@ -3672,6 +3738,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_ship)
 
+    p = sub.add_parser("verify-main", help="run the suite on main after a release reached it untested, and record it")
+    p.add_argument("number", type=int)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=command_verify_main)
+
     p = sub.add_parser("revert-slice", help="undo one merged slice on epic/N before it ships, and reopen it")
     p.add_argument("number", type=int)
     p.add_argument("--reason")
@@ -3714,7 +3785,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_file_issue)
 
-    p = sub.add_parser("demo-accept", help="record the poster's /approve of a demo (the last one: done)")
+    p = sub.add_parser("demo-accept", help="record the poster's /approve of a demo (then `ship` releases it)")
     p.add_argument("number", type=int)
     p.add_argument("--milestone")
     p.add_argument("--from-file")

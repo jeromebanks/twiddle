@@ -691,3 +691,37 @@ def test_demo_status_and_state_agree_on_next(monkeypatch):
     brief = sdlc.demo_brief(12, CONFIG, {OWNER})
     st = sdlc.with_next(sdlc.bundle_state(epic_bundle(shipped), CONFIG), CONFIG, trusted={OWNER})
     assert brief["next"] == st["next"] and brief["next"].startswith("/plan-issue 12 --cleanup")
+
+
+def test_an_untested_release_must_be_verified_before_the_epic_finishes():
+    untested = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1")])
+    assert untested["untested"] == {"M1": HEAD}
+    p = progress(ms("M1", 3, 3), open_=0)
+    view = sdlc.epic_view(untested, p)
+    assert view["due"] == "verify" and view["next"].startswith("`uv run python tools/sdlc.py verify-main 12`")
+    assert sdlc.pause_errors(view)
+    assert not sdlc.finished(p, untested["demos"], untested["shipped"], [], untested["untested"])
+    failed = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1"),
+                     agent("main-tests", None, 14, sha="f" * 40, result="fail", covers=HEAD)])
+    assert failed["untested"]                                     # a failing run verifies nothing
+    verified = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1"),
+                       agent("main-tests", None, 14, sha="f" * 40, result="pass", covers=HEAD)])
+    assert verified["untested"] == {} and sdlc.finished(p, verified["demos"], verified["shipped"], [], {})
+
+
+def test_an_interrupted_untested_ship_does_not_finish_on_rerun(repo, monkeypatch, capsys):
+    gh = GitHub(monkeypatch, repo)
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    stub_ship(monkeypatch, [DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1")],
+              [done_leaf(28, "T1.1")])
+    assert sdlc.main(["ship", "12"]) == 1
+    assert "verify-main 12" in capsys.readouterr().err and sdlc.remote_has("epic/12", repo) and gh.labels == []
+
+
+def test_an_owed_cleanup_pass_holds_ordinary_claims():
+    st = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)])
+    p = {**progress(ms("M1", 3, 3), ms("M2", 0, 2), ready=(35,)), "debt": [81], "cleanup_budget": 1,
+         "units": {35: {"key": "T4.1", "milestone": "M2"}}}
+    view = sdlc.epic_view(st, p)
+    assert view["due"] == "cleanup"
+    assert "cleanup pass after M1 is owed" in sdlc.claim_errors(view, 35, "#12 M2: y", cleanup=False)[0]

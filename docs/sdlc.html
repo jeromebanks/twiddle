@@ -260,7 +260,7 @@ orchestrator) knows exactly what to run.</p>
 <td><code>slice-status</code>, <code>slice-check</code>, <code>claim</code>, <code>test-record</code>, <code>pr-review</code>, <code>merge</code>, <code>cleanup</code>, <code>release</code>, <code>escalate-slice</code>, <code>file-issue</code>, <code>ready</code></td></tr>
 <tr><td><code>milestone-demo</code></td><td>a milestone is complete, the poster replied, or an accepted one is due to ship</td>
 <td><span class="chip">in-progress</span> ⇄ <span class="chip">demo-review</span>. The last ship makes it <span class="chip">done</span>.</td>
-<td><code>demo-status</code>, <code>demo-request</code>, <code>demo-post</code>, <code>demo-accept</code>, <code>demo-changes</code>, <code>sync</code>, <code>ship-review</code>, <code>ship</code>, <code>revert-slice</code>, <code>file-issue</code></td></tr>
+<td><code>demo-status</code>, <code>demo-request</code>, <code>demo-post</code>, <code>demo-accept</code>, <code>demo-changes</code>, <code>sync</code>, <code>ship-review</code>, <code>ship</code>, <code>verify-main</code>, <code>revert-slice</code>, <code>file-issue</code></td></tr>
 </tbody></table></div>
 <p class="note">Also: <code>epic-branch N</code> gives an older epic its branch, <code>next</code> lists every issue where it's the
 agent's move, and <code>state N</code> explains one.</p>
@@ -336,6 +336,9 @@ change of phase to one of these arrows.</figcaption>
 <h3>What's due, in order</h3>
 <p>For the current milestone, <code>next</code> always picks the first of these that applies:</p>
 <ol class="steps">
+<li><strong>Verify <code>main</code></strong>, if a release reached it with commits no recorded run saw, because
+<code>main</code> moved during <code>ship</code>. <code>verify-main N</code> runs the suite on <code>main</code>. Until it passes, nothing else
+starts and the epic can't finish.</li>
 <li><strong>Plan it</strong> (<code>uncreated</code>). By default only the first milestone's issues are created up front.
 Each later one is replanned with a <em>Lessons from M1</em> section and a fresh Codex review, then created.
 <code>/plan-issue N</code>.</li>
@@ -390,7 +393,8 @@ and records it, and pushes only on a pass. A conflict or a failure goes to a hum
   One that resolved a conflict ships only after a human has reviewed it (<code>--accept-merge</code>).</li>
   </ul>
   It rechecks <code>main</code> right before merging, and checks the merge afterwards. If <code>main</code> moved in that moment,
-  the epic is escalated, so someone runs the suite on <code>main</code>.</li>
+  the release is marked untested and the epic is escalated. Nothing more happens until <code>verify-main N</code>
+  passes on <code>main</code>.</li>
 <li>A milestone built before epic branches existed, straight onto <code>main</code>, ships as a recorded no-op.</li>
 </ul>
 
