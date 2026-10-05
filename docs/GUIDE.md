@@ -110,178 +110,12 @@ Alarms are household-wide, so any speaker answers for all of them: one
 and how it writes it (a format of `INV`, i.e. unset, prints 24-hour). Each
 alarm shows its time, days, on/off, volume, duration (the auto-stop), play
 mode, the source's title from the alarm's own metadata, and when it next goes
-off in the household's local time, and its ID (`#34`), which the writing
-verbs below take.
+off in the household's local time.
 
 An alarm aimed at a bonded follower (the right Roam, a surround), at a speaker
 that has vanished from the household, or at a UUID no speaker owns is listed
 with a `!` line saying so, never hidden. `alarm list` writes nothing: no
 `AlarmClock` or `AVTransport` write, no journal entry.
-
-```bash
-uv run twiddle alarm snapshot              # -> logs/snapshots/alarms.json (read-only)
-uv run twiddle alarm restore --dry-run     # every change it would make; writes nothing
-uv run twiddle alarm restore               # WRITES: make the alarms match the snapshot
-```
-
-`alarm snapshot` saves the `CurrentAlarmList` exactly as `ListAlarms` sent it,
-with its version; like `alarm list` it writes nothing to a speaker or the
-journal. `alarm restore` makes the household match it again: alarms the
-snapshot lacks are destroyed, deleted ones recreated, changed ones updated.
-A recreated alarm gets a new ID from the speaker, so alarms are compared by
-everything but their ID: time, days, duration, enabled, room, volume, play
-mode, include-grouped-rooms, and `ProgramURI`/`ProgramMetaData` as exact
-strings. An equal alarm under another ID is left alone, so restoring twice
-does nothing the second time. The old-to-new ID mapping is printed and
-journalled (`alarm_restore`).
-
-Every alarm write (`CreateAlarm`, `UpdateAlarm`, `DestroyAlarm`) first re-reads
-the list and is **refused if its version moved** since twiddle read it: someone
-changed an alarm in the Sonos app meanwhile, and that edit is not overwritten.
-AlarmClock has no compare-and-swap, so the list read back after each write must
-differ only in the alarm written; if anything else moved in that window, the
-write is reported done and everything after it stops. Each write is journalled
-as `alarm_create`/`alarm_update`/`alarm_destroy` with the whole alarm before
-and after (or the error, if it failed), so a deleted or clobbered alarm can be
-recreated from `logs/interventions.jsonl`. A write whose answer is lost (a
-timeout after the speaker acted) is judged from the list read back: `written`
-in the journal is true, false, or null when that can't be told. A restore
-stops at the first write that fails or is refused, reads the list again and
-reports everything still different, exiting 1. Some Spotify alarms carry a
-`<Content>` child that `CreateAlarm` can't set: a recreated one comes back
-without it, and restore says so in a `note:` rather than failing.
-
-```bash
-uv run twiddle alarm disable 34 --dry-run   # the room and alarm it resolves to; writes nothing
-uv run twiddle alarm disable 34             # WRITES: switch alarm 34 off
-uv run twiddle alarm enable 34              # WRITES: and on again
-uv run twiddle alarm rm 34                  # WRITES: delete it, after asking twice
-```
-
-`enable` and `disable` send one `UpdateAlarm` that changes `Enabled` and
-nothing else: every other field goes back exactly as `ListAlarms` gave it, so
-an alarm whose source twiddle doesn't recognise (an iHeart station, say) keeps
-its `ProgramURI` and `ProgramMetaData` byte-for-byte. An alarm already in the
-state asked for is left alone, with nothing written or journalled. That is
-what is *sent*: whether a real speaker keeps a Spotify alarm's `<Content>`
-child through an `UpdateAlarm` is unverified, and the journal entry's
-`before`/`after` children show it.
-
-`rm` asks twice, on the terminal: `y`, then the alarm's ID typed out. Anything
-else, or no terminal to ask (answers piped in, a script), deletes nothing. The prompts go
-to stderr, so `--json` still prints one envelope. If someone changed an alarm
-in the Sonos app while it was asking, the delete is refused. The
-`alarm_destroy` journal entry keeps the whole alarm (every attribute and child
-element), so a deleted alarm can be made again from it, with a new ID
-(refused if an equal alarm is already there):
-
-```bash
-uv run python -c "from twiddle.alarms import clock; ip = '<any speaker>'; \
-  print(clock.recreate(ip, '34', clock.list_alarms(ip).version))"
-```
-
-That is a write too (journalled `alarm_create`); `alarm restore` from a
-snapshot taken before the delete brings it back as well. Every field
-`CreateAlarm` takes comes back exactly; what it has no argument for can't: a
-Spotify alarm's `<Content>` child (see above) and any attribute twiddle's
-model doesn't know. `recreate` returns a list of what it couldn't bring back.
-
-```bash
-uv run twiddle alarm add --room roam --time 07:15 --days weekdays --dry-run   # the alarm it would create
-uv run twiddle alarm add --room roam --time 07:15 --days weekdays --volume 20 --duration 1h
-uv run twiddle alarm edit 34 --volume 15 --mode shuffle --dry-run               # the change; writes nothing
-uv run twiddle alarm edit 34 --days sat,sun --off                               # WRITES
-```
-
-`add` sends one `CreateAlarm` and prints the ID the speaker gave it; `edit`
-sends one `UpdateAlarm` that changes only the fields named on the command line
-and sends every other one back exactly as `ListAlarms` gave it. Between them
-every field `AlarmClock` takes is settable:
-
-| Flag | Field | Values (`add`'s default) |
-|---|---|---|
-| `--time` | `StartLocalTime` | 24-hour `HH:MM` or `HH:MM:SS`, the household's time (required on `add`) |
-| `--days` | `Recurrence` | `once`, `daily`, `weekdays`, `weekends`, days like `mon,wed,fri` or `mon-fri`, or the speaker's own `ON_<days>` (Sunday 0); written the speaker's way, so `sat,sun` is `WEEKENDS` (`daily`) |
-| `--duration` | `Duration` | the auto-stop: `1h`, `30m`, `1h30`, `HH:MM:SS`; `none` sends an empty `Duration`, as soco does for no auto-stop (unverified on a real speaker) (`2h`) |
-| `--volume` | `Volume` | 0-100 (25) |
-| `--mode` | `PlayMode` | `normal`, `repeat`, `repeat-one`, `shuffle`, `shuffle-repeat`, `shuffle-repeat-one`, or the speaker's own value. The speaker's `SHUFFLE` is shuffle *and* repeat (`shuffle-repeat`); plain `shuffle` is `SHUFFLE_NOREPEAT` (`normal`) |
-| `--include-grouped-rooms` / `--no-...` | `IncludeLinkedZones` | also play in the rooms grouped with it when it fires (no) |
-| `--room` | `RoomUUID` | a room by name (required on `add`) |
-| `--on` / `--off` | `Enabled` | (on) |
-| `--source` | `ProgramURI`, `ProgramMetaData` | `chime`; on `edit`, `keep` (the default) leaves the source byte-for-byte (`chime`) |
-
-So editing anything about an alarm whose source twiddle doesn't recognise (an
-iHeart or Spotify alarm) sends its `ProgramURI` and `ProgramMetaData` back
-untouched; as with `enable`, whether a real speaker keeps a Spotify alarm's
-`<Content>` child through that `UpdateAlarm` is unverified (see above). An edit
-that would change nothing writes nothing. In `--json`, `room` is where the
-alarm was and `to_room` where `--room` moves it.
-
-The room is named, never addressed. An alarm belongs to a room, so it goes on
-the room's primary unit: naming a bonded follower (`"Sonos Roam (R)"`, a
-surround, or its IP) puts the alarm on the left Roam or the soundbar, and the
-output says so in a `note:` (`redirected_from`/`reason` in `--json`). Naming
-the room itself is never a redirect. It is never the group coordinator: a
-room grouped with another today keeps its own alarm. For the same reason a
-name that matches two rooms is refused as ambiguous even when they are
-grouped (`--room Den` with Den North and Den South), where transport commands
-would act on the group. `edit` without `--room`
-leaves the alarm where it is, even on a follower (`alarm list` labels those).
-`--dry-run` resolves the room and prints the whole alarm it would write;
-like every alarm write, the real thing is refused if the list moved since it
-was read, and journalled (`alarm_create`/`alarm_update`) before and after.
-
-```bash
-uv run twiddle alarm status                          # is one going off, and where (read-only)
-uv run twiddle alarm try 34 --dry-run                # the room and alarm it would fire; writes nothing
-uv run twiddle alarm try 34                          # WRITES: fire alarm 34 now, to hear it
-uv run twiddle alarm snooze --room roam              # WRITES: the speaker's own snooze, 10 minutes
-uv run twiddle alarm snooze --room roam --minutes 5  # 5, 10, 15 or 30
-uv run twiddle alarm stop --room roam                # WRITES: stop it
-```
-
-Ringing belongs to a group's transport, so these go to `AVTransport` on a
-group coordinator, not to `AlarmClock`. `status` asks every group's
-coordinator `GetRunningAlarmProperties`, which names the alarm going off
-(`AlarmID`, `GroupID`, `LoggedStartTime`) and answers UPnP error 800 when
-none is. It also takes one GENA event from each (the subscription the daemon
-keeps on its anchor) for `AlarmRunning` and `SnoozeRunning`, which no action
-returns; without an event it still answers from `GetRunningAlarmProperties`.
-An event that says plainly neither is running wins over an alarm ID
-`GetRunningAlarmProperties` still names: `stop` acts on this answer, and
-refusing wrongly costs less than stopping ordinary playback.
-The alarm is named from `ListAlarms` by its ID, under its own room. `status`
-writes nothing and journals nothing.
-
-`try` is the speaker's `RunAlarm` with every field of the alarm (time aside),
-on the coordinator of the alarm's room, so a bonded follower's alarm fires on
-its pair's coordinator. It is refused for an alarm aimed at a speaker that
-isn't here. `LoggedStartTime` is sent as the household's local time
-`YYYY-MM-DD HH:MM:SS`, from `GetTimeNow`. Tried on the Roam (2026-10-04,
-alarm 34): it rang, `GetRunningAlarmProperties` named alarm 34 with that
-`LoggedStartTime` and the group's ID, LastChange had `AlarmRunning=1`, and
-`alarm stop` ended it (`status` then read nothing ringing).
-
-`stop` and `snooze` resolve the room the way transport commands do (a bonded
-follower goes to its coordinator, and the output says so) and send the
-group's own `Stop` or `SnoozeAlarm` (`Duration` `00:10:00`). Both are
-**refused when no alarm is going off there**: a bare `Stop` would silence
-whatever the room is playing, and `twiddle stop --room` is the command for
-that. A snoozed alarm (`SnoozeRunning`) can still be stopped. Whether a snoozed
-alarm also answers `GetRunningAlarmProperties`, and whether `Stop` ends a
-snooze, are unverified.
-
-A tried alarm stopped early leaves its duration-stop span in the journal: a
-few minutes wrongly discounted two hours on, the cheaper mistake (as with a
-cancelled sleep timer).
-
-All three writes are journalled (`alarm_run` with the whole alarm,
-`alarm_stop`, `alarm_snooze` with its minutes). The speaker acts again later
-on its own when a tried alarm's duration runs out or a snooze ends, so a span
-is journalled around each of those moments (`alarm_run_stop_*`,
-`alarm_snooze_ring_*`, a minute before to three after) for `analyse` to
-discount, as with the sleep timer. Each takes `--dry-run`, which reads
-whether anything is ringing but writes and journals nothing.
 
 ### Relay: play anything on this Mac, including Spotify
 
@@ -640,9 +474,6 @@ that half-worked is worse than one that failed loudly — the next measurement
 inherits the difference silently. A live stream has no seekable position, so
 restoring one re-issues the URI rather than seeking into it.
 
-Room snapshots don't cover alarms, which belong to the whole household:
-`alarm snapshot` before touching them, `alarm restore` after (see *Alarms*).
-
 ### Playback and long-running tests (these **write**)
 
 ```bash
@@ -653,9 +484,8 @@ uv run twiddle diag soak --room roam --duration 120
 ```
 
 `rooms`, `status`, `snapshot`, and all of `diag scan|ping|watch|analyse` are
-strictly read-only. Every write goes through `play.py`, or for alarms through
-`alarms/clock.py`, and both journal it to `logs/interventions.jsonl` — see
-*Telling real dropouts from ones you caused*.
+strictly read-only. Every write goes through `play.py`, which journals it to
+`logs/interventions.jsonl` — see *Telling real dropouts from ones you caused*.
 
 ## Reading PHY error rates
 
@@ -844,8 +674,8 @@ you add analysis.
 | `report.py` | Findings, severities, hardware-vs-setup discriminators |
 | `household.py` | Speakers, groups, name resolution, snapshot/restore |
 | `control_cli.py` | The room-naming control commands |
-| `alarms/` | Sonos alarms: `model.py` (an `Alarm` that round-trips ListAlarms, its `Recurrence`), `clock.py` (the `AlarmClock` reads, and the version-checked, journalled writes), `baseline.py` (`AlarmSnapshot`, the restore plan and restore) |
-| `alarm_cli.py` | `alarm list`, `alarm snapshot` (read-only); `alarm restore` (writes) |
+| `alarms/` | Sonos alarms: `model.py` (an `Alarm` that round-trips ListAlarms, its `Recurrence`), `clock.py` (the `AlarmClock` reads) |
+| `alarm_cli.py` | `alarm list` (read-only) |
 | `play.py` | HTTP file server and transport control (writes) |
 | `tone.py` | Soak-test signal generator |
 | `spotify_ops.py` | Spotify playback logic with no CLI attached (shared by `spotify_cli` and `scene`) |
