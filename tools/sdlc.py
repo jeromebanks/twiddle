@@ -55,6 +55,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -138,6 +139,177 @@ def keyword_lines(body: str) -> list[tuple[str, str]]:
     return found
 
 
+# --- the ledger: an issue's marked comments, read in order ---------------------
+#
+# Every agent comment carries a marker (`kind=...`). Reading them oldest first
+# builds the issue's history: the latest PRD, the plan and its Codex rounds,
+# each milestone's demo and release, the records bound to commits. One handler
+# per kind, in MARKERS: a new kind of agent comment is one entry here, and the
+# decisions in derive_state / epic_view read only the ledger.
+
+@dataclass
+class Ledger:
+    latest_doc: dict[str, Any] | None = None
+    approved_rev: int | None = None
+    approval_by: str | None = None
+    rounds: int = 0                      # triage rounds (questions and PRD/diagnosis revisions)
+    latest_plan: dict[str, Any] | None = None
+    plan_body: str = ""                  # the latest plan revision's comment: its milestones and create mode
+    plan_verdict: str | None = None
+    plan_rounds: int = 0
+    plan_after_created: bool = False     # a plan revision posted since the last plan-created: an amendment
+    created: set[str] | None = field(default_factory=set)   # milestones whose issues exist (None: all, legacy)
+    cleanups: set[str] = field(default_factory=set)         # milestones whose tech-debt cleanup is planned
+    feedback: bool = False               # demo changes (the poster's or the agent's) not yet turned into issues
+    feedback_plan: bool = False          # a plan revision posted since that feedback
+    demos: dict[str, dict[str, Any]] = field(default_factory=dict)   # milestone -> its latest demo
+    latest_demo: dict[str, Any] | None = None
+    request: dict[str, Any] | None = None    # demo steps only a person can run, asked for on the issue
+    shipped: dict[str, str] = field(default_factory=dict)              # milestone -> the commit on main
+    ship_reviews: list[dict[str, Any]] = field(default_factory=list)   # Codex on main...epic/N, per head
+    epic_tests: list[dict[str, Any]] = field(default_factory=list)     # full runs on the epic head
+
+
+def _rev(mk: dict[str, str]) -> int | None:
+    return int(mk["rev"]) if mk.get("rev", "").isdigit() else None
+
+
+def _ms(mk: dict[str, str]) -> str:
+    return mk.get("milestone", NO_MILESTONE)
+
+
+def _replan(L: Ledger) -> None:
+    """Changes to plan (feedback): plan-issue amends the plan, with fresh Codex rounds."""
+    L.feedback, L.feedback_plan, L.plan_rounds, L.plan_verdict = True, False, 0, None
+
+
+def _reopen(L: Ledger, m: str) -> None:
+    """The milestone goes back to being built: its acceptance is void, and a new demo will ask again."""
+    if d := L.demos.get(m):
+        d["accepted"], d["voided"] = False, True
+    if L.request and L.request["milestone"] == m:
+        L.request = None
+
+
+def _on_question(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    if mk.get("phase") == "plan":
+        L.plan_rounds, L.plan_verdict = 0, None   # the poster's answer buys a fresh set of Codex rounds
+    else:
+        L.rounds += 1
+
+
+def _on_doc(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    L.rounds += 1
+    if (rev := _rev(mk)) is not None:
+        L.latest_doc = {"kind": mk["kind"], "rev": rev, "id": c.get("id"), "url": c.get("url")}
+        L.approved_rev = None
+
+
+def _on_approval(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    if L.latest_doc and _rev(mk) == L.latest_doc["rev"]:
+        L.approved_rev, L.approval_by = _rev(mk), mk.get("by")
+
+
+def _on_plan(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    if (rev := _rev(mk)) is not None:
+        L.latest_plan = {"rev": rev, "id": c.get("id"), "url": c.get("url")}
+        L.plan_body, L.plan_verdict = c.get("body", ""), None
+        L.feedback_plan, L.plan_after_created = L.feedback, True
+
+
+def _on_plan_review(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    L.plan_rounds += 1
+    if L.latest_plan and _rev(mk) == L.latest_plan["rev"]:
+        L.plan_verdict = mk.get("verdict")
+
+
+def _on_plan_created(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    L.feedback = L.feedback_plan = L.plan_after_created = False
+    L.plan_rounds = 0   # the next amendment (a milestone's replan, demo changes) gets fresh rounds
+    if mk.get("cleanup"):
+        L.cleanups.add(mk["cleanup"])
+    if "created" not in mk:
+        L.created = None
+    elif L.created is not None:
+        L.created |= {x for x in mk["created"].split(",") if x}
+
+
+def _on_demo(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    if (rev := _rev(mk)) is None:
+        return
+    m = _ms(mk)
+    if L.request and L.request["milestone"] == m:
+        L.request = None
+    L.latest_demo = L.demos[m] = {"milestone": m, "rev": rev, "id": c.get("id"), "url": c.get("url"),
+                                  "sha": mk.get("sha"), "accepted": False, "changes": False}
+
+
+def _on_demo_approval(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    d = L.demos.get(_ms(mk))
+    if d and d["rev"] == _rev(mk):
+        d["accepted"] = True
+
+
+def _on_demo_changes(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    if L.request and L.request["milestone"] == _ms(mk):
+        L.request = None
+    if mk.get("found") == "agent":
+        # the agent's own demo found the milestone broken: fix slices, then a new demo (an acceptance is void)
+        _replan(L)
+        _reopen(L, _ms(mk))
+        return
+    d = L.demos.get(_ms(mk))
+    if d and _rev(mk) is not None and d["rev"] == _rev(mk):
+        d["changes"] = True
+        _replan(L)   # the poster's changes become new slices
+
+
+def _on_demo_void(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    _reopen(L, _ms(mk))   # a slice of it was reverted (`revert-slice`): it needs a new demo
+
+
+def _on_demo_request(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    L.request = {"milestone": _ms(mk), "index": i, "url": c.get("url")}
+
+
+def _on_shipped(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    L.shipped[_ms(mk)] = mk.get("sha", "")
+
+
+def _on_ship_review(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    L.ship_reviews.append({"milestone": mk.get("milestone"), "sha": mk.get("sha"), "verdict": mk.get("verdict"),
+                           "url": c.get("url")})
+
+
+def _on_epic_tests(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    L.epic_tests.append({"sha": mk.get("sha"), "result": mk.get("result"), "passed": mk.get("passed"),
+                         "main": mk.get("main"), "url": c.get("url")})
+
+
+# kind -> handler. Kinds not listed (notes, escalations, claims on slices...) only end the run of replies.
+MARKERS = {
+    "question": _on_question, "prd": _on_doc, "diagnosis": _on_doc, "approval": _on_approval,
+    "plan": _on_plan, "plan-review": _on_plan_review, "plan-created": _on_plan_created,
+    "demo": _on_demo, "demo-approval": _on_demo_approval, "demo-changes": _on_demo_changes,
+    "demo-void": _on_demo_void, "demo-request": _on_demo_request,
+    "shipped": _on_shipped, "ship-review": _on_ship_review, "epic-tests": _on_epic_tests,
+}
+
+
+def read_ledger(ordered: list[dict[str, Any]], trusted: set[str]) -> tuple[Ledger, int, set[Any]]:
+    """(the ledger, the index of the last marked comment, the marked comments' ids)."""
+    L, last, marked = Ledger(), -1, set()
+    for i, c in enumerate(ordered):
+        mk = parse_marker(c.get("body", "")) if c.get("author") in trusted else None
+        if not mk:
+            continue
+        marked.add(c.get("id"))
+        last = i
+        if handler := MARKERS.get(mk.get("kind", "")):
+            handler(L, mk, c, i)
+    return L, last, marked
+
+
 def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
                  trusted: set[str], config: dict[str, Any]) -> dict[str, Any]:
     """Everything the skill needs to know about one issue, from fetched JSON alone.
@@ -167,96 +339,13 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         state = found[0][len(PREFIX):] if found else "untriaged"
 
     ordered = sorted(comments, key=lambda c: (c.get("created_at", ""), c.get("id", 0)))
-    latest_doc: dict[str, Any] | None = None
-    approved_rev: int | None = None
-    approval_by: str | None = None
-    last_marked = -1
-    rounds = 0
-    marked_ids: set[Any] = set()
-    latest_plan: dict[str, Any] | None = None
-    plan_verdict: str | None = None
-    plan_rounds = 0
-    demos: dict[str, dict[str, Any]] = {}
-    latest_demo: dict[str, Any] | None = None
-    feedback = False          # a demo's /changes not yet turned into issues by plan-create
-    shipped: dict[str, str] = {}              # milestone -> the commit that released it to main (`ship`)
-    ship_reviews: list[dict[str, Any]] = []   # Codex on main...epic/N, bound to the epic head (`ship-review`)
-    epic_tests: list[dict[str, Any]] = []     # full runs on the epic head (`sync`)
-    feedback_plan = False     # a plan revision posted since that feedback
-    plan_body = ""            # the latest plan revision's comment: its milestones and create mode
-    created: set[str] | None = set()   # milestones whose issues exist (None: all of them, a legacy marker)
-    request: dict[str, Any] | None = None   # a demo step only a person can run, asked for on the issue
-    cleanups: set[str] = set()              # milestones whose tech-debt cleanup has been planned
-    plan_after_created = False         # a plan revision posted since the last plan-created: an amendment
-    for i, c in enumerate(ordered):
-        mk = parse_marker(c.get("body", "")) if c.get("author") in trusted else None
-        if not mk:
-            continue
-        marked_ids.add(c.get("id"))
-        last_marked = i
-        kind = mk.get("kind", "")
-        rev = int(mk["rev"]) if mk.get("rev", "").isdigit() else None
-        if request and kind in ("demo-changes", "demo-void") and mk.get("milestone", NO_MILESTONE) == request["milestone"]:
-            request = None   # the milestone goes back to being built: a new demo will ask again
-        if kind in ROUND_KINDS and mk.get("phase") != "plan":
-            rounds += 1
-        if kind == "question" and mk.get("phase") == "plan":
-            plan_rounds, plan_verdict = 0, None   # the poster's answer buys a fresh set of Codex rounds
-        if kind in DOC_KINDS and rev is not None:
-            latest_doc = {"kind": kind, "rev": rev, "id": c.get("id"), "url": c.get("url")}
-            approved_rev = None
-        elif kind == "approval" and latest_doc and rev == latest_doc["rev"]:
-            approved_rev, approval_by = rev, mk.get("by")
-        elif kind == "plan" and rev is not None:
-            latest_plan = {"rev": rev, "id": c.get("id"), "url": c.get("url")}
-            plan_body = c.get("body", "")
-            plan_verdict = None
-            feedback_plan = feedback
-            plan_after_created = True
-        elif kind == "plan-review":
-            plan_rounds += 1
-            if latest_plan and rev == latest_plan["rev"]:
-                plan_verdict = mk.get("verdict")
-        elif kind == "plan-created":
-            feedback = feedback_plan = plan_after_created = False
-            if mk.get("cleanup"):
-                cleanups.add(mk["cleanup"])
-            plan_rounds = 0   # the next amendment (a milestone's replan, demo changes) gets fresh rounds
-            if "created" in mk:
-                if created is not None:
-                    created |= {x for x in mk["created"].split(",") if x}
-            else:
-                created = None
-        elif kind == "demo-request":
-            request = {"milestone": mk.get("milestone", NO_MILESTONE), "index": i, "url": c.get("url")}
-        elif kind == "demo-changes" and mk.get("found") == "agent":
-            # the agent's own demo found the milestone broken: fix slices, then a new demo (an acceptance is void)
-            feedback, feedback_plan, plan_rounds, plan_verdict = True, False, 0, None
-            if d := demos.get(mk.get("milestone", NO_MILESTONE)):
-                d["accepted"], d["voided"] = False, True
-        elif kind == "demo" and rev is not None:
-            m = mk.get("milestone", NO_MILESTONE)
-            if request and request["milestone"] == m:
-                request = None
-            latest_demo = demos[m] = {"milestone": m, "rev": rev, "id": c.get("id"), "url": c.get("url"),
-                                      "sha": mk.get("sha"), "accepted": False, "changes": False}
-        elif kind in ("demo-approval", "demo-changes") and rev is not None:
-            d = demos.get(mk.get("milestone", NO_MILESTONE))
-            if d and d["rev"] == rev:
-                d["accepted" if kind == "demo-approval" else "changes"] = True
-                if kind == "demo-changes":   # the poster's changes become new slices: plan-issue, fresh rounds
-                    feedback, feedback_plan, plan_rounds, plan_verdict = True, False, 0, None
-        elif kind == "demo-void":    # a slice of it was reverted (`revert-slice`): it needs a new demo
-            if d := demos.get(mk.get("milestone", NO_MILESTONE)):
-                d["accepted"], d["voided"] = False, True
-        elif kind == "shipped":
-            shipped[mk.get("milestone", NO_MILESTONE)] = mk.get("sha", "")
-        elif kind == "ship-review":
-            ship_reviews.append({"milestone": mk.get("milestone"), "sha": mk.get("sha"), "verdict": mk.get("verdict"),
-                                 "url": c.get("url")})
-        elif kind == "epic-tests":
-            epic_tests.append({"sha": mk.get("sha"), "result": mk.get("result"), "passed": mk.get("passed"),
-                               "main": mk.get("main"), "url": c.get("url")})
+    L, last_marked, marked_ids = read_ledger(ordered, trusted)
+    latest_doc, approved_rev, approval_by, rounds = L.latest_doc, L.approved_rev, L.approval_by, L.rounds
+    latest_plan, plan_verdict, plan_rounds, plan_body = L.latest_plan, L.plan_verdict, L.plan_rounds, L.plan_body
+    demos, latest_demo, request = L.demos, L.latest_demo, L.request
+    feedback, feedback_plan, plan_after_created = L.feedback, L.feedback_plan, L.plan_after_created
+    created, cleanups = L.created, L.cleanups
+    shipped, ship_reviews, epic_tests = L.shipped, L.ship_reviews, L.epic_tests
 
     replies = [c for c in ordered[last_marked + 1:] if c.get("id") not in marked_ids]
     allowed = trusted | {issue.get("author", "")}
