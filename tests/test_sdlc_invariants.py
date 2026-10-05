@@ -213,10 +213,10 @@ def test_the_space_is_not_trivial():
 
 
 @pytest.mark.parametrize("helper,fake", [
-    ("current_milestone", lambda st, p: None),
+    ("milestone_phases", lambda st, p: [{**m, "phase": "building"} for m in p["milestones"]]),   # no lifecycle
+    ("offered_slices", lambda p, cur: p["ready"]),            # any milestone, no cleanup-first
+    ("cleanup_owed", lambda st, p, phases, cur: None),        # no cleanup pass
     ("is_cleanup", lambda leaf: False),
-    ("due_milestone", lambda demos, p, shipped=None: None),
-    ("cleanup_due", lambda st, p: None),
 ])
 def test_the_checks_catch_a_broken_rule(monkeypatch, helper, fake):
     """Each rule, switched off, must make some case fail: the checks aren't vacuous."""
@@ -229,3 +229,59 @@ def test_the_checks_catch_a_broken_rule(monkeypatch, helper, fake):
 def test_next_and_the_gates_agree(case):
     st, progress, nxt, problems = check(case)
     assert not problems, (nxt, problems)
+
+
+# --- the milestone lifecycle: every step a journey takes is an edge of MILESTONE_FLOW -----------
+
+def _phase(h, slices_done, total=2, keys=("M1", "M2"), created=("M1",)):
+    issue = {"number": EPIC, "title": "epic", "state": "open", "author": POSTER, "labels": ["sdlc:in-progress"]}
+    st = sdlc.derive_state(issue, h.comments, TRUSTED, CONFIG)
+    leaves = [{"number": 100 + i, "key": f"T{i}", "kind": "slice", "milestone": f"#{EPIC} M1: M1",
+               "state": "closed" if i < slices_done else "open", "state_reason": "completed" if i < slices_done else None,
+               "assignees": [], "labels": ["plan:slice"], "body": ""} for i in range(total)]
+    p = {**sdlc.summarise_progress(leaves, {}), "debt": [], "cleanup_budget": 1}
+    return {m["key"]: m["phase"] for m in sdlc.milestone_phases(st, p)}
+
+
+def _start():
+    h = History()
+    h.add("prd", 1)
+    h.add("approval", 1, by=POSTER)
+    h.add("plan", 1, body=sdlc.render_comment("plan", 1, sdlc.render_plan(_plan(["M1", "M2"])), CONFIG).split("\n", 1)[1])
+    h.add("plan-review", 1, verdict="approve", round="1")
+    h.add("plan-created", 1, created="M1")
+    return h
+
+
+DEMO = ("demo", 1, {"milestone": "M1", "sha": "d" * 40})
+ACCEPT = ("demo-approval", 1, {"milestone": "M1", "by": POSTER})
+# each step: (a marker to post, or None), then how many of M1's slices are merged, of how many
+JOURNEYS = {
+    "straight through": [(None, 0, 2), (None, 1, 2), (None, 2, 2), (DEMO, 2, 2), (ACCEPT, 2, 2),
+                         (("shipped", None, {"milestone": "M1", "sha": "e" * 40}), 2, 2)],
+    "the poster asks for changes": [(None, 2, 2), (DEMO, 2, 2), (("demo-changes", 1, {"milestone": "M1"}), 2, 3),
+                                    (None, 3, 3)],                       # a fix slice F1 is added, then merges
+    "the agent finds it broken": [(None, 2, 2), (("demo-changes", None, {"milestone": "M1", "found": "agent"}), 2, 3),
+                                  (None, 3, 3), (DEMO, 3, 3)],
+    "a slice is reverted after acceptance": [(None, 2, 2), (DEMO, 2, 2), (ACCEPT, 2, 2),
+                                             (("demo-void", None, {"milestone": "M1"}), 1, 2), (None, 2, 2)],
+}
+
+
+@pytest.mark.parametrize("name", JOURNEYS)
+def test_milestone_journeys_follow_the_flow(name):
+    h, seen = _start(), []
+    for step, done, total in JOURNEYS[name]:
+        if step:
+            kind, rev, extra = step
+            h.add(kind, rev, **extra)
+        seen.append(_phase(h, done, total)["M1"])
+    for a, b in zip(seen, seen[1:]):
+        assert a == b or b in sdlc.MILESTONE_FLOW[a], f"{name}: {a} -> {b} is not in MILESTONE_FLOW ({seen})"
+    assert _phase(_start(), 0)["M2"] == "uncreated"
+
+
+def test_every_generated_epic_only_uses_known_phases():
+    for case in ALL[::37]:
+        st, progress, _ = build(*case)
+        assert {m["phase"] for m in sdlc.milestone_phases(st, progress)} <= set(sdlc.MILESTONE_FLOW)

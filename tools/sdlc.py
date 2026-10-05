@@ -490,14 +490,10 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
     if a == "escalate_plan":
         return (f"/plan-issue {n}: the Codex rounds on this amendment are spent; escalate it "
                 f"(`transition {n} escalated --kind escalation --reason ...`)")
-    if a == "plan_next_milestone" and progress is not None:
-        if (due := due_milestone(st.get("demos") or {}, progress, st.get("shipped"))) and due["ship"]:
-            return f"/milestone-demo {n}: {due['key']} is accepted; ship it to main, then plan the next milestone"
     if a == "plan_next_milestone":
-        debt = (progress or {}).get("debt") or []
-        return (f"/plan-issue {n}: plan {st['uncreated_milestones'][0]} with what earlier milestones taught"
-                + (f" (and up to {progress['cleanup_budget']} of its {len(debt)} tech-debt issue(s))"
-                   if debt and (progress or {}).get("cleanup_budget") else ""))
+        if progress is not None:
+            return epic_view(st, progress)["next"]
+        return f"/plan-issue {n}: plan {st['uncreated_milestones'][0]} with what earlier milestones taught"
     if a in PLAN_ACTIONS:
         return f"/plan-issue {n}"
     if a == "wait_for_poster":
@@ -507,57 +503,10 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
     if a == "work_slices":
         if progress is None:
             return f"`uv run python tools/sdlc.py state {n}` (needs the slices' progress)"
-        if due := due_milestone(st.get("demos") or {}, progress, st.get("shipped")):
-            if due["ship"]:
-                return f"/milestone-demo {n}: {due['key']} is accepted; ship it to main (new slices wait)"
-            return f"/milestone-demo {n}: {done_phrase(due)}, and new slices wait for its demo"
-        if cm := cleanup_due(st, progress):
-            return (f"/plan-issue {n} --cleanup: {cm} is accepted and #{n} has {len(progress['debt'])} open tech-debt "
-                    f"issue(s); plan up to {progress['cleanup_budget']} before the next milestone's slices")
-        behind = progress.get("behind_main")
-        if behind and not progress["ready"] and not progress["in_flight"]:
-            return f"`uv run python tools/sdlc.py sync {n}`: {epic_branch(n)} is {behind} commit(s) behind main"
-        cur = current_milestone(st, progress)
-        units = progress.get("units") or {}
-        ready = [r for r in progress["ready"] if not cur or (units.get(r) or {}).get("milestone", cur["key"]) == cur["key"]]
-        if progress["ready"] and not ready and not progress["in_flight"]:
-            return (f"nothing ready in {cur['title']}: later milestones' slices wait until it ships "
-                    f"(its open units are blocked or escalated)")
-        progress = {**progress, "ready": ready}
-        if progress["ready"]:
-            first = progress["ready"][0]
-            u = (progress.get("units") or {}).get(first) or {}
-            return f"/work-slice {first}" + (f" ({u['model']}: {u['complexity']})" if u.get("model") else "")
-        if progress["in_flight"]:
-            return ("nothing new to start: in progress " + ", ".join(f"#{x}" for x in progress["in_flight"])
-                    + f" (`/work-slice {progress['in_flight'][0]}` resumes one)")
-        if progress["open"] == 0:
-            return f"/milestone-demo {n}: every unit of work is merged"
-        if progress["escalated"]:
-            return "nothing for an agent: escalated " + ", ".join(f"#{x}" for x in progress["escalated"])
-        return f"nothing ready: the open units of work on #{n} are all blocked"
+        return epic_view(st, progress)["next"]
     if st["state"] in LATER_STATES:
         return f"nothing: #{n} is {st['state']}"
     return "nothing: the issue is closed" if a == "none" else f"? (action {a})"
-
-
-def cleanup_due(st: dict[str, Any], progress: dict[str, Any]) -> str | None:
-    """The accepted milestone whose tech-debt cleanup is still to plan, before the next milestone's slices.
-
-    Only with open debt, a budget, and a next milestone to put the cleanup slices in (after the
-    last one, the debt stays filed for triage).
-    """
-    if not progress.get("debt") or not progress.get("cleanup_budget"):
-        return None
-    keys = [m["key"] for m in progress.get("milestones", [])]
-    keys += [k for k in st.get("planned_milestones") or [] if k not in keys]
-    demos = st.get("demos") or {}
-    for i, k in enumerate(keys[:-1]):
-        if (demos.get(k) or {}).get("accepted") and k not in (st.get("cleanups") or []):
-            later = keys[i + 1:]
-            if not any((demos.get(x) or {}).get("accepted") for x in later):
-                return k
-    return None
 
 
 def milestone_key(title: str | None) -> str:
@@ -570,34 +519,193 @@ def done_phrase(m: dict[str, Any]) -> str:
     return "every unit of work is merged" if m["key"] == NO_MILESTONE else f"{m['title']} is complete"
 
 
-def due_milestone(demos: dict[str, dict[str, Any]], progress: dict[str, Any],
-                  shipped: dict[str, str] | None = None) -> dict[str, Any] | None:
-    """The first milestone whose units are all merged but which isn't accepted, or is accepted but not shipped.
+# --- the epic view: one answer to "where is this epic, and what may happen now?" ------
+#
+# Every gate (claim, merge, ship) and `next` read this view, so they can't disagree.
+# It joins the ledger (derive_state: demos, releases, cleanup passes) with the
+# slices' progress on GitHub. A milestone moves through MILESTONE_FLOW; the epic
+# works on one milestone at a time, the earliest one not shipped, and what's due
+# for it decides the next command.
 
-    While there is one, new slices wait: the poster's answer can change what comes
-    next, and nothing of a later milestone may reach epic/N before this one ships.
-    `ship` is True when only the release to main is left.
+MILESTONE_FLOW = {
+    "uncreated": {"building"},              # plan-create makes its issues (after the previous one's demo)
+    "building": {"complete"},               # its slices merge into epic/N
+    "complete": {"demoed", "building"},     # demo-post; or the agent's demo finds it broken (fix slices)
+    "demoed": {"accepted", "building"},     # the poster's /approve; or /changes (fix slices)
+    "accepted": {"shipped", "building"},    # ship; or a revert / later findings void the acceptance
+    "shipped": set(),
+}
+
+
+def milestone_phases(st: dict[str, Any], progress: dict[str, Any]) -> list[dict[str, Any]]:
+    """Each milestone, in order, with its phase (a key of MILESTONE_FLOW). Planned but uncreated ones included."""
+    demos, shipped = st.get("demos") or {}, st.get("shipped") or {}
+    known = {m["key"]: m for m in progress.get("milestones", [])}
+    order = list(known) + [k for k in st.get("planned_milestones") or [] if k not in known]
+    out = []
+    for k in order:
+        m = known.get(k) or {"key": k, "title": f"#{st['number']} {k}", "done": 0, "total": 0}
+        d = demos.get(k) or {}
+        if k in shipped:
+            phase = "shipped"
+        elif k not in known:
+            phase = "uncreated"
+        elif d.get("accepted"):
+            phase = "accepted"
+        elif not (m["total"] and m["done"] == m["total"]):
+            phase = "building"
+        elif d and not d.get("voided") and not d.get("changes"):
+            phase = "demoed"
+        else:
+            phase = "complete"
+        out.append({**m, "phase": phase})
+    return out
+
+
+def cleanup_owed(st: dict[str, Any], progress: dict[str, Any], phases: list[dict[str, Any]],
+                 cur: dict[str, Any]) -> str | None:
+    """The shipped milestone just before `cur` whose budgeted tech-debt cleanup isn't planned yet.
+
+    Only with open debt and a budget; after the last milestone there's nowhere to put it, so it stays filed.
     """
-    for m in progress.get("milestones", []):
-        if not (m["total"] and m["done"] == m["total"]):
-            continue
-        accepted = bool((demos.get(m["key"]) or {}).get("accepted"))
-        if not accepted or m["key"] not in (shipped or {}):
-            return {**m, "ship": accepted}
+    i = phases.index(cur)
+    prev = phases[i - 1] if i else None
+    if prev and prev["phase"] == "shipped" and progress.get("debt") and progress.get("cleanup_budget") \
+            and prev["key"] not in (st.get("cleanups") or []):
+        return prev["key"]
     return None
 
 
+def offered_slices(progress: dict[str, Any], cur: dict[str, Any] | None) -> list[int]:
+    """The ready slices the epic may start now: the current milestone's, its cleanup pass first
+    (and whatever open work a cleanup slice itself waits on)."""
+    if not cur:
+        return []
+    units = progress.get("units") or {}
+    mine = [r for r in progress["ready"] if (units.get(r) or {}).get("milestone", cur["key"]) == cur["key"]]
+    cleanup = [n for n in progress.get("cleanup_open") or [] if (units.get(n) or {}).get("milestone", cur["key"]) == cur["key"]]
+    if cleanup:
+        allowed = set(cleanup) | set(progress.get("cleanup_needs") or [])
+        mine = [r for r in mine if r in allowed]
+    return mine
+
+
+def current_cleanup(progress: dict[str, Any], cur: dict[str, Any] | None) -> list[int]:
+    units = progress.get("units") or {}
+    return [n for n in progress.get("cleanup_open") or []
+            if cur and (units.get(n) or {}).get("milestone", cur["key"]) == cur["key"]]
+
+
+def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
+    """{phases, current, due, cleanup, offered, next}: due is one of done, plan_next, demo, ship,
+    cleanup, sync, build."""
+    n = st["number"]
+    phases = milestone_phases(st, progress)
+    cur = next((m for m in phases if m["phase"] != "shipped"), None)
+    offered = offered_slices(progress, cur)
+    cleanup = cleanup_owed(st, progress, phases, cur) if cur and cur["phase"] == "building" else None
+    behind = progress.get("behind_main")
+    units = progress.get("units") or {}
+    if cur is None:
+        due = "done"
+        nxt = (f"`uv run python tools/sdlc.py ship {n}`: every milestone has shipped; it finishes the epic" if phases
+               else f"/milestone-demo {n}: every unit of work is merged")
+    elif cur["phase"] == "uncreated":
+        due = "plan_next"
+        debt = progress.get("debt") or []
+        nxt = (f"/plan-issue {n}: plan {cur['key']} with what earlier milestones taught"
+               + (f" (and up to {progress['cleanup_budget']} of its {len(debt)} tech-debt issue(s))"
+                  if debt and progress.get("cleanup_budget") else ""))
+    elif cur["phase"] in ("complete", "demoed"):
+        due = "demo"
+        nxt = f"/milestone-demo {n}: {done_phrase(cur)}, and new slices wait for its demo"
+    elif cur["phase"] == "accepted":
+        due = "ship"
+        later = any(m["phase"] == "uncreated" for m in phases)
+        nxt = f"/milestone-demo {n}: {cur['key']} is accepted; ship it to main" + (
+            ", then plan the next milestone" if later and st.get("action") == "plan_next_milestone" else " (new slices wait)")
+    elif cleanup:
+        due = "cleanup"
+        nxt = (f"/plan-issue {n} --cleanup: {cleanup} is accepted and #{n} has {len(progress['debt'])} open tech-debt "
+               f"issue(s); plan up to {progress['cleanup_budget']} before the next milestone's slices")
+    elif behind and not offered and not progress["in_flight"]:
+        due = "sync"
+        nxt = f"`uv run python tools/sdlc.py sync {n}`: {epic_branch(n)} is {behind} commit(s) behind main"
+    else:
+        due = "build"
+        if offered:
+            u = units.get(offered[0]) or {}
+            nxt = f"/work-slice {offered[0]}" + (f" ({u['model']}: {u['complexity']})" if u.get("model") else "")
+        elif progress["in_flight"]:
+            nxt = ("nothing new to start: in progress " + ", ".join(f"#{x}" for x in progress["in_flight"])
+                   + f" (`/work-slice {progress['in_flight'][0]}` resumes one)")
+        elif progress["ready"]:
+            nxt = (f"nothing ready in {cur['title']}: later milestones' slices wait until it ships "
+                   f"(its open units are blocked or escalated)")
+        elif progress["escalated"]:
+            nxt = "nothing for an agent: escalated " + ", ".join(f"#{x}" for x in progress["escalated"])
+        else:
+            nxt = f"nothing ready: the open units of work on #{n} are all blocked"
+    return {"number": n, "phases": phases, "current": cur, "due": due, "cleanup": cleanup, "offered": offered,
+            "cleanup_open": current_cleanup(progress, cur), "cleanup_needs": progress.get("cleanup_needs") or [],
+            "next": nxt}
+
+
+def pause_errors(view: dict[str, Any]) -> list[str]:
+    """Why no fresh claim may start at all: the current milestone waits for its demo or its release."""
+    cur, n = view["current"], view["number"]
+    if view["due"] == "ship":
+        return [f"{cur['title']} is accepted but not shipped to main: new slices wait (`/milestone-demo {n}`)"]
+    if view["due"] == "demo":
+        return [f"{done_phrase(cur)}: new slices wait for its demo (`/milestone-demo {n}`)"]
+    return []
+
+
+def claim_errors(view: dict[str, Any], number: int, milestone: str | None, cleanup: bool) -> list[str]:
+    """Why a fresh claim of this slice must wait: a paused epic, a later milestone, or the cleanup pass first."""
+    errs = pause_errors(view) or merge_errors(view, milestone)
+    held = [x for x in view["cleanup_open"] if x != number]
+    if not errs and held and not cleanup and number not in view["cleanup_needs"]:
+        errs.append("the cleanup pass comes first: " + ", ".join(f"#{x}" for x in held))
+    return errs
+
+
+def merge_errors(view: dict[str, Any], milestone: str | None) -> list[str]:
+    """A slice may land on epic/N only if it belongs to the current milestone (the earliest not shipped)."""
+    cur = view["current"]
+    if cur and milestone_key(milestone) != cur["key"]:
+        return [f"{milestone_key(milestone)} waits: {cur['title']} is still being built, shown or shipped, "
+                f"and only its slices land on {epic_branch(view['number'])} until it ships"]
+    return []
+
+
+def due_milestone(demos: dict[str, dict[str, Any]], progress: dict[str, Any],
+                  shipped: dict[str, str] | None = None) -> dict[str, Any] | None:
+    """The current milestone when it waits for its demo, or (`ship`: True) for its release. Else None."""
+    v = epic_view({"number": 0, "demos": demos, "shipped": shipped or {}}, progress)
+    return {**v["current"], "ship": v["due"] == "ship"} if v["due"] in ("demo", "ship") else None
+
+
+def current_milestone(epic: dict[str, Any], progress: dict[str, Any] | None) -> dict[str, Any] | None:
+    return epic_view(epic, progress)["current"] if progress else None
+
+
+def cleanup_due(st: dict[str, Any], progress: dict[str, Any]) -> str | None:
+    return epic_view(st, progress)["cleanup"]
+
+
 def claim_pause_errors(epic: dict[str, Any], progress: dict[str, Any] | None) -> list[str]:
-    """Why no new slice of this epic may be claimed now: a milestone demo comes first. `--resume` skips this."""
+    """Why no new slice of this epic may be claimed now: a milestone demo or release comes first. `--resume` skips this."""
     n = epic["number"]
     if epic.get("state") == "demo-review":
         d = epic.get("latest_demo") or {}
         return [f"epic #{n} is in demo review ({d.get('milestone', '?')}): new slices wait for the poster's answer"]
-    if progress and (due := due_milestone(epic.get("demos") or {}, progress, epic.get("shipped"))):
-        if due["ship"]:
-            return [f"{due['title']} is accepted but not shipped to main: new slices wait (`/milestone-demo {n}`)"]
-        return [f"{done_phrase(due)}: new slices wait for its demo (`/milestone-demo {n}`)"]
-    return []
+    return pause_errors(epic_view(epic, progress)) if progress else []
+
+
+def milestone_hold_errors(epic: dict[str, Any], progress: dict[str, Any] | None, slice_milestone: str | None) -> list[str]:
+    """A slice of a later milestone may not land on epic/N until every earlier milestone has shipped."""
+    return merge_errors(epic_view(epic, progress), slice_milestone) if progress else []
 
 
 def check_transition(st: dict[str, Any], to: str, kind: str, config: dict[str, Any]) -> list[str]:
@@ -2004,22 +2112,6 @@ def merge_gate_errors(pr: dict[str, Any], slice_issue: dict[str, Any] | None, te
     return errs
 
 
-def current_milestone(epic: dict[str, Any], progress: dict[str, Any] | None) -> dict[str, Any] | None:
-    """The milestone being built: the earliest one not yet shipped. Only its slices may land on epic/N,
-    so shipping a milestone never carries a later one's work to main."""
-    shipped = epic.get("shipped") or {}
-    return next((m for m in (progress or {}).get("milestones", []) if m["key"] not in shipped), None)
-
-
-def milestone_hold_errors(epic: dict[str, Any], progress: dict[str, Any] | None, slice_milestone: str | None) -> list[str]:
-    """A slice of a later milestone may not land on epic/N until every earlier milestone has shipped."""
-    cur = current_milestone(epic, progress)
-    if cur and milestone_key(slice_milestone) != cur["key"]:
-        return [f"{milestone_key(slice_milestone)} waits: {cur['title']} is still being built, shown or shipped, "
-                f"and only its slices land on {epic_branch(epic['number'])} until it ships"]
-    return []
-
-
 def parse_pytest_summary(text: str) -> tuple[int, int]:
     """(passed, failed + errors) from pytest's summary line."""
     tail = "\n".join((text or "").strip().splitlines()[-3:])
@@ -2035,10 +2127,8 @@ def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[di
     """An epic's units of work: what can start, what is in flight, and each milestone's count."""
     ready, waiting = ready_leaves(leaves, blockers)
     escalated = [l["number"] for l in leaves if l.get("state") == "open" and ESCALATED_LABEL in l.get("labels", [])]
-    # a budgeted cleanup pass (slices that pay down tech debt) goes before anything else,
-    # except the open work a cleanup slice itself waits on (else neither could start)
+    # cleanup slices (they pay down tech debt) and the open work they wait on: epic_view puts them first
     cleanup_open = [l["number"] for l in leaves if l.get("state", "open") == "open" and is_cleanup(l)]
-    cleanup_ms = {milestone_key(l.get("milestone")) for l in leaves if l["number"] in cleanup_open}
     needed, todo = set(cleanup_open), list(cleanup_open)
     while todo:
         for b in blockers.get(todo.pop(), []):
@@ -2046,8 +2136,7 @@ def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[di
                 needed.add(b["number"])
                 todo.append(b["number"])
     by_order = lambda l: (natural_key(milestone_key(l.get("milestone"))), natural_key(l["key"]))  # noqa: E731
-    free = [l["number"] for l in sorted(ready, key=by_order) if not l.get("assignees") and l["number"] not in escalated
-            and (milestone_key(l.get("milestone")) not in cleanup_ms or l["number"] in needed)]
+    free = [l["number"] for l in sorted(ready, key=by_order) if not l.get("assignees") and l["number"] not in escalated]
     in_flight = [l["number"] for l in ready + waiting if l.get("assignees") and l["number"] not in escalated]
     by_ms: dict[str, list[dict[str, Any]]] = {}
     for l in leaves:
@@ -2180,13 +2269,7 @@ def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -
         progress = epic_progress(int(epic), config, trusted) if st["state"] in BUILD_STATES else None
     errs = claim_pause_errors(st, progress)
     if progress and not errs:
-        errs += milestone_hold_errors(st, progress, b["issue"].get("milestone"))
-        units = progress.get("units") or {}
-        mine = milestone_key(b["issue"].get("milestone"))
-        cleanup = [n for n in progress.get("cleanup_open") or [] if n != b["issue"]["number"]
-                   and (units.get(n) or {}).get("milestone", mine) == mine]
-        if cleanup and not is_cleanup(b["issue"]) and b["issue"]["number"] not in (progress.get("cleanup_needs") or []):
-            errs.append("the cleanup pass comes first: " + ", ".join(f"#{n}" for n in cleanup))
+        errs = claim_errors(epic_view(st, progress), b["issue"]["number"], b["issue"].get("milestone"), is_cleanup(b["issue"]))
     return errs
 
 
@@ -2573,23 +2656,20 @@ def carried_slices(commits: list[dict[str, Any]], slice_of: dict[str, dict[str, 
 
 
 def ship_target(st: dict[str, Any], progress: dict[str, Any], key: str | None = None) -> dict[str, Any] | None:
-    """The milestone `ship` releases: the earliest accepted one not yet shipped (milestones ship in order).
-    None when every milestone has shipped."""
-    demos, shipped = st.get("demos") or {}, st.get("shipped") or {}
+    """The milestone `ship` releases: the current one, once accepted (milestones ship in order).
+    None when every created milestone has shipped."""
     if st.get("feedback") or st.get("action") in PLAN_ACTIONS - {"plan_next_milestone"}:
         raise SdlcError(f"#{st['number']} has changes being planned or built (action {st['action']}): "
                         "they come before any release")
-    for m in progress.get("milestones", []):
-        if m["key"] in shipped:
-            continue
-        if key and m["key"] != key:
-            raise SdlcError(f"{m['title']} ships first (milestones ship in order)")
-        if not (demos.get(m["key"]) or {}).get("accepted"):
-            raise SdlcError(f"{m['title']} isn't accepted yet: its demo comes first (`/milestone-demo {st['number']}`)")
-        if m["done"] != m["total"]:
-            raise SdlcError(f"{m['title']} is not complete ({m['done']}/{m['total']} merged)")
-        return m
-    return None
+    cur = epic_view(st, progress)["current"]
+    if not cur or cur["phase"] == "uncreated":
+        return None
+    if key and cur["key"] != key:
+        raise SdlcError(f"{cur['title']} ships first (milestones ship in order)")
+    if cur["phase"] != "accepted":
+        raise SdlcError(f"{cur['title']} isn't accepted yet: its demo comes first (`/milestone-demo {st['number']}`)"
+                        if cur["phase"] != "building" else f"{cur['title']} is not complete ({cur['done']}/{cur['total']} merged)")
+    return cur
 
 
 def ship_gate_errors(st: dict[str, Any], key: str, head: str, synced: bool, carried: list[str]) -> list[str]:

@@ -455,8 +455,8 @@ def test_cleanup_slices_go_first():
     leaves = [{"number": 40, "key": "A1", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": ""},
               {"number": 44, "key": "C1", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": pays}]
     p = sdlc.summarise_progress(leaves, {})
-    assert (p["ready"], p["cleanup_open"]) == ([44], [44])
     epic = derive(["sdlc:in-progress"])
+    assert (sdlc.epic_view(epic, p)["offered"], p["cleanup_open"]) == ([44], [44])
     bundle = {"issue": {"number": 40, "body": sdlc.marker("slice", None, epic="12", key="A1"), "milestone": "#12 M2: x"},
               "epic_state": epic, "epic_progress": p, "trusted": [OWNER]}
     assert "the cleanup pass comes first: #44" in sdlc.epic_pause_errors(bundle, CONFIG, resume=False)
@@ -476,7 +476,8 @@ def test_a_cleanup_slice_can_wait_on_ordinary_work_without_a_deadlock():
               {"number": 41, "key": "T3", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": ""},
               {"number": 44, "key": "C1", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": pays}]
     p = sdlc.summarise_progress(leaves, {44: [{"number": 40, "state": "open"}]})
-    assert (p["ready"], p["cleanup_needs"]) == ([40], [40])         # C1's prerequisite goes first; T3 still waits
+    view = sdlc.epic_view(derive(["sdlc:in-progress"]), p)
+    assert (view["offered"], p["cleanup_needs"]) == ([40], [40])    # C1's prerequisite goes first; T3 still waits
     bundle = {"issue": {"number": 40, "body": sdlc.marker("slice", None, epic="12", key="T2"), "milestone": "#12 M2: x"},
               "epic_state": derive(["sdlc:in-progress"]), "epic_progress": p, "trusted": [OWNER]}
     assert sdlc.epic_pause_errors(bundle, CONFIG, resume=False) == []
