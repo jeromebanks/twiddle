@@ -443,6 +443,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         turn, action = ("agent", "demo_heard") if request["replies"] else ("poster", "wait_for_poster")
     elif state in BUILD_STATES:
         turn, action = "agent", "work_slices"   # whether a slice is ready needs GitHub: see epic_progress
+    elif state == "demo-review" and latest_demo and latest_demo["accepted"]:
+        turn, action = "agent", "record_demo_acceptance"   # recorded, but `demo-accept` was cut short: finish it
     elif state == "demo-review":
         if not replies:
             turn, action = "poster", "wait_for_poster"
@@ -3460,7 +3462,9 @@ def command_demo_accept(args: argparse.Namespace, config: dict[str, Any]) -> int
     n = st["number"]
     if st["action"] != "record_demo_acceptance":
         raise SdlcError(f"#{n} has no /approve of its latest demo to record (state {st['state']}, action {st['action']})")
-    d = st["decision"]
+    resume = bool((st.get("latest_demo") or {}).get("accepted"))   # the record is there; finish the rest
+    d = st["decision"] if not resume else {"milestone": st["latest_demo"]["milestone"], "rev": st["latest_demo"]["rev"],
+                                           "by": "the poster"}
     key, rev = d["milestone"], d["rev"]
     if args.milestone and args.milestone != key:
         raise SdlcError(f"the /approve is for {key}, not {args.milestone}")
@@ -3473,11 +3477,11 @@ def command_demo_accept(args: argparse.Namespace, config: dict[str, Any]) -> int
                else "; work on the rest carries on."))
     comment = render_comment("demo-approval", rev, body, config, milestone=key, by=d["by"])
     if args.dry_run:
-        print(f"DRY RUN #{n}: demo-review -> {target}; then `ship {n}`")
-        print(comment)
+        print(f"DRY RUN #{n}: demo-review -> {target}; then `ship {n}`" + (" (finishing a recorded acceptance)" if resume else ""))
+        print("" if resume else comment)
         return 0
     repo = repo_of(config)
-    posted = post_comment(n, comment, config)
+    posted = {} if resume else post_comment(n, comment, config)
     if key != NO_MILESTONE:
         for m in gh_pages(f"repos/{repo}/milestones?state=open&per_page=100"):
             if m["title"] == title:

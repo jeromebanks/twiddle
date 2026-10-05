@@ -514,3 +514,13 @@ def test_revisions_cant_add_up_past_the_cleanup_budget():
     plan["subtasks"].append(unit("C2", [82]))                      # a later revision keeps C1 and adds C2
     assert sdlc.cleanup_budget_errors(plan, st, CONFIG)
     assert sdlc.cleanup_budget_errors(plan, {"cleanups": ["M0"]}, CONFIG) == []   # two passes, two slices
+
+
+def test_an_acceptance_cut_short_is_finished_by_a_rerun(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    recorded = [DEMO, comment(POSTER, "/approve", 11), agent("demo-approval", 1, 12, milestone="M1", by=POSTER)]
+    st = derive(["sdlc:demo-review"], recorded)              # the label change failed after the record
+    assert st["action"] == "record_demo_acceptance" and sdlc.next_command(st) == "/milestone-demo 12"
+    b = _bundle(tmp_path, ["sdlc:demo-review"], recorded, progress(ms("M1", 3, 3), ms("M2", 0, 2)))
+    assert sdlc.main(["demo-accept", "12", "--from-file", b, "--dry-run"]) == 0
+    assert "finishing a recorded acceptance" in capsys.readouterr().out
