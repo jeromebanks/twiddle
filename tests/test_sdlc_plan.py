@@ -517,3 +517,9 @@ def test_spent_rounds_on_an_amendment_escalate_instead_of_asking_the_poster():
                 [plan_comment({**plan, "lessons": {"milestone": "M1", "text": "t"}}, 2, 30)] + rounds)
     assert st["action"] == "escalate_plan"
     assert "escalate it (`transition 12 escalated" in sdlc.next_command(st)
+
+
+def test_a_milestone_needs_units_of_work():
+    plan = two_milestones()
+    plan["subtasks"] = [{**t, "milestone": "M2"} for t in plan["subtasks"]]
+    assert "milestone M1 has no units of work: give it some, or drop it" in sdlc.validate_plan(plan)

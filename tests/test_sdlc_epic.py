@@ -747,3 +747,10 @@ def test_claims_wait_on_an_escalated_epic_and_an_unverified_main():
              "epic_progress": None, "trusted": [OWNER]}
         errs = sdlc.epic_pause_errors(b, CONFIG, resume=False)
         assert errs and needle in errs[0], errs
+
+
+def test_nothing_ships_while_an_earlier_release_is_unverified():
+    st = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1"),
+                 agent("demo", 1, 14, milestone="M2", sha="d" * 40), agent("demo-approval", 1, 15, milestone="M2", by=POSTER)])
+    with pytest.raises(sdlc.SdlcError, match="verify-main 12"):
+        sdlc.ship_target(st, progress(ms("M1", 3, 3), ms("M2", 2, 2), open_=0))

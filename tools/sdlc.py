@@ -1307,6 +1307,9 @@ def validate_plan(plan: Any, criteria: set[int] | None = None) -> list[str]:
         covers = l.get("covers") or []
         if not all(isinstance(c, int) for c in covers):
             errs.append(f"{k}: covers must be acceptance-criterion numbers")
+    for k in mkeys:
+        if not any(l.get("_milestone") == k for l in leaves):
+            errs.append(f"milestone {k} has no units of work: give it some, or drop it")
     if all(isinstance(k, str) for k in mkeys) and mkeys != sorted(mkeys, key=natural_key):
         errs.append(f"list milestones in order ({', '.join(sorted(mkeys, key=natural_key))}): "
                     "they are built and shipped in that order")
@@ -2740,6 +2743,9 @@ def carried_slices(commits: list[dict[str, Any]], slice_of: dict[str, dict[str, 
 def ship_target(st: dict[str, Any], progress: dict[str, Any], key: str | None = None) -> dict[str, Any] | None:
     """The milestone `ship` releases: the current one, once accepted (milestones ship in order).
     None when every created milestone has shipped."""
+    if st.get("untested"):
+        raise SdlcError(f"main holds a release no recorded run saw ({', '.join(st['untested'])}): "
+                        f"`verify-main {st['number']}` before anything else ships")
     if st.get("feedback") or st.get("action") in PLAN_ACTIONS - {"plan_next_milestone"}:
         raise SdlcError(f"#{st['number']} has changes being planned or built (action {st['action']}): "
                         "they come before any release")
