@@ -1,6 +1,6 @@
 ---
 name: milestone-demo
-description: Show the poster a finished milestone of a twiddle epic and take their answer - run the milestone's demo steps (writes only with the user present and confirming), capture real terminal and TUI screenshots, publish them to the sdlc-demos branch and post a plain-language demo on the epic issue; then record the poster's /approve (closing the milestone, or the whole epic) or turn their /changes into new slices. Use when state's next says /milestone-demo N, when asked to demo a milestone or an epic, or when a poster replied to a demo.
+description: Show the poster a finished milestone of a twiddle epic and take their answer - run the milestone's demo steps from the epic's branch, capture real terminal and TUI screenshots, publish them to the sdlc-demos branch and post a plain-language demo on the epic issue; then record the poster's /approve and ship the accepted milestone to main (sync, Codex review of the milestone, a merge commit), or turn their /changes into new slices. Use when state's next says /milestone-demo N, when asked to demo or ship a milestone or an epic, or when a poster replied to a demo.
 ---
 
 <!-- No dollar-digit sequences in this file: the skill loader substitutes them with arguments. -->
@@ -12,13 +12,15 @@ moment a human sees the result: **what can the poster do now that they couldn't
 before?** The poster is an end user, so the demo shows behaviour, not code. It is
 posted on the epic issue, with real screenshots, and ends with their answer:
 
-- `/approve`: the milestone is accepted. The last one closes the epic (`sdlc:done`).
+- `/approve`: the milestone is accepted, and you **ship** it: `epic/N` is merged into
+  `main`. Until then nothing of it is on `main`. The last ship closes the epic (`sdlc:done`).
 - `/changes <what>`: the changes become new slices (`plan-issue`), then a new demo.
 - A question: you answer it, and the demo stays in review.
 
-While a milestone is complete but not accepted, **new slices of the epic wait**:
-`claim` refuses, and `state`'s `next:` names this skill. Slices already claimed
-can still finish.
+Slices land on the epic's branch, `epic/N`, so the demo shows `epic/N`, and `main`
+is the "before". While a milestone is complete but not yet accepted **and shipped**,
+**new slices of the epic wait**: `claim` refuses, `merge` refuses a slice of any
+other milestone, and `state`'s `next:` names this skill.
 
 - **`tools/sdlc.py` owns every post, label and push.** You run the demo, take the
   pictures, and write two markdown files.
@@ -42,7 +44,8 @@ uv run python tools/sdlc.py demo-status N          # --json for the full brief
 
 - its **demo steps** (the milestone's description; each slice's Demo section when the epic has no milestones);
 - its slices and their merged PRs;
-- the **before** commit (just before its first merge);
+- **before** and **after**: `origin/main` and `origin/epic/N`. A milestone built before
+  epic branches (straight onto `main`) shows `main` against the commit before its first merge;
 - its demo's state.
 
 `demo due:` names the milestone to show. An epic without milestones (most bugs) has one demo, `all`.
@@ -50,7 +53,8 @@ uv run python tools/sdlc.py demo-status N          # --json for the full brief
 | action | do |
 |---|---|
 | `work_slices` and `next` says `/milestone-demo` | steps 2-7 for the due milestone |
-| `record_demo_acceptance` | the poster said `/approve`: step 8 |
+| `record_demo_acceptance` | the poster said `/approve`: step 8, then step 10 |
+| `next` says `... is accepted; ship it` | step 10 |
 | `demo_reply` | the poster replied: step 9 |
 | `turn` is `poster` | the demo is waiting on them: report it and stop |
 | anything else | report the `next:` line and stop |
@@ -66,7 +70,7 @@ script of the steps, each one tagged:
 - **write**: something fires on a real speaker. You run it only with the user present, and only after they say yes.
 
 For each step, plan the picture that shows it. A **bug fix** shows **before and
-after**: the same command at the `before` commit and at `main`, captured one right
+after**: the same command at `before` and at `after`, captured one right
 after the other, because live output like `np` changes minute to minute. Then
 add what "Try it yourself" will list (read-only commands only), and what changed
 from the plan (compare the slices' Outcomes with the PRs).
@@ -118,9 +122,12 @@ uv run python tools/demo_shot.py tui --out-dir <SCRATCH>/demo \
   seconds (`wait:`). **Only read-only keys** belong in `--step`: navigation, `t`,
   `i`, `?`. Never `enter`, `s`, `d`, `R`, volume or mute in `dial`/`scene`. A
   writing key is a demo step, never a screenshot.
-- **Before:** `git worktree add <SCRATCH>/before <before-sha>`, then
-  `cd <SCRATCH>/before && uv sync -q && uv run python <PRIMARY>/tools/demo_shot.py cli --out <SCRATCH>/demo/before-np.svg -- uv run twiddle np wfmu`.
-  Take the "after" picture straight away. Remove the worktree when done.
+- **Run every step from `after`**, never from the primary checkout (that's `main`, which
+  doesn't have the milestone yet): `git fetch origin && git worktree add --detach <SCRATCH>/after <after>`,
+  then `cd <SCRATCH>/after && uv sync -q && uv run python <PRIMARY>/tools/demo_shot.py cli --out <SCRATCH>/demo/alarms.svg -- uv run twiddle alarm list`
+  (`demo_shot.py --cwd <SCRATCH>/after` does the same). TUIs too.
+- **Before:** the same with `git worktree add --detach <SCRATCH>/before <before>`. Take
+  the "after" picture straight away. Remove both worktrees when done (`git worktree remove`).
 - Look at each picture: `qlmanage -t -s 1400 -o <SCRATCH>/previews <SCRATCH>/demo/<file>.svg`
   makes a PNG you can Read (`mkdir -p <SCRATCH>/previews` first, outside the published folder).
   Retake anything blank, cut off or mid-load.
@@ -168,9 +175,8 @@ uv run python tools/sdlc.py demo-accept N
 ```
 
 It records the acceptance, closes the GitHub milestone and its finished subtask
-issues, and moves the epic back to `in-progress`. If this was the last milestone
-and nothing is left, it moves the epic to `done` and closes it. Report the
-**Next:** line it prints, which will be the next `/work-slice`, or nothing when the epic is done.
+issues, and moves the epic back to `in-progress`. The milestone isn't on `main`
+yet: go on to step 10 and ship it.
 
 ## 9. The poster replied
 
@@ -186,3 +192,56 @@ Read their reply as an end user's, not a reviewer's.
   The epic returns to `in-progress`, and **Next:** is `/plan-issue N`, which plans
   the changes as new slices. After they merge, this skill runs again and posts demo rev 2.
 - **Unclear**: answer with a note that asks which they meant.
+
+## 10. Ship the accepted milestone
+
+`main` gets the milestone now, as one merge commit of `epic/N`. Every step is a
+tool step; never merge or push by hand.
+
+1. **Bring `main` in and test the result:**
+
+   ```bash
+   uv run python tools/sdlc.py sync N
+   ```
+
+   It merges `origin/main` into `epic/N` (never a rebase) in `.worktrees/epic-N`, runs
+   the full suite there (give the Bash call `timeout: 600000`), records the run on
+   the epic, and pushes only on a pass. Run it even when `epic/N` is current: it
+   records the run on the head that ships. A conflict or a failing suite escalates
+   the epic to a human, and you stop.
+2. **Codex reviews the milestone's whole diff** on that head. Fill
+   `references/codex-milestone-prompt.md` into `<SCRATCH>/ship-prompt.md` and run it
+   from `<PRIMARY>/.worktrees/epic-N`, as `work-slice` §8 runs Codex
+   (`< /dev/null`, stdout to `<SCRATCH>/ship-codex.md`, stderr apart, `timeout: 600000`).
+   Answer each finding in `<SCRATCH>/ship-response.md`, then record the round **before
+   anything changes on `epic/N`**:
+
+   ```bash
+   uv run python tools/sdlc.py ship-review N --report <SCRATCH>/ship-codex.md --response <SCRATCH>/ship-response.md
+   ```
+
+   Every slice was already reviewed, so this looks for what only shows up
+   together. A blocking finding is a demo finding: it needs fix slices
+   (`plan-issue`), never a hand edit on `epic/N`.
+3. **Ship:**
+
+   ```bash
+   uv run python tools/sdlc.py ship N --dry-run
+   uv run python tools/sdlc.py ship N
+   ```
+
+   It refuses unless the milestone is accepted, `epic/N` contains `main`, a passing
+   run and Codex's approval are recorded on its current head, and no slice of a
+   milestone that isn't accepted is on it. Then it opens a pull request
+   `epic/N -> main` and merges it with a **merge commit**, so each slice stays one
+   revertable commit on `main`, and records the release on the epic. A milestone
+   that was built straight onto `main`, before epic branches, ships as a recorded
+   no-op. The last ship deletes `epic/N`, moves the epic to `done` and closes it.
+
+Report the release and the **Next:** line `ship` prints: the next `/work-slice`, or
+nothing when the epic is done.
+
+**Rolling back one slice before it ships** (a demo shows it's wrong):
+`uv run python tools/sdlc.py revert-slice S --reason "..."`. It makes one tested revert
+commit on `epic/N`, reopens the slice, and voids its milestone's demo. The slice is
+built again with `/work-slice S`.

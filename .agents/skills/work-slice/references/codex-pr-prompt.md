@@ -16,7 +16,8 @@ First, run `git rev-parse HEAD` and print the result on a line of its own, exact
 Then read:
 - the slice's brief: `<SLICE_FILE>` (its Outcome, Scope, Acceptance criteria,
   Validation, Demo, Non-goals and Context sections define the job);
-- the change: `git diff origin/main...HEAD` and `git log origin/main..HEAD`;
+- the change: `git diff <BASE>...HEAD` and `git log <BASE>..HEAD` (`<BASE>` is
+  `origin/epic/<EPIC>`, the branch this slice merges into);
 - `CLAUDE.md`, especially the read-only vs writing table;
 - the code around the change, as far as you need it;
 - <ROUND 2+: the implementer's answer to the previous round: `<RESPONSE_FILE>`. Where they

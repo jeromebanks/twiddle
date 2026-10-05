@@ -1,6 +1,6 @@
 ---
 name: work-slice
-description: Build one ready slice of a planned twiddle epic, start to finish - claim it, work in its own git worktree, implement only what the slice issue says with offline tests, open a PR, record the full test run, get Codex to approve the exact head through review rounds, then merge and clean up. Use when asked to work a slice or issue from an epic, "build the next slice", "do the next thing" on an epic in sdlc:planned or sdlc:in-progress, or to resume a slice in review.
+description: Build one ready slice of a planned twiddle epic, start to finish - claim it, work in its own git worktree, implement only what the slice issue says with offline tests, open a PR, record the full test run, get Codex to approve the exact head through review rounds, then squash-merge it into the epic's branch (epic/N, never main) and clean up. Use when asked to work a slice or issue from an epic, "build the next slice", "do the next thing" on an epic in sdlc:planned or sdlc:in-progress, or to resume a slice in review.
 ---
 
 <!-- No dollar-digit sequences in this file: the skill loader substitutes them with arguments. -->
@@ -20,6 +20,9 @@ Context) are the whole brief. `SDLC.md` explains how the epic got here.
   binds every test run and every review to a head SHA, so a new commit voids both.
 - **Codex has to approve the exact head you merge.** You run it, but you never
   author its verdict. If Codex can't be run, leave the PR open and report that.
+- **Slices land on the epic's branch, `epic/E`, never on `main`.** `main` only gets
+  a milestone after the poster accepts its demo (`ship`, in `milestone-demo`). Your
+  base is always `origin/epic/E`, written `<BASE>` below.
 - **You merge.** `merge` is the gate. Nobody reviews individual PRs by hand: a human
   sees the result at the milestone demo, so the gate and the reviews must be honest.
 
@@ -48,10 +51,14 @@ uv run python tools/sdlc.py slice-check N          # add --resume when it says c
 uv run python tools/sdlc.py claim N                # or: claim N --resume
 ```
 
-It prints `WORKTREE=`, `PRIMARY=`, `BRANCH=slice/N` and `BASE=origin/main`. Its other effects:
+It prints `WORKTREE=`, `PRIMARY=`, `BRANCH=slice/N` and `BASE=origin/epic/E`. Write `BASE`
+down too. Its other effects:
 
 - the claim is posted on the slice, and you're assigned to it;
 - on the first claim, the epic moves from `planned` to `in-progress`.
+
+If it says origin has no `epic/E`, the epic was planned before epic branches:
+run `uv run python tools/sdlc.py epic-branch E`, then claim again.
 
 **Write `WORKTREE` and `PRIMARY` down as literal absolute paths.** Shell variables
 don't survive between tool calls, so type the paths out every time:
@@ -61,7 +68,7 @@ don't survive between tool calls, so type the paths out every time:
   the wrong tree, and `test-record` then tests code that doesn't have your change.
 - **Every shell command that touches the code runs in `WORKTREE`**: `cd <WORKTREE> && ...`, or `git -C <WORKTREE>`.
   Check `git rev-parse --abbrev-ref HEAD` says `slice/N` before you commit. Diff
-  and rebase against `origin/main`, never your local `main`.
+  and rebase against `<BASE>` (`origin/epic/E`), never `main`.
 - **Scratch files never go in the worktree.** This means the PR body, the slice
   brief, the Codex prompt, its report and stderr, and your response. Put them in
   your session's scratchpad directory (or a `mktemp -d`), called `<SCRATCH>` below, by absolute path. Untracked
@@ -97,7 +104,7 @@ git push -u origin slice/N
 
 ## 6. Self-review
 
-Have the `advisor` review the committed diff (`git diff origin/main...HEAD`).
+Have the `advisor` review the committed diff (`git diff <BASE>...HEAD`).
 Fix what it finds, rerun the affected tests, then commit and push.
 
 ## 7. Open the PR and record the tests
@@ -110,7 +117,7 @@ The PR body must contain **exactly one** `Closes #N`. Include:
 - any adjacent issues you noticed but left alone.
 
 ```bash
-gh pr create --base main --head slice/N --title "<key>: <slice title>" --body-file <SCRATCH>/pr.md
+gh pr create --base epic/E --head slice/N --title "<key>: <slice title>" --body-file <SCRATCH>/pr.md
 cd <WORKTREE> && uv run python tools/sdlc.py test-record PR    # runs the full suite itself
 ```
 
@@ -174,21 +181,27 @@ cd <PRIMARY> && uv run python tools/sdlc.py cleanup N
 - the PR closes exactly this one slice;
 - Codex's latest review of the **current head** approves;
 - a passing test run is recorded on that head;
-- the head is **not behind `main`**;
+- the PR targets `epic/E`, and its head is **not behind `epic/E`**;
+- no other milestone of the epic is waiting for its demo or its release to `main`;
 - GitHub says the PR is mergeable.
 
 How to clear each refusal:
 
-- **The head is behind `main`.** Another slice merged first, and nobody has tested
+- **The head is behind `epic/E`.** Another slice merged first (or `sync` brought `main` in), and nobody has tested
   this branch with it. Rebase:
-  `git -C <WORKTREE> fetch origin main && git -C <WORKTREE> rebase origin/main`,
+  `git -C <WORKTREE> fetch origin epic/E && git -C <WORKTREE> rebase origin/epic/E`,
   then push with `--force-with-lease`. Then `test-record`, then a Codex round on
   the new head. A rebase changes the head, which voids both records.
 - **Conflicts.** The same rebase, and resolve them.
 - **UNKNOWN.** GitHub is still computing mergeability after a push. Wait a few
   seconds and run `merge` again. Don't rebase.
+- **Another milestone is waiting for its demo or release.** This slice was claimed
+  before that milestone finished. Leave the PR open and report it: it can merge
+  once that milestone ships (`/milestone-demo <epic>`).
 
-`merge` squash-merges, deletes the remote branch, checks the slice closed, and
+`merge` squash-merges into `epic/E` (one commit per slice, so a bad slice is one
+`revert-slice` later), deletes the remote branch, closes the slice itself (GitHub
+only honours `Closes #N` on `main`) and reads it back, and
 prints the epic's `next`. `cleanup` must run from the primary checkout, not from
 inside the worktree.
 

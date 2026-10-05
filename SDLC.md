@@ -14,15 +14,39 @@ issue ─► sdlc:triage ─► sdlc:needs-info ◄─► (poster answers)
                   sdlc:approved ─► (plan: advisor, then Codex rounds until VERDICT: approve)
                         │      └─ no consensus ─► sdlc:needs-info (a plain-language question to the poster)
                         ▼
-                  sdlc:planned ─► sdlc:in-progress ◄─► sdlc:demo-review ─► sdlc:done
+                  sdlc:planned ─► sdlc:in-progress ◄─► sdlc:demo-review
                      (work-slice: one slice     (milestone-demo:    poster: /approve
-                      per session)               one per milestone)  (the last milestone)
+                      per session, onto epic/N)  one per milestone)  ─► ship M to main
+                                                                       (the last: sdlc:done)
    any stage ─► sdlc:escalated  (a human is needed: no consensus, or the agent is stuck)
 ```
 
 The skills: `triage-issue` (to `approved`), `plan-issue` (to `planned`), `work-slice`
 (builds the slices; the epic is `in-progress` from the first claim) and `milestone-demo`
-(shows the poster each finished milestone; their `/approve` of the last one is `done`).
+(shows the poster each finished milestone, then ships each accepted one to `main`; the last ship is `done`).
+
+## Branches
+
+```
+main ──●────────────────────●───────────────────────●──►      (only accepted milestones)
+        \ epic/N             \ ship M1 (merge commit) \ ship M2
+         ●──s1──s2──s3──sync──●──s4──s5────────────────●
+             (each slice: one squash commit, from a slice/S PR)
+```
+
+- `plan-create` makes **`epic/N`** from `main` (`epic-branch N` does it for an epic planned
+  earlier, or adopts an existing branch). Every slice PR targets it and lands as one squash
+  commit, so a bad slice is one revert (`revert-slice S`) before it ever reaches `main`.
+- The **demo** runs from `epic/N`, with `main` as the "before".
+- **`sync N`** merges `main` into `epic/N` (never a rebase: slice branches are built on it),
+  runs the full suite there, records it on the epic, and pushes on a pass. A conflict or a
+  failure escalates.
+- **`ship N`** releases one accepted milestone, in order: a pull request `epic/N -> main`, merged
+  with a merge commit. It needs `epic/N` to contain `main`, a passing run and Codex's approval of
+  the milestone's diff (`ship-review`), both on the head that ships, and no slice of an unaccepted
+  milestone on the branch. After the last milestone, `epic/N` is deleted.
+- Until a finished milestone has shipped, new slices of the epic wait, and `merge` refuses a
+  slice of any other milestone, so nothing unseen rides along to `main`.
 
 **What to run next is always printed:** `uv run python tools/sdlc.py state N` (or `next`)
 ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every skill ends its report with it.
@@ -35,7 +59,7 @@ ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every sk
 | `sdlc:needs-info`, `sdlc:prd-review`, `sdlc:diagnosis-review` | the poster, until they reply; then the agent |
 | `sdlc:approved` | the agent: `plan-issue` (the poster is not asked to review the plan) |
 | `sdlc:needs-info` after a PRD approval | the poster, answering a planning question; then the agent replans |
-| `sdlc:planned`, `sdlc:in-progress` | the agent: `/work-slice <ready slice>`, or `/milestone-demo N` once a milestone's units are all merged (state's `next:`) |
+| `sdlc:planned`, `sdlc:in-progress` | the agent: `/work-slice <ready slice>`, `/milestone-demo N` once a milestone's units are all merged or an accepted one is due to ship, or `sync N` when `epic/N` is behind `main` and nothing else is going on (state's `next:`) |
 | `sdlc:demo-review` | the poster, until they reply to the demo; then the agent (`/milestone-demo N`) |
 | `sdlc:in-progress` after a demo's `/changes` | the agent: `/plan-issue N` plans them as new slices |
 | `plan:slice` / `plan:subtask` issues | never triaged; a slice's state is `slice-status N` |
@@ -101,7 +125,7 @@ several can run at once. A slice's state is read off GitHub:
 
 `blocked → ready → claimed → in-review → merged`, plus `escalated`.
 
-1. `claim N` posts a claim on the slice, assigns it, creates the worktree from `origin/main`,
+1. `claim N` posts a claim on the slice, assigns it, creates the worktree from `origin/epic/E`,
    and moves the epic to `in-progress`.
 2. The implementer builds only the slice, with offline tests. Real speaker fires belong to
    milestone demos.
@@ -110,10 +134,12 @@ several can run at once. A slice's state is read off GitHub:
 4. **Codex** reviews the head read-only. Its report must name the `HEAD:` it reviewed. The
    implementer fixes or rebuts each finding, and each round is posted with `pr-review`. After
    `max_pr_rounds` (5) without approval: `escalate-slice`, and the slice goes to a human.
-5. `merge` is the gate: Codex's latest review approves the **current head**, a passing test run is
-   recorded on the current head, the PR closes one open `plan:slice`, and it is mergeable. Then
-   the agent squash-merges. A new commit voids both records. Humans review at milestone demos,
-   not per PR.
+5. `merge` is the gate: the PR targets `epic/E` and isn't behind it, Codex's latest review approves
+   the **current head**, a passing test run is recorded on the current head, the PR closes one open
+   `plan:slice`, no other milestone is waiting for its demo or release, and it is mergeable. Then
+   the agent squash-merges into `epic/E` and closes the slice itself (GitHub only acts on
+   `Closes #N` in the default branch). A new commit voids both records. Humans review at
+   milestone demos, not per PR.
 6. `cleanup N`, run from the primary checkout, removes the worktree and the branch.
 
 ## Milestone demos (`milestone-demo`)
@@ -126,8 +152,8 @@ claimed can finish.
 1. The agent runs the milestone's demo steps. Read-only and `--dry-run` steps run
    freely. A real speaker write runs only with the user present and saying yes,
    between `snapshot` and `restore`, and what they heard is recorded with `observe.py`.
-2. `tools/demo_shot.py` draws the real output and TUI screens as SVG. A bug fix shows
-   before (the commit before its first merge) and after.
+2. `tools/demo_shot.py` draws the real output and TUI screens as SVG, run in a worktree of
+   `epic/N`. A bug fix shows before (`main`) and after (`epic/N`).
 3. `demo-post` commits the pictures and a full write-up to the orphan branch
    **`sdlc-demos`** (`epic-N/M1/rev-K/`; never merged), pins every link to that commit,
    posts the demo on the epic (`kind=demo milestone=M1 rev=K`), and moves it to
@@ -135,7 +161,8 @@ claimed can finish.
    IP, a MAC, a Sonos ID or a secret.
 4. The poster answers on the issue:
    - `/approve`: `demo-accept` records it, closes the GitHub milestone, and moves the epic
-     back to `in-progress`. After the last milestone it moves to `done` and closes the issue.
+     back to `in-progress`. Then the agent ships it: `sync`, a Codex review of the milestone's
+     diff (`ship-review`), and `ship`. After the last milestone ships, the epic is `done`.
    - `/changes`: `demo-changes` records them in plain words, the epic returns to
      `in-progress`, and `plan-issue` amends the plan with new slices (Codex-reviewed;
      nothing already created is dropped). When they merge, the milestone gets demo rev 2.

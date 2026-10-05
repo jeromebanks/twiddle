@@ -162,7 +162,9 @@ uv run python tools/sdlc.py plan-create N
 It creates the milestones, the subtasks, then the slices in dependency order.
 Each slice has the required sections and a hidden key marker. It attaches every
 issue as a sub-issue, adds the `blocked_by` links, reads them all back, posts a
-key → issue table on the epic, and moves it to `sdlc:planned`. If it fails
+key → issue table on the epic, creates the epic's branch `epic/N` from `main`
+(slices land there, and each accepted milestone ships to `main`), and moves it to
+`sdlc:planned`. If it fails
 partway, run it again: it finds what exists by marker and does only the rest.
 
 ## 7. No consensus: ask the poster

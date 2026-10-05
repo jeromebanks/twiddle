@@ -51,7 +51,14 @@ def test_a_complete_milestone_comes_before_ready_slices():
     assert sdlc.next_command(st, p).startswith("/milestone-demo 12: #12 M1: x is complete")
     accepted = derive(["sdlc:in-progress"], [agent("demo", 1, 10, milestone="M1", sha="a" * 40),
                                              agent("demo-approval", 1, 12, milestone="M1", by=POSTER)])
-    assert sdlc.next_command(accepted, p) == "/work-slice 30"
+    # accepted is not enough: until M1 ships to main, nothing of M2 may land on epic/12
+    assert sdlc.next_command(accepted, p).startswith("/milestone-demo 12: M1 is accepted; ship it")
+    assert sdlc.claim_pause_errors(accepted, p) and "not shipped" in sdlc.claim_pause_errors(accepted, p)[0]
+    shipped = derive(["sdlc:in-progress"], [agent("demo", 1, 10, milestone="M1", sha="a" * 40),
+                                            agent("demo-approval", 1, 12, milestone="M1", by=POSTER),
+                                            agent("shipped", None, 13, milestone="M1", sha="c" * 40)])
+    assert shipped["shipped"] == {"M1": "c" * 40}
+    assert sdlc.next_command(shipped, p) == "/work-slice 30"
 
 
 def test_milestones_in_natural_order():
@@ -107,11 +114,13 @@ def test_approve_binds_to_the_latest_demo():
     assert not st["demos"]["M1"]["accepted"] and st["demos"]["M1"]["rev"] == 2
 
 
-def test_acceptance_target():
+def test_finished_needs_every_milestone_accepted_and_shipped():
     demos = {"M1": {"accepted": True}, "M2": {"accepted": True}}
-    assert sdlc.acceptance_target(progress(ms("M1", 1, 1), ms("M2", 1, 1), open_=0), demos) == "done"
-    assert sdlc.acceptance_target(progress(ms("M1", 1, 1), ms("M2", 0, 1)), {"M1": {"accepted": True}}) == "in-progress"
-    assert sdlc.acceptance_target(progress(ms("M1", 1, 1), ms("M2", 1, 1), open_=0), {"M1": {"accepted": True}}) == "in-progress"
+    both = {"M1": "a", "M2": "b"}
+    assert sdlc.finished(progress(ms("M1", 1, 1), ms("M2", 1, 1), open_=0), demos, both)
+    assert not sdlc.finished(progress(ms("M1", 1, 1), ms("M2", 1, 1), open_=0), demos, {"M1": "a"})
+    assert not sdlc.finished(progress(ms("M1", 1, 1), ms("M2", 0, 1)), {"M1": {"accepted": True}}, both)
+    assert not sdlc.finished(progress(ms("M1", 1, 1), ms("M2", 1, 1), open_=0), {"M1": {"accepted": True}}, both)
 
 
 def _bundle(tmp_path, labels, comments, prog=None):
@@ -131,7 +140,8 @@ def test_demo_accept_dry_run(tmp_path, capsys, monkeypatch):
     last = _bundle(tmp_path, ["sdlc:demo-review"], [DEMO, comment(POSTER, "/approve", 11)],
                    progress(ms("M1", 3, 3), open_=0, ready=()))
     assert sdlc.main(["demo-accept", "12", "--from-file", last, "--dry-run"]) == 0
-    assert "demo-review -> done and close the issue" in capsys.readouterr().out
+    out = capsys.readouterr().out    # even the last milestone ships before the epic is done
+    assert "demo-review -> in-progress; then `ship 12`" in out and "and then this issue is done" in out
     nothing = _bundle(tmp_path, ["sdlc:demo-review"], [DEMO])
     assert sdlc.main(["demo-accept", "12", "--from-file", nothing, "--dry-run"]) == 1
 
