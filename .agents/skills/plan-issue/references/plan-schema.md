@@ -43,6 +43,19 @@ exactly what gets created.
 }
 ```
 
+Two optional top-level fields:
+
+- `"create": "milestone"` (the default, from `.sdlc/config.json`) or `"all"`. With
+  `milestone`, `plan-create` makes one milestone's issues at a time: the first now,
+  each next one only after the previous one's demo is accepted and the plan is
+  revised with what it taught. `all` makes everything at once. It suits a batch of
+  independent, well-understood slices, like stations or venue sources. A plan with
+  one milestone, or none, is the same either way.
+- `"lessons": {"milestone": "M1", "text": "..."}`: what the last created milestone
+  taught, and what this revision changes because of it. It is shown as `Lessons
+  from M1`, and is required on every revision after a milestone was created while
+  others are still to come.
+
 ## Rules the validator enforces
 
 - `issue` is the epic (the triaged issue itself). `kind` is `feature` or `bug`.
@@ -63,7 +76,8 @@ exactly what gets created.
 - A subtask that has slices needs a `summary`, and may not carry `blocked_by`: put
   it on its slices.
 - `blocked_by` names other units of work, not a subtask that has slices, and
-  never the unit itself. The graph has no cycles.
+  never the unit itself. The graph has no cycles. A unit may wait on an earlier
+  milestone's unit, never on a later one's: that one may not exist yet.
 - With `milestones`, every subtask names one. Without them, none does.
 - `covers` lists PRD acceptance-criterion numbers: the numbered items under
   `## Acceptance criteria` and `## Addendum` in `docs/prd/N-*.md`. Together, the

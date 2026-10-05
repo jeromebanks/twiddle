@@ -48,6 +48,8 @@ Dispatch on `action`:
 | `ask_poster` | step 7 |
 | `create_plan_issues` | Codex approved the latest revision (or an earlier creation was cut short): step 6 |
 | any of these with `feedback: true` | the poster asked for changes at a milestone demo: "After demo feedback" below |
+| `plan_next_milestone` | the latest created milestone was accepted and the plan has more: "The next milestone" below |
+| `continue_plan` / `create_plan_issues` while `sdlc:in-progress` | an amendment is under review: steps 5-6 |
 | `reconcile_label` | `uv run python tools/sdlc.py reconcile N`, then as `plan` |
 | anything in triage | use `triage-issue` instead |
 | `turn` is `poster`, `human` or `later` | report it and stop |
@@ -162,7 +164,11 @@ uv run python tools/sdlc.py plan-create N
 ```
 
 `plan-create` reads the plan from the **reviewed comment**, not from your file.
-It creates the milestones, the subtasks, then the slices in dependency order.
+By default (`"create": "milestone"`) it creates **only the first milestone**, and
+says which, plus what's left for later. Later milestones are created one at a time,
+each after the previous one's demo is accepted and the plan is revised with what
+it taught ("The next milestone" below). It creates the milestone, the subtasks, then
+the slices in dependency order.
 Each slice has the required sections and a hidden key marker. It attaches every
 issue as a sub-issue, adds the `blocked_by` links, reads them all back, posts a
 key → issue table on the epic, creates the epic's branch `epic/N` from `main`
@@ -188,6 +194,23 @@ The tool marks the comment `phase=plan`. The poster's reply makes the action
 `replan` and gives you a fresh set of Codex rounds. If the poster is gone or
 the dispute isn't theirs to settle, escalate instead:
 `transition N escalated --kind escalation --reason "..."`.
+
+## The next milestone
+
+With the default `"create": "milestone"`, the later milestones exist only in the
+plan. When the latest created one's demo is accepted, `state` says
+`plan_next_milestone`. If `next` says to ship it first, `/milestone-demo N` does that.
+Then revise the plan before anything more is created:
+
+- Start from the latest posted plan JSON and **keep every key**.
+- Read what the milestone taught. Sources: the demo and the poster's answer,
+  the merged PRs and their "adjacent issues", and the code as it now is. Then
+  revise the later milestones' slices: their scope, Context, dependencies and
+  ratings, or new and split slices.
+- Add `"lessons": {"milestone": "M1", "text": "..."}`. `plan-post` refuses a revision
+  without it: say what was learnt and what changed because of it, or that nothing did.
+- Steps 4-6 as usual: post, advisor, Codex rounds (a fresh budget for each milestone),
+  then `plan-create N`, which creates the next milestone only. The epic stays `in-progress`.
 
 ## After demo feedback
 

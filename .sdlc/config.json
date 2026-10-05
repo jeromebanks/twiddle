@@ -6,6 +6,7 @@
   "max_plan_rounds": 3,
   "max_pr_rounds": 5,
   "worktree_dir": ".worktrees",
+  "create": "milestone",
   "confirm_before_posting": false,
   "agent_name": "twiddle triage",
   "labels": [

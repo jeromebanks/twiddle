@@ -76,7 +76,7 @@ REVIEW_DOC = {"prd-review": "prd", "diagnosis-review": "diagnosis"}
 LATER_STATES = {"done"}
 BUILD_STATES = {"planned", "in-progress"}     # the epic's slices are being built (`work-slice`)
 TRIAGE_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label"}
-PLAN_ACTIONS = {"plan", "continue_plan", "create_plan_issues", "ask_poster", "replan"}
+PLAN_ACTIONS = {"plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone"}
 # Planning comments: posted by plan-post / plan-review / plan-create, never by `transition`.
 PLAN_KINDS = {"plan", "plan-review", "plan-created"}
 # Milestone demos (milestone-demo), also kept out of DOC_KINDS: a demo never voids the PRD's sign-off.
@@ -181,6 +181,9 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     ship_reviews: list[dict[str, Any]] = []   # Codex on main...epic/N, bound to the epic head (`ship-review`)
     epic_tests: list[dict[str, Any]] = []     # full runs on the epic head (`sync`)
     feedback_plan = False     # a plan revision posted since that feedback
+    plan_body = ""            # the latest plan revision's comment: its milestones and create mode
+    created: set[str] | None = set()   # milestones whose issues exist (None: all of them, a legacy marker)
+    plan_after_created = False         # a plan revision posted since the last plan-created: an amendment
     for i, c in enumerate(ordered):
         mk = parse_marker(c.get("body", "")) if c.get("author") in trusted else None
         if not mk:
@@ -200,14 +203,22 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
             approved_rev, approval_by = rev, mk.get("by")
         elif kind == "plan" and rev is not None:
             latest_plan = {"rev": rev, "id": c.get("id"), "url": c.get("url")}
+            plan_body = c.get("body", "")
             plan_verdict = None
             feedback_plan = feedback
+            plan_after_created = True
         elif kind == "plan-review":
             plan_rounds += 1
             if latest_plan and rev == latest_plan["rev"]:
                 plan_verdict = mk.get("verdict")
         elif kind == "plan-created":
-            feedback = feedback_plan = False
+            feedback = feedback_plan = plan_after_created = False
+            plan_rounds = 0   # the next amendment (a milestone's replan, demo changes) gets fresh rounds
+            if "created" in mk:
+                if created is not None:
+                    created |= {x for x in mk["created"].split(",") if x}
+            else:
+                created = None
         elif kind == "demo" and rev is not None:
             m = mk.get("milestone", NO_MILESTONE)
             latest_demo = demos[m] = {"milestone": m, "rev": rev, "id": c.get("id"), "url": c.get("url"),
@@ -266,6 +277,17 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     if state == "demo-review" and not latest_demo:
         conflicts.append(f"{PREFIX}demo-review but no milestone demo has been posted")
 
+    try:
+        latest_plan_json = extract_plan(plan_body) if plan_body else {}
+    except SdlcError:
+        latest_plan_json = {}
+    planned_ms = [m.get("key") for m in latest_plan_json.get("milestones") or []]
+    created_ms = set(planned_ms) if created is None else created
+    uncreated = [m for m in planned_ms if m not in created_ms] if latest_plan else []
+    last_created = next((m for m in reversed(planned_ms) if m in created_ms), None)
+    # the latest created milestone is accepted and the plan has more: replan, then create the next one
+    next_due = bool(uncreated and last_created and (demos.get(last_created) or {}).get("accepted"))
+
     if issue.get("state", "open").lower() == "closed":
         turn, action = "none", "none"
     elif conflicts:
@@ -274,11 +296,13 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         turn, action = "human", "human"
     elif state in LATER_STATES:
         turn, action = "later", "none"
-    elif state in BUILD_STATES and feedback:
-        # the poster asked for changes at a demo: plan-issue amends the plan with new slices
+    elif state in BUILD_STATES and (feedback or next_due or plan_after_created):
+        # the plan is being amended: the poster's changes at a demo, or the next milestone's replan
         turn = "agent"
-        if not feedback_plan:
+        if feedback and not feedback_plan:
             action = "plan"
+        elif not plan_after_created:
+            action = "plan_next_milestone"
         elif plan_verdict == "approve":
             action = "create_plan_issues"
         elif plan_rounds >= max_plan_rounds:
@@ -330,6 +354,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "plan_verdict": plan_verdict, "plan_rounds": plan_rounds, "max_plan_rounds": max_plan_rounds,
         "demos": demos, "latest_demo": latest_demo, "feedback": feedback,
         "shipped": shipped, "ship_reviews": ship_reviews, "epic_tests": epic_tests,
+        "planned_milestones": planned_ms, "created_milestones": sorted(created_ms, key=natural_key),
+        "uncreated_milestones": uncreated, "create_mode": latest_plan_json.get("create") or config.get("create", "milestone"),
     }
 
 
@@ -345,6 +371,11 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
         return f"/triage-issue {n}"
     if a in DEMO_ACTIONS:
         return f"/milestone-demo {n}"
+    if a == "plan_next_milestone" and progress is not None:
+        if (due := due_milestone(st.get("demos") or {}, progress, st.get("shipped"))) and due["ship"]:
+            return f"/milestone-demo {n}: {due['key']} is accepted; ship it to main, then plan the next milestone"
+    if a == "plan_next_milestone":
+        return f"/plan-issue {n}: plan {st['uncreated_milestones'][0]} with what earlier milestones taught"
     if a in PLAN_ACTIONS:
         return f"/plan-issue {n}"
     if a == "wait_for_poster":
@@ -644,7 +675,7 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
               trusted: set[str] | None = None) -> dict[str, Any]:
     """`state` plus the command to run next (an epic being built looks at its slices on GitHub)."""
     progress = None
-    if st["action"] == "work_slices" and not offline:
+    if st["action"] in ("work_slices", "plan_next_milestone") and not offline:
         progress = epic_progress(st["number"], config, trusted if trusted is not None else fetch_trusted(config))
     return {**st, "progress": progress, "next": next_command(st, progress)}
 
@@ -978,6 +1009,18 @@ def validate_plan(plan: Any, criteria: set[int] | None = None) -> list[str]:
         covers = l.get("covers") or []
         if not all(isinstance(c, int) for c in covers):
             errs.append(f"{k}: covers must be acceptance-criterion numbers")
+    if plan.get("create") not in (None, "milestone", "all"):
+        errs.append("`create` is `milestone` (one milestone's issues at a time) or `all`")
+    if (lessons := plan.get("lessons")) is not None and not (
+            isinstance(lessons, dict) and lessons.get("milestone") in mkeys and _text(lessons.get("text"))):
+        errs.append("`lessons` is {\"milestone\": \"M1\", \"text\": \"what it taught, and what changed\"}")
+    order = {k: i for i, k in enumerate(mkeys)}
+    by_key = {l.get("key"): l for l in leaves}
+    for l in leaves:
+        for b in l.get("blocked_by") or []:
+            if b in by_key and order.get(by_key[b].get("_milestone"), 0) > order.get(l.get("_milestone"), 0):
+                errs.append(f"{l['key']} ({l['_milestone']}) is blocked by {b} of a later milestone "
+                            f"({by_key[b]['_milestone']}), which may not exist yet when it starts")
     graph = {l["key"]: [b for b in l.get("blocked_by") or [] if b in leaf_keys] for l in leaves if isinstance(l.get("key"), str)}
     if cycle := find_cycle(graph):
         errs.append("dependency cycle (each waits on the next): " + " -> ".join(cycle))
@@ -1043,8 +1086,13 @@ def render_plan(plan: dict[str, Any]) -> str:
             bits.append("after " + ", ".join(f"`{b}`" for b in l["blocked_by"]))
         return " · ".join(bits)
 
-    out = [f"**{len(plan['subtasks'])} subtasks, {len(leaves)} units of work** (each one Claude Code session)"
-           + (f" in {len(milestones)} milestones" if milestones else "") + "."]
+    out = []
+    if lessons := plan.get("lessons"):
+        out += [f"## Lessons from {lessons['milestone']}", "", lessons["text"].strip(), ""]
+    out += [f"**{len(plan['subtasks'])} subtasks, {len(leaves)} units of work** (each one Claude Code session)"
+            + (f" in {len(milestones)} milestones" if milestones else "") + "."]
+    if milestones and plan.get("create") == "all":
+        out.append("Every milestone's issues are created at once (`create: all`).")
     for m in milestones or [None]:
         out.append("")
         out.append(f"### {m['key']} · {m['title']}\nDemo: {m['demo']}\n" if m else "### Work\n")
@@ -1130,14 +1178,18 @@ def render_container_body(epic: int, task: dict[str, Any]) -> str:
 
 
 def plan_create_actions(plan: dict[str, Any], existing: dict[str, int], attached: dict[int, set[int]],
-                        blocked: dict[int, set[int]]) -> list[tuple[Any, ...]]:
+                        blocked: dict[int, set[int]], milestones: set[str] | None = None) -> list[tuple[Any, ...]]:
     """What is still missing on GitHub, in the order to do it.
 
     `existing` maps plan keys to issue numbers already created (found by their
     markers), `attached` parent number -> sub-issue numbers, `blocked` issue
     number -> blocked_by numbers. A rerun after a failure only finishes the job.
+    `milestones` limits it to those milestones' issues (None: the whole plan).
     """
     epic = plan["issue"]
+    if milestones is not None and plan.get("milestones"):
+        plan = {**plan, "milestones": [m for m in plan["milestones"] if m["key"] in milestones],
+                "subtasks": [t for t in plan["subtasks"] if t.get("milestone") in milestones]}
 
     def linked(parent_key: str | None, key: str) -> bool:
         p = epic if parent_key is None else existing.get(parent_key)
@@ -1159,9 +1211,41 @@ def plan_create_actions(plan: dict[str, Any], existing: dict[str, int], attached
         if not linked(l["_parent"], k):
             acts.append(("attach", l["_parent"], k))
         for b in l.get("blocked_by") or []:
+            if b not in leaves and b not in existing:
+                continue   # in a milestone not created yet (plan-validate refuses that direction)
             if not (k in existing and b in existing and existing[b] in blocked.get(existing[k], set())):
                 acts.append(("block", k, b))
     return acts if any(a[0] != "milestone" for a in acts) else []
+
+
+def creation_target(plan: dict[str, Any], st: dict[str, Any], config: dict[str, Any], ask: str | None = None
+                    ) -> tuple[set[str] | None, list[str]]:
+    """(the milestones whose issues plan-create makes now, the milestones created after it).
+
+    `create: all` (the plan's, else the config's) or a plan without milestones: everything (None).
+    Otherwise everything already created plus one more: the first milestone not yet created, when
+    nothing is created yet or the latest created one is accepted. `ask` (`--milestone`) names it.
+    """
+    keys = [m["key"] for m in plan.get("milestones") or []]
+    mode = plan.get("create") or config.get("create", "milestone")
+    if not keys or mode == "all":
+        if ask:
+            raise SdlcError("--milestone needs a plan created one milestone at a time")
+        return None, keys
+    done = set(st.get("created_milestones") or []) & set(keys)
+    left = [k for k in keys if k not in done]
+    if ask:
+        if ask not in keys:
+            raise SdlcError(f"the plan has no milestone {ask} (it has {', '.join(keys)})")
+        if earlier := [k for k in keys[:keys.index(ask)] if k not in done]:
+            raise SdlcError(f"{ask} comes after {', '.join(earlier)}, which aren't created yet")
+        nxt = ask
+    else:
+        last = next((k for k in reversed(keys) if k in done), None)
+        accepted = not last or ((st.get("demos") or {}).get(last) or {}).get("accepted")
+        nxt = left[0] if left and accepted else None
+    make = done | ({nxt} if nxt else set())
+    return make, [k for k in keys if k in make]
 
 
 def ready_leaves(leaves: list[dict[str, Any]], blockers: dict[int, list[dict[str, Any]]]
@@ -1235,11 +1319,23 @@ def command_plan_validate(args: argparse.Namespace, config: dict[str, Any]) -> i
     return 0
 
 
+def lessons_errors(plan: dict[str, Any], st: dict[str, Any]) -> list[str]:
+    """Once a milestone exists and the plan still has milestones to create, every revision says what was learnt."""
+    created = [k for k in st.get("planned_milestones") or [] if k in (st.get("created_milestones") or [])]
+    if not (created and st.get("uncreated_milestones")):
+        return []
+    lessons = plan.get("lessons") or {}
+    if lessons.get("milestone") != created[-1] or not _text(lessons.get("text")):
+        return [f"this revision replans after {created[-1]}: it needs `lessons` "
+                f"({{\"milestone\": \"{created[-1]}\", \"text\": ...}}), shown as `Lessons from {created[-1]}`"]
+    return []
+
+
 def command_plan_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Post a plan revision (validated) for Codex to review. Collapses the previous one."""
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
-    if st["action"] not in ("plan", "continue_plan", "create_plan_issues", "replan"):
+    if st["action"] not in ("plan", "continue_plan", "create_plan_issues", "replan", "plan_next_milestone"):
         raise SdlcError(f"#{st['number']} is {st['state']} (action {st['action']}): not the time to post a plan"
                         + (" — the Codex rounds are spent; ask the poster (`transition N needs-info --kind question`)"
                            if st["action"] == "ask_poster" else ""))
@@ -1247,11 +1343,12 @@ def command_plan_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
     errs = check_plan(plan)
     if plan.get("issue") != st["number"]:
         errs.append(f"the plan is for #{plan.get('issue')}, not #{st['number']}")
-    if st.get("feedback") and st["latest_plan"]:
-        # an amendment after demo feedback: the issues already made stay in the plan
+    if st["state"] in BUILD_STATES and st["latest_plan"]:
+        # an amendment (demo feedback, the next milestone): the issues already made stay in the plan
         dropped = plan_keys(latest_plan_of(bundle, st)[1]) - plan_keys(plan)
         if dropped:
             errs.append(f"an amended plan keeps every key already created; it drops {', '.join(sorted(dropped, key=natural_key))}")
+    errs += lessons_errors(plan, st)
     if errs:
         raise SdlcError("the plan does not validate (run plan-validate): " + "; ".join(errs))
     rev = (st["latest_plan"]["rev"] if st["latest_plan"] else 0) + 1
@@ -1321,16 +1418,25 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
     offline = bool(getattr(args, "from_file", None))
     trusted = set(bundle["trusted"])
 
+    target, created_after = creation_target(plan, st, config, getattr(args, "milestone", None))
+    if target is not None:
+        new = [k for k in created_after if k not in (st.get("created_milestones") or [])]
+        print(f"#{epic}: creating {', '.join(new) or 'only new issues in ' + ', '.join(created_after)}"
+              + (f"; later: {', '.join(k for k in st.get('planned_milestones') or [] if k not in created_after)}"
+                 if len(created_after) < len(plan.get("milestones") or []) else ""))
+
     def look() -> tuple[dict[str, dict[str, Any]], list[tuple[Any, ...]]]:
         records = bundle.get("plan_issues", []) if offline else fetch_plan_issues(epic, config, trusted)
         attached, blocked = ({}, {}) if offline else fetch_links(epic, records, config)
         by_key = {r["key"]: r for r in records}
-        return by_key, plan_create_actions(plan, {k: r["number"] for k, r in by_key.items()}, attached, blocked)
+        return by_key, plan_create_actions(plan, {k: r["number"] for k, r in by_key.items()}, attached, blocked, target)
 
     by_key, acts = look()
     numbers: dict[str, Any] = {k: r["number"] for k, r in by_key.items()}
     ids: dict[str, Any] = {k: r["id"] for k, r in by_key.items()}
     items = {t["key"]: t for t in plan["subtasks"]} | {l["key"]: l for l in plan_leaves(plan)}
+    in_scope = (lambda k: True) if target is None else (  # noqa: E731
+        lambda k: (items[k].get("milestone") or items[k].get("_milestone")) in target)
     path = prd_path(epic)
     prd_url = f"https://github.com/{repo}/blob/{config.get('default_branch', 'main')}/{path.relative_to(ROOT)}" if path else None
     if acts and not offline and not args.dry_run:
@@ -1398,16 +1504,23 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
     already = any((parse_marker(c["body"]) or {}).get("kind") == "plan-created" and c["author"] in trusted
                   and (parse_marker(c["body"]) or {}).get("rev") == str(rev) for c in bundle["comments"])
     if not already:
-        leaves = plan_leaves(plan)
-        rows = [f"| `{t['key']}` | #{numbers[t['key']]} | {t['title']} |" for t in plan["subtasks"] if t.get("slices")]
+        leaves = [l for l in plan_leaves(plan) if in_scope(l["key"])]
+        rows = [f"| `{t['key']}` | #{numbers[t['key']]} | {t['title']} |" for t in plan["subtasks"]
+                if t.get("slices") and in_scope(t["key"])]
         rows += [f"| `{k}` | #{numbers[k]} | {items[k]['title']} |" for k in topo_order(leaves)]
         first = [f"#{numbers[l['key']]}" for l in leaves if not l.get("blocked_by")]
+        later = [k for k in st.get("planned_milestones") or [] if k not in created_after]
         body = (f"Created from [plan rev {rev}]({plan_comment.get('url', '')}) after Codex approved it.\n\n"
                 "| key | issue | title |\n|---|---|---|\n" + "\n".join(rows) +
-                f"\n\nReady to start: {', '.join(first)}. Each is one session of work (`work-slice`).")
-        post_comment(epic, render_comment("plan-created", rev, body, config), config)
-    if st.get("feedback"):   # demo feedback: the epic is still being built
-        print(f"#{epic}: the feedback's new issues are created; it stays {PREFIX}{st['state']}")
+                f"\n\nReady to start: {', '.join(first) or 'see `ready`'}. Each is one session of work (`work-slice`)."
+                + (f"\n\n{', '.join(later)} will be planned again with what {created_after[-1]} teaches, "
+                   "then created." if later and created_after else ""))
+        extra = {"created": ",".join(created_after)} if target is not None else {}
+        post_comment(epic, render_comment("plan-created", rev, body, config, **extra), config)
+    if st["state"] in BUILD_STATES:   # demo feedback or the next milestone: the epic is still being built
+        if not offline:
+            ensure_epic_branch(epic, config)
+        print(f"#{epic}: the new issues are created; it stays {PREFIX}{st['state']}")
         return 0
     if not offline:
         sha, created = ensure_epic_branch(epic, config)
@@ -2196,10 +2309,11 @@ def ship_gate_errors(st: dict[str, Any], key: str, head: str, synced: bool, carr
     return errs
 
 
-def finished(progress: dict[str, Any], demos: dict[str, dict[str, Any]], shipped: dict[str, str]) -> bool:
-    """Nothing is left to build, show or release."""
-    return progress["open"] == 0 and all((demos.get(m["key"]) or {}).get("accepted") and m["key"] in shipped
-                                         for m in progress["milestones"])
+def finished(progress: dict[str, Any], demos: dict[str, dict[str, Any]], shipped: dict[str, str],
+             uncreated: list[str] | None = None) -> bool:
+    """Nothing is left to plan, build, show or release."""
+    return not uncreated and progress["open"] == 0 and all(
+        (demos.get(m["key"]) or {}).get("accepted") and m["key"] in shipped for m in progress["milestones"])
 
 
 def epic_head(n: int, config: dict[str, Any]) -> str:
@@ -2374,7 +2488,7 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
     shipped[key] = sha
     post_comment(n, render_comment("shipped", None, body, config, milestone=key, sha=sha, **extra), config)
     print(f"#{n}: {key} shipped ({sha[:12]})")
-    if finished(summarise_progress(leaves, {}), st.get("demos") or {}, shipped):
+    if finished(summarise_progress(leaves, {}), st.get("demos") or {}, shipped, st.get("uncreated_milestones")):
         if remote_has(epic_branch(n), root):
             git(["push", "-q", "origin", "--delete", epic_branch(n)], cwd=root)
         wt = root / config.get("worktree_dir", ".worktrees") / f"epic-{n}"
@@ -2813,6 +2927,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("plan-create", help="create the reviewed plan's issues and links (idempotent)")
     p.add_argument("number", type=int)
+    p.add_argument("--milestone", help="create this milestone (default: the next one due; `create: all` makes every one)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--from-file")
     p.set_defaults(fn=command_plan_create)

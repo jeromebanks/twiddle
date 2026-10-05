@@ -111,6 +111,14 @@ Ordering is **native `blocked_by`** links. All of it is created from the
 reviewed comment, so what was reviewed is what was built. A rerun finishes a
 partial creation instead of duplicating it.
 
+**One milestone at a time.** The plan covers the whole epic, but by default
+(`"create": "milestone"` in `.sdlc/config.json`, or per plan) only the first milestone's
+issues are created. Later milestones depend on what earlier ones teach. When a
+milestone's demo is accepted, `next:` says `/plan-issue N`: the planner revises the
+rest of the plan, with a `Lessons from M1` section, and Codex reviews it with a fresh
+budget. Only then does `plan-create` make the next milestone. `"create": "all"` keeps
+the old behaviour, creating everything at once.
+
 No consensus within `max_plan_rounds` means the planner asks the poster one
 plain-language question (`sdlc:needs-info`, marked `phase=plan`). Their answer
 earns a fresh set of rounds. A plan revision never voids the PRD's sign-off.
