@@ -305,6 +305,22 @@ head, tests passed on it, and it belongs to the current milestone. Then the slic
 and its issue closed. Non-blocking findings are filed as <span class="chip">tech-debt</span> first.</li>
 </ol>
 
+<h3 id="parallel">Several at once</h3>
+<p>Each slice is built in its own <strong>git worktree</strong>, a second checkout of the repo on its own branch, in
+<code>.worktrees/slice-S</code>. <code>claim</code> makes it and <code>cleanup</code> removes it. It isn't Claude Code's own worktree
+feature: that one branches from <code>main</code>, and a slice has to start from <code>epic/N</code>. The main checkout stays on
+<code>main</code>, untouched, so several sessions can work side by side:</p>
+<ul>
+<li><strong>Different issues</strong> run independently. Open one Claude Code session per issue or slice, all started in the main
+checkout. <code>ready</code> lists what can be claimed.</li>
+<li><strong>Slices of one epic</strong> run in parallel within the milestone being built. A slice that needs another's code waits for it.</li>
+<li><strong>Two sessions can't take the same slice:</strong> <code>claim</code> refuses one that's already claimed. Claim from one machine,
+because two machines claiming in the same few seconds could both get through.</li>
+<li><strong>Merges happen one at a time.</strong> The second slice to finish rebases onto <code>epic/N</code> and is tested and reviewed again.</li>
+<li><strong>Demos happen one at a time,</strong> because a demo uses the real speakers, with the poster there.</li>
+</ul>
+<p class="note">The full table of worktrees, and what holds each one, is in <code>SDLC.md</code> → "Worktrees, and several sessions at once".</p>
+
 <h2 id="milestones">6. A milestone, from plan to <code>main</code></h2>
 <p>A milestone is a group of slices that ends in something the poster can see. The epic works on
 <strong>one milestone at a time</strong>, the earliest one not yet shipped. Only its slices are offered,
