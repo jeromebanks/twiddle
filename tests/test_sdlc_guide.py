@@ -49,3 +49,40 @@ def test_every_skill_is_described(skill):
 @pytest.mark.parametrize("phase", list(sdlc.MILESTONE_FLOW))
 def test_every_milestone_phase_is_drawn(phase):
     assert re.search(rf">{phase}<", GUIDE), f"milestone phase {phase} isn't in the guide's diagram"
+
+
+def test_the_pr_review_is_run_by_the_tool_not_by_hand():
+    prompt = (ROOT / ".agents" / "skills" / "work-slice" / "references" / "codex-pr-prompt.md").read_text()
+    assert "HEAD:" not in prompt.split("\n---\n", 1)[1] and "rev-parse" not in prompt   # the tool stamps the head
+    skill = (ROOT / ".agents" / "skills" / "work-slice" / "SKILL.md").read_text()
+    section = skill[skill.index("## 8. Codex rounds"):skill.index("## 9.")]
+    fenced = "\n".join(re.findall(r"```[a-z]*\n(.*?)```", section, re.DOTALL))
+    assert "codex exec" not in fenced and "codex-review --pr" in fenced
+    assert not re.search(r"\$[0-9]", skill)          # the skill loader substitutes dollar-digit sequences
+
+
+SKILL_FILES = sorted((ROOT / ".agents" / "skills").rglob("*.md")) + sorted((ROOT / ".claude" / "skills").rglob("*.md"))
+# Codex's own reviewers bring prompts and settings the repo doesn't own: never offered as a way to review
+OTHER_REVIEWERS = re.compile(r"codex exec|codex[- ]plugin|/codex:|codex:(?:rescue|review|setup)|codex-companion", re.IGNORECASE)
+
+
+def test_every_review_goes_through_codex_review():
+    names = {p.relative_to(ROOT).as_posix() for p in SKILL_FILES}
+    for skill in ("plan-issue", "work-slice", "milestone-demo"):
+        assert f".agents/skills/{skill}/SKILL.md" in names
+    for f in ("plan-issue/references/codex-plan-prompt.md", "milestone-demo/references/codex-milestone-prompt.md",
+              "work-slice/references/codex-pr-prompt.md"):
+        assert f".agents/skills/{f}" in names
+    hits = [f"{p.relative_to(ROOT)}: {m.group(0)!r}" for p in SKILL_FILES for m in OTHER_REVIEWERS.finditer(p.read_text())]
+    assert not hits, "run reviews with `tools/sdlc.py codex-review`, not: " + "; ".join(hits)
+    for skill, flag in (("plan-issue", "codex-review --plan N"), ("milestone-demo", "codex-review --milestone N"),
+                        ("work-slice", "codex-review --pr PR")):
+        assert flag in (ROOT / ".agents" / "skills" / skill / "SKILL.md").read_text()
+    sdlc_md = (ROOT / "SDLC.md").read_text()
+    assert "the only way a review is run" in sdlc_md and "`codex exec review`" in sdlc_md and "Codex plugin" in sdlc_md
+
+
+def test_no_prompt_asks_codex_for_the_head():
+    for skill, name in (("milestone-demo", "codex-milestone-prompt.md"), ("plan-issue", "codex-plan-prompt.md")):
+        prompt = (ROOT / ".agents" / "skills" / skill / "references" / name).read_text().split("\n---\n", 1)[1]
+        assert "HEAD:" not in prompt and "rev-parse" not in prompt
