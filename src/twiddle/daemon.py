@@ -155,10 +155,16 @@ def serving(port: int, host: str = "127.0.0.1", timeout: float = 1.0) -> bool:
         return False
 
 
-def alarm_blocked_by_local_network(project: Path, port: int) -> bool:
+def probe_host(bind: str) -> str:
+    """Where to knock for a server bound to `bind`: a wildcard answers on loopback."""
+    return "127.0.0.1" if bind in ("", "0.0.0.0", "::") else bind
+
+
+def alarm_blocked_by_local_network(project: Path, port: int,
+                                   host: str = "127.0.0.1") -> bool:
     """As `blocked_by_local_network`, for the server: a denied-access error on
     record *and* nothing answering on the port."""
-    if serving(port):
+    if serving(port, host):
         return False
     err = project / "logs" / "alarm_server.err"
     try:

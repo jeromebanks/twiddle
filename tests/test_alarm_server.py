@@ -6,6 +6,7 @@ is conftest's temp file. No speaker, network or Spotify is touched.
 import http.client
 import json
 import socket
+import subprocess
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -904,6 +905,31 @@ def test_another_listener_on_the_port_is_a_collision_not_a_live_server(
     assert code == 1 and p["alive"] is False and p["port_answers"] is True
     code, out, _ = run(["alarm", "serve", "--status"], capsys)
     assert "something else answers" in out
+
+
+def test_status_probes_the_address_the_server_binds(launchd_agent, monkeypatch, capsys):
+    from twiddle import daemon
+    seen = []
+    monkeypatch.setattr(daemon, "serving", lambda port, host="127.0.0.1", **k: seen.append(host) or True)
+    run(["alarm", "serve", "--status", "--host", "192.168.1.5", "--json"], capsys)
+    run(["alarm", "serve", "--status", "--json"], capsys)       # the wildcard default
+    assert seen[0] == "192.168.1.5" and seen[-1] == "127.0.0.1"
+
+
+def test_a_failed_bootstrap_is_still_journalled(fake_house, sounds, capsys, monkeypatch, tmp_path):
+    from twiddle import daemon
+    monkeypatch.setattr(daemon, "AGENT_DIR", tmp_path / "agents")
+    monkeypatch.setattr(daemon, "_which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(daemon, "pick_anchor", lambda: "10.0.0.13")
+
+    def launchctl(cmd, **_kw):
+        return subprocess.CompletedProcess(cmd, 5 if cmd[1] == "bootstrap" else 0, stdout="",
+                                           stderr="Bootstrap failed")
+    monkeypatch.setattr(daemon.subprocess, "run", launchctl)
+    code, _, err = run(["alarm", "serve", "--install", "--dir", str(sounds)], capsys)
+    assert code == 1 and "bootstrap failed" in err
+    actions = [json.loads(l)["action"] for l in play.INTERVENTION_LOG.read_text().splitlines()]
+    assert actions == ["alarm_serve_install", "alarm_serve_install_failed"]
 
 
 def test_install_keeps_the_requested_host_in_the_agent(fake_house, launchd_agent, sounds, capsys):

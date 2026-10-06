@@ -1017,14 +1017,15 @@ def _serve_status(args) -> int:
     project = Path(__file__).resolve().parents[2]
     job = daemon.status(daemon.ALARM_LABEL)
     running = "state = running" in job
-    answers = daemon.serving(args.port)
+    host = daemon.probe_host(args.host)
+    answers = daemon.serving(args.port, host)
     # Alive is the agent's own server answering: some other listener on the
     # port, with the job not running, is a collision, not a live server.
     alive = running and answers
     loaded = job != "not loaded"
-    blocked = loaded and daemon.alarm_blocked_by_local_network(project, args.port)
+    blocked = loaded and daemon.alarm_blocked_by_local_network(project, args.port, host)
     about = {"job": job, "plist": str(daemon.plist_path(daemon.ALARM_LABEL)),
-             "port": args.port, "alive": alive, "stale": not alive,
+             "port": args.port, "host": host, "alive": alive, "stale": not alive,
              "job_running": running, "port_answers": answers,
              "blocked_by_local_network": blocked}
     why = ("" if alive else
@@ -1050,8 +1051,8 @@ def _serve_agent(args) -> int:
         if dry:
             return emit(args, about | {"would": "uninstall", "performed": False},
                         f"[dry-run] would remove {path}")
+        _agent_journal("alarm_serve_uninstall", plist=str(path))
         removed = daemon.uninstall(daemon.ALARM_LABEL)
-        _agent_journal("alarm_serve_uninstall", removed=removed)
         return emit(args, about | {"performed": True, "removed": removed},
                     "Removed." if removed else "Was not installed.")
     if not args.dir:
@@ -1079,9 +1080,15 @@ def _serve_agent(args) -> int:
     if dry:
         return emit(args, about | {"would": "install", "performed": False},
                     f"[dry-run] would install {path}: serve {root} on port {args.port}")
-    installed = daemon.install_alarm(project, root, args.port, args.max_s,
-                                     args.room or [], ip or "", args.host)
-    _agent_journal("alarm_serve_install", dir=str(root), port=args.port)
+    # Journalled before the plist is written or the old job booted out: a
+    # failed bootstrap has already changed what is running.
+    _agent_journal("alarm_serve_install", dir=str(root), port=args.port, host=args.host)
+    try:
+        installed = daemon.install_alarm(project, root, args.port, args.max_s,
+                                         args.room or [], ip or "", args.host)
+    except SystemExit as exc:
+        _agent_journal("alarm_serve_install_failed", error=str(exc))
+        return fail(args, str(exc), "the plist was written; `alarm serve --uninstall` removes it")
     return emit(args, about | {"performed": True},
                 f"Installed {installed}\n  serving {root} on port {args.port}, "
                 f"restarted by launchd if it exits, started again at login\n"
