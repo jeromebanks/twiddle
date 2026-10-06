@@ -5,7 +5,6 @@ is conftest's temp file. No speaker, network or Spotify is touched.
 """
 import http.client
 import json
-import socket
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -90,15 +89,20 @@ def test_a_known_audio_file_is_served_as_audio(srv):
         assert get(srv, path) == (200, body)
 
 
-def test_only_speakers_of_the_household_are_served(sounds):
+def test_this_mac_can_fetch_so_a_curl_can_try_it(sounds):
     s = server.AlarmServer(sounds, {"10.9.9.9"}, port=0, host="127.0.0.1")
     import threading
     threading.Thread(target=s.serve_forever, daemon=True).start()
     try:
-        assert get(s, "/bell.mp3")[0] == 403
-        assert journal() == []
+        assert get(s, "/bell.mp3")[0] == 200      # loopback is this Mac
     finally:
         s.stop()
+
+
+def test_a_client_that_is_neither_a_speaker_nor_this_mac_is_refused():
+    assert not server.permitted("192.168.1.77", {"10.9.9.9"})
+    assert server.permitted("10.9.9.9", {"10.9.9.9"})
+    assert server.permitted("127.0.0.1", {"10.9.9.9"})
 
 
 def test_a_head_request_is_answered_without_a_span(srv):
@@ -222,6 +226,31 @@ def test_records_without_span_id_or_max_s_are_read_as_before(tmp_path):
     assert (T0.timestamp() + 1000, float("inf"), "relay", SPEAKER) in spans
 
 
+def test_an_old_crashed_span_is_still_replaced_by_the_next_start_of_its_kind(tmp_path):
+    # Read as before: of two id-less starts, the second replaces the unclosed
+    # first, so a relay that crashed once does not discount every fault after.
+    for action, t in (("relay_start", 0), ("relay_start", 100), ("relay_end", 160)):
+        write({"ts": iso(T0 + timedelta(seconds=t)), "action": action, "ip": SPEAKER,
+               "span": True})
+    _, spans = report._load_interventions(play.INTERVENTION_LOG)
+    assert spans == [(T0.timestamp() + 100, T0.timestamp() + 160, "relay", SPEAKER)]
+    mon = tmp_path / "monitor.jsonl"
+    mon.write_text("\n".join(json.dumps(r) for r in (
+        {"kind": "sample", "samples": []},
+        VANISH | {"ts": iso(T0 + timedelta(hours=5))})))
+    assert any("left the household" in f.title
+               for f in report.summarise_log(mon, play.INTERVENTION_LOG))
+
+
+def test_an_end_without_an_id_closes_the_latest_open_span_that_has_one(tmp_path):
+    write({"ts": iso(T0), "action": "x_start", "ip": SPEAKER, "span": True,
+           "span_id": "a", "max_s": 600})
+    write({"ts": iso(T0 + timedelta(seconds=30)), "action": "x_end", "ip": SPEAKER,
+           "span": True})
+    _, spans = report._load_interventions(play.INTERVENTION_LOG)
+    assert spans == [(T0.timestamp(), T0.timestamp() + 30, "x", SPEAKER)]
+
+
 def test_every_span_start_the_code_writes_has_an_id_and_a_finite_bound():
     play.journal_span("anything_start", SPEAKER)
     play.journal_span("anything_start", SPEAKER, max_s=5, span_id="x")
@@ -293,11 +322,12 @@ def test_a_second_serve_on_a_busy_port_fails_and_closes_nobodys_spans(fake_house
                                                                       capsys):
     write({"ts": iso(T0), "action": "alarm_serve_start", "ip": SPEAKER, "span": True,
            "span_id": "live", "max_s": 600})
-    with socket.socket() as busy:
-        busy.bind(("0.0.0.0", 0))
-        busy.listen()
+    first = server.AlarmServer(sounds, None, port=0)
+    try:
         code, _, err = run(["alarm", "serve", "--dir", str(sounds),
-                            "--port", str(busy.getsockname()[1])], capsys)
+                            "--port", str(first.port)], capsys)
+    finally:
+        first.stop()
     assert code == 1 and "could not listen" in err
     assert [o["span_id"] for o in report.open_spans(play.INTERVENTION_LOG)] == ["live"]
 

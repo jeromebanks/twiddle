@@ -40,8 +40,8 @@ DEFAULT_LOG = "logs/relay.jsonl"
 DEFAULT_DEVICE_NAME = "Sonos Roam Relay"
 
 
-# A relay has no natural end, so its span is bounded generously: one that
-# outlives this ends being discounted (adjacent: it would need a heartbeat).
+# A relay has no natural end, so its span gets a generous bound. A relay still
+# running past it is no longer discounted: that would take a heartbeat.
 RELAY_SPAN_MAX_S = 24 * 3600
 
 

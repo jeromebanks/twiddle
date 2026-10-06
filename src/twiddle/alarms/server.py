@@ -5,9 +5,9 @@ machine in the alarm itself; the speaker fetches it at fire time, hours after
 anything here ran. So the port is fixed (`PORT`), not whatever was free, and
 the server runs in the foreground until stopped.
 
-It serves audio files from one directory, to speakers of the household only,
-and nothing else: an unknown name, a directory, a path outside the directory, a
-file that isn't audio, a client that isn't a speaker are each refused at once
+It serves audio files from one directory, to speakers of the household (and to
+this Mac itself, so a `curl` can try it) and nothing else: an unknown name, a directory, a path outside the directory, a
+file that isn't audio, a client that is neither are each refused at once
 with an error status, so a speaker that can't be served falls back to its own
 chime instead of waiting on a page that never plays. Nothing here writes to a
 speaker.
@@ -63,6 +63,12 @@ def resolve(root: Path, request_path: str) -> Path | None:
     return path
 
 
+def permitted(ip: str, speakers: set[str] | None) -> bool:
+    """Whether a client may be served: a speaker of the household, or this Mac
+    (loopback) so a `curl` can try it. `speakers` None means anyone (tests)."""
+    return speakers is None or ip in speakers or ip.startswith("127.")
+
+
 def close_stale(now: datetime | None = None) -> list[dict]:
     """Close every `alarm_serve` span a crashed run left open, and return them.
 
@@ -87,7 +93,7 @@ def close_stale(now: datetime | None = None) -> list[dict]:
 
 class AlarmServer:
     """Serves `root` over HTTP to `speakers` (their IPs; None = anyone, for
-    tests), journalling one bounded span per file sent."""
+    tests) and to loopback, journalling one bounded span per file sent."""
 
     def __init__(self, root: Path, speakers: set[str] | None, port: int = PORT,
                  max_s: float = DEFAULT_MAX_S, host: str = "0.0.0.0"):
@@ -108,7 +114,7 @@ class AlarmServer:
 
             def _target(self) -> Path | None:
                 ip = self.client_address[0]
-                if outer.speakers is not None and ip not in outer.speakers:
+                if not permitted(ip, outer.speakers):
                     self._refuse(403, "not a speaker of this household")
                     return None
                 path = resolve(outer.root, self.path)

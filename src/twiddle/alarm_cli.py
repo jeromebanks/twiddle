@@ -1021,12 +1021,19 @@ def cmd_serve(args):
                             known=exc.known)
     else:
         allowed = {s.ip for s in house.speakers}
+    # This Mac's own address as a speaker would see it, so `curl` from here works.
+    this_mac = set()
+    for ip in allowed:
+        try:
+            this_mac.add(play.local_ip_for(ip))
+        except OSError:
+            pass
     files = sorted(p.relative_to(root).as_posix() for p in root.rglob("*")
                    if server.resolve(root, p.relative_to(root).as_posix()))
     stale = [st for st in report.open_spans(play.INTERVENTION_LOG)
              if st["name"] == server.ACTION]
     about = {"dir": str(root), "port": args.port, "max_s": args.max_s,
-             "speakers": sorted(allowed), "files": files, "stale_spans": len(stale)}
+             "speakers": sorted(allowed), "this_mac": sorted(this_mac), "files": files, "stale_spans": len(stale)}
     plan = (f"serving {len(files)} file(s) from {root} on port {args.port} to "
             f"{len(allowed)} speaker(s), each serve bounded to {args.max_s:.0f}s; "
             f"{len(stale)} stale span(s) to close")
@@ -1034,7 +1041,7 @@ def cmd_serve(args):
         return emit(args, about | {"would": "serve", "performed": False},
                     f"[dry-run] would start: {plan}")
     try:
-        srv = server.AlarmServer(root, allowed, port=args.port, max_s=args.max_s)
+        srv = server.AlarmServer(root, allowed | this_mac, port=args.port, max_s=args.max_s)
     except OSError as exc:
         return fail(args, f"could not listen on port {args.port}: {exc}",
                     "another `alarm serve` may already be running")

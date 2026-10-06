@@ -288,18 +288,21 @@ def _rf_findings(topo: topology.Topology, devices: dict[str, Device],
 def _read_interventions(path: Path):
     """(points, closed spans, still-open spans) from the journal.
 
-    A span's start and end are paired by `span_id`, so two overlapping spans of
-    one action on one speaker stay two. A record without an id (older journals,
-    and an end whose start had none) pairs by action and speaker, the latest
-    open one first. Each open span is `{name, ip, span_id, start, max_s}`;
-    `max_s` is None for a record that predates it.
+    A start with a `span_id` is paired with the end that names it, so two
+    overlapping spans of one action on one speaker stay two. A record without
+    one (older journals) pairs by action and speaker exactly as it always did:
+    a second start replaces an unclosed first. An end without an id closes that
+    kind first, else the latest id-ful open span of that action and speaker.
+    Each open span is `{name, ip, span_id, start, max_s}`; `max_s` is None for
+    a record that predates it.
     """
     from datetime import datetime
     points: list[tuple[float, str, str]] = []
     spans: list[tuple[float, float, str, str]] = []
-    open_spans: list[dict] = []
+    by_id: dict[str, dict] = {}
+    legacy: dict[tuple[str, str], dict] = {}
     if not path.exists():
-        return points, spans, open_spans
+        return points, spans, []
     for line in path.read_text().splitlines():
         try:
             rec = json.loads(line)
@@ -310,22 +313,25 @@ def _read_interventions(path: Path):
         if rec.get("span"):
             sid = rec.get("span_id")
             if action.endswith("_start"):
-                open_spans.append({"name": action[:-6], "ip": ip, "span_id": sid,
-                                   "start": ts, "max_s": rec.get("max_s")})
+                st = {"name": action[:-6], "ip": ip, "span_id": sid,
+                      "start": ts, "max_s": rec.get("max_s")}
+                if sid:
+                    by_id[sid] = st
+                else:
+                    legacy[(st["name"], ip)] = st
             elif action.endswith("_end"):
                 name = action[:-4]
-                match = next((i for i in range(len(open_spans) - 1, -1, -1)
-                              if sid and open_spans[i]["span_id"] == sid), None)
-                if match is None:
-                    match = next((i for i in range(len(open_spans) - 1, -1, -1)
-                                  if open_spans[i]["name"] == name
-                                  and open_spans[i]["ip"] == ip), None)
-                if match is not None:
-                    st = open_spans.pop(match)
+                st = by_id.pop(sid, None) if sid else None
+                if st is None:
+                    st = legacy.pop((name, ip), None)
+                if st is None and not sid:
+                    later = [k for k, v in by_id.items() if v["name"] == name and v["ip"] == ip]
+                    st = by_id.pop(later[-1]) if later else None
+                if st is not None:
                     spans.append((st["start"], ts, name, ip))
             continue
         points.append((ts, action, ip))
-    return points, spans, open_spans
+    return points, spans, [*legacy.values(), *by_id.values()]
 
 
 def _load_interventions(path: Path):
