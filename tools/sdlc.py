@@ -2471,10 +2471,12 @@ def command_release(args: argparse.Namespace, config: dict[str, Any]) -> int:
 
 
 def wait_for_pr_head(number: int, head: str, config: dict[str, Any], wait: float | None = None,
-                     poll: float | None = None, sleep=None) -> dict[str, Any]:
+                     poll: float | None = None) -> dict[str, Any]:
     """The PR once GitHub reports `head` as its head: a push shows up there a few seconds late."""
     wait = HEAD_WAIT_SECONDS if wait is None else wait
     poll = HEAD_POLL_SECONDS if poll is None else poll
+    if poll <= 0 or wait < 0:
+        raise SdlcError(f"the wait for GitHub needs a positive poll interval and a non-negative timeout (got {poll}, {wait})")
     waited = 0.0
     while True:
         pr, _ = fetch_pr(number, config)
@@ -2483,7 +2485,7 @@ def wait_for_pr_head(number: int, head: str, config: dict[str, Any], wait: float
         if waited >= wait:
             raise SdlcError(f"HEAD {head[:12]} is not PR #{number}'s head {pr['headRefOid'][:12]}, "
                             f"even after waiting {waited:g}s: push, or check out the branch")
-        (sleep or time.sleep)(poll)
+        time.sleep(poll)
         waited += poll
 
 
@@ -2494,7 +2496,7 @@ def command_test_record(args: argparse.Namespace, config: dict[str, Any]) -> int
                         + ", ".join(l[3:] for l in dirty.splitlines()[:8])
                         + " (commit and push, or keep scratch files outside the worktree)")
     head = git(["rev-parse", "HEAD"])
-    pr = wait_for_pr_head(args.pr, head, config)
+    wait_for_pr_head(args.pr, head, config)
     run = run_suite()
     result, passed = run["result"], run["passed"]
     body = suite_body("the PR head", head, run)

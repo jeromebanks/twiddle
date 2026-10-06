@@ -241,10 +241,18 @@ def test_test_record_waits_for_github_to_show_the_pushed_head(monkeypatch, capsy
     sleeps, runs = stub_test_record(monkeypatch, [OLD, OLD, HEAD])
     assert sdlc.main(["test-record", "50", "--dry-run"]) == 0
     assert runs == [1] and len(sleeps) == 2
+    out = capsys.readouterr().out
+    assert f"sha={HEAD}" in out and OLD not in out
 
 
 def test_test_record_gives_up_when_github_never_catches_up(monkeypatch, capsys):
     sleeps, runs = stub_test_record(monkeypatch, [OLD])
     assert sdlc.main(["test-record", "50", "--dry-run"]) == 1
     assert runs == [] and sum(sleeps) == sdlc.HEAD_WAIT_SECONDS
-    assert "is not PR #50's head" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "is not PR #50's head" in err and "waiting 30s" in err
+
+
+def test_the_wait_for_github_refuses_an_unbounded_poll():
+    with pytest.raises(sdlc.SdlcError, match="positive poll"):
+        sdlc.wait_for_pr_head(50, HEAD, CONFIG, wait=5, poll=0)
