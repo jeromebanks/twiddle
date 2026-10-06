@@ -1160,7 +1160,7 @@ def cmd_serve(args):
     if args.port != points:
         about["warning"] = (f"new alarms point at port {points}, not {args.port}: they won't "
                             f"reach this server (`alarm serve --install --port {args.port}` "
-                            "points them here)")
+                            "points new ones here)")
         plan += f"\n  warning: {about['warning']}"
     if getattr(args, "dry_run", False):
         return emit(args, about | {"would": "serve", "performed": False},

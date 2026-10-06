@@ -1010,6 +1010,8 @@ def test_installing_the_agent_on_a_port_points_new_alarms_at_it(sounds, capsys, 
     monkeypatch.setattr(alarm_cli, "_household", lambda args: household())
     monkeypatch.setattr(daemon, "_which", lambda cmd: f"/bin/{cmd}")
     monkeypatch.setattr(daemon, "pick_anchor", lambda: "10.0.0.13")
+    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: (_ for _ in ()).throw(
+        OSError("no network in tests")))
     ran = []
     monkeypatch.setattr(daemon.subprocess, "run",
                         lambda cmd, **_kw: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""))

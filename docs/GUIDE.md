@@ -397,10 +397,11 @@ curl -o /dev/null http://localhost:8765/bell.mp3            # a test fetch; see 
 
 The port is the installed agent's when there is one: after `alarm serve --install
 --port P`, a sound or Bandcamp alarm made by `alarm add`/`edit` points at `P`
-(else 8765), while alarms made before keep the port they were made with:
-reinstalling on another port doesn't move them, though `alarm list` still marks
-them ⌁; and a foreground `alarm serve --port` other than the one new alarms point
-at prints a warning.
+(else 8765). Alarms made before keep the port they were made with: reinstalling
+on another port doesn't move them, so nothing answers them and they fall back to
+the chime (`alarm list` still marks them ⌁); `alarm edit <id> --source
+sound:<name>` (or `bandcamp:...`) rebuilds one on the new port. A foreground
+`alarm serve --port` other than the one new alarms point at prints a warning.
 
 It writes to no speaker. It serves audio files under `--dir`, and Bandcamp
 tracks under `/bandcamp/<token>.mp3` (a fresh stream URL is fetched for each

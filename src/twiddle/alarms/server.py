@@ -58,8 +58,9 @@ TYPES = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".mp4": "audio/mp4",
 
 def alarm_port() -> int:
     """The port a new alarm's URL points at: the installed agent's, else `PORT`.
-    Only building an alarm asks; recognising one never does, so reinstalling
-    the agent on another port leaves the alarms already made as they were."""
+    Building an alarm asks (and `alarm serve`, to warn when it is elsewhere);
+    recognising one never does, so reinstalling the agent on another port
+    leaves the alarms already made recognised as they were."""
     installed = daemon.installed_alarm_endpoint()
     return installed[0] if installed and 1 <= installed[0] <= 65535 else PORT
 
