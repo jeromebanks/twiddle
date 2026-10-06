@@ -16,6 +16,7 @@ import os
 import socket
 import threading
 import urllib.parse
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
@@ -54,15 +55,38 @@ def _journal(action: str, ip: str, **extra) -> None:
         pass
 
 
-def journal_span(action: str, ip: str, **extra) -> None:
+# A span's start always says how long it can last. Whatever opened it may die
+# before it closes it, and an unclosed span must end somewhere finite: left
+# open forever it would discount every real fault that followed.
+DEFAULT_SPAN_MAX_S = 6 * 3600
+
+
+def new_span_id() -> str:
+    return uuid.uuid4().hex
+
+
+def journal_span(action: str, ip: str, *, span_id: str | None = None,
+                 max_s: float | None = None, **extra) -> str | None:
     """Record a sustained activity, not a one-off command.
 
     While this Mac serves audio to a speaker it is part of the audio path, so
     anything observed during that whole window is suspect -- not just the
     instant a command was sent. Analysis needs the span, so mark its start and
     end explicitly.
+
+    A start (`..._start`) gets a `span_id` (made here unless given) and a finite
+    `max_s`, the longest it can last: `analyse` ends an unclosed span there. An
+    end names the same `span_id`, so overlapping spans of one action on one
+    speaker stay apart; an end without one closes the latest open span of that
+    action and speaker. Returns the id a start was given.
     """
+    if action.endswith("_start"):
+        span_id = span_id or new_span_id()
+        extra["max_s"] = DEFAULT_SPAN_MAX_S if max_s is None else max_s
+    if span_id:
+        extra["span_id"] = span_id
     _journal(action, ip, span=True, **extra)
+    return span_id
 
 
 def local_ip_for(peer: str) -> str:
@@ -251,9 +275,11 @@ def set_sleep_timer(ip: str, duration_s: int, **journal) -> datetime | None:
     if duration_s <= 0:
         return None
     fires = datetime.now(timezone.utc) + timedelta(seconds=duration_s)
+    sid, bound = new_span_id(), 60 + SLEEP_FIRE_MARGIN_S
     for name, at in (("sleep_timer_fire_start", fires - timedelta(seconds=60)),
                      ("sleep_timer_fire_end", fires + timedelta(seconds=SLEEP_FIRE_MARGIN_S))):
-        journal_span(name, ip, ts=at.isoformat(timespec="milliseconds"), **journal)
+        journal_span(name, ip, span_id=sid, max_s=bound,
+                     ts=at.isoformat(timespec="milliseconds"), **journal)
     return fires
 
 

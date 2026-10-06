@@ -526,10 +526,11 @@ def alarm_now(ip: str, events: bool = True) -> Running | None:
 def _span(name: str, ip: str, at: datetime, **journal) -> None:
     """Journal a span around a moment the speaker will act on its own (an
     alarm's duration-stop, a snooze running out), so `analyse` discounts it."""
+    sid, bound = play.new_span_id(), 60 + FIRE_MARGIN_S
     for edge, t in (("start", at - timedelta(seconds=60)),
                     ("end", at + timedelta(seconds=FIRE_MARGIN_S))):
-        play.journal_span(f"{name}_{edge}", ip, ts=t.isoformat(timespec="milliseconds"),
-                          **journal)
+        play.journal_span(f"{name}_{edge}", ip, span_id=sid, max_s=bound,
+                          ts=t.isoformat(timespec="milliseconds"), **journal)
 
 
 def _av_write(ip: str, action: str, args: list[tuple[str, str]], journal: str,

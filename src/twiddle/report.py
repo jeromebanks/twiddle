@@ -285,18 +285,21 @@ def _rf_findings(topo: topology.Topology, devices: dict[str, Device],
     return out
 
 
-def _load_interventions(path: Path):
-    """Our own state-changing activity: discrete calls, plus served spans.
+def _read_interventions(path: Path):
+    """(points, closed spans, still-open spans) from the journal.
 
-    Returns (points, spans). A span is a window during which this machine was
-    itself in the audio path, so everything inside it is confounded.
+    A span's start and end are paired by `span_id`, so two overlapping spans of
+    one action on one speaker stay two. A record without an id (older journals,
+    and an end whose start had none) pairs by action and speaker, the latest
+    open one first. Each open span is `{name, ip, span_id, start, max_s}`;
+    `max_s` is None for a record that predates it.
     """
     from datetime import datetime
     points: list[tuple[float, str, str]] = []
     spans: list[tuple[float, float, str, str]] = []
-    open_spans: dict[tuple[str, str], float] = {}
+    open_spans: list[dict] = []
     if not path.exists():
-        return points, spans
+        return points, spans, open_spans
     for line in path.read_text().splitlines():
         try:
             rec = json.loads(line)
@@ -305,18 +308,46 @@ def _load_interventions(path: Path):
             continue
         action, ip = rec.get("action", ""), rec.get("ip", "")
         if rec.get("span"):
+            sid = rec.get("span_id")
             if action.endswith("_start"):
-                open_spans[(action[:-6], ip)] = ts
+                open_spans.append({"name": action[:-6], "ip": ip, "span_id": sid,
+                                   "start": ts, "max_s": rec.get("max_s")})
             elif action.endswith("_end"):
-                start = open_spans.pop((action[:-4], ip), None)
-                if start is not None:
-                    spans.append((start, ts, action[:-4], ip))
+                name = action[:-4]
+                match = next((i for i in range(len(open_spans) - 1, -1, -1)
+                              if sid and open_spans[i]["span_id"] == sid), None)
+                if match is None:
+                    match = next((i for i in range(len(open_spans) - 1, -1, -1)
+                                  if open_spans[i]["name"] == name
+                                  and open_spans[i]["ip"] == ip), None)
+                if match is not None:
+                    st = open_spans.pop(match)
+                    spans.append((st["start"], ts, name, ip))
             continue
         points.append((ts, action, ip))
-    # A span left open (crash, kill) still covers everything after its start.
-    for (name, ip), start in open_spans.items():
-        spans.append((start, float("inf"), name, ip))
+    return points, spans, open_spans
+
+
+def _load_interventions(path: Path):
+    """Our own state-changing activity: discrete calls, plus served spans.
+
+    Returns (points, spans). A span is a window during which this machine was
+    itself in the audio path, so everything inside it is confounded.
+    """
+    points, spans, open_spans = _read_interventions(path)
+    # A span left open (crash, kill) ends where its start said it could, at
+    # latest. One from before that was recorded has no bound: it covers
+    # everything after its start, as it always did.
+    for st in open_spans:
+        end = st["start"] + st["max_s"] if st["max_s"] is not None else float("inf")
+        spans.append((st["start"], end, st["name"], st["ip"]))
     return points, spans
+
+
+def open_spans(path: Path) -> list[dict]:
+    """The spans in the journal that never closed, for whatever opened them to
+    close on its next start."""
+    return _read_interventions(path)[2]
 
 
 def _self_induced(ev_ts: str, interventions, window: float = 45.0):

@@ -40,6 +40,11 @@ DEFAULT_LOG = "logs/relay.jsonl"
 DEFAULT_DEVICE_NAME = "Sonos Roam Relay"
 
 
+# A relay has no natural end, so its span is bounded generously: one that
+# outlives this ends being discounted (adjacent: it would need a heartbeat).
+RELAY_SPAN_MAX_S = 24 * 3600
+
+
 class _Terminated(Exception):
     """SIGTERM, raised so the same `finally` handles it as Ctrl-C."""
 
@@ -339,7 +344,7 @@ def cmd_start(args):
         log.close()
         return fail(args, f"could not start the relay: {type(exc).__name__}: {exc}")
 
-    snap = None
+    snap = span_id = None
     prev = signal.signal(signal.SIGTERM, _on_sigterm)
     try:
         if not _wait_for_audio(rly, args.start_timeout):
@@ -363,8 +368,9 @@ def cmd_start(args):
             snap.save(snap_path)
             # The span, not the instant: this Mac is in the audio path for the
             # whole session, so everything observed during it is suspect.
-            play.journal_span("relay_start", res.group.ip,
-                              source=args.source, url=url)
+            span_id = play.journal_span("relay_start", res.group.ip,
+                                        max_s=RELAY_SPAN_MAX_S,
+                                        source=args.source, url=url)
             if args.volume is not None:
                 res.group.set_volume(args.volume)
             res.group.play_radio(url, title, art=rly.cover_url_for(res.group.ip))
@@ -417,7 +423,8 @@ def cmd_start(args):
         final = rly.stats()
         record("relay_end", **final)
         if res is not None:
-            play.journal_span("relay_end", res.group.ip, source=args.source)
+            play.journal_span("relay_end", res.group.ip, span_id=span_id,
+                              source=args.source)
             if not args.no_restore and snap is not None:
                 try:
                     result = res.group.restore(snap)
