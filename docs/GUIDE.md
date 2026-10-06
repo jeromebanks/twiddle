@@ -381,6 +381,34 @@ it is worked out here. `alarms[].` is a key of each alarm's object.
 | `alarms[].next_fire` | twiddle | The next time it goes off, ISO, in the household's local time, counted from `household_time.local`. `null` when the alarm is disabled (or its time can't be read). |
 | `alarms[].next_fire_text` | twiddle | The same moment as the list prints it (`today 7:30 AM`, `tomorrow 07:30`, `Mon 10-05 07:30`). `-` when `next_fire` is null, so for a disabled alarm. |
 
+### Serving alarm audio from this Mac
+
+A source that needs this Mac (an alarm sound, a Bandcamp track) stores a URL on
+this machine in the alarm, and the speaker fetches it at fire time. `alarm
+serve` is what answers, in the foreground, on a fixed port (8765: the alarm
+stores the URL, so it can't be whatever was free):
+
+```bash
+uv run twiddle alarm serve --dir ~/alarm-sounds --dry-run   # the plan; binds and journals nothing
+uv run twiddle alarm serve --dir ~/alarm-sounds             # Ctrl-C stops it
+curl -o /dev/null http://localhost:8765/bell.mp3            # a test fetch; see the span in logs/interventions.jsonl
+```
+
+It writes to no speaker. It serves audio files under `--dir`, to the
+household's speakers (or just the `--room`s), and refuses everything else at
+once with a 403/404 (a directory, a name outside `--dir`, a file that isn't
+audio, a client that isn't a speaker): a speaker that can't be served falls back
+to its own chime instead of waiting. Each file sent is a **span** in the
+journal, `alarm_serve_start`/`alarm_serve_end` with its own `span_id` (two at
+once to one speaker stay two) and a finite `max_s` (`--max-s`, default 3600):
+the server stops sending there, and `analyse` ends a span a crash left open at
+start + `max_s`, so a killed server doesn't discount every fault after it. At
+start, once the port is bound, it closes any span of its own a crash left open,
+at the moment it could no longer have been running. A second `alarm serve` on
+the port fails without touching the first one's spans. Every span start any
+command writes carries a `span_id` and `max_s`; journal records from before
+that still read as they did.
+
 ### Relay: play anything on this Mac, including Spotify
 
 `serve` plays files off disk. `relay` widens the same pipe to *live* audio and

@@ -285,18 +285,24 @@ def _rf_findings(topo: topology.Topology, devices: dict[str, Device],
     return out
 
 
-def _load_interventions(path: Path):
-    """Our own state-changing activity: discrete calls, plus served spans.
+def _read_interventions(path: Path):
+    """(points, closed spans, still-open spans) from the journal.
 
-    Returns (points, spans). A span is a window during which this machine was
-    itself in the audio path, so everything inside it is confounded.
+    A start with a `span_id` is paired with the end that names it, so two
+    overlapping spans of one action on one speaker stay two. A record without
+    one (older journals) pairs by action and speaker exactly as it always did:
+    a second start replaces an unclosed first. An end without an id closes that
+    kind first, else the latest id-ful open span of that action and speaker.
+    Each open span is `{name, ip, span_id, start, max_s, pid}`; `max_s` is None for
+    a record that predates it.
     """
     from datetime import datetime
     points: list[tuple[float, str, str]] = []
     spans: list[tuple[float, float, str, str]] = []
-    open_spans: dict[tuple[str, str], float] = {}
+    by_id: dict[str, dict] = {}
+    legacy: dict[tuple[str, str], dict] = {}
     if not path.exists():
-        return points, spans
+        return points, spans, []
     for line in path.read_text().splitlines():
         try:
             rec = json.loads(line)
@@ -305,18 +311,52 @@ def _load_interventions(path: Path):
             continue
         action, ip = rec.get("action", ""), rec.get("ip", "")
         if rec.get("span"):
+            sid = rec.get("span_id")
             if action.endswith("_start"):
-                open_spans[(action[:-6], ip)] = ts
+                st = {"name": action[:-6], "ip": ip, "span_id": sid,
+                      "start": ts, "max_s": rec.get("max_s"), "pid": rec.get("pid")}
+                if sid:
+                    # the old reader's next start replaced a crashed one of its
+                    # kind, and an id-ful start is that next start
+                    legacy.pop((st["name"], ip), None)
+                    by_id[sid] = st
+                else:
+                    legacy[(st["name"], ip)] = st
             elif action.endswith("_end"):
-                start = open_spans.pop((action[:-4], ip), None)
-                if start is not None:
-                    spans.append((start, ts, action[:-4], ip))
+                name = action[:-4]
+                st = by_id.pop(sid, None) if sid else None
+                if st is None:
+                    st = legacy.pop((name, ip), None)
+                if st is None and not sid:
+                    later = [k for k, v in by_id.items() if v["name"] == name and v["ip"] == ip]
+                    st = by_id.pop(later[-1]) if later else None
+                if st is not None:
+                    spans.append((st["start"], ts, name, ip))
             continue
         points.append((ts, action, ip))
-    # A span left open (crash, kill) still covers everything after its start.
-    for (name, ip), start in open_spans.items():
-        spans.append((start, float("inf"), name, ip))
+    return points, spans, [*legacy.values(), *by_id.values()]
+
+
+def _load_interventions(path: Path):
+    """Our own state-changing activity: discrete calls, plus served spans.
+
+    Returns (points, spans). A span is a window during which this machine was
+    itself in the audio path, so everything inside it is confounded.
+    """
+    points, spans, open_spans = _read_interventions(path)
+    # A span left open (crash, kill) ends where its start said it could, at
+    # latest. One from before that was recorded has no bound: it covers
+    # everything after its start, as it always did.
+    for st in open_spans:
+        end = st["start"] + st["max_s"] if st["max_s"] is not None else float("inf")
+        spans.append((st["start"], end, st["name"], st["ip"]))
     return points, spans
+
+
+def open_spans(path: Path) -> list[dict]:
+    """The spans in the journal that never closed, for whatever opened them to
+    close on its next start."""
+    return _read_interventions(path)[2]
 
 
 def _self_induced(ev_ts: str, interventions, window: float = 45.0):

@@ -45,20 +45,28 @@ default 10), refused when no alarm is going off there. Each takes
 one source's choices (`alarm sources station kexp`). `alarm list` marks an
 alarm whose source needs this Mac with ⌁.
 
+`alarm serve --dir DIR` runs in the foreground and serves DIR's audio files to
+the household's speakers (or just `--room`'s) on a fixed port, for an alarm
+whose source needs this Mac (`alarms/server.py`). It writes to no speaker; each
+file sent is a bounded span in the journal, and it closes the spans a crash of
+its own left open. Anything it can't serve is refused at once. `--dry-run`
+resolves everything and prints the plan without listening or journalling.
+
 Follows the rest of the package: the `ok`/`error` envelope, `--json` anywhere.
 """
 from __future__ import annotations
 
 import argparse
 import re
+import signal
 import sys
 from dataclasses import replace
 from datetime import datetime, time, timedelta
 from pathlib import Path
 
-from .alarms import baseline, clock, soundsource, sources
+from .alarms import baseline, clock, server, soundsource, sources
 from .alarms.model import NAMED, Alarm, Recurrence, Unreadable, UnreadableAlarm
-from . import play
+from . import play, report
 from .control_cli import (SNAPSHOT_DIR, BadSpec, add_write_args, emit, fail,
                           parse_sleep_spec)
 from .household import Ambiguous, Household, NotFound, Speaker
@@ -993,6 +1001,70 @@ def cmd_try(args):
                 f"`twiddle alarm stop --room \"{about['room']}\"`")
 
 
+def cmd_serve(args):
+    """Serve alarm audio from this Mac until stopped (foreground)."""
+    root = Path(args.dir).expanduser()
+    if not root.is_dir():
+        return fail(args, f"{root} is not a directory", "`--dir` names the folder to serve")
+    house, _, err = _anchor(args)
+    if err is not None:
+        return err
+    if args.room:
+        allowed = set()
+        for query in args.room:
+            try:
+                allowed |= {m.ip for m in house.resolve(query).group.members}
+            except Ambiguous as exc:
+                return fail(args, str(exc), "be more specific", candidates=exc.candidates)
+            except NotFound as exc:
+                return fail(args, str(exc), "run `twiddle rooms` to list targets",
+                            known=exc.known)
+    else:
+        allowed = {s.ip for s in house.speakers}
+    # This Mac's own address as a speaker would see it, so `curl` from here works.
+    this_mac = set()
+    for ip in allowed:
+        try:
+            this_mac.add(play.local_ip_for(ip))
+        except OSError:
+            pass
+    files = sorted(p.relative_to(root).as_posix() for p in root.rglob("*")
+                   if server.resolve(root, p.relative_to(root).as_posix()))
+    stale = [st for st in report.open_spans(play.INTERVENTION_LOG)
+             if st["name"] == server.ACTION]
+    about = {"dir": str(root), "port": args.port, "max_s": args.max_s,
+             "speakers": sorted(allowed), "this_mac": sorted(this_mac), "files": files, "stale_spans": len(stale)}
+    plan = (f"serving {len(files)} file(s) from {root} on port {args.port} to "
+            f"{len(allowed)} speaker(s), each serve bounded to {args.max_s:.0f}s; "
+            f"{len(stale)} stale span(s) to close")
+    if getattr(args, "dry_run", False):
+        return emit(args, about | {"would": "serve", "performed": False},
+                    f"[dry-run] would start: {plan}")
+    try:
+        srv = server.AlarmServer(root, allowed | this_mac, port=args.port,
+                                    max_s=args.max_s, host=args.host)
+    except OSError as exc:
+        return fail(args, f"could not listen on port {args.port}: {exc}",
+                    "another `alarm serve` may already be running")
+    # Only after the port is ours: a second copy must not close a live one's spans.
+    closed = server.close_stale()
+    emit(args, about | {"performed": True, "stale_spans": len(closed)},
+         f"{plan}\nCtrl-C to stop")
+
+    def _stop(_sig, _frame):
+        raise KeyboardInterrupt
+
+    prev = signal.signal(signal.SIGTERM, _stop)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        signal.signal(signal.SIGTERM, prev)
+        srv.stop()
+    return 0
+
+
 def _ringing_or_fail(args, house: Household, verb: str):
     """The room's group, its coordinator's running alarm, and an `about`; or
     an exit code last. Refused when nothing is going off: a bare Stop would
@@ -1136,6 +1208,23 @@ def register(sub, parents=None):
     add_write_args(tr)
     tr.set_defaults(func=cmd_try)
 
+    sv = asub.add_parser(**kw, name="serve",
+                         help="serve alarm audio from this Mac, in the foreground")
+    sv.add_argument("--dir", required=True, help="the folder of audio files to serve")
+    sv.add_argument("--port", type=int, default=server.PORT,
+                    help=f"port (default {server.PORT}: alarms store the URL)")
+    sv.add_argument("--host", default="0.0.0.0",
+                    help="the address to listen on (default every interface, so speakers can reach it)")
+    sv.add_argument("--max-s", type=_bound, default=server.DEFAULT_MAX_S,
+                    help="the longest one serve may last, in seconds "
+                         f"(default {server.DEFAULT_MAX_S})")
+    sv.add_argument("--room", action="append",
+                    help="serve only this room (repeatable); default: every speaker")
+    sv.add_argument("--anchor", default=None,
+                    help="speaker IP to query instead of SSDP discovery")
+    add_write_args(sv)
+    sv.set_defaults(func=cmd_serve)
+
     for name, fn, helptext in (
         ("stop", cmd_stop, "stop the alarm going off in a room (WRITES)"),
         ("snooze", cmd_snooze, "snooze the alarm going off in a room (WRITES)"),
@@ -1150,6 +1239,18 @@ def register(sub, parents=None):
                        help="speaker IP to query instead of SSDP discovery")
         add_write_args(w)
         w.set_defaults(func=fn)
+
+
+def _bound(text: str) -> float:
+    """A `--max-s`: a finite number of seconds above 0 (an unbounded span would
+    discount every fault after a crash)."""
+    try:
+        value = float(text)
+    except ValueError:
+        value = float("nan")
+    if not (value > 0 and value != float("inf")):
+        raise argparse.ArgumentTypeError(f"{text!r} is not a finite number of seconds above 0")
+    return value
 
 
 def _field_args(p, adding: bool):
