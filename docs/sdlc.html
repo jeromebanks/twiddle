@@ -257,7 +257,7 @@ orchestrator) knows exactly what to run.</p>
 <td><code>plan-validate</code>, <code>plan-post</code>, <code>plan-review</code>, <code>plan-create</code>, <code>plan-annotate</code>, <code>bootstrap-labels</code></td></tr>
 <tr><td><code>work-slice</code></td><td>a slice is ready</td>
 <td><span class="chip">planned</span> → <span class="chip">in-progress</span> (first claim). The slice goes from ready to merged.</td>
-<td><code>slice-status</code>, <code>slice-check</code>, <code>claim</code>, <code>test-record</code>, <code>pr-review</code>, <code>merge</code>, <code>cleanup</code>, <code>release</code>, <code>escalate-slice</code>, <code>file-issue</code>, <code>ready</code></td></tr>
+<td><code>slice-status</code>, <code>slice-check</code>, <code>claim</code>, <code>test-record</code>, <code>codex-review</code>, <code>pr-review</code>, <code>merge</code>, <code>cleanup</code>, <code>release</code>, <code>escalate-slice</code>, <code>file-issue</code>, <code>ready</code></td></tr>
 <tr><td><code>milestone-demo</code></td><td>a milestone is complete, the poster replied, or an accepted one is due to ship</td>
 <td><span class="chip">in-progress</span> ⇄ <span class="chip">demo-review</span>. The last ship makes it <span class="chip">done</span>.</td>
 <td><code>demo-status</code>, <code>demo-request</code>, <code>demo-post</code>, <code>demo-accept</code>, <code>demo-changes</code>, <code>sync</code>, <code>ship-review</code>, <code>ship</code>, <code>verify-main</code>, <code>revert-slice</code>, <code>file-issue</code></td></tr>
@@ -297,8 +297,11 @@ later milestone is waiting, or the cleanup pass comes first.</li>
 <li><strong>Build.</strong> Only what the brief says, with offline tests. No test touches the network, a speaker or Spotify, and
 nothing fires on a real speaker.</li>
 <li><strong>Test.</strong> <code>test-record PR</code> runs the full suite on the pushed head and records the result on the PR.</li>
-<li><strong>Review.</strong> Codex reviews that exact head. Each round is recorded with <code>pr-review</code>
-<em>before</em> any fix is pushed. Fixing or rebutting continues until Codex approves the current head. After
+<li><strong>Review.</strong> Codex reviews that exact head. <code>codex-review --pr PR</code> runs each round.
+It fills the prompt and checks that the worktree is clean and on the PR's head, before and after the run. It uses the model,
+effort, sandbox and timeout from the <code>codex</code> section of <code>.sdlc/config.json</code>, never the user's own Codex
+config. It writes the report's <code>HEAD:</code> line itself and retries once when there's no verdict. Each round is
+recorded with <code>pr-review</code> <em>before</em> any fix is pushed. Fixing or rebutting continues until Codex approves the current head. After
 <code>max_pr_rounds</code> (5 by default) rounds asking for changes the slice escalates. If it was built on a cheaper model,
 it's retried once on the strongest.
 <br>Two kinds of slice skip this and are reviewed with their milestone instead. A slice rated <span class="chip">complexity:routine</span>

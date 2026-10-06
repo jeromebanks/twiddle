@@ -16,6 +16,7 @@ and every label change and agent comment. Config is `.sdlc/config.json`.
     uv run python tools/sdlc.py plan-create 12 --dry-run
     uv run python tools/sdlc.py ready --epic 12
     uv run python tools/sdlc.py slice-check 28 && uv run python tools/sdlc.py claim 28
+    uv run python tools/sdlc.py codex-review --pr 50 --out scratch    # one Codex round, report stamped with the head
     uv run python tools/sdlc.py test-record 50 && uv run python tools/sdlc.py pr-review 50 --report codex.md
     uv run python tools/sdlc.py merge 50 && uv run python tools/sdlc.py cleanup 28
     uv run python tools/sdlc.py demo-status 12
@@ -59,6 +60,13 @@ import time
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
+
+try:
+    from tools import codex_review          # imported as tools.sdlc (the tests)
+except ModuleNotFoundError:
+    import codex_review                     # run as tools/sdlc.py
+# how a review runs and what counts as one live there; sdlc.py reads GitHub, posts and gates
+HEAD_RE, VERDICT_RE, parse_verdict = codex_review.HEAD_RE, codex_review.VERDICT_RE, codex_review.parse_verdict
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = ROOT / ".sdlc" / "config.json"
@@ -107,8 +115,8 @@ TRANSITIONS = {
 }
 
 
-class SdlcError(Exception):
-    pass
+# one error class, so a review's refusal is reported like any other
+SdlcError = codex_review.ReviewError
 
 
 # --- config ---------------------------------------------------------------
@@ -1171,7 +1179,6 @@ KEY_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9._-]*\Z")
 LEAF_SECTIONS = {"outcome": "Outcome", "scope": "Scope", "acceptance": "Acceptance criteria",
                  "validation": "Validation", "demo": "Demo", "non_goals": "Non-goals", "context": "Context"}
 PLAN_JSON_RE = re.compile(r"<!-- plan-json -->\s*(`{3,})json\n(.*?)\n\1", re.DOTALL)
-VERDICT_RE = re.compile(r"\A[*_`]*VERDICT:[*_`\s]*(approve|changes)[*_`.\s]*\Z", re.IGNORECASE)
 HEAD_WAIT_SECONDS = 30   # how long `test-record` waits for GitHub to show a just-pushed head
 HEAD_POLL_SECONDS = 2
 COMMENT_LIMIT = 65000   # GitHub refuses comments over 65536 characters
@@ -1483,18 +1490,6 @@ def extract_plan(body: str) -> dict[str, Any]:
         return json.loads(m.group(2))
     except ValueError as exc:
         raise SdlcError(f"the plan comment's JSON does not parse: {exc}")
-
-
-def parse_verdict(report: str) -> str:
-    """`approve` or `changes` from the last non-empty line of a Codex report. Anything else is a failed run."""
-    lines = [l.strip() for l in (report or "").splitlines() if l.strip()]
-    if not lines:
-        raise SdlcError("the Codex report is empty: the review did not run")
-    m = VERDICT_RE.match(lines[-1])
-    if not m:
-        raise SdlcError("the Codex report does not end in `VERDICT: approve` or `VERDICT: changes`; "
-                        "treat it as a failed run and run the review again")
-    return m.group(1).lower()
 
 
 # --- planning: creating the issues -----------------------------------------
@@ -2000,7 +1995,6 @@ def command_ready(args: argparse.Namespace, config: dict[str, Any]) -> int:
 # (`tests`, `pr-review`). Test runs and Codex reviews are bound to a head SHA,
 # so a new commit voids both and the merge gate sees it.
 
-HEAD_RE = re.compile(r"^\s*[*_`]*HEAD:[*_`\s]*([0-9a-f]{40})\b", re.MULTILINE | re.IGNORECASE)
 CLOSES_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b", re.IGNORECASE)
 ESCALATED_LABEL = f"{PREFIX}escalated"
 DEBT_LABEL = "tech-debt"
@@ -2527,18 +2521,21 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     verdict = parse_verdict(report)
     m = HEAD_RE.search(report)
     if not m:
-        raise SdlcError("the Codex report has no `HEAD: <40-hex sha>` line: it can't show what it reviewed; run it again")
+        raise SdlcError("the Codex report has no `HEAD: <40-hex sha>` line: save it with `codex-review --pr`, "
+                        "which writes the head it checked")
     if m.group(1) != pr["headRefOid"]:
         raise SdlcError(f"Codex reviewed {m.group(1)[:12]} but the PR head is {pr['headRefOid'][:12]}: "
                         "review the current head (record each round before pushing its fixes)")
     response = Path(args.response).read_text().strip() if args.response else ""
     rnd = len(reviews) + 1
+    # the next round's prompt reads the response back from after its boundary (codex_review.response_section)
     body = (f"**Review {rnd} — Codex on `{pr['headRefOid'][:12]}`: `{verdict}`** "
             f"({changes_rounds(reviews) + (verdict == 'changes')}/{limit} change rounds used)\n\n"
-            f"<details><summary>Codex's review</summary>\n\n{report.strip()}\n\n</details>")
+            f"<details><summary>Codex's review</summary>\n\n{codex_review.unmarked(report).strip()}\n\n</details>")
     if response:
-        body += f"\n\n### Claude's response\n\n{response}"
-    comment = render_comment("pr-review", None, body, config, sha=pr["headRefOid"], verdict=verdict, round=str(rnd))
+        body += codex_review.response_section(response)
+    comment = render_comment("pr-review", None, body, config, sha=pr["headRefOid"], verdict=verdict, round=str(rnd),
+                             response="1" if response else "0")
     if len(comment) > COMMENT_LIMIT:
         raise SdlcError(f"the review comment is {len(comment)} characters, over GitHub's limit")
     if args.dry_run:
@@ -2584,6 +2581,51 @@ def command_review_defer(args: argparse.Namespace, config: dict[str, Any]) -> in
     posted = post_comment(pr["number"], comment, config)
     print(f"PR #{pr['number']}: Codex review of {head[:12]} deferred to the milestone  {posted.get('html_url', '')}")
     return 0
+
+
+def command_codex_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Run one Codex round on a slice PR's head and save the report, stamped with that head. How the round
+    runs (prompt, settings, checks, retry) is `codex_review`'s; this reads GitHub and finds the worktree."""
+    settings = codex_review.codex_settings(config)
+    if args.from_file:
+        b = json.loads(Path(args.from_file).read_text())
+        pr, comments, trusted, slice_issue = b["pr"], b["pr_comments"], set(b["trusted"]), b.get("slice")
+    else:
+        (pr, comments), trusted = fetch_pr(args.pr, config), fetch_trusted(config)
+        refs = closes_refs(pr.get("body", ""))
+        slice_issue = fetch_slice(refs[0], config)[0] if len(refs) == 1 else None
+    if pr.get("state") != "OPEN":
+        raise SdlcError(f"PR #{pr['number']} is {pr.get('state')}")
+    refs = closes_refs(pr.get("body", ""))
+    if len(refs) != 1 or not slice_issue or (epic := slice_epic(slice_issue)) is None:
+        raise SdlcError(f"PR #{pr['number']} must close exactly one slice of an epic (it closes {refs or 'none'})")
+    wt = worktree_path(refs[0], config)
+    out = Path(args.out).resolve() if args.out else Path(tempfile.mkdtemp(prefix=f"codex-review-{pr['number']}-"))
+    if out.is_relative_to(wt.resolve()):
+        raise SdlcError(f"--out {out} is inside the worktree: its files would make the tree dirty")
+    out.mkdir(parents=True, exist_ok=True)
+    if not args.from_file and (wt / ".git").exists() and git(["rev-parse", "HEAD"], cwd=wt) != pr["headRefOid"]:
+        pr = wait_for_pr_head(pr["number"], git(["rev-parse", "HEAD"], cwd=wt), config)   # a push GitHub hasn't shown yet
+    head = codex_review.check_worktree(wt, pr["headRefOid"])
+    base = f"origin/{epic_branch(epic)}"
+    git(["fetch", "origin", epic_branch(epic)], cwd=wt, check=False)
+    if not git(["rev-parse", "--verify", "--quiet", base], cwd=wt, check=False):
+        raise SdlcError(f"the worktree has no {base} to diff against: `git fetch origin {epic_branch(epic)}`")
+    rounds = [{"verdict": mk.get("verdict"), "body": c.get("body", ""), "response": mk.get("response")}
+              for mk, c in _marked(comments, trusted) if mk.get("kind") == "pr-review"]
+    prompt, files = codex_review.prepare_pr_round(pr, slice_issue, epic, rounds, out)
+    cmd = codex_review.codex_command(settings, prompt)
+    print(f"PR #{pr['number']} round {len(rounds) + 1} on {head[:12]}\n"
+          + "".join(f"  {k}: {v}\n" for k, v in files.items())
+          + f"  run (timeout {settings['timeout_seconds']}s): {codex_review.show_command(cmd, wt, files['prompt'])}")
+    if args.dry_run:
+        print(f"\n{prompt}")
+        return 0
+    status, report = codex_review.run_review(cmd, wt, head, out, settings["timeout_seconds"])
+    if report:
+        print(f"\n{report.read_text()}\nsaved: {report}\n"
+              f"record it: uv run python tools/sdlc.py pr-review {pr['number']} --report {report} --response <your answers>")
+    return status
 
 
 def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
@@ -3874,7 +3916,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("pr-review", help="record a Codex review round of the PR's current head")
     p.add_argument("pr", type=int)
-    p.add_argument("--report", required=True, help="Codex's stdout: a `HEAD: <sha>` line, last line the verdict")
+    p.add_argument("--report", required=True, help="the report `codex-review` saved: its `HEAD: <sha>` line, last line the verdict")
     p.add_argument("--response", help="Claude's answer to each finding (markdown)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--from-file")
@@ -3886,6 +3928,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--from-file")
     p.set_defaults(fn=command_review_defer)
+
+    p = sub.add_parser("codex-review", help="run one Codex round on a PR's head and save the report, stamped with it")
+    p.add_argument("--pr", type=int, required=True)
+    p.add_argument("--out", help="where the prompt, brief, response and report go (outside the worktree); default a temp dir")
+    p.add_argument("--dry-run", action="store_true", help="print the filled prompt and the exact codex command; run nothing")
+    p.add_argument("--from-file")
+    p.set_defaults(fn=command_codex_review)
 
     p = sub.add_parser("merge", help="the merge gate, then squash-merge a slice's PR")
     p.add_argument("pr", type=int)
