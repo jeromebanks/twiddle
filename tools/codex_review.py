@@ -32,7 +32,8 @@ PLACEHOLDER_RE = re.compile(r"<[A-Z]")
 ROUND2_RE = re.compile(r"^- <ROUND2>(.*?)</ROUND2>\n", re.MULTILINE | re.DOTALL)
 # How `pr-review` records a round: Codex's report folded in <details>, then the implementer's answer after
 # RESPONSE_MARK, a boundary `pr-review` removes from the report and the response first, so its first occurrence
-# is the real one. Rounds recorded before it fall back to the heading that follows the report (LEGACY_MARK).
+# is the real one; its marker says whether there is one (`response=1|0`). Rounds recorded before that carry no
+# `response` attribute and fall back to the heading that follows the report (LEGACY_MARK).
 RESPONSE_MARK = "<!-- sdlc:response -->"
 RESPONSE_HEADING = "### Claude's response"
 LEGACY_MARK = f"</details>\n\n{RESPONSE_HEADING}\n\n"
@@ -125,20 +126,19 @@ def show_command(cmd: list[str], wt: Path, prompt_file: Path) -> str:
 def latest_response(rounds: list[dict[str, Any]]) -> tuple[int, str | None]:
     """(the latest recorded round's number, its "Claude's response") for the next round's prompt.
 
-    `rounds` are the PR's recorded `pr-review` rounds, oldest first, each with its `verdict` and comment
-    `body`. The response is what follows `RESPONSE_MARK` (see `response_section`), so nothing quoted in the
-    report and no `<details>` block in the response itself is taken for it. A round that asked for changes
-    must carry one."""
+    `rounds` are the PR's recorded `pr-review` rounds, oldest first, each with its `verdict`, comment `body`
+    and marker's `response` attribute. A round marked `response=0` has none, whatever its report quotes; one
+    marked `response=1` is read after `RESPONSE_MARK`, where `response_section` puts it. A round that asked
+    for changes must carry one."""
     if not rounds:
         return 0, None
     last = rounds[-1]
-    body = last.get("body") or ""
+    body, has = last.get("body") or "", last.get("response")
     response, i = None, body.find(RESPONSE_MARK)
-    # the boundary counts where `response_section` puts it: right after the report, before the heading. A legacy
-    # round's response may mention the boundary's text; that mention is neither
-    if i >= 0 and body[:i].endswith("</details>\n\n") and body.startswith(f"{RESPONSE_MARK}\n{RESPONSE_HEADING}", i):
-        response = body[i + len(RESPONSE_MARK):].strip().removeprefix(RESPONSE_HEADING).strip() or None
-    elif LEGACY_MARK in body:
+    if has == "1":
+        if i >= 0 and body[:i].endswith("</details>\n\n") and body.startswith(f"{RESPONSE_MARK}\n{RESPONSE_HEADING}", i):
+            response = body[i + len(RESPONSE_MARK):].strip().removeprefix(RESPONSE_HEADING).strip() or None
+    elif has is None and LEGACY_MARK in body:     # recorded before the marker said
         response = body.split(LEGACY_MARK, 1)[1].strip() or None
     if response is None and last.get("verdict") == "changes":
         raise ReviewError(f"round {len(rounds)} asked for changes and recorded no response: Codex would never see "

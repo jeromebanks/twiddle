@@ -2534,7 +2534,8 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
             f"<details><summary>Codex's review</summary>\n\n{codex_review.unmarked(report).strip()}\n\n</details>")
     if response:
         body += codex_review.response_section(response)
-    comment = render_comment("pr-review", None, body, config, sha=pr["headRefOid"], verdict=verdict, round=str(rnd))
+    comment = render_comment("pr-review", None, body, config, sha=pr["headRefOid"], verdict=verdict, round=str(rnd),
+                             response="1" if response else "0")
     if len(comment) > COMMENT_LIMIT:
         raise SdlcError(f"the review comment is {len(comment)} characters, over GitHub's limit")
     if args.dry_run:
@@ -2610,8 +2611,8 @@ def command_codex_review(args: argparse.Namespace, config: dict[str, Any]) -> in
     git(["fetch", "origin", epic_branch(epic)], cwd=wt, check=False)
     if not git(["rev-parse", "--verify", "--quiet", base], cwd=wt, check=False):
         raise SdlcError(f"the worktree has no {base} to diff against: `git fetch origin {epic_branch(epic)}`")
-    rounds = [{"verdict": mk.get("verdict"), "body": c.get("body", "")} for mk, c in _marked(comments, trusted)
-              if mk.get("kind") == "pr-review"]
+    rounds = [{"verdict": mk.get("verdict"), "body": c.get("body", ""), "response": mk.get("response")}
+              for mk, c in _marked(comments, trusted) if mk.get("kind") == "pr-review"]
     prompt, files = codex_review.prepare_pr_round(pr, slice_issue, epic, rounds, out)
     cmd = codex_review.codex_command(settings, prompt)
     print(f"PR #{pr['number']} round {len(rounds) + 1} on {head[:12]}\n"

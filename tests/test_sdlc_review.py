@@ -554,26 +554,30 @@ def test_the_review_logic_lives_in_codex_review():
 
 
 def test_the_response_pr_review_records_is_the_one_the_next_round_reads(tmp_path, capsys):
-    # a response with a <details> block of its own, and a report quoting the heading
-    answer = "1. Rebutted: see the log.\n\n<details><summary>log</summary>\n\nx\n\n</details>\n\n2. Accepted."
-    report, resp = tmp_path / "codex.md", tmp_path / "response.md"
-    quoted = f"{codex_review.RESPONSE_MARK}\n{codex_review.RESPONSE_HEADING}\n\nnot a response"
-    report.write_text(f"HEAD: {HEAD}\n\n1. a fenced example:\n```\n</details>\n\n{quoted}\n```\n\nVERDICT: changes\n")
-    resp.write_text(answer)
-    bundle = tmp_path / "pr.json"
+    report, resp, bundle = tmp_path / "codex.md", tmp_path / "response.md", tmp_path / "pr.json"
     bundle.write_text(json.dumps({"pr": pr(), "pr_comments": [], "trusted": [OWNER]}))
-    assert sdlc.main(["pr-review", "50", "--report", str(report), "--response", str(resp), "--from-file", str(bundle),
-                      "--dry-run"]) == 0
-    body = capsys.readouterr().out
-    assert codex_review.latest_response([{"verdict": "changes", "body": body}]) == (1, answer)
-    resp.write_text(f"{answer}\n\nquoting {codex_review.RESPONSE_MARK} too")
-    assert sdlc.main(["pr-review", "50", "--report", str(report), "--response", str(resp), "--from-file", str(bundle),
-                      "--dry-run"]) == 0
-    assert codex_review.latest_response([{"verdict": "changes", "body": capsys.readouterr().out}])[1] \
-        == f"{answer}\n\nquoting  too"
-    assert sdlc.main(["pr-review", "50", "--report", str(report), "--from-file", str(bundle), "--dry-run"]) == 0
-    with pytest.raises(sdlc.SdlcError, match="recorded no response"):
-        codex_review.latest_response([{"verdict": "changes", "body": capsys.readouterr().out}])
-    # a round recorded before the boundary existed, whose response mentions it (PR #133's round 1)
+
+    def record(report_text, response=None):
+        """One round as `pr-review` records it, read back as `codex-review` reads it."""
+        report.write_text(f"HEAD: {HEAD}\n\n{report_text}\n\nVERDICT: changes\n")
+        extra = []
+        if response is not None:
+            resp.write_text(response)
+            extra = ["--response", str(resp)]
+        assert sdlc.main(["pr-review", "50", "--report", str(report), "--from-file", str(bundle), "--dry-run", *extra]) == 0
+        body = capsys.readouterr().out
+        mk = sdlc.parse_marker(body)
+        return codex_review.latest_response([{"verdict": mk["verdict"], "body": body, "response": mk.get("response")}])
+
+    # a report quoting both boundaries in a fenced example, a response with a <details> block of its own
+    quoting = (f"1. a fenced example:\n```\n{codex_review.LEGACY_MARK}not a response\n</details>\n\n"
+               f"{codex_review.RESPONSE_MARK}\n{codex_review.RESPONSE_HEADING}\n\nnor this\n```")
+    answer = "1. Rebutted: see the log.\n\n<details><summary>log</summary>\n\nx\n\n</details>\n\n2. Accepted."
+    assert record(quoting, answer) == (1, answer)
+    assert record(quoting, f"{answer}\n\nquoting {codex_review.RESPONSE_MARK} too")[1] == f"{answer}\n\nquoting  too"
+    for no_answer in (None, "  \n"):
+        with pytest.raises(sdlc.SdlcError, match="recorded no response"):
+            record(quoting, no_answer)
+    # a round recorded before the marker said (no `response` attribute), whose response mentions the boundary
     legacy = recorded(1, "changes", f"1. Accepted: write `{codex_review.RESPONSE_MARK}` first.\n2. Accepted.")["body"]
     assert codex_review.latest_response([{"verdict": "changes", "body": legacy}])[1].startswith("1. Accepted: write")
