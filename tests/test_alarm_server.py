@@ -524,6 +524,16 @@ def bandcamp_cdn():
                 except OSError:
                     CDN_HUNG_UP.set()
                 return
+            if self.path == "/stall":           # a first chunk, then nothing, for a long while
+                try:
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(MP3[:100])
+                    self.wfile.flush()
+                    time.sleep(5)
+                except OSError:
+                    pass
+                return
             if self.path == "/chunked":         # a chunk, then the next chunk's size a digit at a time
                 try:
                     self.wfile.write(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
@@ -655,6 +665,20 @@ def test_an_upstream_with_an_empty_body_is_a_502_with_no_span(sounds, bandcamp_c
     try:
         assert get(s, path_for(), method)[0] == 502
         assert journal() == []
+    finally:
+        s.stop()
+
+
+def test_an_upstream_that_goes_silent_after_its_first_chunk_hits_the_idle_limit_not_max_s(
+        sounds, bandcamp_cdn, monkeypatch):
+    monkeypatch.setattr(server, "UPSTREAM_S", 0.3)
+    s = agent(sounds, lambda t: f"{bandcamp_cdn}/stall", max_s=600)
+    try:
+        t0 = time.monotonic()
+        status, body = get(s, path_for())
+        assert status == 200 and body == MP3[:100]
+        assert time.monotonic() - t0 < 2
+        wait_for(lambda: len(journal()) == 2, "the span to close")
     finally:
         s.stop()
 

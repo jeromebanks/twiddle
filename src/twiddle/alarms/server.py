@@ -366,7 +366,7 @@ class AlarmServer:
                 conn.sendall(chunk)
                 if (left := deadline - time.monotonic()) <= 0:
                     return
-                _bound(upstream, left)
+                _bound(upstream, min(UPSTREAM_S, left))   # still an idle limit too
                 chunk = _read(upstream, CHUNK)
         finally:
             cut.cancel()
