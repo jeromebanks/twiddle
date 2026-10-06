@@ -1,8 +1,12 @@
 # The Codex milestone-review prompt
 
-Fill the `<...>` placeholders and pass the text below the line to `codex exec`
-as one argument. Run it from the epic's worktree, `.worktrees/epic-N`, which
-`sync` leaves at the head that will ship.
+`uv run python tools/sdlc.py codex-review --milestone N` fills this and runs it from the
+epic's worktree, `.worktrees/epic-N`, which `sync` leaves at the head that will ship:
+the text below the line, `<N>`, `<MILESTONE_FILE>`, `<SLICES>`, `<DEFERRED_SLICES>` and
+`<RESPONSE_FILE>` replaced, the `<DEFERRED>` bullet kept only when slices merged without
+a review of their own, and the `<ROUND2>` bullet only from round 2 on. Don't fill it by
+hand. The tool checks the worktree's HEAD itself and writes the report's `HEAD:` line,
+so the prompt doesn't ask Codex for it.
 
 ---
 
@@ -13,22 +17,18 @@ Every slice in it was reviewed on its own already, except any listed below as
 deferred: look for what only shows up when they are put together. Don't assume any claim in the commits or the issues
 is true.
 
-First, run `git rev-parse HEAD` and print the result on a line of its own, exactly:
-`HEAD: <the 40-character sha>`
-
-Then read:
+Read:
 - what the milestone promised: `<MILESTONE_FILE>` (its demo steps, and each slice's
   Outcome and Acceptance criteria);
-- the slices it is made of: <SLICES, e.g. "#28 T1.1 (PR #55), #29 T1.2 (PR #56)">;
+- the slices it is made of, each with its squash commit on `epic/<N>` and its issue's brief: <SLICES>;
 - the change: `git diff origin/main...HEAD` and `git log --oneline origin/main..HEAD`;
 - `CLAUDE.md`, especially the read-only vs writing table;
-- <DEFERRED, only when some slices skipped their own review (`demo-status` lists them as
-  "Codex review owed"): "These slices merged without a review of their own: <KEY (#issue,
-  squash sha), ...>. This is their first review. For each, read `git show <sha>` and its
-  issue's Acceptance criteria and Non-goals (`<SLICE_FILES>`), and review it as closely as
-  a pull request: correctness, the tests, and the safety rules below.">
-- <ROUND 2+: the answer to the previous round: `<RESPONSE_FILE>`. Where a finding
-  was rebutted, decide whether the rebuttal holds.>
+- <DEFERRED>these slices merged without a review of their own: <DEFERRED_SLICES>. This is
+  their first review. For each, read `git show` of its squash commit and its brief's
+  Acceptance criteria and Non-goals, and review it as closely as a pull request:
+  correctness, the tests, and the safety rules below.</DEFERRED>
+- <ROUND2>the answer to the previous round: `<RESPONSE_FILE>`. Where a finding
+  was rebutted, decide whether the rebuttal holds.</ROUND2>
 
 Do not modify anything, and do not run the full test suite: a passing run on
 this head is recorded on the epic separately.

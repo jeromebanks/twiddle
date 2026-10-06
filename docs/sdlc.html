@@ -219,7 +219,7 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <td>A revision is posted. The poster replies <code>/approve</code>, <code>/changes …</code>, or just comments. Each revision spends a round, up to <code>max_rounds</code>.</td>
 <td><code>record_approval</code> or <code>respond_to_reply</code> → <code>/triage-issue N</code></td></tr>
 <tr><td><span class="chip">sdlc:approved</span></td><td class="turn agent">agent</td>
-<td>The approved PRD is merged into <code>docs/prd/</code>. The agent plans the work as subtasks and one-session slices, grouped into milestones, each rated for complexity. Codex reviews the plan round by round until it approves. The poster isn't asked to review it.</td>
+<td>The approved PRD is merged into <code>docs/prd/</code>. The agent plans the work as subtasks and one-session slices, grouped into milestones, each rated for complexity. Codex reviews the plan round by round until it approves (<code>codex-review --plan N</code>, against the approved revision). The poster isn't asked to review it.</td>
 <td><code>plan</code>, <code>continue_plan</code>, <code>create_plan_issues</code>, <code>ask_poster</code> → <code>/plan-issue N</code> (<code>reconcile_label</code> when a maintainer ticked the label by hand)</td></tr>
 <tr><td><span class="chip">sdlc:planned</span></td><td class="turn agent">agent</td>
 <td><code>plan-create</code> has made the first milestone's issues and the branch <code>epic/N</code>.</td>
@@ -300,7 +300,8 @@ nothing fires on a real speaker.</li>
 <li><strong>Review.</strong> Codex reviews that exact head. <code>codex-review --pr PR</code> runs each round.
 It fills the prompt and checks that the worktree is clean and on the PR's head, before and after the run. It uses the model,
 effort, sandbox and timeout from the <code>codex</code> section of <code>.sdlc/config.json</code>, never the user's own Codex
-config. It writes the report's <code>HEAD:</code> line itself and retries once when there's no verdict. Each round is
+config. It writes the report's <code>HEAD:</code> line itself and retries once when there's no verdict. The same command
+runs the plan's review (<code>--plan N</code>) and the milestone's (<code>--milestone N</code>): it is the only way a review is run. Each round is
 recorded with <code>pr-review</code> <em>before</em> any fix is pushed. Fixing or rebutting continues until Codex approves the current head. After
 <code>max_pr_rounds</code> (5 by default) rounds asking for changes the slice escalates. If it was built on a cheaper model,
 it's retried once on the strongest.

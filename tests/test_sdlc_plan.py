@@ -523,3 +523,165 @@ def test_a_milestone_needs_units_of_work():
     plan = two_milestones()
     plan["subtasks"] = [{**t, "milestone": "M2"} for t in plan["subtasks"]]
     assert "milestone M1 has no units of work: give it some, or drop it" in sdlc.validate_plan(plan)
+
+
+# --- codex-review --plan: Codex on the posted revision, held to the approved one --------------------------
+
+import re  # noqa: E402
+import subprocess  # noqa: E402
+
+from tools import codex_review  # noqa: E402
+from tests.fake_codex import APPROVES, NO_VERDICT, QUICK, SETTINGS, SLOW, calls, install, no_real_codex_home  # noqa: E402,F401
+
+DOC_URL = "https://github.com/o/r/issues/12#issuecomment-{}"
+
+
+def doc(rev, ts, cid, text="## Acceptance criteria\n\n1. alarms are listed"):
+    c = agent("prd", rev, ts, f"# PRD rev {rev}\n\n{text}")
+    c["id"], c["url"] = cid, DOC_URL.format(cid)
+    return c
+
+
+def git_(*args, cwd):
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+
+
+class PlanReview:
+    """A primary checkout whose origin/main may hold docs/prd/12-*.md, the fake `codex`, and the issue's bundle."""
+
+    def __init__(self, tmp_path, monkeypatch, docs=None, plan=(APPROVES,), settings=SETTINGS):
+        self.tmp, self.root = tmp_path, tmp_path / "primary"
+        self.log, _, _ = install(tmp_path, monkeypatch, plan)
+        for k in ("AUTHOR", "COMMITTER"):
+            monkeypatch.setenv(f"GIT_{k}_NAME", "t")
+            monkeypatch.setenv(f"GIT_{k}_EMAIL", "t@example.invalid")
+        self.root.mkdir()
+        git_("init", "-q", cwd=self.root)
+        (self.root / "CLAUDE.md").write_text("the repo\n")
+        for name, text in (docs or {}).items():
+            (self.root / "docs" / "prd").mkdir(parents=True, exist_ok=True)
+            (self.root / "docs" / "prd" / name).write_text(text)
+        git_("add", ".", cwd=self.root)
+        git_("commit", "-qm", "main", cwd=self.root)
+        git_("update-ref", "refs/remotes/origin/main", "HEAD", cwd=self.root)
+        self.main = git_("rev-parse", "HEAD", cwd=self.root)
+        monkeypatch.setattr(sdlc, "primary_root", lambda: self.root)
+        monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("codex-review --from-file must not call gh"))
+        self.config = tmp_path / "config.json"
+        self.config.write_text(json.dumps({**CONFIG, "codex": settings}))
+        self.out = tmp_path / "scratch"
+
+    def run(self, comments, *extra, labels=("sdlc:approved",)):
+        return sdlc.main(["--config", str(self.config), "codex-review", "--plan", "12", "--out", str(self.out),
+                          "--from-file", _bundle(self.tmp, comments, labels), *extra])
+
+    def prompt(self):
+        return (self.out / "prompt.md").read_text()
+
+
+APPROVED_555 = [doc(1, 1, 444), agent("approval", 1, 2, by=POSTER), doc(2, 3, 555), agent("approval", 2, 4, by=POSTER)]
+POSTED = [plan_comment(make_plan(), 1, 5)]
+
+
+def test_a_plan_round_reviews_the_posted_json_in_a_scratch_checkout_of_main(tmp_path, monkeypatch, capsys):
+    r = PlanReview(tmp_path, monkeypatch)                      # no docs/prd/12-*.md merged yet
+    assert r.run(APPROVED_555 + POSTED) == 0
+    prompt, saved = r.prompt(), (r.out / "codex.md").read_text()
+    # the posted plan, not a local file, and the approved comment written out, named in the prompt
+    assert json.loads((r.out / "plan.json").read_text()) == make_plan() and f"`{r.out / 'plan.json'}`" in prompt
+    assert f"`{r.out / 'requirements.md'}`" in prompt and "# PRD rev 2" in (r.out / "requirements.md").read_text()
+    assert "sdlc:v1" not in (r.out / "requirements.md").read_text()
+    assert "This is round 1." in prompt and "planner's answer" not in prompt and not re.search(r"<[A-Za-z/]", prompt)
+    (call,) = calls(r.log)
+    # run in a checkout of origin/main made for the round, on the isolated CODEX_HOME, and removed after
+    assert call["cwd"] == str((r.out / "main").resolve()) and call["argv"][-1] == prompt
+    assert call["codex_home"] == str(r.out / "codex-home") and call["entries"] == {"auth.json": False, "config.toml": False}
+    assert call["config"] == codex_review.config_toml(SETTINGS)
+    assert not (r.out / "main").exists() and str(r.out / "main") not in git_("worktree", "list", cwd=r.root)
+    assert saved.startswith(f"HEAD: {r.main}\nModel: test-model\n") and saved.rstrip().endswith("VERDICT: approve")
+    # plan-review takes the plan the command wrote, and shows what the round ran under
+    capsys.readouterr()
+    assert sdlc.main(["plan-review", "12", "--plan", str(r.out / "plan.json"), "--report", str(r.out / "codex.md"),
+                      "--from-file", _bundle(tmp_path, APPROVED_555 + POSTED), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "verdict=approve round=1 response=0 model=test-model effort=low codex=9.9.9-test prompt=" in out
+    assert "Ran `test-model` at effort `low`, codex `9.9.9-test`" in out
+
+
+@pytest.mark.parametrize("docs, names", [
+    ({"12-alarms.md": f"# PRD (#12)\n\nApproved revision 2 ([PRD]({DOC_URL.format(555)})).\n\n## Goals\n"}, "file"),
+    # an older revision's doc, and one whose anchor only starts with the approved id: the comment is used
+    ({"12-alarms.md": f"# PRD (#12)\n\nApproved revision 1 ([PRD]({DOC_URL.format(444)})).\n\n## Goals\n"}, "comment"),
+    ({"12-alarms.md": f"# PRD (#12)\n\nApproved revision 9 ([PRD]({DOC_URL.format(5550)})).\n\n## Goals\n"}, "comment"),
+    # the link has to be in the header, not quoted further down
+    ({"12-alarms.md": f"# PRD (#12)\n\nApproved revision 1.\n\n## Notes\n\nsee {DOC_URL.format(555)}\n"}, "comment"),
+])
+def test_the_requirements_are_the_approved_revision(tmp_path, monkeypatch, capsys, docs, names):
+    r = PlanReview(tmp_path, monkeypatch, docs=docs)
+    assert r.run(APPROVED_555 + POSTED, "--dry-run") == 0
+    prompt, out = r.prompt(), capsys.readouterr().out
+    if names == "file":
+        assert "the approved PRD it must deliver: `docs/prd/12-alarms.md`" in prompt
+        assert "links comment 555" in out and not (r.out / "requirements.md").exists()
+    else:
+        assert f"`{r.out / 'requirements.md'}`" in prompt and "# PRD rev 2" in (r.out / "requirements.md").read_text()
+        assert "the approved comment 555" in out
+    assert calls(r.log) == [] and not (r.out / "main").exists()      # --dry-run runs nothing, makes no checkout
+
+
+def test_round_two_takes_the_last_rounds_response_even_across_a_new_revision(tmp_path, monkeypatch, capsys):
+    r = PlanReview(tmp_path, monkeypatch)
+    body, extra = sdlc.review_body("**Round 1/3 — Codex: `changes`**", "Codex's review",
+                                   "1. T2 is too big\n\nVERDICT: changes", "1. Accepted: split T2 in rev 2.")
+    round1 = comment(OWNER, sdlc.render_comment("plan-review", 1, body, CONFIG, verdict="changes", round="1", **extra), 6)
+    rev2 = plan_comment(two_milestones(), 2, 7)
+    assert r.run(APPROVED_555 + POSTED + [round1, rev2], "--dry-run") == 0
+    prompt = r.prompt()
+    resp = r.out / "response-round-1.md"
+    assert "This is round 2." in prompt and f"`{resp}`" in prompt and "planner's answer" in prompt
+    assert resp.read_text().strip() == "1. Accepted: split T2 in rev 2."
+    assert json.loads((r.out / "plan.json").read_text()) == two_milestones()       # the latest revision
+    # a round that asked for changes with no response recorded: refused
+    bare = agent("plan-review", 1, 6, "**Round 1**\n\n<details><summary>x</summary>\n\nr\n\n</details>",
+                 verdict="changes", round="1", response="0")
+    assert r.run(APPROVED_555 + POSTED + [bare, rev2], "--dry-run") == 1
+    assert "plan-review --response" in capsys.readouterr().err
+
+
+def test_no_verdict_is_retried_once_and_a_plan_not_under_review_is_refused(tmp_path, monkeypatch, capsys):
+    r = PlanReview(tmp_path, monkeypatch, plan=(NO_VERDICT, APPROVES))
+    assert r.run(APPROVED_555 + POSTED) == 0 and len(calls(r.log)) == 2
+    r.log.unlink()
+    (tmp_path / "plan.json").write_text(json.dumps([NO_VERDICT]))
+    assert r.run(APPROVED_555 + POSTED) == codex_review.UNAVAILABLE and len(calls(r.log)) == 2
+    assert not (r.out / "main").exists()
+    # an epic being built has no plan under review: a dry run says so, a real run refuses before Codex
+    r.log.unlink()
+    built = APPROVED_555 + POSTED + [review(1, 6, "approve"), agent("plan-created", 1, 7)]
+    assert r.run(built, "--dry-run", labels=("sdlc:in-progress",)) == 0
+    assert "no plan under review" in capsys.readouterr().out
+    assert r.run(built, labels=("sdlc:in-progress",)) == 1 and calls(r.log) == []
+    assert "no plan under review" in capsys.readouterr().err
+    # nothing approved: nothing to hold the plan to
+    assert r.run([doc(1, 1, 444)] + POSTED, "--dry-run") == 1
+    assert "no approved" in capsys.readouterr().err
+
+
+def test_a_plan_round_that_times_out_is_retried_once(tmp_path, monkeypatch):
+    r = PlanReview(tmp_path, monkeypatch, plan=(SLOW, APPROVES), settings=QUICK)
+    assert r.run(APPROVED_555 + POSTED) == 0 and len(calls(r.log)) == 2
+    assert "timed out after 1s" in (r.out / "codex.err").read_text() and (r.out / "codex.md").exists()
+
+
+def test_a_directory_in_the_checkouts_place_is_never_deleted(tmp_path, monkeypatch, capsys):
+    r = PlanReview(tmp_path, monkeypatch)
+    (r.out / "main").mkdir(parents=True)
+    (r.out / "main" / "keep.txt").write_text("someone's")
+    assert r.run(APPROVED_555 + POSTED) == 1 and calls(r.log) == []
+    assert "isn't a checkout this command made" in capsys.readouterr().err
+    assert (r.out / "main" / "keep.txt").read_text() == "someone's"
+    # one a cut-short run left registered is replaced
+    (r.out / "main" / "keep.txt").unlink()
+    (r.out / "main").rmdir()
+    git_("worktree", "add", "-q", "--detach", str(r.out / "main"), r.main, cwd=r.root)
+    assert r.run(APPROVED_555 + POSTED) == 0 and not (r.out / "main").exists()

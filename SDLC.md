@@ -150,6 +150,8 @@ Instead the agents review it:
 
 1. The planner checks it with its `advisor`.
 2. **Codex** reviews it read-only, ending in `VERDICT: approve` or `VERDICT: changes`.
+   `codex-review --plan N` runs each round on the revision as posted, held to the currently
+   approved PRD or diagnosis, in a scratch checkout of `origin/main` it makes and removes.
 3. The planner accepts or rebuts each finding, and each round is posted as a
    `plan-review` comment.
 4. When Codex approves the latest revision, that's consensus, and `plan-create`
@@ -216,8 +218,15 @@ several can run at once. A slice's state is read off GitHub:
 
 ### Codex reviews
 
+**`codex-review` is the only way a review is run**: `--pr PR` for a slice, `--plan N` for a plan
+revision, `--milestone N` for a milestone's diff. It fills the repo's prompt, runs Codex on the
+repo's settings, checks the commit it reads and stamps the report. Never Codex's own
+`codex exec review`, the Codex plugin for Claude Code, or a `codex exec` run by hand: each brings
+instructions or settings the repo doesn't own, and nothing on the record would show it.
+
 Codex reviews twice: each slice on its PR, and each milestone's whole diff before it ships
-(`ship-review`). A slice's own review moves to its milestone's in two cases:
+(`codex-review --milestone N`, recorded with `ship-review`). A slice's own review moves to its
+milestone's in two cases:
 
 - **Routine slices.** `.sdlc/config.json`'s `slice_review` maps a complexity to `slice` or
   `milestone`. Here `routine` is `milestone`; `judgment`, `novel` and unrated slices are
@@ -268,7 +277,7 @@ And the tool only sets things up; the real binary decides what it loads. That is
 checked by hand once, in the demo of #100's first milestone, from a real run's session log.
 
 The saved report's header (`HEAD:`, `Model:`, `Effort:`, `Codex:`, `Prompt-SHA256:`) is written
-by the tool. `pr-review` copies it into the round's comment and its marker. Only the lines
+by the tool. `pr-review`, `plan-review` and `ship-review` copy it into the round's comment and its marker. Only the lines
 directly under `HEAD:` count, so a report can't claim a model of its own. A report saved before
 the header existed is still recorded, without it.
 
@@ -289,9 +298,10 @@ makes it work in the worktree by writing every path out in full (`work-slice` §
 | Worktree | Made by | For | Removed by |
 |---|---|---|---|
 | `.worktrees/slice-S`, on `slice/S` from `origin/epic/N` | `claim S` | building one slice | `cleanup S` |
-| `.worktrees/epic-N`, detached at `origin/epic/N` | `sync N`, `revert-slice S` | merging `main` in, reverting a slice, Codex's milestone review | nobody: reset to `origin/epic/N` before each use |
+| `.worktrees/epic-N`, detached at `origin/epic/N` | `sync N`, `revert-slice S` | merging `main` in, reverting a slice, Codex's milestone review (`codex-review --milestone N` reads it as `sync` left it: it never resets it, and refuses it dirty or behind `epic/N`) | nobody: `sync` and `revert-slice` reset it to `origin/epic/N` before each use |
 | `.worktrees/sdlc-demos`, on `sdlc-demos` | `demo-post` | committing a demo's pictures | nobody: kept |
 | `.worktrees/verify-main-N`, detached at `origin/main` | `verify-main N` | the suite on `main` after an untested release | `verify-main N`, when it's done |
+| `<out>/main`, detached at `origin/main` | `codex-review --plan N` | Codex's plan review reads the repo there | `codex-review --plan N`, when the round ends (a left-over one is replaced on the next run) |
 | `<scratchpad>/before` and `after`, detached | `milestone-demo` | the pictures of `main` and `epic/N` | the skill (`git worktree remove`) |
 | a throwaway worktree on `prd/N`, from `origin/main` | `triage-issue` | the approved PRD's one-file PR | the skill |
 
