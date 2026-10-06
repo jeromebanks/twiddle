@@ -279,6 +279,7 @@ def test_ctrl_c_in_a_create_or_updates_read_back_journals_written(fake, monkeypa
         write(v)
     [rec] = journal()
     assert rec["written"] is True
+    assert rec["alarm_id"] == ("200" if rec["action"] == "alarm_create" else "1")
 
 
 def test_ctrl_c_while_sending_a_write_journals_it_as_unknown(fake, monkeypatch):
