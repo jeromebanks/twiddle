@@ -57,11 +57,17 @@ resolves everything and prints the plan without listening or journalling.
 its port. Install and uninstall take `--dry-run` and are journalled
 (`alarm_serve_install`/`alarm_serve_uninstall`).
 
+`twiddle alarm` with no verb opens the list as a TUI (`alarms/app.py`):
+browsing and `r` are read-only; space (enable/disable) and `d` (delete, asked
+twice) WRITE through the same journalled `clock` writes as the verbs above.
+`twiddle alarm --dry-run` makes them say what they would do and write nothing.
+
 Follows the rest of the package: the `ok`/`error` envelope, `--json` anywhere.
 """
 from __future__ import annotations
 
 import argparse
+import functools
 import re
 import signal
 import sys
@@ -1259,8 +1265,17 @@ def cmd_snooze(args):
 
 def register(sub, parents=None):
     kw = {"parents": parents} if parents else {}
-    p = sub.add_parser(**kw, name="alarm", help="the household's Sonos alarms")
-    asub = p.add_subparsers(dest="alarm_cmd", required=True, metavar="<command>")
+    p = sub.add_parser(**kw, name="alarm",
+                       help="the household's Sonos alarms; with no command, the list as a "
+                            "TUI (space on/off and d delete WRITE)")
+    # Their own dests: a verb's `--dry-run`/`--anchor` defaults would
+    # otherwise overwrite these (`_with_alarm_flags` hands them on).
+    p.add_argument("--anchor", dest="alarm_anchor", default=None, metavar="IP",
+                   help="speaker IP to query instead of SSDP discovery")
+    p.add_argument("--dry-run", dest="alarm_dry_run", action="store_true",
+                   help="the TUI's writes (and a verb's) say what they would do, and write nothing")
+    p.set_defaults(func=cmd_tui)
+    asub = p.add_subparsers(dest="alarm_cmd", metavar="<command>")
     ls = asub.add_parser(**kw, name="list",
                          help="every alarm, grouped by room (read-only)")
     ls.add_argument("--anchor", default=None,
@@ -1371,6 +1386,32 @@ def register(sub, parents=None):
                        help="speaker IP to query instead of SSDP discovery")
         add_write_args(w)
         w.set_defaults(func=fn)
+
+    for verb in asub.choices.values():
+        verb.set_defaults(func=_with_alarm_flags(verb.get_default("func")))
+
+
+def _with_alarm_flags(fn):
+    """`alarm --dry-run <verb>` and `alarm --anchor IP <verb>` mean what they
+    say: either one, given before the verb, holds for it too."""
+    @functools.wraps(fn)
+    def run(args):
+        if getattr(args, "alarm_dry_run", False):
+            args.dry_run = True
+        if getattr(args, "alarm_anchor", None) and not getattr(args, "anchor", None):
+            args.anchor = args.alarm_anchor
+        return fn(args)
+    return run
+
+
+def cmd_tui(args):
+    """`twiddle alarm` with no verb: the list as a TUI (`alarms/app.py`).
+    Browsing is read-only; space and d write, unless `--dry-run`."""
+    # Imported here so no other command pays for loading Textual.
+    from .alarms.app import AlarmApp
+    args.anchor = args.alarm_anchor
+    AlarmApp(household=lambda: _household(args), dry_run=args.alarm_dry_run).run()
+    return 0
 
 
 def _bound(text: str) -> float:

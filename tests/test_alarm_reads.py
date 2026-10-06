@@ -29,6 +29,9 @@ ALLOWLIST = {
         "`alarm list`: shows every readable alarm and names the unreadable",
     ("alarm_cli", "cmd_status"):
         "`alarm status`: only names an alarm already going off; writes nothing",
+    ("alarms.app", "AlarmApp._read"):
+        "the `twiddle alarm` TUI's list: shows every readable alarm and names the "
+        "unreadable; its space and d writes read again strictly (`AlarmApp._do`)",
     ("monitor", "Monitor._check_alarms"):
         "the watcher: records what it saw, never writes to a speaker",
     ("alarms.sources.spotify", "_household_account"):

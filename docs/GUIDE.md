@@ -221,6 +221,32 @@ snapshot taken before the delete brings it back as well. Every field
 Spotify alarm's `<Content>` child (see above) and any attribute twiddle's
 model doesn't know. `recreate` returns a list of what it couldn't bring back.
 
+The same list, and the same two writes, as a TUI:
+
+```bash
+uv run twiddle alarm --dry-run      # browse; space and d say what they would do, write nothing
+uv run twiddle alarm                # space and d WRITE
+```
+
+`twiddle alarm` with no verb shows every room in the household, each with its
+alarms in time order (a room with none says `(no alarms)`): on/off (● ○),
+time, days, the source's title (⌁ when it needs this Mac when it goes off),
+volume, auto-stop and play mode (left out when normal). An alarm aimed at a
+bonded follower or a vanished speaker is under its own heading that says so,
+and unreadable alarms are named apart, as in `alarm list`. The footer says
+when the next one goes off. Opening it, browsing and `r` (read again) write
+nothing.
+
+`space` switches the highlighted alarm on or off and `d` deletes it, asking
+twice (`y`, then its ID typed out; anything else keeps it). Each goes through
+the same journalled `UpdateAlarm`/`DestroyAlarm` as `alarm enable`/`disable`/`rm`,
+with the same checks: the list is read again strictly first, so an unreadable
+alarm refuses the write, and if the list changed since it was shown (the
+Sonos app?) nothing is written and the list is shown again. `--dry-run` (also
+`--anchor IP`) goes before any verb as well: `twiddle alarm --dry-run rm 34`
+is a dry run. New, edit and try-now in the TUI are still to come; until then
+they are `alarm add`, `alarm edit` and `alarm try`.
+
 ```bash
 uv run twiddle alarm add --room roam --time 07:15 --days weekdays --dry-run   # the alarm it would create
 uv run twiddle alarm add --room roam --time 07:15 --days weekdays --volume 20 --duration 1h
