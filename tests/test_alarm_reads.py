@@ -56,12 +56,27 @@ class _Reads(ast.NodeVisitor):
         self.names: list[str] = []
         self.found: list[tuple[str, ast.expr]] = []
 
-    def _scope(self, node):
-        self.names.append(getattr(node, "name", "<lambda>"))
-        self.generic_visit(node)
+    def _scope(self, name, outside, body):
+        # Decorators, defaults, annotations and bases run in the enclosing
+        # scope; only the body belongs to `name`.
+        for n in outside:
+            self.visit(n)
+        self.names.append(name)
+        for n in body if isinstance(body, list) else [body]:
+            self.visit(n)
         self.names.pop()
 
-    visit_FunctionDef = visit_AsyncFunctionDef = visit_ClassDef = visit_Lambda = _scope
+    def visit_FunctionDef(self, node):
+        outside = [*node.decorator_list, node.args, *filter(None, [node.returns])]
+        self._scope(node.name, outside, node.body)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node):
+        self._scope(node.name, [*node.decorator_list, *node.bases, *node.keywords], node.body)
+
+    def visit_Lambda(self, node):
+        self._scope("<lambda>", [node.args], node.body)
 
     def visit_Call(self, node):
         where = ".".join(self.names) or MODULE
@@ -142,11 +157,16 @@ def test_tolerant_is_keyword_only_so_the_scan_sees_it():
     ("alarm_cli", "def cmd_list(ip):\n    f = lambda: clock.list_alarms(ip, tolerant=True)\n"),
     ("alarm_cli", "def cmd_list(ip):\n    clock.list_alarms(ip, **{'tolerant': True})\n"),
     ("alarm_cli", "def cmd_list(ip, opts):\n    clock.list_alarms(ip, **opts)\n"),
+    ("alarm_cli", "def cmd_list(found=clock.list_alarms(IP, tolerant=True)):\n    pass\n"),
+    ("alarm_cli", "@cache(clock.list_alarms(IP, tolerant=True))\ndef cmd_list(ip):\n    pass\n"),
+    ("alarm_cli", "def cmd_list(ip) -> clock.list_alarms(IP, tolerant=True):\n    pass\n"),
+    ("alarm_cli", "class Monitor(base(clock.list_alarms(IP, tolerant=True))):\n    pass\n"),
 ], ids=["new module", "allowlisted name, other module", "async def", "module level",
         "class method", "nested in a view", "async nested in a view", "function, not the method",
         "the parser, truthy", "a flag", "a flag in a view", "forwarding, other clock function",
         "list_alarms, another name",
-        "a lambda in a view", "a spread dict", "a spread into the reader"])
+        "a lambda in a view", "a spread dict", "a spread into the reader",
+        "a view's default", "a view's decorator", "a view's annotation", "a class's base"])
 def test_the_checker_fails(module, source):
     assert violations(source, module)
 
