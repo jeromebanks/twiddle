@@ -108,6 +108,27 @@ access — the same request succeeds from a terminal. Fix is
 *System Settings → Privacy & Security → Local Network*, enable the `uv` entry;
 launchd retries every 60s and recovers on its own.
 
+### The alarm server agent
+
+`alarm serve` can run as a second launchd agent, `local.twiddle.alarmserver`, so
+a Mac-hosted alarm (a Bandcamp track, a sound, a file) has something to answer
+when it fires with no terminal open:
+
+```bash
+uv run twiddle alarm serve --install --dir ~/alarm-sounds [--room "Living Room"] [--dry-run]
+uv run twiddle alarm serve --status       # read-only
+uv run twiddle alarm serve --uninstall
+```
+
+It is restarted by launchd like the monitor, with its own `logs/alarm_server.err`.
+`--status` reports **alive** when something answers on the server's port (a
+local connect that sends nothing), else **STALE**, and exits 1. Install and
+uninstall are journalled (`alarm_serve_install`/`alarm_serve_uninstall`).
+
+It has the same **Local Network** trap: if `--status` says STALE and
+`alarm_server.err` shows "No route to host", enable the `uv` entry in *System
+Settings → Privacy & Security → Local Network*; launchd retries every 60s.
+
 **Known gap:** the daemon subscribes AVTransport on the anchor only, so it
 records no transport state for the other speakers: "what was playing, and
 when" can't be recovered for them after the fact.
@@ -156,11 +177,11 @@ Under `src/twiddle/`:
 | `topology.py` | groups, bonds, satellites, `VanishedDevices` |
 | `monitor.py` | GENA subscriptions + polling; JSONL; rotation |
 | `report.py` | findings, severities, hardware-vs-setup discriminators |
-| `daemon.py` | launchd agent install/status |
+| `daemon.py` | launchd agents install/status: the monitor and the alarm server's (`ALARM_LABEL`) |
 | `household.py` | speakers, groups, name resolution, snapshot/restore |
 | `control_cli.py` | the room-naming control commands |
 | `alarms/` | Sonos alarms, no UI. `model.py` = an `Alarm` that round-trips every ListAlarms field (program URI/metadata opaque, unknown attributes and children kept) + `Recurrence` (ONCE/DAILY/WEEKDAYS/WEEKENDS/ON_<days>); `clock.py` = the `AlarmClock` reads (`ListAlarms`, `GetTimeNow`, `GetFormat`) with pure parsers beside them, and the writes (`create_alarm`/`update_alarm`/`destroy_alarm`: refused with `VersionChanged` if the list moved since it was read, journalled before and after, **write**); `deleted`/`recreate` = a deleted alarm back from its `alarm_destroy` journal entry (**recreate writes**); and the `AVTransport` side: `running_alarm` (`GetRunningAlarmProperties`; UPnP 800 = none), `last_change` (one GENA event: `AlarmRunning`/`SnoozeRunning`), `alarm_now`, and `run_alarm`/`snooze_alarm`/`stop_alarm` (journalled, **write**); `server.py` = `alarm serve`'s HTTP server (audio from this Mac, one bounded span per serve, `close_stale`); `baseline.py` = `AlarmSnapshot` (the raw `CurrentAlarmList`), `plan` (alarms compared by `key`, not ID) and `restore` (**writes**); `sources/` = what an alarm plays: a `Source` (choices, build URI + DIDL, `needs_mac`, `fallback`, `owns`, `describe`, `sound_source`) per module and a registry the CLI reads at run time (`chime.py`, `station.py` = dial's catalog via `play.radio_uri`, `bandcamp.py` = a track served by the Mac's agent: the URI holds a token, never an expiring Bandcamp URL; `sound.py` = five standard alarm sounds (four generated, one a CC0 recording), from `alarms/sounds/` (licences in its `LICENSES.md`, regenerate with `tools/make_alarm_sounds.py`), served at `/sound/<name>.mp3`); a new source is one module + `register()`, no CLI edit; `soundsource.py` = where an alarm's sound comes from, from its `ProgramURI` alone (a registered source first, then the observed Sonos shapes: scheme + `sid` + item prefix, exactly; else `unknown`) |
-| `alarm_cli.py` | `alarm list`, `alarm snapshot` (read-only): every alarm under its room's name, bonded-follower / vanished / unknown rooms labelled, next fire in the household's time; `alarm restore [--dry-run]`, `alarm enable/disable/rm <id> [--dry-run]`, `alarm add`, `alarm edit <id>`, `alarm try <id>`, `alarm stop/snooze --room` (**write**; `alarm status`, `alarm sources` read-only; `rm` asks twice; stop/snooze refuse when nothing is ringing; `add`/`edit` parse every field, and `room_target` = a room name to its primary unit's RoomUUID) |
+| `alarm_cli.py` | `alarm serve --install/--uninstall/--status` (the server as the launchd agent `daemon.ALARM_LABEL`; install/uninstall **write** a plist, `--status` read-only); `alarm list`, `alarm snapshot` (read-only): every alarm under its room's name, bonded-follower / vanished / unknown rooms labelled, next fire in the household's time; `alarm restore [--dry-run]`, `alarm enable/disable/rm <id> [--dry-run]`, `alarm add`, `alarm edit <id>`, `alarm try <id>`, `alarm stop/snooze --room` (**write**; `alarm status`, `alarm sources` read-only; `rm` asks twice; stop/snooze refuse when nothing is ringing; `add`/`edit` parse every field, and `room_target` = a room name to its primary unit's RoomUUID) |
 | `play.py` | HTTP file server + transport control (**writes**) |
 | `relay.py` | live audio -> paced PCM -> MP3 -> HTTP fan-out (no speaker writes) |
 | `relay_cli.py` | `relay doctor/login/measure/start` (**start writes**) |

@@ -51,6 +51,11 @@ Bandcamp tracks (a fresh stream URL per request), to the household's speakers
 file sent is a bounded span in the journal, and it closes the spans a crash of
 its own left open. Anything it can't serve is refused at once. `--dry-run`
 resolves everything and prints the plan without listening or journalling.
+`alarm serve --install --dir DIR` keeps that server running as a launchd agent
+(`daemon.ALARM_LABEL`), so a Mac-hosted alarm works with no terminal open;
+`--uninstall` removes it and `--status` (read-only) says whether it answers on
+its port. Install and uninstall take `--dry-run` and are journalled
+(`alarm_serve_install`/`alarm_serve_uninstall`).
 
 Follows the rest of the package: the `ok`/`error` envelope, `--json` anywhere.
 """
@@ -1001,8 +1006,90 @@ def cmd_try(args):
                 f"`twiddle alarm stop --room \"{about['room']}\"`")
 
 
+def _agent_journal(action: str, **extra) -> None:
+    play._journal(action, "", **extra)
+
+
+def _serve_status(args) -> int:
+    """Is the launchd agent up and answering? Read-only: a local connect to
+    the port, nothing sent, no span opened, no speaker touched."""
+    from . import daemon
+    project = Path(__file__).resolve().parents[2]
+    job = daemon.status(daemon.ALARM_LABEL)
+    alive = daemon.serving(args.port)
+    blocked = daemon.alarm_blocked_by_local_network(project, args.port)
+    about = {"job": job, "plist": str(daemon.plist_path(daemon.ALARM_LABEL)),
+             "port": args.port, "alive": alive, "stale": not alive,
+             "blocked_by_local_network": blocked}
+    human = (f"launchd job {daemon.ALARM_LABEL}: {job}\n"
+             f"plist: {about['plist']}\n"
+             f"server: {'alive' if alive else 'STALE'} "
+             f"(port {args.port} {'answers' if alive else 'does not answer'})")
+    if blocked:
+        human += "\n" + daemon.ALARM_LOCAL_NETWORK_HINT
+    emit(args, about, human)
+    return 0 if alive else 1
+
+
+def _serve_agent(args) -> int:
+    """`--install` / `--uninstall`: the launchd agent around `alarm serve`."""
+    from . import daemon
+    project = Path(__file__).resolve().parents[2]
+    path = daemon.plist_path(daemon.ALARM_LABEL)
+    dry = getattr(args, "dry_run", False)
+    if args.uninstall:
+        about = {"plist": str(path), "installed": path.exists()}
+        if dry:
+            return emit(args, about | {"would": "uninstall", "performed": False},
+                        f"[dry-run] would remove {path}")
+        removed = daemon.uninstall(daemon.ALARM_LABEL)
+        _agent_journal("alarm_serve_uninstall", removed=removed)
+        return emit(args, about | {"performed": True, "removed": removed},
+                    "Removed." if removed else "Was not installed.")
+    if not args.dir:
+        return fail(args, "--install needs --dir", "`--dir` names the folder to serve")
+    root = Path(args.dir).expanduser().resolve()
+    if not root.is_dir():
+        return fail(args, f"{root} is not a directory", "`--dir` names the folder to serve")
+    house, first, err = _anchor(args)
+    if err is not None:
+        return err
+    # Pinned into the plist: a mains-powered speaker, since a Roam asleep at
+    # 3am would leave the restarted agent unable to find the household.
+    ip = args.anchor or daemon.pick_anchor() or first
+    # Names are checked now so a typo fails here, not in a launchd restart loop.
+    for query in args.room or []:
+        try:
+            house.resolve(query)
+        except Ambiguous as exc:
+            return fail(args, str(exc), "be more specific", candidates=exc.candidates)
+        except NotFound as exc:
+            return fail(args, str(exc), "run `twiddle rooms` to list targets",
+                        known=exc.known)
+    about = {"plist": str(path), "dir": str(root), "port": args.port,
+             "max_s": args.max_s, "rooms": args.room or [], "anchor": ip}
+    if dry:
+        return emit(args, about | {"would": "install", "performed": False},
+                    f"[dry-run] would install {path}: serve {root} on port {args.port}")
+    installed = daemon.install_alarm(project, root, args.port, args.max_s,
+                                     args.room or [], ip or "")
+    _agent_journal("alarm_serve_install", dir=str(root), port=args.port)
+    return emit(args, about | {"performed": True},
+                f"Installed {installed}\n  serving {root} on port {args.port}, "
+                f"restarted by launchd if it exits, started again at login\n"
+                f"  check it: uv run twiddle alarm serve --status\n"
+                f"  if it never answers, see Local Network in CLAUDE.md §The daemon")
+
+
 def cmd_serve(args):
-    """Serve alarm audio from this Mac until stopped (foreground)."""
+    """Serve alarm audio from this Mac until stopped (foreground), or manage
+    the launchd agent that keeps it running."""
+    if args.status:
+        return _serve_status(args)
+    if args.install or args.uninstall:
+        return _serve_agent(args)
+    if not args.dir:
+        return fail(args, "--dir is required", "`--dir` names the folder to serve")
     root = Path(args.dir).expanduser()
     if not root.is_dir():
         return fail(args, f"{root} is not a directory", "`--dir` names the folder to serve")
@@ -1210,7 +1297,14 @@ def register(sub, parents=None):
 
     sv = asub.add_parser(**kw, name="serve",
                          help="serve alarm audio from this Mac, in the foreground")
-    sv.add_argument("--dir", required=True, help="the folder of audio files to serve")
+    sv.add_argument("--dir", default=None, help="the folder of audio files to serve")
+    mode = sv.add_mutually_exclusive_group()
+    mode.add_argument("--install", action="store_true",
+                      help="keep the server running as a launchd agent (WRITES a plist)")
+    mode.add_argument("--uninstall", action="store_true",
+                      help="remove that agent (WRITES)")
+    mode.add_argument("--status", action="store_true",
+                      help="is the agent's server answering (read-only)")
     sv.add_argument("--port", type=int, default=server.PORT,
                     help=f"port (default {server.PORT}: alarms store the URL)")
     sv.add_argument("--host", default="0.0.0.0",

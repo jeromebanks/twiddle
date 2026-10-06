@@ -16,11 +16,12 @@ import sys
 from pathlib import Path
 
 LABEL = "local.twiddle.monitor"
+ALARM_LABEL = "local.twiddle.alarmserver"
 AGENT_DIR = Path.home() / "Library" / "LaunchAgents"
 
 
-def plist_path() -> Path:
-    return AGENT_DIR / f"{LABEL}.plist"
+def plist_path(label: str = LABEL) -> Path:
+    return AGENT_DIR / f"{label}.plist"
 
 
 def build_plist(project: Path, interval: float, log: Path,
@@ -87,14 +88,18 @@ def pick_anchor() -> str:
 
 def install(project: Path, interval: float, log: Path, max_bytes: int,
             anchor: str = "") -> Path:
+    anchor = anchor or pick_anchor()
+    return _install(build_plist(project, interval, log, max_bytes, anchor),
+                    LABEL, project)
+
+
+def _install(plist: dict, label: str, project: Path) -> Path:
     AGENT_DIR.mkdir(parents=True, exist_ok=True)
     (project / "logs").mkdir(parents=True, exist_ok=True)
-    anchor = anchor or pick_anchor()
-    path = plist_path()
-    path.write_bytes(plistlib.dumps(
-        build_plist(project, interval, log, max_bytes, anchor)))
+    path = plist_path(label)
+    path.write_bytes(plistlib.dumps(plist))
     # bootout first so a re-install picks up the new plist.
-    subprocess.run(["launchctl", "bootout", f"gui/{_uid()}/{LABEL}"],
+    subprocess.run(["launchctl", "bootout", f"gui/{_uid()}/{label}"],
                    capture_output=True)
     r = subprocess.run(["launchctl", "bootstrap", f"gui/{_uid()}", str(path)],
                        capture_output=True, text=True)
@@ -103,10 +108,69 @@ def install(project: Path, interval: float, log: Path, max_bytes: int,
     return path
 
 
-def uninstall() -> bool:
-    subprocess.run(["launchctl", "bootout", f"gui/{_uid()}/{LABEL}"],
+def build_alarm_plist(project: Path, audio_dir: Path, port: int, max_s: float,
+                      rooms: list[str], anchor: str) -> dict:
+    """The agent that keeps `twiddle alarm serve` up, so a Mac-hosted alarm
+    (Bandcamp, a sound, a file) has something to answer when it fires hours
+    after anyone had a terminal open."""
+    args = [
+        _which("uv"), "run", "--project", str(project), "twiddle", "alarm", "serve",
+        "--dir", str(audio_dir), "--port", str(port), "--max-s", str(max_s),
+    ]
+    for room in rooms:
+        args += ["--room", room]
+    # No Local Network grant means no SSDP multicast: pin the speaker to ask.
+    if anchor:
+        args += ["--anchor", anchor]
+    return {
+        "Label": ALARM_LABEL,
+        "ProgramArguments": args,
+        "WorkingDirectory": str(project),
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ThrottleInterval": 60,
+        "StandardOutPath": str(project / "logs" / "alarm_server.out"),
+        "StandardErrorPath": str(project / "logs" / "alarm_server.err"),
+        "ProcessType": "Background",
+        "LowPriorityIO": True,
+        "Nice": 5,
+    }
+
+
+def install_alarm(project: Path, audio_dir: Path, port: int, max_s: float,
+                  rooms: list[str], anchor: str = "") -> Path:
+    return _install(build_alarm_plist(project, audio_dir, port, max_s, rooms, anchor),
+                    ALARM_LABEL, project)
+
+
+def serving(port: int, host: str = "127.0.0.1", timeout: float = 1.0) -> bool:
+    """Is something accepting connections on the server's port? A local
+    connect that sends nothing, so it opens no span and touches no speaker."""
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def alarm_blocked_by_local_network(project: Path, port: int) -> bool:
+    """As `blocked_by_local_network`, for the server: a denied-access error on
+    record *and* nothing answering on the port."""
+    if serving(port):
+        return False
+    err = project / "logs" / "alarm_server.err"
+    try:
+        tail = err.read_text()[-4000:]
+    except OSError:
+        return False
+    return "No route to host" in tail or "EHOSTUNREACH" in tail
+
+
+def uninstall(label: str = LABEL) -> bool:
+    subprocess.run(["launchctl", "bootout", f"gui/{_uid()}/{label}"],
                    capture_output=True)
-    path = plist_path()
+    path = plist_path(label)
     if path.exists():
         path.unlink()
         return True
@@ -135,6 +199,25 @@ instead, which already has the permission:
 
     uv run twiddle watch --duration 0 --interval 30 \\
         --log logs/daemon.jsonl --max-bytes 50000000 --anchor <speaker-ip>
+"""
+
+
+ALARM_LOCAL_NETWORK_HINT = """
+This is macOS Local Network privacy, not a bug in the alarm server.
+
+A launchd agent cannot show the permission prompt, so it is denied LAN access
+until you grant it:
+
+    System Settings -> Privacy & Security -> Local Network
+    enable the entry for "uv" (or python3.12 / Terminal)
+
+launchd retries every 60s, so no reinstall is needed. Check with:
+
+    uv run twiddle alarm serve --status
+
+Or run it in a terminal session, which already has the permission:
+
+    uv run twiddle alarm serve --dir <folder>
 """
 
 
@@ -175,8 +258,8 @@ def blocked_by_local_network(project: Path, log: Path | None = None,
     return "No route to host" in tail or "EHOSTUNREACH" in tail
 
 
-def status() -> str:
-    r = subprocess.run(["launchctl", "print", f"gui/{_uid()}/{LABEL}"],
+def status(label: str = LABEL) -> str:
+    r = subprocess.run(["launchctl", "print", f"gui/{_uid()}/{label}"],
                        capture_output=True, text=True)
     if r.returncode:
         return "not loaded"
