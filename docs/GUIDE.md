@@ -113,6 +113,29 @@ mode, the source's title from the alarm's own metadata, and when it next goes
 off in the household's local time, and its ID (`#34`), which the writing
 verbs below take.
 
+Beside the title, a column says where the alarm's sound comes from (`--json`:
+`sound_source`, a key, and `sound_source_text`, as shown). It is read from the
+alarm's `ProgramURI` alone, never from its title. Twiddle's own sources
+(`alarm sources`) are asked first and recognise the URIs they build: a dial
+station is `twiddle:station`, "twiddle station (direct stream)", and a source
+added later is `twiddle:<name>` unless it says otherwise. Then the URI's
+scheme, its `sid=` and the start of its item ID are matched, all three
+exactly, against what this household's speakers were seen to use:
+
+| `sound_source` | shown as | `ProgramURI` |
+|---|---|---|
+| `sonos_chime` | Sonos chime | `x-rincon-buzzer:<n>` |
+| `sonos_radio` | Sonos Radio | `x-sonosapi-radio:sonos:…?sid=303` |
+| `iheart_sonos_radio` | iHeart through Sonos Radio | `x-sonosapi-stream:ihr:…?sid=303` |
+| `tunein` | TuneIn | `x-sonosapi-stream:s<digits>?sid=333` |
+| `spotify_sonos` | Spotify through the Sonos app's link | `x-rincon-cpcontainer:<8 hex>spotify:…?sid=12` |
+
+These service IDs and prefixes are **observed conventions, not a table Sonos
+publishes**, and twiddle asks no speaker or service to name them. Anything
+else, including another service ID for a service already listed, is
+`unknown`, shown with the URI's scheme (`unknown (x-sonosapi-hls)`), rather
+than a guess.
+
 An alarm aimed at a bonded follower (the right Roam, a surround), at a speaker
 that has vanished from the household, or at a UUID no speaker owns is listed
 with a `!` line saying so, never hidden. `alarm list` writes nothing: no

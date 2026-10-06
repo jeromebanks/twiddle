@@ -15,7 +15,7 @@ import pytest
 import requests
 
 from twiddle import alarm_cli, cli, devices, play
-from twiddle.alarms import clock
+from twiddle.alarms import clock, soundsource
 from twiddle.alarms.model import Alarm, Recurrence, parse_alarms
 from twiddle.household import Group, Household, Speaker
 from twiddle.topology import Member, Topology, Vanished
@@ -103,6 +103,94 @@ def test_unreadable_metadata_falls_back_to_the_uri_scheme():
     a = extra(ROAM_L, "90")
     a.program_uri, a.program_metadata = "x-sonosapi-stream:foo", "<DIDL-Lite"
     assert alarm_cli.source_title(a) == "x-sonosapi-stream"
+
+
+# ---- where each alarm's sound comes from ---------------------------------------
+
+def test_every_fixture_alarm_has_its_sound_source():
+    got = rows()
+    want = {"1": "sonos_chime", "3": "sonos_chime", "42": "sonos_chime",
+            "11": "sonos_radio", "2": "iheart_sonos_radio", "68": "iheart_sonos_radio",
+            "34": "tunein", "66": "spotify_sonos", "73": "spotify_sonos", "94": "spotify_sonos"}
+    assert {i: r["sound_source"] for i, r in got.items()} == want
+    assert got["1"]["sound_source_text"] == "Sonos chime"
+    assert got["11"]["sound_source_text"] == "Sonos Radio"
+    assert got["2"]["sound_source_text"] == "iHeart through Sonos Radio"
+    assert got["34"]["sound_source_text"] == "TuneIn"
+    assert got["66"]["sound_source_text"] == "Spotify through the Sonos app's link"
+
+
+@pytest.mark.parametrize("uri, scheme", [
+    ("x-sonosapi-stream:s34804?sid=254&flags=8232&sn=93", "x-sonosapi-stream"),   # wrong sid
+    ("x-sonosapi-stream:s34804?sid=3330", "x-sonosapi-stream"),     # sid=333 only as a substring
+    ("x-sonosapi-stream:s34804", "x-sonosapi-stream"),              # no sid at all
+    ("x-sonosapi-stream:s34804?sid=333&sid=303", "x-sonosapi-stream"),   # two sids
+    ("x-sonosapi-stream:foo%3a1?sid=303", "x-sonosapi-stream"),     # right sid, wrong item
+    ("x-sonosapi-stream:sonos%3a3005?sid=303", "x-sonosapi-stream"),   # Sonos Radio's item, stream scheme
+    ("x-sonosapi-radio:ihr%3a152584?sid=303", "x-sonosapi-radio"),  # iHeart's item, radio scheme
+    ("x-sonosapi-hls:s34804?sid=333", "x-sonosapi-hls"),            # right sid and item, wrong scheme
+    ("x-rincon-cpcontainer:spotify%3aplaylist%3aX?sid=12", "x-rincon-cpcontainer"),  # no hex prefix
+    ("x-rincon-cpcontainer:00060000spotify%3aplaylist%3aX?sid=9", "x-rincon-cpcontainer"),
+    ("x-file-cifs://nas/alarm.mp3", "x-file-cifs"),
+])
+def test_a_near_miss_is_unknown_with_its_scheme(uri, scheme):
+    assert soundsource.classify(uri) == soundsource.SoundSource("unknown", f"unknown ({scheme})")
+
+
+@pytest.mark.parametrize("uri", ["x-rincon-buzzer:0?sid=999", "x-rincon-buzzer:not-a-chime",
+                                 "x-rincon-buzzer:"])
+def test_only_the_chimes_own_shape_is_the_sonos_chime(uri):
+    assert soundsource.classify(uri) == soundsource.SoundSource("unknown",
+                                                                "unknown (x-rincon-buzzer)")
+    a = extra(ROAM_L, "90")
+    a.program_uri = uri
+    r = alarm_cli.row(household(), a, SAT_AFTERNOON)
+    assert (r["sound_source"], r["source"]) == ("unknown", None)
+
+
+def test_no_uri_is_unknown_without_crashing():
+    assert soundsource.classify("", "") == soundsource.SoundSource("unknown", "unknown (no URI)")
+
+
+@pytest.mark.parametrize("title", ["TuneIn", "Spotify", "iHeart through Sonos Radio", "Sonos chime"])
+def test_the_sound_source_is_never_guessed_from_the_title(title):
+    a = extra(ROAM_L, "90")
+    a.program_uri = "x-sonosapi-stream:abc?sid=999"
+    a.program_metadata = ("<DIDL-Lite xmlns:dc='http://purl.org/dc/elements/1.1/'>"
+                          f"<item><dc:title>{title}</dc:title></item></DIDL-Lite>")
+    r = alarm_cli.row(household(), a, SAT_AFTERNOON)
+    assert (r["sound_source"], r["sound_source_text"]) == ("unknown", "unknown (x-sonosapi-stream)")
+    assert r["source_title"] == title
+
+
+def test_the_spotify_container_prefix_is_matched_in_either_case():
+    uri = "x-rincon-cpcontainer:1006206CSPOTIFY%3aplaylist%3aX?sid=12"
+    assert soundsource.classify(uri).key == "spotify_sonos"
+
+
+# Every key `alarm list --json` had before the sound source, written out so a
+# renamed or dropped one fails here rather than passing a comparison with itself.
+ROW_KEYS = {"id", "room", "speaker", "status", "room_uuid", "time", "time_text", "recurrence",
+            "days", "days_text", "enabled", "volume", "duration", "duration_text", "play_mode",
+            "include_linked_zones", "source_title", "source", "needs_mac", "program_uri",
+            "next_fire", "next_fire_text"}
+
+
+def test_the_sound_source_adds_two_keys_and_changes_none():
+    got = rows()
+    assert all(set(r) == ROW_KEYS | {"sound_source", "sound_source_text"} for r in got.values())
+    titles = {"1": "Sonos chime", "11": "Pindrop Electronic", "2": "KQED",
+              "34": "88.5 | KQED-FM (US News)", "73": "Todd Rundgren Mix", "94": "Tibetan Bowls"}
+    assert {i: got[i]["source_title"] for i in titles} == titles
+    assert got["1"]["source"] == "chime" and got["2"]["source"] is None
+
+
+def test_list_shows_the_sound_source_before_the_title():
+    text = alarm_cli.human(list(rows().values()), SAT_AFTERNOON)
+    [line] = [l for l in text.splitlines() if l.lstrip().startswith("#34 ")]
+    assert line.split("SHUFFLE", 1)[1].split() == ["TuneIn", "88.5", "|", "KQED-FM", "(US", "News)"]
+    [line] = [l for l in text.splitlines() if l.lstrip().startswith("#2 ")]
+    assert line.rstrip().endswith("iHeart through Sonos Radio            KQED")
 
 
 def test_a_vanished_or_unknown_speaker_is_labelled_not_hidden():
@@ -365,6 +453,18 @@ def test_list_json_keeps_every_row_and_adds_the_unreadable(speaker, monkeypatch,
     actions = {a for _, a in speaker}
     assert actions <= {"ListAlarms", "GetTimeNow", "GetFormat"}, actions
     assert not play.INTERVENTION_LOG.exists()
+
+
+def test_a_partly_unreadable_list_still_shows_each_readable_sound_source(speaker, monkeypatch,
+                                                                         capsys):
+    monkeypatch.setitem(ANSWERS, "ListAlarms", _list_answer(with_bad()))
+    code, out, _ = run(["alarm", "list", "--json"], capsys)
+    payload = json.loads(out)
+    assert code == 0
+    assert {r["id"]: r["sound_source"] for r in payload["alarms"]}["34"] == "tunein"
+    assert all("sound_source" not in u for u in payload["unreadable"])
+    code, out, _ = run(["alarm", "list"], capsys)
+    assert code == 0 and "TuneIn" in out and "can't read 4 alarms" in out
 
 
 def test_a_readable_list_has_no_unreadable(speaker, capsys):

@@ -85,6 +85,19 @@ def test_a_station_alarms_title_is_the_stations_name():
     assert sources.recognise(uri, didl).name == "station"
 
 
+def test_a_station_alarm_comes_from_twiddle_through_the_station_provider(monkeypatch):
+    _, uri, didl = sources.build("station:kalx")
+    alarm = Alarm(id="90", start_time="07:00:00", recurrence=Recurrence.parse("WEEKDAYS"),
+                  room_uuid=ROAM_L, program_uri=uri, program_metadata=didl)
+    r = alarm_cli.row(household(), alarm, SAT_AFTERNOON)
+    assert (r["sound_source"], r["sound_source_text"]) == (
+        "twiddle:station", "twiddle station (direct stream)")
+    # It is the provider that knows: one that stops owning it leaves the URI unknown.
+    monkeypatch.setattr(type(sources.get("station")), "owns", lambda self, uri, meta: False)
+    r = alarm_cli.row(household(), alarm, SAT_AFTERNOON)
+    assert (r["sound_source"], r["sound_source_text"]) == ("unknown", "unknown (x-rincon-mp3radio)")
+
+
 def test_play_radio_still_sends_the_same_uri(monkeypatch):
     sent = []
     monkeypatch.setattr(play, "set_uri", lambda ip, uri, meta: sent.append(uri))
@@ -159,6 +172,21 @@ def test_a_source_names_its_own_alarms(podcast, monkeypatch):
     by_id = {r["id"]: r for r in alarm_cli.listing(household(), [*ALARMS, mac], SAT_AFTERNOON)}
     assert by_id["90"]["source_title"] == "Podcast: ep1"
     assert by_id["1"]["source_title"] == "Sonos chime"
+
+
+def test_a_new_provider_is_a_sound_source_with_no_classifier_edit(podcast):
+    uri, didl = Podcast().build("ep1")
+    alarm = Alarm(id="90", start_time="06:00:00", recurrence=Recurrence.parse("DAILY"),
+                  room_uuid=LIVING, program_uri=uri, program_metadata=didl)
+    before = alarm_cli.row(household(), alarm, SAT_AFTERNOON)
+    assert (before["sound_source"], before["sound_source_text"]) == (
+        "unknown", "unknown (x-twiddle-podcast)")
+    podcast()
+    r = alarm_cli.row(household(), alarm, SAT_AFTERNOON)
+    assert (r["sound_source"], r["sound_source_text"]) == ("twiddle:podcast",
+                                                           "twiddle podcast episode")
+    text = alarm_cli.human([r], SAT_AFTERNOON)
+    assert "twiddle podcast episode  Episode One" in text
 
 
 def test_list_shows_no_mark_when_nothing_needs_this_mac(podcast):
