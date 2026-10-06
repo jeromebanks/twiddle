@@ -49,9 +49,13 @@ _SPOTIFY_URI = re.compile(r"^(?:spotify:)?(playlist|album|track):([A-Za-z0-9]+)$
 _SPOTIFY_URL = re.compile(r"^https?://open\.spotify\.com/(?:intl-\w+/)?"
                           r"(playlist|album|track)/([A-Za-z0-9]+)/?(?:[?#].*)?$")
 _SN = re.compile(r"[?&]sn=(\d+)")
-_FAVOURITES = ('<ObjectID>FV:2</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag>'
-               "<Filter>*</Filter><StartingIndex>0</StartingIndex>"
-               "<RequestedCount>200</RequestedCount><SortCriteria></SortCriteria>")
+_PAGE = 100
+
+
+def _browse(start: int) -> str:
+    return ("<ObjectID>FV:2</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag>"
+            f"<Filter>*</Filter><StartingIndex>{start}</StartingIndex>"
+            f"<RequestedCount>{_PAGE}</RequestedCount><SortCriteria></SortCriteria>")
 
 
 def parse_choice(choice: str) -> tuple[str, str]:
@@ -101,10 +105,18 @@ def account_from_text(text: str) -> str | None:
 
 def favourites_account(ip: str) -> str | None:
     """The linked account's serial from the speaker's Sonos favourites (a
-    read-only `Browse`); None when none is a Spotify one."""
-    return account_from_text(devices.soap(
-        ip, "ContentDirectory", "Browse", _FAVOURITES,
-        path="/MediaServer/ContentDirectory/Control"))
+    read-only `Browse`, a page at a time until one is a Spotify item or they run
+    out); None when none is."""
+    start = 0
+    while True:
+        text = devices.soap(ip, "ContentDirectory", "Browse", _browse(start),
+                            path="/MediaServer/ContentDirectory/Control")
+        found = account_from_text(text)
+        returned, total = (int(m.group(1)) if m else 0 for m in (
+            re.search(r"<NumberReturned>(\d+)<", text), re.search(r"<TotalMatches>(\d+)<", text)))
+        start += returned
+        if found or not returned or start >= total:
+            return found
 
 
 def alarms_account(alarms) -> str | None:
@@ -201,7 +213,8 @@ class Spotify(Source):
         sn = self.account(self.anchor)
         if not sn:
             raise ValueError("no Spotify account is linked to this household's Sonos: "
-                             "add Spotify in the Sonos app first (twiddle won't build "
-                             "an alarm that can't play)")
+                             "add Spotify in the Sonos app, and save one Spotify playlist as a Sonos "
+                             "favourite so twiddle can read the account (it won't build an alarm "
+                             "that can't play)")
         title, art = self._seen.get(ident) or self._lookup(kind, ident)
         return program(kind, ident, sn, title or f"Spotify {kind}", art)

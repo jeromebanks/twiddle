@@ -6,6 +6,7 @@ podcast provider shows a new source needs no CLI edit: registered through the
 same `register()` the stock ones use, it is listed, built and marked.
 """
 import json
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -415,6 +416,25 @@ def test_a_linked_account_with_no_spotify_alarm_can_still_make_one(monkeypatch):
     src.account = lambda anchor: spotify_source.favourites_account("192.0.2.1")
     uri, _ = src.build("spotify:playlist:FakePlaylist0000000009")
     assert uri.endswith("?sid=12&flags=0&sn=92")
+
+
+def test_favourites_are_read_page_by_page_until_a_spotify_one_turns_up(monkeypatch):
+    pages = {0: ("sid=254&amp;flags=8224&amp;sn=0", 2, 3), 2: ("sid=12&amp;flags=8300&amp;sn=92", 1, 3)}
+    asked = []
+
+    def soap(ip, service, action, body="", path=None):
+        start = int(re.search(r"<StartingIndex>(\d+)<", body).group(1))
+        asked.append(start)
+        uri, n, total = pages[start]
+        return (f"<Result>x-rincon-cpcontainer:a?{uri}</Result><NumberReturned>{n}</NumberReturned>"
+                f"<TotalMatches>{total}</TotalMatches>")
+
+    monkeypatch.setattr(spotify_source.devices, "soap", soap)
+    assert spotify_source.favourites_account("192.0.2.1") == "92"
+    assert asked == [0, 2]
+    pages[2] = ("sid=254&amp;sn=0", 1, 3)
+    asked.clear()
+    assert spotify_source.favourites_account("192.0.2.1") is None and asked == [0, 2]
 
 
 def test_the_account_falls_back_to_an_existing_spotify_alarm_last():
