@@ -278,6 +278,7 @@ def test_an_epic_without_milestones_owes_and_clears_the_same_way(monkeypatch):
 
 import ast
 import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -352,6 +353,10 @@ class Codex:
     def __init__(self, tmp_path, monkeypatch, plan=(APPROVES,), settings=SETTINGS):
         self.tmp = tmp_path
         self.user = codex_review.user_codex_home()
+        # it writes a fake user Codex home: never the real one, whatever undid the HOME fixture
+        real = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+        assert not self.user.resolve().is_relative_to(real) and self.user.resolve().is_relative_to(tmp_path.resolve().parents[1]), \
+            f"refusing to write a fake Codex home at {self.user}"
         for name, text in USER_CODEX.items():
             (self.user / name).parent.mkdir(parents=True, exist_ok=True)
             (self.user / name).write_text(text)
