@@ -11,6 +11,7 @@ from .devices import discover, link_stats, load_device, sample_phy_rate
 from .monitor import Monitor, http_alive, ping_stats
 from .dial import cli as dial_cli
 from .viz import cli as viz_cli
+from . import limits_cli
 from .scene import cli as scene_cli
 
 DEFAULT_LOG = Path("logs/monitor.jsonl")
@@ -742,6 +743,7 @@ def build_parser() -> argparse.ArgumentParser:
     stations_cli.register(sub, parents=[base])
     comedy_cli.register(sub, parents=[base])
     scene_cli.register(sub, parents=[base])
+    limits_cli.register(sub, parents=[base])
     dial_cli.register(sub, parents=[base])
     viz_cli.register(sub, parents=[base])
     alarm_cli.register(sub, parents=[base])

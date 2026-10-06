@@ -520,6 +520,24 @@ def test_ship_records_a_milestone_already_on_main_without_merging(repo, monkeypa
     assert not any(c[:2] in (["pr", "merge"], ["pr", "create"]) for c in gh.calls)
 
 
+def test_ship_review_refuses_a_milestone_already_on_main(repo, monkeypatch, capsys, tmp_path):
+    # #12 M1: main...epic/12 is M2's diff, so a "review of M1" would judge the wrong code
+    gh = GitHub(monkeypatch, repo)
+    leaves = [done_leaf(28, "T1.1"), done_leaf(29, "T1.2"), done_leaf(31, "T3.1", "#12 M2: y")]
+    stub_ship(monkeypatch, [DEMO1, ACCEPT1], leaves)
+    monkeypatch.setattr(sdlc, "epic_progress", lambda n, cfg, trusted: progress(ms("M1", 2, 2), ms("M2", 1, 1)))
+    monkeypatch.setattr(sdlc, "epic_head", lambda n, cfg: HEAD)
+    r = tmp_path / "r.md"
+    r.write_text(f"HEAD: {HEAD}\n\nVERDICT: approve\n")
+    monkeypatch.setattr(sdlc, "reverted_on_main", lambda cfg, root=None: set())
+    assert sdlc.main(["ship-review", "12", "--report", str(r)]) == 1
+    assert "nothing of it to review; `ship 12`" in capsys.readouterr().err and gh.posted == []
+    # once its slices are reverted on main (or it was built on epic/12), the review is wanted again
+    monkeypatch.setattr(sdlc, "reverted_on_main", lambda cfg, root=None: {f"{28:040d}"})
+    assert sdlc.main(["ship-review", "12", "--report", str(r)]) == 0
+    assert gh.kinds() == [(12, "ship-review")]
+
+
 def test_ship_finishes_the_epic_and_can_finish_it_again(repo, monkeypatch, capsys):
     gh = GitHub(monkeypatch, repo)
     sdlc.ensure_epic_branch(12, CONFIG, repo)

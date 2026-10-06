@@ -57,6 +57,7 @@ uv run python tools/sdlc.py demo-status N          # --json for the full brief
 
 | action | do |
 |---|---|
+| `work_slices` and `next` says Codex hasn't reviewed some slices | step 1b, then steps 2-7 |
 | `work_slices` and `next` says `/milestone-demo` | steps 2-7 for the due milestone |
 | `record_demo_acceptance` | the poster said `/approve`: step 8, then step 10 |
 | `next` says `... is accepted; ship it` | step 10 |
@@ -64,6 +65,33 @@ uv run python tools/sdlc.py demo-status N          # --json for the full brief
 | `demo_heard` | someone answered your `demo-request`: step 3 (record what they heard), then steps 4-7 |
 | `turn` is `poster` | the demo is waiting on them: report it and stop |
 | anything else | report the `next:` line and stop |
+
+## 1b. The milestone's review, when slices of it skipped their own
+
+Routine slices are reviewed with their milestone, and a slice whose PR Codex couldn't
+review (`review-defer`) is too. `demo-status` lists them under "Codex review owed", and
+`demo-post` refuses until a milestone review approves. Nothing changes on `epic/N` by hand.
+
+1. `uv run python tools/sdlc.py sync N` (`timeout: 600000`): it brings `main` in, runs the
+   suite on the head and records it, so the review and the demo see the same code. A
+   conflict or a failure escalates, and you stop.
+2. Save each owed slice's brief where Codex can read it (its sandbox has no network):
+   `gh issue view S --json title,body -q '.title + "\n\n" + .body' > <SCRATCH>/slice-S.md`, one per
+   slice. Fill `references/codex-milestone-prompt.md` into `<SCRATCH>/ship-prompt.md`, **including
+   its deferred-slices part** (`<SLICE_FILES>` = those files): each owed slice's key, issue and squash commit on `epic/N`
+   (`git -C <PRIMARY>/.worktrees/epic-N log --oneline origin/main..HEAD` finds them). Run
+   it from `<PRIMARY>/.worktrees/epic-N`, as in step 10.2, then record the round:
+   `uv run python tools/sdlc.py ship-review N --report <SCRATCH>/ship-codex.md --response <SCRATCH>/ship-response.md`.
+3. Its verdict:
+   - **approve**: the review is no longer owed. Go on to step 2. If `epic/N` doesn't move
+     before the ship, the same approval serves step 10's review.
+   - **changes**: a blocking finding is a demo finding: `demo-changes N --found` (step 3's
+     table), and `/plan-issue N` plans the fix slices. Non-blocking ones are filed as tech debt.
+   - **Codex still can't run**: report the `next:` line and stop. The milestone waits for
+     its review; the poster never sees code nobody reviewed.
+
+The review budget is `max_pr_rounds` (5) rounds asking for changes per milestone, shared
+with step 10.
 
 ## 2. Plan the demo
 
@@ -225,6 +253,11 @@ Read their reply as an end user's, not a reviewer's.
 `main` gets the milestone now, as one merge commit of `epic/N`. Every step is a
 tool step; never merge or push by hand.
 
+0. **Is it already on `main`?** Run `uv run python tools/sdlc.py ship N --dry-run` first. If it says
+   the milestone was **built straight onto main** (before epic branches existed), there is
+   nothing to sync or review: `main...epic/N` holds a *later* milestone's work, not this one,
+   and Codex would judge the wrong code (`ship-review` refuses it). Run `ship N` (it records a
+   no-op release), report its `next:` line, and stop. Otherwise carry on from 1.
 1. **Bring `main` in and test the result:**
 
    ```bash

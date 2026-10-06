@@ -17,16 +17,17 @@ the worked examples:
 
 | File | Platform | Reusable for another venue on it? |
 |---|---|---|
-| `scene/sources/seetickets.py` | See Tickets WordPress plugin (HTML list view, `?list1page=N`) | **yes: one line in `VENUES`** (5 venues) |
-| `scene/sources/ticketweb.py` | TicketWeb WordPress plugin (`tw-section`, one page, several themes) | **yes: one line in `VENUES`** (7 venues) |
-| `scene/sources/gilman.py` | ShowSlinger widget (HTML, public *with* the URL token) | yes: change `WIDGET`/`VENUE` |
-| `scene/sources/venuepilot.py` | VenuePilot (public GraphQL, `venuepilot.co/graphql`) | **yes: one line in `VENUES`** (account id from `venuepilotSettings`) |
-| `scene/sources/squarespace.py` | Squarespace events collection, `?format=json` | **yes: one line in `VENUES`** (the collection's URL) |
-| `scene/sources/simplecal.py` | WordPress "Simple Calendar" (a Google Calendar, server-rendered) | **yes: one line in `VENUES`** |
-| `scene/sources/makeoutroom.py` | CalendarWiz (cookie session, month grid) + Weebly blog flyers | the CalendarWiz half, with a new `crd` |
-| `scene/sources/grayarea.py` | venue's own WordPress cards | no, bespoke |
-| `scene/sources/yoshis.py` | venue's own HTML calendar + detail pages | no, bespoke |
-| `scene/sources/thelist.py` | The List | — |
+| `scenedata/sources/seetickets.py` | See Tickets WordPress plugin (HTML list view, `?list1page=N`) | **yes: one line in `VENUES`** (5 venues) |
+| `scenedata/sources/ticketweb.py` | TicketWeb WordPress plugin (`tw-section`, one page, several themes) | **yes: one line in `VENUES`** (7 venues) |
+| `scenedata/sources/gilman.py` | ShowSlinger widget (HTML, public *with* the URL token) | yes: change `WIDGET`/`VENUE` |
+| `scenedata/sources/venuepilot.py` | VenuePilot (public GraphQL, `venuepilot.co/graphql`) | **yes: one line in `VENUES`** (account id from `venuepilotSettings`) |
+| `scenedata/sources/squarespace.py` | Squarespace events collection, `?format=json` | **yes: one line in `VENUES`** (the collection's URL) |
+| `scenedata/sources/simplecal.py` | WordPress "Simple Calendar" (a Google Calendar, server-rendered) | **yes: one line in `VENUES`** |
+| `scenedata/sources/makeoutroom.py` | CalendarWiz (cookie session, month grid) + Weebly blog flyers | the CalendarWiz half, with a new `crd` |
+| `scenedata/sources/grayarea.py` | venue's own WordPress cards | no, bespoke |
+| `scenedata/sources/kalx.py` | KALX 90.7's weekly events post (WordPress REST API): ~75 rooms, `Venue: acts` lines, no times or links | no, bespoke; a new room needs a `CITY` entry only if its watched-venue match has a city |
+| `scenedata/sources/yoshis.py` | venue's own HTML calendar + detail pages | no, bespoke |
+| `scenedata/sources/thelist.py` | The List | — |
 
 See Tickets, TicketWeb, VenuePilot, Squarespace and Simple Calendar are
 one class over a `VENUES` table each. If a second venue turns up on
@@ -48,10 +49,10 @@ plugin can move fields around: match on the whole class token (TicketWeb's
 1. `uv run twiddle scene list --all-venues | grep -i <name>` for The List's
    spelling(s).
 2. Add a `Venue(name, (match substrings,), icon_url)` to
-   `DEFAULT_VENUES` in `scene/venues.py`. Pick the icon by hand and check it
+   `DEFAULT_VENUES` in `scenedata/venues.py`. Pick the icon by hand and check it
    loads. A venue's favicon is often wrong, and no icon is fine: it gets a tile.
 3. Add its `VenueInfo` (address, website, one-line description) to
-   `scene/venue_info.py`. Check the address against the venue's own site.
+   `scenedata/venue_info.py`. Check the address against the venue's own site.
 4. Add its Instagram handle to `venue_info.INSTAGRAM`, taken from a link
    on the venue's own site. Then confirm `instagram.com/<handle>/` has an
    `og:image` and the right name, because a guessed handle can be someone
@@ -92,11 +93,11 @@ least a date and a name per event. Everything else is a bonus.
 
 ## 3. Writing the source
 
-Create `scene/sources/<name>.py` with a class that has `name = "<name>"` and
+Create `scenedata/sources/<name>.py` with a class that has `name = "<name>"` and
 `fetch() -> list[Show]`. Register it in `sources/base._registry()`, **after**
 `thelist`, because order decides whose facts win in a merge.
 
-Fill `Show` (`scene/model.py`) like this:
+Fill `Show` (`scenespec/model.py`) like this:
 
 | Field | Rule |
 |---|---|
@@ -127,7 +128,7 @@ Rules the existing sources learned the hard way:
   (`seetickets._day`). Never assume the current year.
 - **Raise `SourceError`** for network failures, non-200 responses, zero
   shows, or a failed page partway through pagination. Don't return partial
-  results, or the stale cache won't cover the gap. `fetch_all` also catches
+  results, or the last dataset's rows won't cover the gap. `fetch_all` also catches
   any other exception, but a clear `SourceError` message is better.
 - **Cap pagination** (`MAX_PAGES`), and stop if the site serves page 1 again.
 - **Keep bands out of lookups when there are none.** Band-less nights are
@@ -146,7 +147,7 @@ need to touch this. **Do verify it on live data:**
 
 ```bash
 uv run python - <<'EOF'
-from twiddle.scene.sources import fetch_all
+from twiddle.scenedata.sources import fetch_all
 shows, errors = fetch_all()
 rows = [s for s in shows if "<venue>" in s.venue.lower()]
 print(errors, len(rows), "merged", sum(1 for s in rows if s.also),
@@ -154,6 +155,9 @@ print(errors, len(rows), "merged", sum(1 for s in rows if s.also),
 for s in rows: print(s.day, s.source, "+" if s.also else " ", "F" if s.flyer else "-", s.billing[:60], s.price)
 EOF
 ```
+
+The app reads a dataset, not the sources: after registering a source, run
+`uv run twiddle scene build` to see it in `scene` / `scene list`.
 
 Look for **duplicate rows on the same night**. Most are real: karaoke,
 open mic or comedy beside the gig, or a pre-show. Some are missed merges,

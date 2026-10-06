@@ -48,7 +48,7 @@ def encode(track: dict) -> str:
 
 
 def decode(token: str) -> dict | None:
-    """The track a token names, as `scene.bandcamp.stream_url` takes it; None
+    """The track a token names, as `twiddle.bandcamp.stream_url` takes it; None
     for anything that isn't one of ours, or names a page that isn't http(s)."""
     if not _TOKEN.fullmatch(token):
         return None
@@ -86,28 +86,32 @@ def _household_host(anchor: str | None = None) -> str:
                          "LAN, or pass --anchor <ip>") from exc
 
 
-def scene_bandcamp():
-    """The module holding scene's Bandcamp search, tracks and `stream_url`; the
-    one place that names it (lazy: scene stays out of `alarm list`'s imports)."""
-    from ...scene import bandcamp
+def songs():
+    """`twiddle.bandcamp`: the throttled tracks, `stream_url` and `UA` (lazy:
+    the Bandcamp client stays out of `alarm list`'s imports)."""
+    from ... import bandcamp
+    return bandcamp
+
+
+def bands():
+    """`twiddle.scenedata.bandcamp`: the cached search for a band by name."""
+    from ...scenedata import bandcamp
     return bandcamp
 
 
 def _page_tracks(page: str) -> list[dict]:
-    bandcamp = scene_bandcamp()
     try:
-        return bandcamp.page_tracks(page)
+        return songs().page_tracks(page)
     except Exception as exc:
         raise ValueError(f"couldn't read {page} from Bandcamp: {exc}") from exc
 
 
 def _search(query: str) -> list[dict]:
     """Streamable tracks of the bands named exactly `query`, each with its band."""
-    bandcamp = scene_bandcamp()
     try:
         out = []
-        for band in [b for b in bandcamp.search(query) or [] if not b.get("is_label")][:3]:
-            for t in bandcamp.tracks(band["item_url_root"], want=5):
+        for band in [b for b in bands().search(query) or [] if not b.get("is_label")][:3]:
+            for t in songs().tracks(band["item_url_root"], want=5):
                 out.append(dict(t, band=band.get("name") or ""))
         return out
     except Exception as exc:

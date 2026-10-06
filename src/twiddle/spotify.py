@@ -34,6 +34,8 @@ from pathlib import Path
 
 import requests
 
+from . import netstats, ratelimit
+
 API = "https://api.spotify.com/v1"
 ACCOUNTS = "https://accounts.spotify.com"
 
@@ -324,12 +326,19 @@ class Session:
         re-run `spotify auth`.
         """
         self._ensure_fresh()
+        gov = ratelimit.governor("spotify")
         for attempt in (0, 1):
+            try:
+                gov.acquire()           # our own budget, shared by every Spotify client here
+            except ratelimit.RateLimited as exc:
+                raise ApiError(429, str(exc), retry_after=exc.retry_after) from exc
             url = path if path.startswith("http") else API + path
             resp = requests.request(
                 method, url, timeout=30,
                 headers={"Authorization": f"Bearer {self.tokens.access_token}"},
                 **kw)
+            netstats.record_response("spotify", resp)
+            gov.report_response(resp)
             if resp.status_code == 401 and attempt == 0:
                 self.tokens = refresh(self.tokens)
                 self.tokens.save(self.path)

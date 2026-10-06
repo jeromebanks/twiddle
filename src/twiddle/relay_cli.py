@@ -295,6 +295,72 @@ def _wait_for_audio(rly: relay.Relay, seconds: float) -> bool:
     return rly.encoded_bytes > 0
 
 
+TRACK_POLL = 1.0      # seconds between looks at which track librespot says is playing
+_LIVE = {"PLAYING", "TRANSITIONING"}
+IDLE = "idle"                  # what `follow_track` returns once it has cleared the title
+IDLE_TITLE = "Spotify (relay)"  # the same title `ensure_room_on_relay` starts a room with
+IDLE_AFTER = 4.0               # seconds of `stopped` before the title is cleared
+
+
+def track_key(track: dict) -> str:
+    """Short, URL-safe id of a track: the tail of its `spotify:track:...` URI."""
+    return (track.get("uri") or "").rsplit(":", 1)[-1]
+
+
+def track_title(track: dict) -> str:
+    """"Song \u2014 Artist, Artist": what the Sonos app shows for the stream."""
+    artists = ", ".join(track.get("artists") or [])
+    return f"{track['name']} \u2014 {artists}" if track.get("name") and artists \
+        else track.get("name") or IDLE_TITLE
+
+
+def follow_track(group, rly: relay.Relay, url: str, last: str | None,
+                 record) -> str | None:
+    """Re-point the room at the relay with the current track's title and cover.
+
+    The Sonos app reads the title and art from the metadata sent when the room
+    is pointed, and fetches the art once per URL, so a change of track needs a
+    new `SetAVTransportURI` (a journalled write, and an audible blip as the
+    speaker refills its buffer). That is why this only fires on a *change*.
+
+    Returns the key of the track now shown. Nothing is sent, and `last` comes
+    back unchanged (so it retries next tick), unless the room is still on the
+    relay and playing: a room someone has since moved to a radio station, or
+    paused, must not be pulled back.
+    """
+    track = rly.covers.track()
+    key = track_key(track)
+    if not key:
+        return last
+    if track.get("state") == "stopped":
+        # The song is over and nothing followed it. Clear the title and cover
+        # once it has stayed that way a few seconds: a skip or the gap between
+        # queued tracks also passes through `stopped` briefly.
+        if last in (None, IDLE) or time.time() - track.get("state_ts", 0) < IDLE_AFTER:
+            return last
+        key, title, art = IDLE, IDLE_TITLE, None
+    else:
+        title = track_title(track)
+        art = None
+    if key == last:
+        return last
+    try:
+        now = group.now_playing()
+    except Exception:
+        return last
+    if (now.get("uri") or "").removeprefix(play.RADIO_SCHEME) != url.removeprefix("http://") \
+            or now.get("state") not in _LIVE:
+        return last
+    try:
+        if key != IDLE:
+            art = rly.cover_url_for(group.ip, key)
+        group.play_radio(url, title, art=art)
+    except Exception:
+        return last         # a title that would not write is not worth the audio: try next tick
+    record("relay_retitle", track=track.get("name"), key=key, title=title)
+    return key
+
+
 def cmd_start(args):
     try:
         argv, title = _build_source(args)
@@ -400,8 +466,15 @@ def cmd_start(args):
              "\n".join(human))
 
         deadline = time.monotonic() + args.duration * 60 if args.duration else None
+        last_track = None
+        next_sample = time.monotonic() + args.interval
         while deadline is None or time.monotonic() < deadline:
-            time.sleep(args.interval)
+            time.sleep(min(TRACK_POLL, args.interval))
+            if res is not None and rly.covers is not None:
+                last_track = follow_track(res.group, rly, url, last_track, record)
+            if time.monotonic() < next_sample:
+                continue
+            next_sample = time.monotonic() + args.interval
             stats = rly.stats()
             state = (play.transport_info(res.group.ip)
                      .get("CurrentTransportState", "?") if res else "-")

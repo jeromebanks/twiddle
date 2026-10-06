@@ -299,19 +299,44 @@ nothing fires on a real speaker.</li>
 <li><strong>Test.</strong> <code>test-record PR</code> runs the full suite on the pushed head and records the result on the PR.</li>
 <li><strong>Review.</strong> Codex reviews that exact head. Each round is recorded with <code>pr-review</code>
 <em>before</em> any fix is pushed. Fixing or rebutting continues until Codex approves the current head. After
-<code>max_pr_rounds</code> the slice escalates. If it was built on a cheaper model, it's retried once on the strongest.</li>
+<code>max_pr_rounds</code> (5 by default) rounds asking for changes the slice escalates. If it was built on a cheaper model,
+it's retried once on the strongest.
+<br>Two kinds of slice skip this and are reviewed with their milestone instead. A slice rated <span class="chip">complexity:routine</span>
+is one (<code>slice_review</code> in the config). A slice whose PR Codex couldn't review is the other: Codex wasn't installed or
+signed in, was out of quota, or timed out. <code>review-defer PR --reason …</code> records that, but never after Codex asked
+for changes nobody has answered.</li>
 <li><strong>Merge.</strong> <code>merge PR</code> is the gate: the PR targets <code>epic/N</code> and isn't behind it, Codex approved this
-head, tests passed on it, and it belongs to the current milestone. Then the slice is squash-merged into <code>epic/N</code>
+head (or its review is owed to the milestone, which <code>merge</code> records on the epic first), tests passed on it, and it belongs to the current milestone. Then the slice is squash-merged into <code>epic/N</code>
 and its issue closed. Non-blocking findings are filed as <span class="chip">tech-debt</span> first.</li>
 </ol>
+
+<h3 id="parallel">Several at once</h3>
+<p>Each slice is built in its own <strong>git worktree</strong>, a second checkout of the repo on its own branch, in
+<code>.worktrees/slice-S</code>. <code>claim</code> makes it and <code>cleanup</code> removes it. It isn't Claude Code's own worktree
+feature: that one branches from <code>main</code>, and a slice has to start from <code>epic/N</code>. The main checkout stays on
+<code>main</code>, untouched, so several sessions can work side by side:</p>
+<ul>
+<li><strong>Different issues</strong> run independently. Open one Claude Code session per issue or slice, all started in the main
+checkout. <code>ready</code> lists what can be claimed.</li>
+<li><strong>Slices of one epic</strong> run in parallel within the milestone being built. A slice that needs another's code waits for it.</li>
+<li><strong>Two sessions can't take the same slice:</strong> <code>claim</code> refuses one that's already claimed. Claim from one machine,
+because two machines claiming in the same few seconds could both get through.</li>
+<li><strong>Merges happen one at a time.</strong> The second slice to finish rebases onto <code>epic/N</code> and is tested and reviewed again.</li>
+<li><strong>Demos happen one at a time,</strong> because a demo uses the real speakers, with the poster there.</li>
+</ul>
+<p class="note">The full table of worktrees, and what holds each one, is in <code>SDLC.md</code> → "Worktrees, and several sessions at once".</p>
 
 <h2 id="milestones">6. A milestone, from plan to <code>main</code></h2>
 <p>A milestone is a group of slices that ends in something the poster can see. The epic works on
 <strong>one milestone at a time</strong>, the earliest one not yet shipped. Only its slices are offered,
 claimed or merged.</p>
 <figure>
-<svg viewBox="0 0 900 230" role="img" aria-labelledby="ms-t">
-  <title id="ms-t">A milestone's phases: uncreated, building, complete, demoed, accepted, shipped</title>
+<svg viewBox="0 -70 900 300" role="img" aria-labelledby="ms-t">
+  <title id="ms-t">A milestone's phases: uncreated, building, review (when a slice's review is owed), complete, demoed, accepted, shipped</title>
+  <rect class="box agent" x="235" y="-62" width="120" height="40" rx="10"/><text class="title" x="295" y="-37" text-anchor="middle">review</text>
+  <path class="edge" d="M240,60 L262,-20"/><path class="edge" d="M330,-20 L352,58"/>
+  <text class="label" x="232" y="-6" text-anchor="end">a review owed</text>
+  <text class="label" x="362" y="-6">ship-review approves</text>
   <rect class="box" x="10" y="60" width="120" height="50" rx="10"/><text class="title" x="70" y="90" text-anchor="middle">uncreated</text>
   <rect class="box agent" x="160" y="60" width="120" height="50" rx="10"/><text class="title" x="220" y="90" text-anchor="middle">building</text>
   <rect class="box agent" x="310" y="60" width="120" height="50" rx="10"/><text class="title" x="370" y="90" text-anchor="middle">complete</text>
@@ -342,6 +367,9 @@ starts and the epic can't finish.</li>
 <li><strong>Plan it</strong> (<code>uncreated</code>). By default only the first milestone's issues are created up front.
 Each later one is replanned with a <em>Lessons from M1</em> section and a fresh Codex review, then created.
 <code>/plan-issue N</code>.</li>
+<li><strong>Review it</strong> (<code>review</code>), when some of its slices were merged without a review of their own.
+<code>/milestone-demo N</code> syncs <code>epic/N</code> and has Codex review the milestone, reading each of those slices as closely
+as a pull request (<code>ship-review</code>). Nothing is shown to the poster until Codex approves. A blocking finding becomes fix slices.</li>
 <li><strong>Demo it</strong> (<code>complete</code> or <code>demoed</code>). <code>/milestone-demo N</code> runs the demo steps from
 <code>epic/N</code>, with <code>main</code> as the "before". It draws real screenshots and posts the demo for the poster.</li>
 <li><strong>Ship it</strong> (<code>accepted</code>). <code>sync N</code> merges <code>main</code> into <code>epic/N</code> and runs the suite.
@@ -395,7 +423,8 @@ and records it, and pushes only on a pass. A conflict or a failure goes to a hum
   It rechecks <code>main</code> right before merging, and checks the merge afterwards. If <code>main</code> moved in that moment,
   the release is marked untested and the epic is escalated. Nothing more happens until <code>verify-main N</code>
   passes on <code>main</code>.</li>
-<li>A milestone built before epic branches existed, straight onto <code>main</code>, ships as a recorded no-op.</li>
+<li>A milestone built before epic branches existed, straight onto <code>main</code>, ships as a recorded no-op, with no sync and
+no Codex review: nothing of it is on the branch, so a review would judge a later milestone's code.</li>
 </ul>
 
 <h2 id="findings">8. Problems found along the way</h2>

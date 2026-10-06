@@ -84,7 +84,7 @@ def permitted(ip: str, speakers: set[str] | None) -> bool:
 
 def resolve_stream(track: dict) -> str:
     """A fresh audio URL for a Bandcamp track (the default `resolve`)."""
-    return bc.scene_bandcamp().stream_url(track)
+    return bc.songs().stream_url(track)
 
 
 def open_stream(url: str, timeout: float = UPSTREAM_S):
@@ -93,7 +93,7 @@ def open_stream(url: str, timeout: float = UPSTREAM_S):
     if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
         raise ValueError(f"not an http(s) URL: {url!r}")
     return urllib.request.urlopen(
-        urllib.request.Request(url, headers={"User-Agent": bc.scene_bandcamp().UA}),
+        urllib.request.Request(url, headers={"User-Agent": bc.songs().UA}),
         timeout=timeout)
 
 

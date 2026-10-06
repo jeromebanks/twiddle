@@ -19,34 +19,12 @@ from __future__ import annotations
 import json
 import time
 import urllib.parse
-from dataclasses import dataclass, replace
+from dataclasses import replace
 
 import requests
 
+from ..scenespec.venue import VenueInfo
 from . import cache
-
-
-@dataclass(frozen=True)
-class VenueInfo:
-    address: str = ""
-    url: str = ""
-    about: str = ""
-    wikipedia: str = ""         # an article title, only where one is about this room
-    instagram: str = ""         # a handle, from INSTAGRAM below
-
-    @property
-    def instagram_url(self) -> str:
-        return f"https://www.instagram.com/{self.instagram}/" if self.instagram else ""
-
-    @property
-    def map_url(self) -> str:
-        if not self.address:
-            return ""
-        return "https://www.google.com/maps/search/?api=1&query=" + \
-            urllib.parse.quote(self.address)
-
-    def __bool__(self) -> bool:
-        return bool(self.address or self.url or self.about or self.wikipedia)
 
 
 I = VenueInfo
@@ -145,6 +123,15 @@ INFO: dict[str, VenueInfo] = {
         "3225 22nd St, San Francisco, CA 94110", "https://www.makeoutroom.com/",
         "Mission bar and legacy business: early-evening bands, readings and "
         "comedy, then DJ dance nights until 2am, most of them free."),
+    "Hillside Club": I(
+        "2286 Cedar St, Berkeley, CA 94709", "https://www.hillsideclub.org/",
+        "A Northside neighbourhood clubhouse since 1898 (the 1924 building is by John "
+        "White): concerts, dances and talks in a small hall, mostly seated.",
+        "Hillside Club"),
+    "Sweetwater": I(
+        "19 Corte Madera Ave, Mill Valley, CA 94941", "https://sweetwatermusichall.org/",
+        "Marin's nonprofit music hall since 1972: rock, jam, folk and bluegrass, "
+        "often seated with a bar."),
     "Great American": I(
         "859 O'Farrell St, San Francisco, CA 94109", "https://gamh.com/",
         "Ornate concert hall in the Tenderloin, with a balcony.",

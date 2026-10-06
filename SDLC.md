@@ -50,7 +50,10 @@ main ──●────────────────────●─
   milestone on the branch. Every commit on `epic/N` must trace to a slice: its squash, a
   `git cherry-pick -x` of one, or a revert of one. A merge must be a clean merge of `main`
   (exactly what git would make of its parents); one that resolved a conflict ships only with
-  `ship --accept-merge <sha>` after a human has looked at it. Anything else stops the ship. After the last milestone, `epic/N` is deleted.
+  `ship --accept-merge <sha>` after a human has looked at it. Anything else stops the ship.
+  A milestone built straight onto `main`, before epic branches, ships as a recorded no-op:
+  no sync, and no `ship-review`, which refuses it (`main...epic/N` would be a later milestone's diff).
+  After the last milestone, `epic/N` is deleted.
 - **One milestone at a time on the branch.** Only the earliest milestone that hasn't shipped
   is built: `next:` offers only its slices, and `claim` and `merge` refuse a later milestone's,
   so nothing unseen rides along to `main`. Once it's complete, new slices wait for its demo and
@@ -178,7 +181,8 @@ blockers have all closed as completed.
 The planner rates each unit `routine`, `judgment` or `novel` (with a reason Codex
 checks). It becomes a `complexity:<level>` label and a line in the slice, and
 `.sdlc/config.json`'s `models` maps it to the model that builds it: `next:` says e.g.
-`/work-slice 29 (sonnet: routine)`. `plan-annotate N` backfills ratings onto an epic
+`/work-slice 29 (sonnet: routine)`. The rating also says where Codex reviews the slice
+(see "Codex reviews" below). `plan-annotate N` backfills ratings onto an epic
 created before them. A slice that escalates on a cheaper model is retried once on the
 strongest before a human gets it: `claim N --retry --model <strongest>` lifts the
 escalation, keeps the branch and PR, and gives the retry a fresh Codex budget.
@@ -196,16 +200,94 @@ several can run at once. A slice's state is read off GitHub:
    milestone demos.
 3. The PR closes exactly that slice. `test-record` runs the full `pytest` itself and records the
    result on the PR for the head SHA. The repo has no CI, so this is the test gate.
-4. **Codex** reviews the head read-only. Its report must name the `HEAD:` it reviewed. The
+4. **Codex** reviews the head read-only, unless the slice is reviewed with its milestone
+   (below). Its report must name the `HEAD:` it reviewed. The
    implementer fixes or rebuts each finding, and each round is posted with `pr-review`. After
    `max_pr_rounds` (5) without approval: `escalate-slice`, and the slice goes to a human.
 5. `merge` is the gate: the PR targets `epic/E` and isn't behind it, Codex's latest review approves
-   the **current head**, a passing test run is recorded on the current head, the PR closes one open
+   the **current head** (or the review is owed to the milestone), a passing test run is recorded on the current head, the PR closes one open
    `plan:slice`, no other milestone is waiting for its demo or release, and it is mergeable. Then
    the agent squash-merges into `epic/E` and closes the slice itself (GitHub only acts on
    `Closes #N` in the default branch). A new commit voids both records. Humans review at
    milestone demos, not per PR.
 6. `cleanup N`, run from the primary checkout, removes the worktree and the branch.
+
+### Codex reviews
+
+Codex reviews twice: each slice on its PR, and each milestone's whole diff before it ships
+(`ship-review`). A slice's own review moves to its milestone's in two cases:
+
+- **Routine slices.** `.sdlc/config.json`'s `slice_review` maps a complexity to `slice` or
+  `milestone`. Here `routine` is `milestone`; `judgment`, `novel` and unrated slices are
+  reviewed on their PR. Without `slice_review`, every slice is.
+- **Codex can't run** (not installed, not signed in, out of quota, the network, timing out).
+  `review-defer PR --reason "<the error>"` records it on the PR, bound to the head. It is
+  refused once Codex has asked for changes that no later round approved: findings nobody
+  checked can't be deferred.
+
+Either way only the review relaxes: the tests, the base and the rest of the gate still
+hold, and a review that asks for changes always blocks. `merge` posts a `review-owed`
+record on the epic **before** the squash. A milestone with a review owed is in phase
+`review` once complete: new slices wait, `demo-post` refuses, and `next:` says
+`/milestone-demo N`, which syncs `epic/N` and has Codex review the milestone, reading each
+owed slice as closely as a pull request. An approving `ship-review` clears every review
+owed before it; one asking for changes is a demo finding (fix slices). If the head doesn't
+move before the ship, the same approval serves the ship.
+
+**Round limits** (`.sdlc/config.json`): `max_pr_rounds` (default 5) is how many Codex rounds
+that ask for changes a slice PR, or a milestone, may take before it escalates.
+`max_plan_rounds` (default 3) is the same for a plan, and `max_rounds` (5) for triage.
+
+## Worktrees, and several sessions at once
+
+Every worktree here is a plain **git worktree** that `tools/sdlc.py` or a skill makes with
+`git worktree add`. None of them comes from Claude Code's own worktree feature (`EnterWorktree`,
+`claude --worktree`, an agent's `isolation: "worktree"`). That feature puts its worktrees under
+`.claude/worktrees/`, branches them from `origin/main` and names the branches itself. The SDLC
+needs `slice/S` cut from `origin/epic/N`, at a path that `claim`, `merge` and `cleanup` can find
+again from the issue. A session starts in the primary checkout and stays rooted there. The skill
+makes it work in the worktree by writing every path out in full (`work-slice` §2).
+
+| Worktree | Made by | For | Removed by |
+|---|---|---|---|
+| `.worktrees/slice-S`, on `slice/S` from `origin/epic/N` | `claim S` | building one slice | `cleanup S` |
+| `.worktrees/epic-N`, detached at `origin/epic/N` | `sync N`, `revert-slice S` | merging `main` in, reverting a slice, Codex's milestone review | nobody: reset to `origin/epic/N` before each use |
+| `.worktrees/sdlc-demos`, on `sdlc-demos` | `demo-post` | committing a demo's pictures | nobody: kept |
+| `.worktrees/verify-main-N`, detached at `origin/main` | `verify-main N` | the suite on `main` after an untested release | `verify-main N`, when it's done |
+| `<scratchpad>/before` and `after`, detached | `milestone-demo` | the pictures of `main` and `epic/N` | the skill (`git worktree remove`) |
+| a throwaway worktree on `prd/N`, from `origin/main` | `triage-issue` | the approved PRD's one-file PR | the skill |
+
+`.worktrees/` is gitignored. **The primary checkout stays on `main`, and stays clean.** Every
+session runs `tools/sdlc.py` from it, and the tool adds and removes worktrees from it, so nothing
+switches its branch or edits files in it.
+
+### Running issues in parallel
+
+Run one Claude Code session per piece of work, each started in the primary checkout, and give
+each a different issue or slice: for example `/work-slice 35` in one terminal and
+`/triage-issue 80` in another. `ready` lists every slice that can be claimed, across all epics.
+
+- **Different issues share nothing but the primary checkout.** Each epic has its own `epic/N`.
+  Each slice has its own worktree, branch and `.venv`, so its first `uv sync` and suite run are
+  slower. Triage and planning write only to GitHub and to the session's scratchpad.
+- **Slices of one epic** run in parallel only within the milestone being built: one milestone
+  is built at a time. `blocked_by` holds back any slice that needs another's merged code.
+- **Two sessions can't take the same slice.** `claim` refuses a slice with an active claim, which
+  it reads off GitHub. On one machine the worktree also guards it: a second `claim S` finds
+  `.worktrees/slice-S` and stops before posting anything. Across two machines, the GitHub check
+  is the only guard. It reads and then posts, so two claims seconds apart could both land. Claim
+  from one machine.
+- **Merges into `epic/N` happen one at a time.** The gate refuses a PR that is behind `epic/N`.
+  The second slice to finish rebases onto `origin/epic/N`. Its new head needs a fresh
+  `test-record` and its review again (a Codex round, or a new deferral; nothing more for a slice
+  reviewed with its milestone), because the records are bound to the head SHA. A review of a
+  rebased head doesn't spend the round budget.
+- **`sync` and `revert-slice` share `.worktrees/epic-N`** and take a lock on it. A second one
+  started meanwhile refuses ("wait for it, then rerun") and doesn't queue.
+- **Only one session touches a speaker at a time.** Slices never touch one (tests are offline).
+  A milestone demo writes to the real household with the user present, so run one demo at a time.
+- **The machine is shared.** Each full suite takes about two minutes, and parallel runs slow
+  each other down. Give the Bash call `timeout: 600000`, as the skills say.
 
 ## Milestone demos (`milestone-demo`)
 
