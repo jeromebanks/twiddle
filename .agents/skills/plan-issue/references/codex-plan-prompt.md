@@ -1,8 +1,11 @@
 # The Codex plan-review prompt
 
-Fill the `<...>` placeholders and pass the text below the line to `codex exec`,
-quoted as one argument. Codex runs read-only in the repo, so give it **paths**,
-not pasted content: anything pasted is a claim, and a file is evidence.
+`uv run python tools/sdlc.py codex-review --plan N` fills this and runs it: the text
+below the line, `<N>`, `<PLAN_FILE>` (the plan JSON as posted), `<PRD_FILE>` (the
+approved revision), `<K>` and `<RESPONSE_FILE>` replaced, and the `<ROUND2>` bullet kept
+only from round 2 on. Don't fill it by hand. Codex runs read-only in a scratch checkout
+of `main`, so it gets **paths**, not pasted content: anything pasted is a claim, and a
+file is evidence.
 
 ---
 
@@ -15,9 +18,9 @@ Read these yourself:
 - the approved PRD it must deliver: `<PRD_FILE>`
 - `CLAUDE.md` (especially the read-only vs writing table, and Layout)
 - any source file the plan names, as far as you need it to judge a slice
-- <ROUND 2+: the planner's answer to the previous round: `<RESPONSE_FILE>`. Where the
+- <ROUND2>the planner's answer to the previous round: `<RESPONSE_FILE>`. Where the
   planner rebutted a finding, decide whether the rebuttal holds. Do not repeat a
-  finding the rebuttal answered unless you can show why the rebuttal is wrong.>
+  finding the rebuttal answered unless you can show why the rebuttal is wrong.</ROUND2>
 
 This is round <K>. Do not build, run tests, or modify anything. This is a plan review.
 

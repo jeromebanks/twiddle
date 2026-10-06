@@ -32,11 +32,13 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 PR_PROMPT = ROOT / ".agents" / "skills" / "work-slice" / "references" / "codex-pr-prompt.md"
+PLAN_PROMPT = ROOT / ".agents" / "skills" / "plan-issue" / "references" / "codex-plan-prompt.md"
+MILESTONE_PROMPT = ROOT / ".agents" / "skills" / "milestone-demo" / "references" / "codex-milestone-prompt.md"
 
 VERDICT_RE = re.compile(r"\A[*_`]*VERDICT:[*_`\s]*(approve|changes)[*_`.\s]*\Z", re.IGNORECASE)
 HEAD_RE = re.compile(r"^\s*[*_`]*HEAD:[*_`\s]*([0-9a-f]{40})\b", re.MULTILINE | re.IGNORECASE)
 PLACEHOLDER_RE = re.compile(r"<[A-Z]")
-ROUND2_RE = re.compile(r"^- <ROUND2>(.*?)</ROUND2>\n", re.MULTILINE | re.DOTALL)
+NAME_RE = re.compile(r"<([A-Z][A-Z0-9_]*)>")
 # How `pr-review` records a round: Codex's report folded in <details>, then the implementer's answer after
 # RESPONSE_MARK, a boundary `pr-review` removes from the report and the response first, so its first occurrence
 # is the real one; its marker says whether there is one (`response=1|0`). Rounds recorded before that carry no
@@ -164,13 +166,13 @@ def show_command(cmd: list[str], wt: Path, prompt_file: Path) -> str:
 
 # --- the prompt ---------------------------------------------------------------
 
-def latest_response(rounds: list[dict[str, Any]]) -> tuple[int, str | None]:
+def latest_response(rounds: list[dict[str, Any]], record: str = "pr-review") -> tuple[int, str | None]:
     """(the latest recorded round's number, its "Claude's response") for the next round's prompt.
 
-    `rounds` are the PR's recorded `pr-review` rounds, oldest first, each with its `verdict`, comment `body`
-    and marker's `response` attribute. A round marked `response=0` has none, whatever its report quotes; one
-    marked `response=1` is read after `RESPONSE_MARK`, where `response_section` puts it. A round that asked
-    for changes must carry one."""
+    `rounds` are the recorded rounds (`pr-review`, `plan-review` or `ship-review`, named by `record`), oldest
+    first, each with its `verdict`, comment `body` and marker's `response` attribute. A round marked
+    `response=0` has none, whatever its report quotes; one marked `response=1` is read after `RESPONSE_MARK`,
+    where `response_section` puts it. A round that asked for changes must carry one."""
     if not rounds:
         return 0, None
     last = rounds[-1]
@@ -183,7 +185,7 @@ def latest_response(rounds: list[dict[str, Any]]) -> tuple[int, str | None]:
         response = body.split(LEGACY_MARK, 1)[1].strip() or None
     if response is None and last.get("verdict") == "changes":
         raise ReviewError(f"round {len(rounds)} asked for changes and recorded no response: Codex would never see "
-                          "the answers to its findings. Record the round with `pr-review --response`, then run this")
+                          f"the answers to its findings. Record the round with `{record} --response`, then run this")
     return len(rounds), response
 
 
@@ -193,24 +195,40 @@ def unmarked(text: str) -> str:
 
 
 def response_section(response: str) -> str:
-    """What `pr-review` appends after the folded report: the boundary, then the implementer's answer."""
+    """What a recorded round appends after the folded report: the boundary, then the implementer's answer."""
     return f"\n\n{RESPONSE_MARK}\n{RESPONSE_HEADING}\n\n{unmarked(response).strip()}"
 
 
-def fill_pr_prompt(template: str, slice_file: Path, base: str, epic: int, response_file: Path | None) -> str:
-    """The text below the template's `---` line, its placeholders replaced (plain string replacement)."""
+def fill_prompt(template: str, values: dict[str, str], keep: dict[str, bool]) -> str:
+    """The text below the template's `---` line, filled. Each `- <TAG>...</TAG>` bullet named in `keep` stays
+    (its tags dropped) or goes; then every `<NAME>` is replaced from `values`, in one pass, so a value is never
+    read as a placeholder itself. A placeholder left over, or a bullet the template lacks, is refused."""
     if "\n---\n" not in template:
-        raise ReviewError("the PR prompt template has no `---` line above the prompt")
+        raise ReviewError("the prompt template has no `---` line above the prompt")
     text = template.split("\n---\n", 1)[1].strip() + "\n"
-    if not ROUND2_RE.search(text):
-        raise ReviewError("the PR prompt template has no `- <ROUND2>...</ROUND2>` bullet")
-    text = ROUND2_RE.sub(lambda m: f"- {m.group(1)}\n" if response_file else "", text)
-    for key, value in (("<SLICE_FILE>", str(slice_file)), ("<BASE>", base), ("<EPIC>", str(epic)),
-                       ("<RESPONSE_FILE>", str(response_file or ""))):
-        text = text.replace(key, value)
-    if m := PLACEHOLDER_RE.search(text):
-        raise ReviewError(f"the filled prompt still has a placeholder: {text[m.start():m.start() + 40]!r}")
-    return text
+    for tag, kept in keep.items():
+        bullet = re.compile(rf"^- <{tag}>(.*?)</{tag}>\n", re.MULTILINE | re.DOTALL)
+        if not bullet.search(text):
+            raise ReviewError(f"the prompt template has no `- <{tag}>...</{tag}>` bullet")
+        text = bullet.sub(lambda m: f"- {m.group(1)}\n" if kept else "", text)
+    rest = NAME_RE.sub(lambda m: "" if m.group(1) in values else m.group(0), text)
+    if m := PLACEHOLDER_RE.search(rest):
+        raise ReviewError(f"the filled prompt still has a placeholder: {rest[m.start():m.start() + 40]!r}")
+    return NAME_RE.sub(lambda m: values[m.group(1)] if m.group(1) in values else m.group(0), text)
+
+
+def fill_pr_prompt(template: str, slice_file: Path, base: str, epic: int, response_file: Path | None) -> str:
+    return fill_prompt(template, {"SLICE_FILE": str(slice_file), "BASE": base, "EPIC": str(epic),
+                                  "RESPONSE_FILE": str(response_file or "")}, {"ROUND2": bool(response_file)})
+
+
+def _write_response(rounds: list[dict[str, Any]], record: str, scratch: Path, files: dict[str, Path]) -> int:
+    """The latest round's response, written for Codex to read; the next round's number."""
+    k, response = latest_response(rounds, record)
+    if response:
+        files["response"] = scratch / f"response-round-{k}.md"
+        files["response"].write_text(response + "\n")
+    return k + 1
 
 
 def prepare_pr_round(pr: dict[str, Any], slice_issue: dict[str, Any], epic: int, rounds: list[dict[str, Any]],
@@ -224,12 +242,81 @@ def prepare_pr_round(pr: dict[str, Any], slice_issue: dict[str, Any], epic: int,
         raise ReviewError(f"PR #{pr.get('number')} targets {pr.get('baseRefName')}, not {base}: a slice merges into its epic's branch")
     files = {"brief": scratch / "slice.md", "prompt": scratch / "prompt.md"}
     files["brief"].write_text(f"{slice_issue.get('title', '')}\n\n{slice_issue.get('body', '')}\n")
-    k, response = latest_response(rounds)
-    if response:
-        files["response"] = scratch / f"response-round-{k}.md"
-        files["response"].write_text(response + "\n")
+    _write_response(rounds, "pr-review", scratch, files)
     prompt = fill_pr_prompt(PR_PROMPT.read_text() if template is None else template, files["brief"],
                             f"origin/{base}", epic, files.get("response"))
+    files["prompt"].write_text(prompt)
+    return prompt, files
+
+
+def prepare_plan_round(issue: int, plan: dict[str, Any], requirements: str | Path, rounds: list[dict[str, Any]],
+                       scratch: Path, template: str | None = None) -> tuple[str, dict[str, Path]]:
+    """(the filled prompt, the files written for it) for one round on a posted plan revision.
+
+    `plan` is the JSON as posted (written to `plan.json`, which `plan-review --plan` takes); `requirements` is
+    the approved revision: a path Codex can read from its checkout of main (a `docs/prd/` file), or the
+    approved comment's text, written to `requirements.md`."""
+    files = {"plan": scratch / "plan.json", "prompt": scratch / "prompt.md"}
+    files["plan"].write_text(json.dumps(plan, indent=1, ensure_ascii=False) + "\n")
+    if isinstance(requirements, Path):
+        req = str(requirements)
+    else:
+        files["requirements"] = scratch / "requirements.md"
+        files["requirements"].write_text(requirements.strip() + "\n")
+        req = str(files["requirements"])
+    k = _write_response(rounds, "plan-review", scratch, files)
+    prompt = fill_prompt(PLAN_PROMPT.read_text() if template is None else template,
+                         {"N": str(issue), "PLAN_FILE": str(files["plan"]), "PRD_FILE": req, "K": str(k),
+                          "RESPONSE_FILE": str(files.get("response", ""))}, {"ROUND2": "response" in files})
+    files["prompt"].write_text(prompt)
+    return prompt, files
+
+
+def _brief(s: dict[str, Any]) -> str:
+    return f"{s.get('title', '')}\n\n{s.get('body', '')}\n"
+
+
+def _section(body: str, name: str) -> str:
+    m = re.search(rf"^## {re.escape(name)}\s*\n(.*?)(?=^## |\Z)", body or "", re.MULTILINE | re.DOTALL)
+    return m.group(1).strip() if m else ""
+
+
+def prepare_milestone_round(epic: int, milestone: dict[str, Any], slices: list[dict[str, Any]],
+                            owed: list[dict[str, Any]], rounds: list[dict[str, Any]], scratch: Path,
+                            template: str | None = None) -> tuple[str, dict[str, Path]]:
+    """(the filled prompt, the files written for it) for one round on a milestone's diff.
+
+    `milestone` is {key, title, steps}; `slices` are its merged slices, each {number, key, title, body, pr,
+    merge_commit} (the squash commit on `epic/N`); `owed` are the slices `merge` recorded as merging without a
+    review of their own ({number, slice, why}). Each slice's brief goes in `slice-<number>.md`, and
+    `milestone.md` holds the demo steps and each slice's Outcome and Acceptance criteria."""
+    by_number = {str(s["number"]): s for s in slices}
+    if missing := [s for s in slices if not s.get("merge_commit")]:
+        raise ReviewError("no squash commit on the epic branch for " + ", ".join(f"#{s['number']} {s['key']}" for s in missing)
+                          + ": the milestone's slices must all be merged")
+    if stray := [o for o in owed if str(o.get("number")) not in by_number]:
+        raise ReviewError("a review is owed for " + ", ".join(f"{o.get('slice')} (#{o.get('number')})" for o in stray)
+                          + f", which isn't a merged slice of {milestone['key']}: nothing to point Codex at")
+    files = {"milestone": scratch / "milestone.md", "prompt": scratch / "prompt.md"}
+    lines = [f"# {milestone['title']}", "", "## Demo steps", "", (milestone.get("steps") or "(none given)").strip(), ""]
+    for s in slices:
+        brief = files[f"slice-{s['number']}"] = scratch / f"slice-{s['number']}.md"
+        brief.write_text(_brief(s))
+        lines += [f"## {s['key']} (#{s['number']}, PR #{s.get('pr')}, squash {s['merge_commit']}): {s.get('title', '')}",
+                  "", f"The whole brief: {brief}", "", "### Outcome", "", _section(s.get("body", ""), "Outcome") or "(none)",
+                  "", "### Acceptance criteria", "", _section(s.get("body", ""), "Acceptance criteria") or "(none)", ""]
+    files["milestone"].write_text("\n".join(lines))
+
+    def one(s: dict[str, Any]) -> str:
+        return f"#{s['number']} {s['key']} (PR #{s.get('pr')}, squash `{s['merge_commit']}`, brief `{files[f'slice-' + str(s['number'])]}`)"
+    why = {"routine": "routine", "unavailable": "Codex couldn't run on its PR"}
+    deferred = [f"{one(by_number[str(o['number'])])}: {why.get(o.get('why'), o.get('why') or '?')}" for o in owed]
+    k = _write_response(rounds, "ship-review", scratch, files)
+    prompt = fill_prompt(MILESTONE_PROMPT.read_text() if template is None else template,
+                         {"N": str(epic), "MILESTONE_FILE": str(files["milestone"]),
+                          "SLICES": "; ".join(one(s) for s in slices), "DEFERRED_SLICES": "; ".join(deferred),
+                          "RESPONSE_FILE": str(files.get("response", ""))},
+                         {"DEFERRED": bool(deferred), "ROUND2": "response" in files})
     files["prompt"].write_text(prompt)
     return prompt, files
 
@@ -386,18 +473,18 @@ def git_head(cwd: Path) -> str:
     return _git(["rev-parse", "HEAD"], cwd).strip()
 
 
-def check_worktree(wt: Path, pr_head: str) -> str:
-    """The worktree's HEAD, once it's clean and is the PR's head; otherwise say which it isn't."""
+def check_worktree(wt: Path, pr_head: str, what: str = "the PR's head", make: str = "`claim N --resume`") -> str:
+    """The worktree's HEAD, once it's clean and is `what` (the PR's head, or epic/N's); otherwise say which it isn't."""
     if not (wt / ".git").exists():
-        raise ReviewError(f"no worktree at {wt}: `claim N --resume` makes it")
+        raise ReviewError(f"no worktree at {wt}: {make} makes it")
     if dirty := dirty_files(wt):
         raise ReviewError(f"the worktree {wt} is not clean, so Codex would not review the pushed head: "
                           + ", ".join(dirty[:8])
                           + " (commit and push, or keep scratch files outside the worktree)")
     head = git_head(wt)
     if head != pr_head:
-        raise ReviewError(f"the worktree's HEAD {head[:12]} is not the PR's head {pr_head[:12]}: "
-                          "push, or check out the PR's branch")
+        raise ReviewError(f"the worktree's HEAD {head[:12]} is not {what} {pr_head[:12]}: "
+                          + ("push, or check out the PR's branch" if what == "the PR's head" else f"{make} brings it up to date"))
     return head
 
 

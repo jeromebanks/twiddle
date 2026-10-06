@@ -173,6 +173,7 @@ class Ledger:
     plan_body: str = ""                  # the latest plan revision's comment: its milestones and create mode
     plan_verdict: str | None = None
     plan_rounds: int = 0
+    plan_review: dict[str, Any] | None = None   # the latest round counted in plan_rounds: its response feeds the next
     plan_after_created: bool = False     # a plan revision posted since the last plan-created: an amendment
     created: set[str] | None = field(default_factory=set)   # milestones whose issues exist (None: all, legacy)
     cleanups: set[str] = field(default_factory=set)         # milestones whose tech-debt cleanup is planned
@@ -200,7 +201,7 @@ def _ms(mk: dict[str, str]) -> str:
 
 def _replan(L: Ledger) -> None:
     """Changes to plan (feedback): plan-issue amends the plan, with fresh Codex rounds."""
-    L.feedback, L.feedback_plan, L.plan_rounds, L.plan_verdict = True, False, 0, None
+    L.feedback, L.feedback_plan, L.plan_rounds, L.plan_verdict, L.plan_review = True, False, 0, None, None
 
 
 def _reopen(L: Ledger, m: str) -> None:
@@ -213,7 +214,7 @@ def _reopen(L: Ledger, m: str) -> None:
 
 def _on_question(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     if mk.get("phase") == "plan":
-        L.plan_rounds, L.plan_verdict = 0, None   # the poster's answer buys a fresh set of Codex rounds
+        L.plan_rounds, L.plan_verdict, L.plan_review = 0, None, None   # the poster's answer buys fresh Codex rounds
     else:
         L.rounds += 1
 
@@ -239,13 +240,14 @@ def _on_plan(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
 
 def _on_plan_review(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     L.plan_rounds += 1
+    L.plan_review = {"id": c.get("id"), "verdict": mk.get("verdict"), "response": mk.get("response")}
     if L.latest_plan and _rev(mk) == L.latest_plan["rev"]:
         L.plan_verdict = mk.get("verdict")
 
 
 def _on_plan_created(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     L.feedback = L.feedback_plan = L.plan_after_created = False
-    L.plan_rounds = 0   # the next amendment (a milestone's replan, demo changes) gets fresh rounds
+    L.plan_rounds, L.plan_review = 0, None   # the next amendment (a milestone's replan, demo changes) gets fresh rounds
     if mk.get("cleanup"):
         L.cleanups.add(mk["cleanup"])
     if "created" not in mk:
@@ -506,6 +508,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "decision": decision, "ignored_keywords": ignored, "reconcile": reconcile, "stale_labels": stale,
         "conflicts": conflicts, "doc_approved": doc_approved, "latest_plan": latest_plan,
         "plan_verdict": plan_verdict, "plan_rounds": plan_rounds, "max_plan_rounds": max_plan_rounds,
+        "plan_review": L.plan_review,
         "demos": demos, "latest_demo": latest_demo, "feedback": feedback,
         "shipped": shipped, "ship_reviews": ship_reviews, "epic_tests": epic_tests, "untested": untested,
         "review_owed": review_owed,
@@ -958,7 +961,8 @@ def print_state(st: dict[str, Any]) -> None:
     print(f"#{st['number']} {st['title']}")
     print(f"  state: {st['state']}   turn: {st['turn']}   action: {st['action']}   type: {st['type'] or '?'}")
     print(f"  latest revision: {('%s rev %s' % (doc['kind'], doc['rev'])) if doc else 'none'}"
-          f"   approved: {st['approved_rev'] or 'no'}   rounds: {st['rounds']}/{st['max_rounds']}")
+          f"   approved: {st['approved_rev'] or 'no'}" + (f" (comment {approved_comment(st)})" if st.get("doc_approved") else "")
+          + f"   rounds: {st['rounds']}/{st['max_rounds']}")
     if st["replies"]:
         print("  replies since the last agent comment: " + ", ".join(f"{r['by']} ({r['url']})" for r in st["replies"]))
     if st["decision"]:
@@ -1738,12 +1742,8 @@ def command_plan_review(args: argparse.Namespace, config: dict[str, Any]) -> int
     """Record one Codex round on the latest plan revision, with Claude's answer to it."""
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
-    if st["action"] not in ("continue_plan", "create_plan_issues", "ask_poster", "escalate_plan") or not st["latest_plan"]:
-        raise SdlcError(f"#{st['number']} has no plan under review (state {st['state']}, action {st['action']})")
-    if st["plan_rounds"] >= st["max_plan_rounds"]:
-        raise SdlcError(f"Codex rounds spent ({st['plan_rounds']}/{st['max_plan_rounds']}) without consensus: "
-                        + ("escalate it (`transition N escalated --kind escalation --reason ...`): the epic is being built"
-                           if st["state"] in BUILD_STATES else "ask the poster (`transition N needs-info --kind question`)"))
+    if errs := plan_round_errors(st):
+        raise SdlcError(errs[0])
     _, posted_plan = latest_plan_of(bundle, st)
     if json.loads(Path(args.plan).read_text()) != posted_plan:
         raise SdlcError(f"{args.plan} is not plan rev {st['latest_plan']['rev']} as posted: Codex must review exactly "
@@ -1752,11 +1752,9 @@ def command_plan_review(args: argparse.Namespace, config: dict[str, Any]) -> int
     verdict = parse_verdict(report)
     response = Path(args.response).read_text().strip() if args.response else ""
     rnd = st["plan_rounds"] + 1
-    body = (f"**Round {rnd}/{st['max_plan_rounds']} — Codex: `{verdict}`**\n\n"
-            f"<details><summary>Codex's review</summary>\n\n{report.strip()}\n\n</details>")
-    if response:
-        body += f"\n\n### Claude's response\n\n{response}"
-    comment = render_comment("plan-review", st["latest_plan"]["rev"], body, config, verdict=verdict, round=str(rnd))
+    body, extra = review_body(f"**Round {rnd}/{st['max_plan_rounds']} — Codex: `{verdict}`**", "Codex's review",
+                              report, response)
+    comment = render_comment("plan-review", st["latest_plan"]["rev"], body, config, verdict=verdict, round=str(rnd), **extra)
     if len(comment) > COMMENT_LIMIT:
         raise SdlcError(f"the review comment is {len(comment)} characters, over GitHub's limit")
     if args.dry_run:
@@ -2504,6 +2502,26 @@ def command_test_record(args: argparse.Namespace, config: dict[str, Any]) -> int
     return 0 if result == "pass" else 1
 
 
+def review_body(head: str, summary: str, report: str, response: str) -> tuple[str, dict[str, str]]:
+    """A recorded Codex round (`pr-review`, `plan-review`, `ship-review`): (the comment body, its marker's extras).
+
+    What the round ran under is read from the block `codex-review` stamps under `HEAD:` (none in a report saved
+    before that), shown and kept in the marker. The response goes after its boundary
+    (`codex_review.response_section`), where the next round's prompt reads it back from."""
+    prov = {k: v for k, v in codex_review.parse_provenance(report).items() if MARKER_VALUE_RE.fullmatch(v) and "--" not in v}
+    ran = (f"Ran `{prov.get('model', '?')}` at effort `{prov.get('effort', '?')}`, codex `{prov.get('codex', '?')}`, "
+           f"prompt sha256 `{prov.get('prompt', '?')[:12]}`\n\n") if prov else ""
+    body = (f"{head}\n\n{ran}<details><summary>{summary}</summary>\n\n{codex_review.unmarked(report).strip()}\n\n</details>"
+            + (codex_review.response_section(response) if response else ""))
+    return body, {"response": "1" if response else "0", **prov}
+
+
+def recorded_rounds(comments: list[dict[str, Any]], trusted: set[str], kind: str, **match: str) -> list[dict[str, Any]]:
+    """The recorded rounds of one kind (and milestone), oldest first, as `codex_review.latest_response` reads them."""
+    return [{"verdict": mk.get("verdict"), "body": c.get("body", ""), "response": mk.get("response")}
+            for mk, c in _marked(comments, trusted) if mk.get("kind") == kind and all(mk.get(k) == v for k, v in match.items())]
+
+
 def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Record one Codex round on the PR's current head, with Claude's answer to it."""
     if args.from_file:
@@ -2529,18 +2547,10 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
                         "review the current head (record each round before pushing its fixes)")
     response = Path(args.response).read_text().strip() if args.response else ""
     rnd = len(reviews) + 1
-    # the next round's prompt reads the response back from after its boundary (codex_review.response_section)
-    # what it ran under, from the block `codex-review` stamps under HEAD (none in a report saved before that)
-    prov = {k: v for k, v in codex_review.parse_provenance(report).items() if MARKER_VALUE_RE.fullmatch(v) and "--" not in v}
-    ran = (f"Ran `{prov.get('model', '?')}` at effort `{prov.get('effort', '?')}`, codex `{prov.get('codex', '?')}`, "
-           f"prompt sha256 `{prov.get('prompt', '?')[:12]}`\n\n") if prov else ""
-    body = (f"**Review {rnd} — Codex on `{pr['headRefOid'][:12]}`: `{verdict}`** "
-            f"({changes_rounds(reviews) + (verdict == 'changes')}/{limit} change rounds used)\n\n{ran}"
-            f"<details><summary>Codex's review</summary>\n\n{codex_review.unmarked(report).strip()}\n\n</details>")
-    if response:
-        body += codex_review.response_section(response)
-    comment = render_comment("pr-review", None, body, config, sha=pr["headRefOid"], verdict=verdict, round=str(rnd),
-                             response="1" if response else "0", **prov)
+    head = (f"**Review {rnd} — Codex on `{pr['headRefOid'][:12]}`: `{verdict}`** "
+            f"({changes_rounds(reviews) + (verdict == 'changes')}/{limit} change rounds used)")
+    body, extra = review_body(head, "Codex's review", report, response)
+    comment = render_comment("pr-review", None, body, config, sha=pr["headRefOid"], verdict=verdict, round=str(rnd), **extra)
     if len(comment) > COMMENT_LIMIT:
         raise SdlcError(f"the review comment is {len(comment)} characters, over GitHub's limit")
     if args.dry_run:
@@ -2589,9 +2599,43 @@ def command_review_defer(args: argparse.Namespace, config: dict[str, Any]) -> in
 
 
 def command_codex_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """Run one Codex round on a slice PR's head and save the report, stamped with that head. How the round
-    runs (prompt, settings, checks, retry) is `codex_review`'s; this reads GitHub and finds the worktree."""
+    """Run one Codex round (a slice PR's head, a posted plan revision, or a milestone's diff on epic/N) and save
+    the report, stamped with the commit it read. How a round runs (prompt, settings, checks, retry) is
+    `codex_review`'s; this reads GitHub, finds the checkout and picks what goes into the prompt."""
     settings = codex_review.codex_settings(config)
+    mode = "pr" if args.pr is not None else "plan" if args.plan is not None else "milestone"
+    return {"pr": codex_review_pr, "plan": codex_review_plan, "milestone": codex_review_milestone}[mode](args, config, settings)
+
+
+def review_scratch(args: argparse.Namespace, label: str, *inside: Path) -> Path:
+    """`--out`, or a temp dir: never inside a checkout whose `git status` it would dirty."""
+    out = Path(args.out).resolve() if args.out else Path(tempfile.mkdtemp(prefix=f"codex-review-{label}-"))
+    for wt in inside:
+        if out.is_relative_to(wt.resolve()):
+            raise SdlcError(f"--out {out} is inside the worktree {wt}: its files would make the tree dirty")
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, head: str, out: Path,
+                    settings: dict[str, Any], dry_run: bool, record: str) -> int:
+    """Print what the round runs, then run it (or, with --dry-run, print the prompt)."""
+    cmd = codex_review.codex_command(settings, prompt)
+    print(f"{title}\n"
+          + "".join(f"  {k}: {v}\n" for k, v in files.items())
+          + f"  CODEX_HOME: {out / 'codex-home'} (only a copy of your sign-in and the config.toml written from "
+            f"`.sdlc/config.json`; its sessions/ holds the run's log)\n"
+          + f"  run (timeout {settings['timeout_seconds']}s): {codex_review.show_command(cmd, wt, files['prompt'])}")
+    if dry_run:
+        print(f"\n{prompt}")
+        return 0
+    status, report = codex_review.run_review(cmd, wt, head, out, settings)
+    if report:
+        print(f"\n{report.read_text()}\nsaved: {report}\nrecord it: uv run python tools/sdlc.py {record}")
+    return status
+
+
+def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: dict[str, Any]) -> int:
     if args.from_file:
         b = json.loads(Path(args.from_file).read_text())
         pr, comments, trusted, slice_issue = b["pr"], b["pr_comments"], set(b["trusted"]), b.get("slice")
@@ -2605,10 +2649,7 @@ def command_codex_review(args: argparse.Namespace, config: dict[str, Any]) -> in
     if len(refs) != 1 or not slice_issue or (epic := slice_epic(slice_issue)) is None:
         raise SdlcError(f"PR #{pr['number']} must close exactly one slice of an epic (it closes {refs or 'none'})")
     wt = worktree_path(refs[0], config)
-    out = Path(args.out).resolve() if args.out else Path(tempfile.mkdtemp(prefix=f"codex-review-{pr['number']}-"))
-    if out.is_relative_to(wt.resolve()):
-        raise SdlcError(f"--out {out} is inside the worktree: its files would make the tree dirty")
-    out.mkdir(parents=True, exist_ok=True)
+    out = review_scratch(args, str(pr["number"]), wt)
     if not args.from_file and (wt / ".git").exists() and git(["rev-parse", "HEAD"], cwd=wt) != pr["headRefOid"]:
         pr = wait_for_pr_head(pr["number"], git(["rev-parse", "HEAD"], cwd=wt), config)   # a push GitHub hasn't shown yet
     head = codex_review.check_worktree(wt, pr["headRefOid"])
@@ -2616,23 +2657,160 @@ def command_codex_review(args: argparse.Namespace, config: dict[str, Any]) -> in
     git(["fetch", "origin", epic_branch(epic)], cwd=wt, check=False)
     if not git(["rev-parse", "--verify", "--quiet", base], cwd=wt, check=False):
         raise SdlcError(f"the worktree has no {base} to diff against: `git fetch origin {epic_branch(epic)}`")
-    rounds = [{"verdict": mk.get("verdict"), "body": c.get("body", ""), "response": mk.get("response")}
-              for mk, c in _marked(comments, trusted) if mk.get("kind") == "pr-review"]
+    rounds = recorded_rounds(comments, trusted, "pr-review")
     prompt, files = codex_review.prepare_pr_round(pr, slice_issue, epic, rounds, out)
-    cmd = codex_review.codex_command(settings, prompt)
-    print(f"PR #{pr['number']} round {len(rounds) + 1} on {head[:12]}\n"
-          + "".join(f"  {k}: {v}\n" for k, v in files.items())
-          + f"  CODEX_HOME: {out / 'codex-home'} (only a copy of your sign-in and the config.toml written from "
-            f"`.sdlc/config.json`; its sessions/ holds the run's log)\n"
-          + f"  run (timeout {settings['timeout_seconds']}s): {codex_review.show_command(cmd, wt, files['prompt'])}")
+    return run_codex_round(f"PR #{pr['number']} round {len(rounds) + 1} on {head[:12]}", prompt, files, wt, head, out,
+                           settings, args.dry_run, f"pr-review {pr['number']} --report {out / 'codex.md'} --response <your answers>")
+
+
+def approved_comment(st: dict[str, Any]) -> str:
+    """The approved PRD or diagnosis comment's id, as its `#issuecomment-` anchor (and `merge-prd`'s doc) gives it."""
+    doc = st["latest_doc"]
+    m = re.search(r"#issuecomment-(\d+)$", doc.get("url") or "")
+    return m.group(1) if m else str(doc["id"])
+
+
+def approved_requirements(n: int, comment_id: str, comment_body: str, ref: str, root: Path) -> tuple[str, str | Path]:
+    """(what was used, the requirements for the plan prompt): the merged `docs/prd/N-*.md` at `ref` whose header
+    links the approved comment, as a path relative to a checkout of `ref`; else the approved comment's text.
+    A doc of an older revision, or none merged yet, is never what the plan is held to."""
+    listed = git(["ls-tree", "--name-only", ref, "docs/prd/"], cwd=root, check=False).splitlines()
+    anchor = re.compile(rf"#issuecomment-{comment_id}(?!\d)")
+    for path in sorted(p for p in listed if re.fullmatch(rf"docs/prd/{n}-[^/]*\.md", p)):
+        text = git(["show", f"{ref}:{path}"], cwd=root, check=False)
+        header = text.split("\n## ", 1)[0]
+        if anchor.search(header):
+            return f"{path} (its header links comment {comment_id})", Path(path)
+    body = "\n".join(l for l in comment_body.splitlines() if not MARKER_RE.match(l.strip())).strip()
+    return f"the approved comment {comment_id} (no docs/prd/{n}-*.md on {ref} links it)", body
+
+
+def plan_round_errors(st: dict[str, Any]) -> list[str]:
+    """Why a Codex round on the latest plan revision couldn't be recorded now (`plan-review`'s checks)."""
+    if st["action"] not in ("continue_plan", "create_plan_issues", "ask_poster", "escalate_plan") or not st["latest_plan"]:
+        return [f"#{st['number']} has no plan under review (state {st['state']}, action {st['action']})"]
+    if st["plan_rounds"] >= st["max_plan_rounds"]:
+        return [f"Codex rounds spent ({st['plan_rounds']}/{st['max_plan_rounds']}) without consensus: "
+                + ("escalate it (`transition N escalated --kind escalation --reason ...`): the epic is being built"
+                   if st["state"] in BUILD_STATES else "ask the poster (`transition N needs-info --kind question`)")]
+    return []
+
+
+def codex_review_plan(args: argparse.Namespace, config: dict[str, Any], settings: dict[str, Any]) -> int:
+    """Codex on the latest posted plan revision, from a scratch checkout of origin/main (created and removed
+    here: the primary checkout is shared by other sessions), held to the currently approved revision."""
+    n = args.plan
+    if args.from_file:
+        bundle = json.loads(Path(args.from_file).read_text())
+    else:
+        bundle = fetch_bundle(n, config)
+    st = bundle_state(bundle, config)
+    if not st.get("doc_approved"):
+        raise SdlcError(f"#{n} has no approved PRD or diagnosis: a plan is reviewed against the approved revision")
+    if not st.get("latest_plan"):
+        raise SdlcError(f"#{n} has no plan revision yet: `plan-post` it first")
+    if errs := plan_round_errors(st):
+        if not args.dry_run:
+            raise SdlcError("; ".join(errs) + ": a round now couldn't be recorded")
+        print("note: " + "; ".join(errs) + " (a real run would refuse)")
+    _, plan = latest_plan_of(bundle, st)
+    doc = next(c for c in bundle["comments"] if c["id"] == st["latest_doc"]["id"])
+    root = primary_root()
+    main = config.get("default_branch", "main")
+    if not args.from_file:
+        git(["fetch", "-q", "origin", main], cwd=root)
+    sha = git(["rev-parse", "--verify", f"origin/{main}^{{commit}}"], cwd=root)
+    out = review_scratch(args, f"plan-{n}", root)
+    used, requirements = approved_requirements(n, approved_comment(st), doc.get("body", ""), sha, root)
+    rounds = []
+    if last := st.get("plan_review"):
+        c = next(c for c in bundle["comments"] if c["id"] == last["id"])
+        rounds = [{"verdict": last["verdict"], "body": c.get("body", ""), "response": last.get("response")}]
+    k = st["plan_rounds"]
+    # `latest_response` numbers rounds by the list it's given: pad it to the rounds counted so far
+    prompt, files = codex_review.prepare_plan_round(n, plan, requirements, [{}] * (k - len(rounds)) + rounds, out)
+    checkout = out / "main"
+    if isinstance(requirements, Path):          # read by Codex from its checkout of main
+        files["requirements"] = checkout / requirements
+    title = (f"#{n} plan rev {st['latest_plan']['rev']} round {k + 1}, held to {used}; "
+             f"Codex reads {main} at {sha[:12]}")
+    record = f"plan-review {n} --plan {files['plan']} --report {out / 'codex.md'} --response <your answers>"
     if args.dry_run:
-        print(f"\n{prompt}")
-        return 0
-    status, report = codex_review.run_review(cmd, wt, head, out, settings)
-    if report:
-        print(f"\n{report.read_text()}\nsaved: {report}\n"
-              f"record it: uv run python tools/sdlc.py pr-review {pr['number']} --report {report} --response <your answers>")
-    return status
+        return run_codex_round(title, prompt, files, checkout, sha, out, settings, True, record)
+    git(["worktree", "prune"], cwd=root)
+    if checkout.exists():
+        git(["worktree", "remove", "--force", str(checkout)], cwd=root, check=False)
+        shutil.rmtree(checkout, ignore_errors=True)
+    git(["worktree", "add", "-q", "--detach", str(checkout), sha], cwd=root)
+    try:
+        return run_codex_round(title, prompt, files, checkout, sha, out, settings, False, record)
+    finally:
+        git(["worktree", "remove", "--force", str(checkout)], cwd=root, check=False)
+        git(["worktree", "prune"], cwd=root, check=False)
+
+
+def milestone_slices(epic: int, title: str, config: dict[str, Any], trusted: set[str]) -> list[dict[str, Any]]:
+    """A milestone's slices, each with its brief and the squash commit its PR left on epic/N."""
+    out = []
+    for l in fetch_plan_issues(epic, config, trusted):
+        if l["kind"] != "slice" or (l.get("milestone") or "(no milestone)") != title:
+            continue
+        pr = find_slice_pr(l["number"], config) if l["state"] == "closed" else None
+        out.append({"number": l["number"], "key": l["key"], "title": l["title"], "body": l["body"],
+                    "pr": (pr or {}).get("number"), "merge_commit": ((pr or {}).get("mergeCommit") or {}).get("oid")})
+    return sorted(out, key=lambda s: natural_key(s["key"]))
+
+
+def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], settings: dict[str, Any]) -> int:
+    """Codex on the milestone's whole diff (main...epic/N), from `.worktrees/epic-N` as `sync` left it."""
+    n = args.milestone
+    if args.from_file:
+        b = json.loads(Path(args.from_file).read_text())
+        bundle, progress, head, slices = b, b["progress"], b["epic_head"], b["slices"]
+        steps = lambda title: b.get("steps", "")  # noqa: E731
+        already = lambda title: bool(b.get("on_main"))  # noqa: E731
+        wt = Path(b["worktree"]) if b.get("worktree") else primary_root() / config.get("worktree_dir", ".worktrees") / f"epic-{n}"
+    else:
+        bundle = fetch_bundle(n, config)
+        progress = epic_progress(n, config, set(bundle["trusted"]))
+        head = epic_head(n, config)
+        slices = None
+        gh_ms = {m["title"]: m for m in gh_pages(f"repos/{repo_of(config)}/milestones?state=all&per_page=100")}
+        steps = lambda title: (gh_ms.get(title) or {}).get("description") or ""  # noqa: E731
+        leaves = [r for r in fetch_plan_issues(n, config, set(bundle["trusted"])) if r["kind"] == "slice"]
+        already = lambda title: milestone_on_main(title, leaves, config)  # noqa: E731
+        wt = primary_root() / config.get("worktree_dir", ".worktrees") / f"epic-{n}"
+    st = bundle_state(bundle, config)
+    trusted = set(bundle["trusted"])
+    if not (target := review_target(st, progress, None)):
+        raise SdlcError(f"#{n}: every milestone has shipped")
+    key, title = target["key"], target["title"]
+    if already(title):
+        raise SdlcError(f"{title} was built straight onto {config.get('default_branch', 'main')}: "
+                        f"there is nothing of it to review; `ship {n}` records it as shipped")
+    rounds = recorded_rounds(bundle["comments"], trusted, "ship-review", milestone=key)
+    limit = config.get("max_pr_rounds", 5)
+    if (spent := sum(1 for r in rounds if r["verdict"] == "changes")) >= limit:
+        raise SdlcError(f"Codex rounds on {key} spent ({spent}/{limit}): "
+                        f"`transition {n} escalated --kind escalation --reason ...`")
+    if slices is None:
+        slices = milestone_slices(n, title, config, trusted)
+    out = review_scratch(args, f"milestone-{n}", wt)
+    checked = codex_review.check_worktree(wt, head, f"{epic_branch(n)}'s head", f"`sync {n}`")
+    main = config.get("default_branch", "main")
+    git(["fetch", "-q", "origin", main], cwd=wt, check=False)
+    if not git(["rev-parse", "--verify", "--quiet", f"origin/{main}"], cwd=wt, check=False):
+        raise SdlcError(f"the epic worktree has no origin/{main} to diff against: `git fetch origin {main}`")
+    if gone := [s["key"] for s in slices if s.get("merge_commit") and not is_ancestor(s["merge_commit"], checked, wt)]:
+        raise SdlcError(f"{', '.join(gone)}'s squash commit isn't on {epic_branch(n)} at {checked[:12]}: "
+                        "Codex would be pointed at a commit that isn't there (was it reverted?)")
+    owed = (st.get("review_owed") or {}).get(key) or []
+    prompt, files = codex_review.prepare_milestone_round(n, {"key": key, "title": title, "steps": steps(title)},
+                                                         slices, owed, rounds, out)
+    return run_codex_round(f"#{n} {key} round {len(rounds) + 1} on {epic_branch(n)} {checked[:12]}"
+                           + (f"; owed: {', '.join(o.get('slice', '?') for o in owed)}" if owed else ""),
+                           prompt, files, wt, checked, out, settings, args.dry_run,
+                           f"ship-review {n} --report {out / 'codex.md'} --response <your answers>")
 
 
 def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
@@ -3074,17 +3252,17 @@ def command_ship_review(args: argparse.Namespace, config: dict[str, Any]) -> int
     verdict = parse_verdict(report)
     m = HEAD_RE.search(report)
     if not m:
-        raise SdlcError("the Codex report has no `HEAD: <40-hex sha>` line: it can't show what it reviewed; run it again")
+        raise SdlcError(f"the Codex report has no `HEAD: <40-hex sha>` line: save it with `codex-review --milestone "
+                        f"{st['number']}`, which writes the head it checked")
     if m.group(1) != head:
         raise SdlcError(f"Codex reviewed {m.group(1)[:12]} but {epic_branch(st['number'])} is at {head[:12]}: "
                         "review the current head (record each round before pushing anything)")
     response = Path(args.response).read_text().strip() if args.response else ""
     rnd = len(reviews) + 1
-    body = (f"**{key}, review {rnd} — Codex on `{epic_branch(st['number'])}` `{head[:12]}`: `{verdict}`**\n\n"
-            f"<details><summary>Codex's review of main...{epic_branch(st['number'])}</summary>\n\n{report.strip()}\n\n</details>")
-    if response:
-        body += f"\n\n### Claude's response\n\n{response}"
-    comment = render_comment("ship-review", None, body, config, milestone=key, sha=head, verdict=verdict, round=str(rnd))
+    body, extra = review_body(f"**{key}, review {rnd} — Codex on `{epic_branch(st['number'])}` `{head[:12]}`: `{verdict}`**",
+                              f"Codex's review of main...{epic_branch(st['number'])}", report, response)
+    comment = render_comment("ship-review", None, body, config, milestone=key, sha=head, verdict=verdict, round=str(rnd),
+                             **extra)
     if len(comment) > COMMENT_LIMIT:
         raise SdlcError(f"the review comment is {len(comment)} characters, over GitHub's limit")
     if args.dry_run:
@@ -3936,9 +4114,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--from-file")
     p.set_defaults(fn=command_review_defer)
 
-    p = sub.add_parser("codex-review", help="run one Codex round on a PR's head and save the report, stamped with it")
-    p.add_argument("--pr", type=int, required=True)
-    p.add_argument("--out", help="where the prompt, brief, response and report go (outside the worktree); default a temp dir")
+    p = sub.add_parser("codex-review", help="run one Codex round (a PR, a plan, a milestone) and save the report, stamped")
+    which = p.add_mutually_exclusive_group(required=True)
+    which.add_argument("--pr", type=int, help="a slice PR's head, from the slice's worktree")
+    which.add_argument("--plan", type=int, metavar="N", help="issue N's latest posted plan revision, against its approved revision")
+    which.add_argument("--milestone", type=int, metavar="N", help="epic N's current milestone: main...epic/N, from .worktrees/epic-N")
+    p.add_argument("--out", help="where the prompt, briefs, response and report go (outside any checkout); default a temp dir")
     p.add_argument("--dry-run", action="store_true", help="print the filled prompt and the exact codex command; run nothing")
     p.add_argument("--from-file")
     p.set_defaults(fn=command_codex_review)
