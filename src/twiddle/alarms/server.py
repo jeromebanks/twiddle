@@ -58,9 +58,9 @@ def resolve(root: Path, request_path: str) -> Path | None:
         root = root.resolve()
         path = (root / rel).resolve()
         path.relative_to(root)
-    except (OSError, ValueError, RuntimeError):   # RuntimeError: a symlink loop
-        return None
-    if path.suffix.lower() not in TYPES or not path.is_file():
+        if path.suffix.lower() not in TYPES or not path.is_file():
+            return None
+    except (OSError, ValueError, RuntimeError):   # too long, unreadable, a symlink loop
         return None
     return path
 

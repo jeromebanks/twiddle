@@ -84,6 +84,12 @@ def test_an_unknown_or_unresolvable_request_fails_fast_and_opens_no_span(srv, pa
     assert journal() == []
 
 
+@pytest.mark.parametrize("name", ["x" * 300 + ".mp3", "a/" * 3000 + "b.mp3"])
+def test_a_name_the_filesystem_rejects_is_a_404(srv, name):
+    assert server.resolve(srv.root, "/" + name) is None
+    assert get(srv, "/" + name)[0] == 404
+
+
 def test_a_symlink_loop_is_a_404_not_a_dropped_request(srv, sounds):
     (sounds / "loop.mp3").symlink_to(sounds / "loop.mp3")
     assert server.resolve(sounds, "/loop.mp3") is None
@@ -389,7 +395,7 @@ def test_a_span_start_refuses_a_bound_that_is_not_finite_and_positive(bad):
 @pytest.mark.parametrize("bad", ["inf", "nan", "0", "-1", "soon"])
 def test_serve_refuses_a_bound_that_is_not_finite_and_positive(bad, sounds, capsys):
     with pytest.raises(SystemExit):
-        cli.main(["alarm", "serve", "--dir", str(sounds), "--max-s", bad])
+        cli.main(["alarm", "serve", "--host", "127.0.0.1", "--dir", str(sounds), "--max-s", bad])
     capsys.readouterr()
     assert journal() == []
 
@@ -413,7 +419,7 @@ def test_dry_run_prints_the_plan_and_neither_listens_nor_journals(fake_house, so
     write({"ts": iso(T0), "action": "alarm_serve_start", "ip": SPEAKER, "span": True,
            "span_id": "old", "max_s": 600})
     before = play.INTERVENTION_LOG.read_text()
-    code, out, _ = run(["alarm", "serve", "--dir", str(sounds), "--port", "0",
+    code, out, _ = run(["alarm", "serve", "--host", "127.0.0.1", "--dir", str(sounds), "--port", "0",
                         "--room", "Living Room", "--dry-run", "--json"], capsys)
     assert code == 0
     p = json.loads(out)
@@ -426,7 +432,7 @@ def test_dry_run_prints_the_plan_and_neither_listens_nor_journals(fake_house, so
 
 def test_an_unknown_room_or_directory_is_refused_before_anything_is_bound(fake_house, sounds,
                                                                           capsys):
-    code, _, err = run(["alarm", "serve", "--dir", str(sounds), "--room", "Nowhere"], capsys)
+    code, _, err = run(["alarm", "serve", "--host", "127.0.0.1", "--dir", str(sounds), "--room", "Nowhere"], capsys)
     assert code == 1 and "Nowhere" in err
     code, _, err = run(["alarm", "serve", "--dir", str(sounds / "missing")], capsys)
     assert code == 1 and "not a directory" in err
@@ -437,9 +443,9 @@ def test_a_second_serve_on_a_busy_port_fails_and_closes_nobodys_spans(fake_house
                                                                       capsys):
     write({"ts": iso(T0), "action": "alarm_serve_start", "ip": SPEAKER, "span": True,
            "span_id": "live", "max_s": 600})
-    first = server.AlarmServer(sounds, None, port=0)
+    first = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")
     try:
-        code, _, err = run(["alarm", "serve", "--dir", str(sounds),
+        code, _, err = run(["alarm", "serve", "--host", "127.0.0.1", "--dir", str(sounds),
                             "--port", str(first.port)], capsys)
     finally:
         first.stop()
@@ -455,7 +461,7 @@ def test_serve_runs_until_interrupted_then_closes_its_spans(fake_house, sounds, 
     def interrupt(self):
         raise KeyboardInterrupt
     monkeypatch.setattr(server.AlarmServer, "serve_forever", interrupt)
-    code, out, _ = run(["alarm", "serve", "--dir", str(sounds), "--port", "0"], capsys)
+    code, out, _ = run(["alarm", "serve", "--host", "127.0.0.1", "--dir", str(sounds), "--port", "0"], capsys)
     assert code == 0 and "1 stale span(s) to close" in out
     assert report.open_spans(play.INTERVENTION_LOG) == []
     assert journal()[-1]["stale"] is True

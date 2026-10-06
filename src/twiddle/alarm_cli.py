@@ -1041,7 +1041,8 @@ def cmd_serve(args):
         return emit(args, about | {"would": "serve", "performed": False},
                     f"[dry-run] would start: {plan}")
     try:
-        srv = server.AlarmServer(root, allowed | this_mac, port=args.port, max_s=args.max_s)
+        srv = server.AlarmServer(root, allowed | this_mac, port=args.port,
+                                    max_s=args.max_s, host=args.host)
     except OSError as exc:
         return fail(args, f"could not listen on port {args.port}: {exc}",
                     "another `alarm serve` may already be running")
@@ -1212,6 +1213,8 @@ def register(sub, parents=None):
     sv.add_argument("--dir", required=True, help="the folder of audio files to serve")
     sv.add_argument("--port", type=int, default=server.PORT,
                     help=f"port (default {server.PORT}: alarms store the URL)")
+    sv.add_argument("--host", default="0.0.0.0",
+                    help="the address to listen on (default every interface, so speakers can reach it)")
     sv.add_argument("--max-s", type=_bound, default=server.DEFAULT_MAX_S,
                     help="the longest one serve may last, in seconds "
                          f"(default {server.DEFAULT_MAX_S})")
