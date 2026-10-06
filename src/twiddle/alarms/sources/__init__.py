@@ -123,7 +123,9 @@ def recognise(uri: str, metadata: str) -> Source | None:
 
 
 from .chime import Chime            # noqa: E402  (the stock sources register below)
+from .spotify import Spotify        # noqa: E402
 from .station import Station        # noqa: E402
 
 register(Chime())
 register(Station())
+register(Spotify())

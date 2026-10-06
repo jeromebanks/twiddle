@@ -6,12 +6,15 @@ podcast provider shows a new source needs no CLI edit: registered through the
 same `register()` the stock ones use, it is listed, built and marked.
 """
 import json
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
 
 from twiddle import alarm_cli, play
 from twiddle.alarms import sources
+from twiddle.alarms.sources import spotify as spotify_source
 from twiddle.alarms.model import CHIME_URI, Alarm, Recurrence
 from twiddle.stations import load_catalog
 
@@ -290,3 +293,143 @@ def test_a_bad_source_writes_nothing(clockfake, capsys, argv, says):
     code, out, _ = run(["alarm", *argv, "--json"], capsys)
     assert code == 1 and says in json.loads(out)["error"]
     assert clockfake.writes == [] and journal() == []
+
+
+# ---- spotify: Sonos's own link, the account read from the household ---------
+
+FAV_FIXTURE = Path(__file__).parent / "fixtures" / "favorites_spotify.xml"
+
+
+def _fixture_alarm(alarm_id):
+    return next(a for a in ALARMS if a.id == alarm_id)
+
+
+def _shape(doc):
+    return ET.canonicalize(doc, strip_text=True)
+
+
+def fake_spotify(sn="92", search=None):
+    return sources.Spotify(account=lambda: sn, search=search or (lambda q: []))
+
+
+def test_a_playlist_alarm_has_the_shape_of_the_households_spotify_alarms():
+    real = _fixture_alarm("66")
+    meta = ET.fromstring(real.program_metadata)
+    ns = {"dc": "http://purl.org/dc/elements/1.1/",
+          "u": "urn:schemas-upnp-org:metadata-1-0/upnp/"}
+    uri, didl = spotify_source.program(
+        "playlist", "FakePlaylist0000000001", "92", meta.find(".//dc:title", ns).text,
+        meta.find(".//u:albumArtURI", ns).text)
+    assert uri == real.program_uri
+    assert _shape(didl) == _shape(real.program_metadata)
+
+
+def test_the_built_playlist_is_still_a_sonos_spotify_alarm_to_the_classifier():
+    uri, didl = fake_spotify().build("spotify:playlist:FakePlaylist0000000001")
+    alarm = Alarm(id="90", start_time="07:00:00", recurrence=Recurrence.parse("DAILY"),
+                  room_uuid=LIVING, program_uri=uri, program_metadata=didl)
+    r = alarm_cli.row(household(), alarm, SAT_AFTERNOON)
+    assert (r["sound_source"], r["source"], r["needs_mac"]) == ("spotify_sonos", None, False)
+
+
+@pytest.mark.parametrize("choice, uri, klass", [
+    ("spotify:album:FakeAlbum00000000001",
+     "x-rincon-cpcontainer:00040000spotify%3aalbum%3aFakeAlbum00000000001?sid=12&flags=0&sn=92",
+     "object.container.album.musicAlbum"),
+    ("spotify:track:FakeTrack0000000001",
+     "x-sonos-spotify:spotify%3atrack%3aFakeTrack0000000001?sid=12&flags=8224&sn=92",
+     "object.item.audioItem.musicTrack"),
+])
+def test_album_and_track_forms_are_built(choice, uri, klass):
+    got_uri, didl = fake_spotify().build(choice)
+    assert got_uri == uri
+    assert f"<upnp:class>{klass}</upnp:class>" in didl
+    assert "Svc3079-0-Token" in didl
+
+
+def test_a_spotify_link_is_a_choice_and_the_ids_case_survives():
+    link = "https://open.spotify.com/intl-de/playlist/FakePlaylist0000000001?si=abc"
+    assert fake_spotify().build(link) == fake_spotify().build("spotify:playlist:FakePlaylist0000000001")
+    assert "FakePlaylist0000000001" in fake_spotify().build(link)[0]
+
+
+@pytest.mark.parametrize("bad", ["", "spotify:artist:abc", "spotify:playlist:", "kalx",
+                                 "https://example.com/playlist/abc"])
+def test_anything_that_is_not_a_spotify_item_is_refused(bad):
+    with pytest.raises(ValueError, match="isn't a Spotify"):
+        fake_spotify().build(bad)
+
+
+def test_a_search_result_gives_the_alarm_its_title_and_cover():
+    found = [{"_kind": "playlist", "id": "FakePlaylist0000000002", "name": "Todd Rundgren Mix",
+              "owner": {"display_name": "Someone"},
+              "images": [{"url": "https://example.test/c.jpg"}]}]
+    src = fake_spotify(search=lambda q: found)
+    [choice] = src.choices("todd")
+    assert choice.key == "playlist:FakePlaylist0000000002"
+    assert choice.title == "Todd Rundgren Mix" and "Someone" in choice.detail
+    _, didl = src.build(choice.key)
+    assert "<dc:title>Todd Rundgren Mix</dc:title>" in didl
+    assert "https://example.test/c.jpg" in didl
+
+
+def test_no_linked_account_says_so_instead_of_building_a_broken_alarm():
+    with pytest.raises(ValueError, match="no Spotify account is linked"):
+        fake_spotify(sn=None).build("spotify:playlist:FakePlaylist0000000001")
+
+
+def test_a_linked_account_with_no_spotify_alarm_can_still_make_one(monkeypatch):
+    """The household has the Spotify favourites and no Spotify alarm: the account
+    comes from the favourites, read from the speaker, not from an alarm."""
+    seen = []
+
+    def soap(ip, service, action, body="", path=None):
+        seen.append((service, action))
+        return FAV_FIXTURE.read_text()
+
+    monkeypatch.setattr(spotify_source.devices, "soap", soap)
+    monkeypatch.setattr(spotify_source, "alarms_account",
+                        lambda alarms: pytest.fail("looked at the alarms"))
+    assert spotify_source.favourites_account("192.0.2.1") == "92"
+    assert seen == [("ContentDirectory", "Browse")]
+    src = sources.Spotify(account=lambda: spotify_source.favourites_account("192.0.2.1"),
+                          search=lambda q: [])
+    uri, _ = src.build("spotify:playlist:FakePlaylist0000000009")
+    assert uri.endswith("?sid=12&flags=0&sn=92")
+
+
+def test_the_account_falls_back_to_an_existing_spotify_alarm_last():
+    assert spotify_source.alarms_account(ALARMS) == "92"
+    assert spotify_source.alarms_account([a for a in ALARMS if "spotify" not in a.program_uri]) is None
+
+
+def test_favourites_with_no_spotify_item_name_no_account():
+    assert spotify_source.account_from_text(
+        "x-sonosapi-stream:s00000?sid=254&amp;flags=8224&amp;sn=0") is None
+
+
+def test_the_default_household_lookup_prefers_favourites(monkeypatch):
+    monkeypatch.setattr(spotify_source, "favourites_account", lambda ip: "4")
+    monkeypatch.setattr(spotify_source.Household, "load", classmethod(lambda cls, **kw: household()))
+    assert spotify_source._household_account() == "4"
+
+
+def test_the_default_lookup_uses_the_alarms_when_the_favourites_fail(monkeypatch):
+    def boom(ip):
+        raise OSError("unreachable")
+
+    monkeypatch.setattr(spotify_source, "favourites_account", boom)
+    monkeypatch.setattr(spotify_source.Household, "load", classmethod(lambda cls, **kw: household()))
+    monkeypatch.setattr(spotify_source.clock, "list_alarms",
+                        lambda ip, tolerant=False: type("L", (), {"alarms": ALARMS})())
+    assert spotify_source._household_account() == "92"
+
+
+def test_alarm_add_with_a_spotify_source_is_dry_run_safe(clockfake, monkeypatch, capsys):
+    monkeypatch.setattr(sources.get("spotify"), "account", lambda: "92")
+    code, out, _ = run(["alarm", "add", "--room", "roam", "--time", "07:00", "--days",
+                        "weekdays", "--source", "spotify:playlist:FakePlaylist0000000001",
+                        "--dry-run", "--json"], capsys)
+    assert code == 0, out
+    assert "x-rincon-cpcontainer:00060000spotify%3aplaylist%3aFakePlaylist0000000001" in out
+    assert clockfake.writes == []
