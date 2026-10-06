@@ -16,3 +16,6 @@ class Chime(Source):
 
     def owns(self, uri: str, metadata: str) -> bool:
         return uri.startswith("x-rincon-buzzer:")
+
+    def describe(self, uri: str, metadata: str) -> str | None:
+        return self.title

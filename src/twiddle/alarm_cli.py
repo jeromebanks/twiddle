@@ -1,7 +1,8 @@
 """`twiddle alarm` -- the household's Sonos alarms from the command line.
 
 `alarm list` is read-only: one `ListAlarms` plus the household's clock and
-display format, from any speaker (alarms are household-wide). Every alarm is
+display format, from any speaker (alarms are household-wide), and the
+station catalog, to recognise station alarms. Every alarm is
 shown under its room's name, including one aimed at a bonded follower or at a
 speaker that has vanished: labelled, never hidden. An alarm twiddle can't read
 (`model.UnreadableAlarm`) is listed apart with why, and the rest still show;
@@ -49,7 +50,6 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-import xml.etree.ElementTree as ET
 from dataclasses import replace
 from datetime import datetime, time, timedelta
 from pathlib import Path
@@ -61,7 +61,6 @@ from .control_cli import (SNAPSHOT_DIR, BadSpec, add_write_args, emit, fail,
                           parse_sleep_spec)
 from .household import Ambiguous, Household, NotFound, Speaker
 
-CHIME = "Sonos chime"
 NEEDS_MAC = "⌁"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "alarms.json"
 # Monday first for reading; Sonos numbers the days from Sunday = 0.
@@ -196,19 +195,13 @@ def aimed_at(house: Household, uuid: str) -> dict:
 # ---- describing one alarm ------------------------------------------------
 
 def source_title(alarm: Alarm) -> str:
-    """The alarm's own title for its source: the DIDL's dc:title, the chime,
-    or failing both the URI's scheme. The model never parses the metadata;
-    this does, for display only."""
-    if alarm.program_uri.startswith("x-rincon-buzzer:"):
-        return CHIME
-    try:
-        title = ET.fromstring(alarm.program_metadata).find(
-            ".//{http://purl.org/dc/elements/1.1/}title")
-        if title is not None and title.text:
-            return title.text
-    except ET.ParseError:
-        pass
-    return alarm.program_uri.split(":", 1)[0] or "(no source)"
+    """The alarm's own title for its source: what the source that built it
+    says, else the DIDL's dc:title, or failing both the URI's scheme. The
+    model never parses the metadata; this does, for display only."""
+    uri, metadata = alarm.program_uri, alarm.program_metadata
+    source = sources.recognise(uri, metadata)
+    return ((source and source.describe(uri, metadata)) or sources.didl_title(metadata)
+            or uri.split(":", 1)[0] or "(no source)")
 
 
 def days_text(r: Recurrence) -> str:
@@ -870,7 +863,7 @@ def cmd_sources(args):
         rows = [{"name": s.name, "title": s.title, "needs_mac": s.needs_mac,
                  "takes_choice": s.takes_choice, "fallback": s.fallback}
                 for s in sources.all_sources()]
-        lines = [f"  {(r['name'] + ':<choice>') if r['takes_choice'] else r['name']:<18} "
+        lines = [f"  {(r['name'] + ':<key>') if r['takes_choice'] else r['name']:<18} "
                  f"{NEEDS_MAC if r['needs_mac'] else ' '} {r['title']}"
                  f"\n{'':<23}if it can't play: {r['fallback']}" for r in rows]
         mark = any(r["needs_mac"] for r in rows)

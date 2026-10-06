@@ -4,7 +4,8 @@ A source is one module here with a `Source` subclass and a `register()` call
 below: it lists or searches what it can play, builds the `ProgramURI` and
 `ProgramMetaData` for one choice, says whether this Mac must be up when the
 alarm fires (`needs_mac`) and what the room does if it can't play
-(`fallback`), and recognises an alarm it built (`owns`). The CLI reads the
+(`fallback`), recognises an alarm it built (`owns`) and names what that alarm
+plays (`describe`). The CLI reads the
 registry when it runs, so a new source needs no CLI edit: `alarm sources`
 lists it and `--source <name>[:<choice>]` takes it.
 
@@ -16,6 +17,7 @@ Nothing here talks to a speaker; building a source writes nothing.
 """
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 KEEP = "keep"
@@ -50,6 +52,21 @@ class Source:
     def owns(self, uri: str, metadata: str) -> bool:
         """Whether an alarm's source is one this would build."""
         return False
+
+    def describe(self, uri: str, metadata: str) -> str | None:
+        """What an alarm it owns plays, for display: by default the DIDL's
+        dc:title."""
+        return didl_title(metadata)
+
+
+def didl_title(metadata: str) -> str | None:
+    """A DIDL-Lite's dc:title, or None. Display only: the metadata itself is
+    never rewritten."""
+    try:
+        title = ET.fromstring(metadata).find(".//{http://purl.org/dc/elements/1.1/}title")
+    except ET.ParseError:
+        return None
+    return title.text if title is not None and title.text else None
 
 
 _REGISTRY: dict[str, Source] = {}

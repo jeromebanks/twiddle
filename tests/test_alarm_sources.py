@@ -149,6 +149,18 @@ def test_list_marks_an_alarm_whose_source_needs_this_mac(podcast):
     assert sum("⌁" in l for l in text.splitlines()) == 2
 
 
+def test_a_source_names_its_own_alarms(podcast, monkeypatch):
+    """A source whose metadata says nothing useful still titles its alarms."""
+    podcast()
+    monkeypatch.setattr(Podcast, "describe", lambda self, uri, meta: "Podcast: " + uri[-3:])
+    uri, _ = sources.get("podcast").build("ep1")
+    mac = Alarm(id="90", start_time="06:00:00", recurrence=Recurrence.parse("DAILY"),
+                room_uuid=LIVING, program_uri=uri, program_metadata="")
+    by_id = {r["id"]: r for r in alarm_cli.listing(household(), [*ALARMS, mac], SAT_AFTERNOON)}
+    assert by_id["90"]["source_title"] == "Podcast: ep1"
+    assert by_id["1"]["source_title"] == "Sonos chime"
+
+
 def test_list_shows_no_mark_when_nothing_needs_this_mac(podcast):
     podcast(needs_mac=False)
     uri, didl = sources.get("podcast").build("ep1")
@@ -185,7 +197,7 @@ def test_a_registered_fake_provider_is_listed_with_no_cli_edit(offline, podcast,
     assert row == {"name": "podcast", "title": "podcast episode", "needs_mac": True,
                    "takes_choice": True, "fallback": "the Sonos chime"}
     code, out, _ = run(["alarm", "sources"], capsys)
-    assert "podcast:<choice>" in out and "⌁ podcast episode" in out
+    assert "podcast:<key>" in out and "⌁ podcast episode" in out
     code, out, _ = run(["alarm", "sources", "podcast", "two", "--json"], capsys)
     assert json.loads(out)["choices"] == [{"key": "ep2", "title": "Episode Two", "detail": ""}]
 
