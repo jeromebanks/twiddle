@@ -84,6 +84,12 @@ def test_an_unknown_or_unresolvable_request_fails_fast_and_opens_no_span(srv, pa
     assert journal() == []
 
 
+def test_a_symlink_loop_is_a_404_not_a_dropped_request(srv, sounds):
+    (sounds / "loop.mp3").symlink_to(sounds / "loop.mp3")
+    assert server.resolve(sounds, "/loop.mp3") is None
+    assert get(srv, "/loop.mp3")[0] == 404
+
+
 def test_a_known_audio_file_is_served_as_audio(srv):
     for path, body in (("/bell.mp3", b"ID3" + b"x" * 1000), ("/sub/rise.wav", b"RIFF" + b"y" * 100)):
         assert get(srv, path) == (200, body)
@@ -400,6 +406,7 @@ def test_a_stale_span_whose_bound_is_not_up_ends_now():
 @pytest.fixture
 def fake_house(monkeypatch):
     monkeypatch.setattr(alarm_cli, "_household", lambda args: household())
+    monkeypatch.setattr(play, "local_ip_for", lambda peer: "10.0.0.99")   # no socket at all
 
 
 def test_dry_run_prints_the_plan_and_neither_listens_nor_journals(fake_house, sounds, capsys):
