@@ -356,7 +356,7 @@ it is worked out here. `alarms[].` is a key of each alarm's object.
 | `household_time.time_format` | Sonos: `GetFormat` `CurrentTimeFormat` | How the household writes times. Only `INV` (unset) has been seen on a real speaker; twiddle shows `12H` as AM/PM and anything else, `INV` included, as 24-hour. |
 | `household_time.date_format` | Sonos: `GetFormat` `CurrentDateFormat` | How it writes dates. Twiddle shows `DMY` as day/month, `MDY` as month/day and anything else, `INV` included, as month-day. |
 | `alarms` | twiddle | Every alarm twiddle could read, grouped by room name, each room's in time order. |
-| `unreadable` | twiddle | The alarms it couldn't read, each `{id, room, status, room_uuid, reason}`; see above. |
+| `unreadable` | twiddle | The alarms it couldn't read, each `{id, room, speaker, status, room_uuid, reason}`; see above. `id` is the alarm's ID (null if it has none); `room`, `speaker` and `status` mean what they do for `alarms[]` (below); `room_uuid` is its `RoomUUID` as the speaker sent it (null if missing); `reason` is why it couldn't be read. An alarm with no `RoomUUID` has no `speaker` key, and its `room` and `status` are null. |
 | `alarms[].id` | Sonos: `ID` | The alarm's ID, a string; what the writing verbs take. |
 | `alarms[].room` | twiddle | The room's name for `room_uuid`; `(unknown speaker)` if no speaker owns it. |
 | `alarms[].speaker` | twiddle | The speaker's own name (or, for a vanished one, its last room name); empty if unknown. |
