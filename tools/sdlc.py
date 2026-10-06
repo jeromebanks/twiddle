@@ -1172,6 +1172,8 @@ LEAF_SECTIONS = {"outcome": "Outcome", "scope": "Scope", "acceptance": "Acceptan
                  "validation": "Validation", "demo": "Demo", "non_goals": "Non-goals", "context": "Context"}
 PLAN_JSON_RE = re.compile(r"<!-- plan-json -->\s*(`{3,})json\n(.*?)\n\1", re.DOTALL)
 VERDICT_RE = re.compile(r"\A[*_`]*VERDICT:[*_`\s]*(approve|changes)[*_`.\s]*\Z", re.IGNORECASE)
+HEAD_WAIT_SECONDS = 30   # how long `test-record` waits for GitHub to show a just-pushed head
+HEAD_POLL_SECONDS = 2
 COMMENT_LIMIT = 65000   # GitHub refuses comments over 65536 characters
 LEAF_LABEL, CONTAINER_LABEL = "plan:slice", "plan:subtask"
 # How hard a unit of work is, rated by the planner; `.sdlc/config.json` maps it to the model that builds it.
@@ -2468,16 +2470,33 @@ def command_release(args: argparse.Namespace, config: dict[str, Any]) -> int:
     return 0
 
 
+def wait_for_pr_head(number: int, head: str, config: dict[str, Any], wait: float | None = None,
+                     poll: float | None = None) -> dict[str, Any]:
+    """The PR once GitHub reports `head` as its head: a push shows up there a few seconds late."""
+    wait = HEAD_WAIT_SECONDS if wait is None else wait
+    poll = HEAD_POLL_SECONDS if poll is None else poll
+    if poll <= 0 or wait < 0:
+        raise SdlcError(f"the wait for GitHub needs a positive poll interval and a non-negative timeout (got {poll}, {wait})")
+    waited = 0.0
+    while True:
+        pr, _ = fetch_pr(number, config)
+        if pr["headRefOid"] == head:
+            return pr
+        if waited >= wait:
+            raise SdlcError(f"HEAD {head[:12]} is not PR #{number}'s head {pr['headRefOid'][:12]}, "
+                            f"even after waiting {waited:g}s: push, or check out the branch")
+        time.sleep(poll)
+        waited += poll
+
+
 def command_test_record(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Run the full test suite on the PR's head, here, and record the result on the PR."""
-    pr, _ = fetch_pr(args.pr, config)
     if dirty := git(["status", "--porcelain"]):
         raise SdlcError("the working tree is not clean, so the run would not be of the pushed head: "
                         + ", ".join(l[3:] for l in dirty.splitlines()[:8])
                         + " (commit and push, or keep scratch files outside the worktree)")
     head = git(["rev-parse", "HEAD"])
-    if head != pr["headRefOid"]:
-        raise SdlcError(f"HEAD {head[:12]} is not PR #{args.pr}'s head {pr['headRefOid'][:12]}: push, or check out the branch")
+    wait_for_pr_head(args.pr, head, config)
     run = run_suite()
     result, passed = run["result"], run["passed"]
     body = suite_body("the PR head", head, run)

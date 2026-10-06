@@ -109,7 +109,14 @@ git push -u origin slice/N
 
 ## 6. Self-review
 
-Have the `advisor` review the committed diff (`git diff <BASE>...HEAD`).
+First work through this checklist on your own diff:
+
+- every bound (a timeout, a limit, a retry count) is finite and validated;
+- shutdown and cancel ordering: what is stopped first, and what happens to work in flight;
+- every error path returns a status, never silently drops the request;
+- tests listen on loopback only, and stub anything that opens a socket to a fake address.
+
+Then have the `advisor` review the committed diff (`git diff <BASE>...HEAD`).
 Fix what it finds, rerun the affected tests, then commit and push.
 
 ## 7. Open the PR and record the tests
