@@ -581,3 +581,7 @@ def test_the_response_pr_review_records_is_the_one_the_next_round_reads(tmp_path
     # a round recorded before the marker said (no `response` attribute), whose response mentions the boundary
     legacy = recorded(1, "changes", f"1. Accepted: write `{codex_review.RESPONSE_MARK}` first.\n2. Accepted.")["body"]
     assert codex_review.latest_response([{"verdict": "changes", "body": legacy}])[1].startswith("1. Accepted: write")
+    # and one recorded with the boundary but before the marker said (PR #133's round 2)
+    answer_two = "1. Accepted: the marker will say."
+    between = f"**Review 2**\n\n<details><summary>x</summary>\n\nr\n\n</details>{codex_review.response_section(answer_two)}"
+    assert codex_review.latest_response([{"verdict": "changes", "body": between}]) == (1, answer_two)

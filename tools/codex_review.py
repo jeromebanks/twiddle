@@ -135,10 +135,10 @@ def latest_response(rounds: list[dict[str, Any]]) -> tuple[int, str | None]:
     last = rounds[-1]
     body, has = last.get("body") or "", last.get("response")
     response, i = None, body.find(RESPONSE_MARK)
-    if has == "1":
-        if i >= 0 and body[:i].endswith("</details>\n\n") and body.startswith(f"{RESPONSE_MARK}\n{RESPONSE_HEADING}", i):
-            response = body[i + len(RESPONSE_MARK):].strip().removeprefix(RESPONSE_HEADING).strip() or None
-    elif has is None and LEGACY_MARK in body:     # recorded before the marker said
+    at_boundary = i >= 0 and body[:i].endswith("</details>\n\n") and body.startswith(f"{RESPONSE_MARK}\n{RESPONSE_HEADING}", i)
+    if has != "0" and at_boundary:
+        response = body[i + len(RESPONSE_MARK):].strip().removeprefix(RESPONSE_HEADING).strip() or None
+    elif has is None and LEGACY_MARK in body:     # recorded before the boundary existed
         response = body.split(LEGACY_MARK, 1)[1].strip() or None
     if response is None and last.get("verdict") == "changes":
         raise ReviewError(f"round {len(rounds)} asked for changes and recorded no response: Codex would never see "
