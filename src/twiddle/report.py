@@ -427,6 +427,20 @@ def _alarm_points(schedules: list[dict],
     return points
 
 
+def _unreadable_alarms(schedules: list[dict]) -> list[dict]:
+    """Each alarm any schedule couldn't read, once. The same alarm is in
+    every schedule (and checkpoint) until it's repaired; alarms with no ID
+    are told apart by how many one schedule holds."""
+    seen: dict[tuple, dict] = {}
+    for rec in schedules:
+        counts: dict[tuple, int] = {}
+        for b in rec.get("unreadable", []):
+            k = (b.get("id"), b.get("room_uuid"), b.get("reason"))
+            counts[k] = counts.get(k, 0) + 1
+            seen.setdefault(k + (counts[k],), b)
+    return list(seen.values())
+
+
 def rotated_logs(path: Path) -> list[Path]:
     """The log plus its rotated predecessors, oldest first.
 
@@ -567,6 +581,19 @@ def summarise_log(path: Path,
                if alarm else "") +
             ". Real-world evidence has to come from windows where nothing was "
             "sent to the speakers.",
+        ))
+
+    bad = _unreadable_alarms(schedules)
+    if bad:
+        named = "; ".join(
+            f"{'alarm ' + b['id'] if b.get('id') else 'an alarm with no ID'}"
+            f" ({b.get('room') or b.get('room_uuid') or 'no room'}): {b.get('reason', '?')}"
+            for b in bad)
+        findings.append(Finding(
+            "info", f"{len(bad)} alarm{'s' if len(bad) != 1 else ''} in the schedule "
+                    "couldn't be read",
+            f"{named}. Their fires and stops are not discounted, so a drop one "
+            "of them caused would be scored as a fault. The other alarms are.",
         ))
 
     if not vanish and not induced:

@@ -16,10 +16,11 @@ import pytest
 import requests
 
 from twiddle import alarm_cli, cli, devices, play, report
-from twiddle.alarms import baseline, clock
+from twiddle.alarms import baseline, clock, model
 from twiddle.alarms.model import Alarm, Recurrence
 
-from tests.test_alarm_cli import ALARMS, ALARMS_XML, GONE, ROAM_L, ROAM_R, household
+from tests.test_alarm_cli import (ALARMS, ALARMS_XML, BAD, GONE, ROAM_L,
+                                  ROAM_R, household)
 
 IP = "10.0.0.11"
 _ORDER = ("ID", "StartTime", "Duration", "Recurrence", "Enabled", "RoomUUID",
@@ -899,3 +900,45 @@ def test_a_refused_write_journals_no_later_span(av, write, action, name, span):
     with pytest.raises(requests.HTTPError):
         write()
     assert [r["action"] for r in journal()] == [name]
+
+
+# ---- an alarm twiddle can't read --------------------------------------------------
+
+def test_a_strict_read_refuses_the_list_a_tolerant_one_lists_around_it(fake):
+    fake.alarms["80"], fake.children["80"] = dict(BAD["80"]), []
+    with pytest.raises(model.UnreadableAlarm, match="alarm 80: invalid alarm recurrence"):
+        clock.list_alarms(IP)
+    got = clock.list_alarms(IP, tolerant=True)
+    assert got.alarms == ALARMS and got.version == fake.version
+    [bad] = got.unreadable
+    assert (bad.id, bad.room_uuid) == ("80", ROAM_L)
+    assert got.xml == fake.document()                    # still the whole document
+    assert fake.writes == []
+
+
+def test_a_strict_read_has_no_unreadable(fake):
+    assert clock.list_alarms(IP).unreadable == []
+
+
+@pytest.mark.parametrize("argv, action", [
+    (["stop"], "Stop"), (["snooze"], "SnoozeAlarm")])
+def test_stop_and_snooze_work_while_another_alarm_cant_be_read(av, capsys, argv, action):
+    # They never read the list, so a bad alarm elsewhere can't block silencing one.
+    av.alarms["80"], av.children["80"] = dict(BAD["80"]), []
+    av.running[ROAM_IP] = RUNNING
+    code, out, _ = run(["alarm", *argv, "--room", "Sonos Roam", "--json"], capsys)
+    assert code == 0, out
+    assert [(ip, a) for ip, a, _ in av.av_writes] == [(ROAM_IP, action)]
+    assert journal()[0]["action"] == f"alarm_{argv[0]}"
+    assert "ListAlarms" not in av.sent
+    code, out, _ = run(["alarm", *argv, "--room", "Sonos Roam", "--dry-run"], capsys)
+    assert code == 0 and out.startswith(f"[dry-run] would {argv[0]}")
+
+
+def test_status_names_the_ringing_alarm_while_another_cant_be_read(av, capsys):
+    av.alarms["80"], av.children["80"] = dict(BAD["80"]), []
+    av.running[ROAM_IP] = RUNNING
+    code, out, _ = run(["alarm", "status"], capsys)
+    assert code == 0, out
+    assert "Sonos Roam: RINGING alarm 34: Sonos Roam 08:20:00" in out
+    assert av.av_writes == [] and av.writes == [] and journal() == []

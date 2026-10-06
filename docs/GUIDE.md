@@ -118,6 +118,18 @@ that has vanished from the household, or at a UUID no speaker owns is listed
 with a `!` line saying so, never hidden. `alarm list` writes nothing: no
 `AlarmClock` or `AVTransport` write, no journal entry.
 
+An alarm twiddle can't read (a recurrence it doesn't know, a volume over 100,
+a flag that isn't 0/1, a missing attribute) doesn't hide the others: `alarm
+list` shows every alarm it can read, then a `can't read` section naming each
+one it couldn't, its room and why (`--json`: an `unreadable` list beside
+`alarms`, each `{id, room, status, room_uuid, reason}`; `id` is null for an
+alarm with no ID). `alarm status` reads the same way. Every other alarm verb
+(`add`, `edit`, `rm`, `enable`, `disable`, `try`, `snapshot`, `restore`)
+**refuses while one is unreadable**, even for a readable alarm, and writes
+nothing: its checks compare whole lists, and an alarm missing from both sides
+could change unseen. Fix or delete it in the Sonos app. `alarm stop` and
+`snooze` never read the list, so they still silence a ringing alarm.
+
 ```bash
 uv run twiddle alarm snapshot              # -> logs/snapshots/alarms.json (read-only)
 uv run twiddle alarm restore --dry-run     # every change it would make; writes nothing
@@ -789,6 +801,11 @@ the schedule in force when it fired:
 ```
 
 A log written before this has no schedule, so the alarms in it still count.
+
+An alarm the monitor can't read is named in the schedule (`unreadable`) and the
+rest are still logged and discounted. Its own fires can't be, so `analyse`
+says so once, as an info finding naming each one: a drop one of them caused
+would otherwise count as a fault without a word.
 
 Evidence about the speakers has to come from windows where nothing was sent to
 them. `watch` on its own never writes, so its windows are clean by construction.

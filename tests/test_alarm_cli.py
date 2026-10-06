@@ -5,6 +5,7 @@ them is built here. The end-to-end tests answer at the HTTP layer, so the real
 SOAP envelopes are built and every action the command sends is seen.
 """
 import json
+import xml.etree.ElementTree as ET
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -288,13 +289,125 @@ def test_an_unreachable_household_is_an_error_envelope(monkeypatch, capsys):
     assert payload["ok"] is False and "could not reach" in payload["error"]
 
 
+def _list_answer(doc: str) -> str:
+    return _envelope("ListAlarms", f"<CurrentAlarmList>{escape(doc)}</CurrentAlarmList>"
+                                   f"<CurrentAlarmListVersion>{ROAM_L}:108"
+                                   "</CurrentAlarmListVersion>")
+
+
 def test_a_malformed_alarm_list_is_an_error_not_a_traceback(speaker, monkeypatch, capsys):
-    monkeypatch.setitem(ANSWERS, "ListAlarms", _envelope(
-        "ListAlarms", f"<CurrentAlarmList>{escape('<Alarms><Alarm ID=\"1\"/></Alarms>')}"
-                      "</CurrentAlarmList>"))
+    # `alarm list` lists around one bad alarm (below); a verb that needs the
+    # whole list, like `snapshot`, still says so in an error envelope.
+    monkeypatch.setitem(ANSWERS, "ListAlarms", _list_answer('<Alarms><Alarm ID="1"/></Alarms>'))
+    code, out, _ = run(["alarm", "snapshot", "--json"], capsys)
+    assert code == 1
+    assert "alarm 1 (missing" in json.loads(out)["error"]
+
+
+@pytest.mark.parametrize("doc", ["<Alarms><Alarm", "<Nope/>"])
+def test_a_list_that_isnt_an_alarm_list_is_still_an_error(speaker, monkeypatch, capsys, doc):
+    monkeypatch.setitem(ANSWERS, "ListAlarms", _list_answer(doc))
     code, out, _ = run(["alarm", "list", "--json"], capsys)
     assert code == 1
-    assert "alarm 1: missing" in json.loads(out)["error"]
+    assert json.loads(out)["ok"] is False
+
+
+# ---- one alarm twiddle can't read --------------------------------------------
+
+def _bad(aid, **attrs):
+    base = {"ID": aid, "StartTime": "06:00:00", "Duration": "01:00:00", "Recurrence": "DAILY",
+            "Enabled": "1", "RoomUUID": ROAM_L, "ProgramURI": "x-rincon-buzzer:0",
+            "ProgramMetaData": "", "PlayMode": "NORMAL", "Volume": "20",
+            "IncludeLinkedZones": "0"}
+    return {k: v for k, v in (base | attrs).items() if v is not None}
+
+
+# One of each way the model refuses an alarm.
+BAD = {"80": _bad("80", Recurrence="EVERY_OTHER_DAY"),
+       "81": _bad("81", Volume="101"),
+       "82": _bad("82", Enabled="2"),
+       "83": _bad("83", StartTime=None, RoomUUID=GONE)}
+BAD_REASONS = {"80": "invalid alarm recurrence 'EVERY_OTHER_DAY'",
+               "81": "expected a volume 0-100, got '101'",
+               "82": "expected 0 or 1, got '2'",
+               "83": "missing StartTime"}
+
+
+def with_bad(doc: str = ALARMS_XML, bad=BAD) -> str:
+    els = "".join(ET.tostring(ET.Element("Alarm", a), encoding="unicode") for a in bad.values())
+    return doc.replace("</Alarms>", els + "</Alarms>")
+
+
+def test_list_shows_every_readable_alarm_and_labels_the_unreadable(speaker, monkeypatch,
+                                                                   capsys):
+    monkeypatch.setitem(ANSWERS, "ListAlarms", _list_answer(with_bad()))
+    code, out, _ = run(["alarm", "list"], capsys)
+    assert code == 0
+    assert out.count(" vol ") == len(ALARMS)
+    assert "can't read 4 alarms (fix or delete them in the Sonos app):" in out
+    for aid, why in BAD_REASONS.items():
+        room = "Kitchen" if aid == "83" else "Sonos Roam"
+        assert f"#{aid} {room}: {why}" in out
+
+
+def test_list_json_keeps_every_row_and_adds_the_unreadable(speaker, monkeypatch, capsys):
+    monkeypatch.setitem(ANSWERS, "ListAlarms", _list_answer(with_bad()))
+    code, out, _ = run(["alarm", "list", "--json"], capsys)
+    assert code == 0
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["alarms"] == alarm_cli.listing(household(), ALARMS, SAT_AFTERNOON)
+    got = {u["id"]: u for u in payload["unreadable"]}
+    assert set(got) == set(BAD)
+    assert all(BAD_REASONS[i] in u["reason"] for i, u in got.items())
+    assert got["83"] | {"room": "Kitchen", "status": "vanished", "room_uuid": GONE} == got["83"]
+    assert got["80"]["room"] == "Sonos Roam" and got["80"]["status"] == "ok"
+    actions = {a for _, a in speaker}
+    assert actions <= {"ListAlarms", "GetTimeNow", "GetFormat"}, actions
+    assert not play.INTERVENTION_LOG.exists()
+
+
+def test_a_readable_list_has_no_unreadable(speaker, capsys):
+    code, out, _ = run(["alarm", "list", "--json"], capsys)
+    assert json.loads(out)["unreadable"] == []
+    code, out, _ = run(["alarm", "list"], capsys)
+    assert "can't read" not in out
+
+
+def test_only_unreadable_alarms_still_says_which(speaker, monkeypatch, capsys):
+    monkeypatch.setitem(ANSWERS, "ListAlarms", _list_answer(
+        with_bad("<Alarms></Alarms>", {"x": {"Volume": "7"}})))
+    code, out, _ = run(["alarm", "list"], capsys)
+    assert code == 0
+    assert out.startswith("no alarms\n")
+    assert "an alarm with no ID no room: missing ID" in out
+
+
+def _calls_with_tolerant(module) -> set[str]:
+    """The functions in `module` that read the alarm list tolerantly."""
+    import ast
+    import inspect
+    found = set()
+    for fn in ast.walk(ast.parse(inspect.getsource(module))):
+        if isinstance(fn, ast.FunctionDef):
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Call) and any(
+                        k.arg == "tolerant" and getattr(k.value, "value", None) is True
+                        for k in node.keywords):
+                    found.add(fn.name)
+    return found
+
+
+def test_only_the_views_read_the_list_tolerantly():
+    # Anything that writes, or compares lists to decide a write, must see
+    # every alarm: an alarm left out of the comparison could be changed (or
+    # destroyed) unseen.
+    from twiddle import monitor
+    from twiddle.alarms import baseline
+    assert _calls_with_tolerant(alarm_cli) == {"cmd_list", "cmd_status"}
+    assert _calls_with_tolerant(monitor) == {"_check_alarms"}
+    assert _calls_with_tolerant(clock) == set()
+    assert _calls_with_tolerant(baseline) == set()
 
 
 def test_the_clock_refuses_anything_but_a_read():
@@ -1071,3 +1184,55 @@ def test_a_surround_no_map_names_is_ambiguous_between_two_units_of_its_room(
         assert code == 1 and "matches more than one target" in payload["error"]
         assert payload["candidates"] == ["Den [10.0.0.31]", "Den [10.0.0.32]"]
     assert clockfake.writes == []
+
+
+# ---- writes refuse while an alarm can't be read --------------------------------
+
+def _break_one(f):
+    f.alarms["80"], f.children["80"] = dict(BAD["80"]), []
+
+
+@pytest.mark.parametrize("argv, doing", [
+    (["add", "--room", "Living Room", "--time", "06:05"], "add an alarm"),
+    (["edit", "2", "--volume", "30"], "edit alarm 2"),
+    (["rm", "2"], "delete alarm 2"),
+    (["enable", "66"], "enable alarm 66"),
+    (["disable", "2"], "disable alarm 2"),
+    (["try", "34"], "fire alarm 34"),
+    (["snapshot"], "take a snapshot"),
+    (["restore"], "restore"),
+])
+def test_every_verb_that_reads_alarms_refuses_while_one_cant_be_read(
+        clockfake, capsys, monkeypatch, argv, doing):
+    # Even aimed at a readable alarm: the list it would check against has a
+    # hole in it, and the change could land unseen.
+    run(["alarm", "snapshot"], capsys)                     # for restore
+    saved = alarm_cli.SNAPSHOT_FILE.read_text()
+    clockfake.alarms.pop("1"), clockfake.children.pop("1")  # so restore has work to do
+    _break_one(clockfake)
+    asked = answers(monkeypatch, "y", "2")
+    code, out, _ = run(["alarm", *argv, "--json"], capsys)
+    assert code == 1
+    payload = json.loads(out)
+    assert payload["error"] == (f"twiddle can't read alarm 80 ({BAD_REASONS['80']}: "
+                                "expected ONCE, DAILY, WEEKDAYS, WEEKENDS or ON_<days> "
+                                f"(1-7 digits 0-6, Sunday 0)), so it won't {doing}: "
+                                "nothing written")
+    assert payload["unreadable"]["id"] == "80"
+    assert asked == []
+    assert clockfake.writes == [] and journal() == []
+    assert alarm_cli.SNAPSHOT_FILE.read_text() == saved      # not overwritten
+
+
+def test_restore_refuses_a_snapshot_holding_an_alarm_it_cant_read(clockfake, capsys):
+    _break_one(clockfake)
+    alarm_cli.SNAPSHOT_FILE.parent.mkdir(parents=True)
+    alarm_cli.SNAPSHOT_FILE.write_text(json.dumps(
+        {"taken_utc": "2026-10-04T12:00:00+00:00", "version": clockfake.version,
+         "alarm_list": clockfake.document()}))
+    clockfake.alarms.pop("80"), clockfake.children.pop("80")   # the household is fine now
+    code, out, _ = run(["alarm", "restore", "--json"], capsys)
+    assert code == 1
+    assert "can't read alarm 80" in json.loads(out)["error"]
+    assert clockfake.writes == [] and journal() == []
+

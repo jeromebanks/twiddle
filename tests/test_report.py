@@ -478,3 +478,47 @@ def test_a_fire_at_the_dst_switch_is_scored_under_the_new_offset(tmp_path: Path)
     ])
     assert _scored(report.summarise_log(mon)) == {
         "at-switch": "induced", "pst-0300": "fault", "next-day": "induced"}
+
+
+# ---- alarms the daemon couldn't read --------------------------------------------
+
+def _unreadable(aid="9", reason="invalid alarm recurrence 'EVERY_OTHER_DAY'", room="Bedroom"):
+    return {"id": aid, "room_uuid": "RINCON_00000000000101400", "room": room, "reason": reason}
+
+
+def test_unreadable_alarms_are_named_once_and_not_discounted(tmp_path: Path):
+    unreadable = [_unreadable(), _unreadable(aid=None, reason="missing ID"),
+                  _unreadable(aid=None, reason="missing ID")]
+    sched = _schedule("2026-10-04T12:00:00.000Z", [_alarm()], unreadable=unreadable)
+    mon = _log(tmp_path, [
+        sched,
+        sched | {"checkpoint": True, "ts": "2026-10-05T00:00:00.000Z"},
+        _vanish("2026-10-05T14:00:20.000Z", "readable-fire"),     # alarm 1, 07:00
+    ])
+    findings = report.summarise_log(mon)
+    assert _scored(findings) == {"readable-fire": "induced"}
+    [f] = [f for f in findings if "couldn't be read" in f.title]
+    assert f.severity == "info"
+    assert f.title == "3 alarms in the schedule couldn't be read"
+    assert "alarm 9 (Bedroom): invalid alarm recurrence" in f.detail
+    assert f.detail.count("an alarm with no ID (Bedroom): missing ID") == 2
+    assert "not discounted" in f.detail
+
+
+def test_a_repaired_alarm_is_discounted_only_from_its_repair(tmp_path: Path):
+    # 07:00 can't be read, so its fire can't be discounted; once repaired (a
+    # new version) the same alarm's fires are, but never retroactively.
+    mon = _log(tmp_path, [
+        _schedule("2026-10-04T12:00:00.000Z", [], unreadable=[_unreadable(aid="1")]),
+        _vanish("2026-10-05T14:00:20.000Z", "while-unreadable"),
+        _schedule("2026-10-05T20:00:00.000Z", [_alarm()], version="RINCON_00000000000101400:2"),
+        _vanish("2026-10-06T14:00:20.000Z", "after-repair"),
+    ])
+    findings = report.summarise_log(mon)
+    assert _scored(findings) == {"while-unreadable": "fault", "after-repair": "induced"}
+    assert any("couldn't be read" in f.title for f in findings)
+
+
+def test_no_unreadable_no_finding(tmp_path: Path):
+    mon = _log(tmp_path, [_schedule("2026-10-04T12:00:00.000Z", [_alarm()])])
+    assert not any("couldn't be read" in f.title for f in report.summarise_log(mon))
