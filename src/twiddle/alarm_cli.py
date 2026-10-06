@@ -3,7 +3,10 @@
 `alarm list` is read-only: one `ListAlarms` plus the household's clock and
 display format, from any speaker (alarms are household-wide). Every alarm is
 shown under its room's name, including one aimed at a bonded follower or at a
-speaker that has vanished: labelled, never hidden.
+speaker that has vanished: labelled, never hidden. An alarm twiddle can't read
+(`model.UnreadableAlarm`) is listed apart with why, and the rest still show;
+`alarm status` reads the same way. Every other verb refuses while one is
+unreadable, before writing anything: they need the whole list to be safe.
 
 `alarm snapshot` is read-only too: it saves that `ListAlarms` to a file.
 `alarm restore` WRITES: it creates, updates and destroys alarms until the
@@ -46,7 +49,7 @@ from datetime import datetime, time, timedelta
 from pathlib import Path
 
 from .alarms import baseline, clock
-from .alarms.model import CHIME_URI, NAMED, Alarm, Recurrence
+from .alarms.model import CHIME_URI, NAMED, Alarm, Recurrence, Unreadable, UnreadableAlarm
 from . import play
 from .control_cli import (SNAPSHOT_DIR, BadSpec, add_write_args, emit, fail,
                           parse_sleep_spec)
@@ -309,9 +312,29 @@ _LABEL = {"bonded_follower": "set on {speaker}, a bonded follower",
           "unknown": "set on {room_uuid}, not a speaker in this household"}
 
 
-def human(rows: list[dict], hh: clock.HouseholdTime) -> str:
+def unreadable_rows(house: Household, bad: list[Unreadable]) -> list[dict]:
+    """The alarms that couldn't be read, JSON-ready: ID, room when the alarm
+    names one, and why."""
+    out = []
+    for u in bad:
+        where = aimed_at(house, u.room_uuid) if u.room_uuid else {"room": None, "status": None}
+        out.append({"id": u.id, **where, "room_uuid": u.room_uuid, "reason": u.reason})
+    return out
+
+
+def unreadable_text(rows: list[dict]) -> str:
+    many = len(rows) != 1
+    lines = [f"\ncan't read {len(rows)} alarm{'s' if many else ''}"
+             f" (fix or delete {'them' if many else 'it'} in the Sonos app):"]
+    for r in rows:
+        name = f"#{r['id']}" if r["id"] else "an alarm with no ID"
+        lines.append(f"  {name:>4} {r['room'] or 'no room'}: {r['reason']}")
+    return "\n".join(lines)
+
+
+def human(rows: list[dict], hh: clock.HouseholdTime, bad: list[dict] = ()) -> str:
     if not rows:
-        return "no alarms"
+        return "no alarms" + (f"\n{unreadable_text(bad)}" if bad else "")
     lines, room = [], None
     for r in rows:
         if r["room"] != room:
@@ -325,6 +348,8 @@ def human(rows: list[dict], hh: clock.HouseholdTime) -> str:
             lines.append(f"      ! {_LABEL[r['status']].format(**r)}")
         if r["next_fire"]:
             lines.append(f"      next: {r['next_fire_text']}")
+    if bad:
+        lines.append(unreadable_text(bad))
     lines.append(f"\nhousehold time {clock_text(hh.local.time(), hh.time_format)}"
                  f" {_date_text(hh.local, hh.date_format)}")
     return "\n".join(lines)
@@ -474,18 +499,31 @@ def _anchor(args):
     return house, house.groups[0].coordinator.ip, None
 
 
+def _read_failed(args, ip: str, exc: Exception, doing: str) -> int:
+    """A strict read, before anything was written, that raised."""
+    if isinstance(exc, UnreadableAlarm):
+        name = f"alarm {exc.alarm_id}" if exc.alarm_id else "an alarm with no ID"
+        return fail(args, f"twiddle can't read {name} ({exc.reason}), so it won't "
+                          f"{doing}: nothing written",
+                    "fix or delete it in the Sonos app; `twiddle alarm list` shows it",
+                    unreadable=[{"id": exc.alarm_id, "room_uuid": exc.attributes.get("RoomUUID"),
+                                 "reason": exc.reason}])
+    return fail(args, f"could not read the alarms from {ip}: {exc}")
+
+
 def cmd_list(args):
     house, ip, err = _anchor(args)
     if err is not None:
         return err
     try:
-        found = clock.list_alarms(ip)
+        found = clock.list_alarms(ip, tolerant=True)
         hh = clock.household_time(ip)
     except Exception as exc:
         return fail(args, f"could not read the alarms from {ip}: {exc}")
     rows = listing(house, found.alarms, hh)
+    bad = unreadable_rows(house, found.unreadable)
     return emit(args, {"version": found.version, "household_time": hh.to_dict(),
-                       "alarms": rows}, human(rows, hh))
+                       "alarms": rows, "unreadable": bad}, human(rows, hh, bad))
 
 
 def cmd_snapshot(args):
@@ -496,7 +534,7 @@ def cmd_snapshot(args):
     try:
         found = clock.list_alarms(ip)
     except Exception as exc:
-        return fail(args, f"could not read the alarms from {ip}: {exc}")
+        return _read_failed(args, ip, exc, "take a snapshot")
     snap = baseline.AlarmSnapshot.of(found)
     path = snap.save(Path(args.out) if args.out else SNAPSHOT_FILE)
     return emit(args, {"path": str(path), "snapshot": snap.to_dict(),
@@ -513,6 +551,8 @@ def cmd_restore(args):
     try:
         snap = baseline.AlarmSnapshot.load(path)
         want = snap.alarms
+    except UnreadableAlarm as exc:
+        return _read_failed(args, str(path), exc, "restore that snapshot")
     except Exception as exc:
         return fail(args, f"could not read the snapshot {path}: {exc}")
     house, ip, err = _anchor(args)
@@ -521,7 +561,7 @@ def cmd_restore(args):
     try:
         found = clock.list_alarms(ip)
     except Exception as exc:
-        return fail(args, f"could not read the alarms from {ip}: {exc}")
+        return _read_failed(args, ip, exc, "restore")
     changes = baseline.plan(want, found.alarms)
     lines = [change_text(house, c) for c in changes]
     head = f"alarms as at {snap.taken_utc} ({path})"
@@ -551,6 +591,9 @@ def cmd_restore(args):
     return 0 if out.ok else 1
 
 
+_VERB = {"rm": "delete", "try": "fire"}
+
+
 def _target(args):
     """The household, a speaker to ask, the alarm list and the alarm named by
     `args.alarm_id`; or an exit code last."""
@@ -560,7 +603,8 @@ def _target(args):
     try:
         found = clock.list_alarms(ip)
     except Exception as exc:
-        return None, None, None, None, fail(args, f"could not read the alarms from {ip}: {exc}")
+        return None, None, None, None, _read_failed(
+            args, ip, exc, f"{_VERB.get(args.alarm_cmd, args.alarm_cmd)} alarm {args.alarm_id}")
     alarm = found.get(args.alarm_id)
     if alarm is None:
         return None, None, None, None, fail(
@@ -737,13 +781,14 @@ def cmd_add(args):
                           room_uuid=target["room_uuid"]), **found_set)
     about = {"room": target["room"], "alarm": alarm.to_attributes(), **_aim(target)}
     what = f"{brief(house, alarm)}\n  {details(alarm)}{_note(target)}"
-    if getattr(args, "dry_run", False):
-        return emit(args, about | {"would": "create", "performed": False},
-                    f"[dry-run] would create an alarm: {what}")
+    # Read before the dry run too, so it refuses whatever the real one would.
     try:
         found = clock.list_alarms(ip)
     except Exception as exc:
-        return fail(args, f"could not read the alarms from {ip}: {exc}")
+        return _read_failed(args, ip, exc, "add an alarm")
+    if getattr(args, "dry_run", False):
+        return emit(args, about | {"would": "create", "performed": False},
+                    f"[dry-run] would create an alarm: {what}")
     try:
         after, now = clock.create_alarm(ip, alarm, found.version)
     except Exception as exc:
@@ -857,7 +902,7 @@ def cmd_status(args):
         return err
     try:
         running = [(g, clock.alarm_now(g.coordinator.ip)) for g in groups]
-        alarms = clock.list_alarms(ip) if any(r for _, r in running) else None
+        alarms = clock.list_alarms(ip, tolerant=True) if any(r for _, r in running) else None
     except Exception as exc:
         return fail(args, f"could not read whether an alarm is ringing: {exc}")
     rows = [ringing_row(house, g, r, alarms) for g, r in running]

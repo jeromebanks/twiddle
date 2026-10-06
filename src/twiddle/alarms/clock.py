@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,7 +29,7 @@ import requests
 
 from .. import play
 from ..devices import PORT, soap
-from .model import Alarm, key, parse_alarms
+from .model import Alarm, Unreadable, key, parse_alarms, read_alarms
 
 SERVICE = "AlarmClock"
 READS = frozenset({"ListAlarms", "GetTimeNow", "GetFormat"})
@@ -41,6 +41,7 @@ class AlarmList:
     version: str            # CurrentAlarmListVersion, "<uuid>:<n>"; changes on every edit
     alarms: list[Alarm]
     xml: str = ""           # the CurrentAlarmList document exactly as it came
+    unreadable: list[Unreadable] = field(default_factory=list)   # tolerant reads only
 
     def get(self, alarm_id: str | None) -> Alarm | None:
         return next((a for a in self.alarms if a.id == alarm_id), None)
@@ -98,10 +99,18 @@ def _response(xml: str, action: str) -> dict[str, str]:
     raise ValueError(f"no {action}Response in the speaker's answer")
 
 
-def parse_list_alarms(xml: str) -> AlarmList:
+def parse_list_alarms(xml: str, *, tolerant: bool = False) -> AlarmList:
+    """The list. Strict by default: one alarm the model can't read raises
+    `UnreadableAlarm`. `tolerant` skips it into `unreadable` instead, for
+    views only: anything that writes, or compares lists to decide a write,
+    must see every alarm."""
     r = _response(xml, "ListAlarms")
     doc = r.get("CurrentAlarmList") or "<Alarms/>"
-    return AlarmList(r.get("CurrentAlarmListVersion", ""), parse_alarms(doc), doc)
+    version = r.get("CurrentAlarmListVersion", "")
+    if tolerant:
+        alarms, unreadable = read_alarms(doc)
+        return AlarmList(version, alarms, doc, unreadable)
+    return AlarmList(version, parse_alarms(doc), doc)
 
 
 def parse_time_now(xml: str) -> tuple[datetime, datetime]:
@@ -122,9 +131,9 @@ def _read(ip: str, action: str) -> str:
     return soap(ip, SERVICE, action)
 
 
-def list_alarms(ip: str) -> AlarmList:
-    """Every alarm in the household (read-only)."""
-    return parse_list_alarms(_read(ip, "ListAlarms"))
+def list_alarms(ip: str, *, tolerant: bool = False) -> AlarmList:
+    """Every alarm in the household (read-only); `tolerant` as in `parse_list_alarms`."""
+    return parse_list_alarms(_read(ip, "ListAlarms"), tolerant=tolerant)
 
 
 def household_time(ip: str) -> HouseholdTime:
