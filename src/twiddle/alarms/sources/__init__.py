@@ -128,10 +128,12 @@ def recognise(uri: str, metadata: str) -> Source | None:
     return next((s for s in _REGISTRY.values() if s.owns(uri, metadata)), None)
 
 
-from .chime import Chime            # noqa: E402  (the stock sources register below)
+from .bandcamp import Bandcamp      # noqa: E402  (the stock sources register below)
+from .chime import Chime            # noqa: E402
 from .spotify import Spotify        # noqa: E402
 from .station import Station        # noqa: E402
 
 register(Chime())
 register(Station())
 register(Spotify())
+register(Bandcamp())
