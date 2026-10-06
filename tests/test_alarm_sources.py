@@ -685,7 +685,7 @@ def test_at_least_four_sounds_are_choices_and_each_has_a_file_and_a_licence():
         f = sources.sound.file_of(key)
         assert f.is_file() and f.stat().st_size < 400_000, key
         row = next((r for r in licences.splitlines() if f"`{f.name}`" in r), "")
-        assert re.search(r"generated, CC0|\bCC0\b|public domain", row, re.I), key
+        assert re.search(r"generated here|\bCC0\b|public domain", row, re.I), key
         assert server.resolve(sources.sound.SOUNDS_DIR, f.name) == f.resolve()
     assert {p.name for p in sources.sound.SOUNDS_DIR.glob("*.mp3")} == {f"{k}.mp3" for k in keys}
 
@@ -750,3 +750,15 @@ def test_add_a_sound_alarm_dry_run_writes_nothing(clockfake, capsys, monkeypatch
                         "--source", "sound:bell", "--dry-run", "--json"], capsys)
     assert code == 0, out
     assert "/sound/bell.mp3" in out and journal() == []
+
+
+def test_the_generated_sounds_come_from_tone_and_the_recording_is_the_only_other():
+    from twiddle import tone
+    gen = {"bell", "beep", "rise", "chimes"}
+    assert {k for k in sources.sound.SOUNDS} == gen | {"birdsong"}
+    for fn in (tone.classic_bell, tone.digital_beep, tone.gentle_rise, tone.chimes):
+        track = fn(4.0)
+        assert len(track) == 4 * tone.SOUND_RATE and max(abs(v) for v in track) > 0.1
+    licences = (sources.sound.SOUNDS_DIR / "LICENSES.md").read_text()
+    assert "creativecommons" not in licences and "CC0 1.0" in licences
+    assert "commons.wikimedia.org/wiki/File:" in licences

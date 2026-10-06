@@ -4,7 +4,7 @@
 
 Sonos has only the one built-in chime, so these live here, are labelled the
 same way as a Bandcamp track (`needs_mac`) and fall back to the chime if the
-Mac can't serve them. Each file is 45 seconds of a repeating pattern, since an
+Mac can't serve them. Each file is 45 seconds (a repeating pattern, or a recording), since an
 alarm's track plays once and stops. Every file's origin and licence is in
 `sounds/LICENSES.md`.
 
@@ -29,7 +29,7 @@ SOUNDS = {                      # key -> (title, what it is)
     "bell": ("Classic bell", "a struck bell, every two seconds"),
     "beep": ("Digital beep", "four short beeps a second"),
     "rise": ("Gentle rise", "a soft chord that swells over fifteen seconds"),
-    "birdsong": ("Birdsong", "little phrases of chirps"),
+    "birdsong": ("Birdsong", "a forest at dusk (a recording)"),
     "chimes": ("Chimes", "a falling run of soft bells"),
 }
 

@@ -797,11 +797,12 @@ def test_a_bundled_sound_is_served_from_its_route_whatever_dir_is_served(srv):
     assert get(srv, "/sound/bell.mp3") == (200, sound.file_of("bell").read_bytes())
     assert get(srv, "/sound/bell.mp3", "HEAD")[0] == 200
     assert [r["action"] for r in journal()] == ["alarm_serve_start", "alarm_serve_end"]
-    assert journal()[0]["file"] == "bell.mp3"
+    assert journal()[0]["file"] == "sound:bell"
 
 
 @pytest.mark.parametrize("path", ["/sound/nope.mp3", "/sound/",
-                                  "/sound/bell.wav", "/sound/%2e%2e/secret.mp3"])
+                                  "/sound/bell.wav", "/sound/%2e%2e/secret.mp3",
+                                  "/sound/../bell.mp3", "/sound/sub/rise.wav"])
 def test_an_unknown_sound_is_a_404_with_no_span(srv, path):
     before = len(journal())
     status, _ = get(srv, path)

@@ -190,9 +190,11 @@ class AlarmServer:
                 if not permitted(ip, outer.speakers):
                     self._refuse(403, "not a speaker of this household")
                     return None
-                name = snd.name_of(self.path)
-                path = (resolve(snd.SOUNDS_DIR, snd.file_of(name).name) if name
-                        else resolve(outer.root, self.path))
+                if urllib.parse.urlsplit(self.path).path.startswith(snd.ROUTE):
+                    name = snd.name_of(self.path)       # exclusive, like /bandcamp/: never DIR
+                    path = resolve(snd.SOUNDS_DIR, snd.file_of(name).name) if name else None
+                else:
+                    path = resolve(outer.root, self.path)
                 if path is None:
                     self._refuse(404, "no such audio")
                 return path
@@ -263,7 +265,9 @@ class AlarmServer:
                 except OSError:
                     return self._refuse(404, "no such audio")
                 with fh:
-                    span_id = outer._open(self.client_address[0], path.name, self.connection)
+                    sound = snd.name_of(self.path)
+                    span_id = outer._open(self.client_address[0],
+                                          f"sound:{sound}" if sound else path.name, self.connection)
                     if span_id is None:
                         return self._refuse(503, "shutting down")
                     try:
