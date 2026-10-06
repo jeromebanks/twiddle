@@ -242,6 +242,58 @@ def test_a_failed_read_back_is_journalled_as_written(fake, monkeypatch):
     assert "ZeroDivisionError" in rec["error"]
 
 
+def _interrupt_read_back(fake, monkeypatch):
+    """Ctrl-C at the first read after a write; returns a function that undoes it."""
+    real = clock.list_alarms
+
+    def read(ip):
+        if fake.writes:
+            raise KeyboardInterrupt
+        return real(ip)
+    monkeypatch.setattr(clock, "list_alarms", read)
+    return lambda: monkeypatch.setattr(clock, "list_alarms", real)
+
+
+def test_ctrl_c_in_a_destroys_read_back_still_journals_it_as_written(fake, monkeypatch):
+    gone = next(a for a in ALARMS if a.id == "66")
+    v = clock.list_alarms(IP).version
+    uninterrupt = _interrupt_read_back(fake, monkeypatch)
+    with pytest.raises(KeyboardInterrupt):
+        clock.destroy_alarm(IP, "66", v)
+    [rec] = journal()
+    assert rec["action"] == "alarm_destroy" and rec["written"] is True
+    assert rec["before"] and clock.deleted("66") == gone
+    uninterrupt()
+    again, _, _ = clock.recreate(IP, "66", clock.list_alarms(IP).version)
+    assert baseline.key(again) == baseline.key(gone)
+
+
+@pytest.mark.parametrize("write", [
+    lambda v: clock.create_alarm(IP, new_alarm(), v),
+    lambda v: clock.update_alarm(IP, ALARMS[0], v),
+])
+def test_ctrl_c_in_a_create_or_updates_read_back_journals_written(fake, monkeypatch, write):
+    v = clock.list_alarms(IP).version
+    _interrupt_read_back(fake, monkeypatch)
+    with pytest.raises(KeyboardInterrupt):
+        write(v)
+    [rec] = journal()
+    assert rec["written"] is True
+
+
+def test_ctrl_c_while_sending_a_write_journals_it_as_unknown(fake, monkeypatch):
+    v = clock.list_alarms(IP).version
+
+    def interrupted(*a, **k):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(clock, "_write", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        clock.destroy_alarm(IP, "66", v)
+    [rec] = journal()
+    assert rec["written"] is None
+    assert clock.deleted("66") is None
+
+
 def test_unknown_ids_are_refused_before_writing(fake):
     v = clock.list_alarms(IP).version
     with pytest.raises(KeyError):
