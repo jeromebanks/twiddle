@@ -233,16 +233,20 @@ def _journalled(ip: str, action: str, read: AlarmList, alarm_id: str | None,
     rather than overwrite it. A write that raises may still have landed (a
     timeout after the speaker acted), so the list is read back then too and
     `written` says whether it shows the write: true, false, or null when it
-    can't be told. Returns the alarm as the speaker now has it (None once
-    destroyed) and the list it came from, whose version the next write expects.
+    can't be told. An interrupt (Ctrl-C) journals what was known when it
+    came: true once the speaker answered, null before. Returns the alarm as the
+    speaker now has it (None once destroyed) and the list it came from, whose
+    version the next write expects.
     """
     entry: dict = {"alarm_id": alarm_id, "before": _record(read.get(alarm_id)),
-                   "sent": dict(args), "written": False}
+                   "sent": dict(args), "written": None}
     landed, failed, now, after = None, None, None, None
     try:
         try:
             reply = _write(ip, action, args)
             alarm_id, landed = reply.get("AssignedID") or alarm_id, True
+            # what is known so far, should Ctrl-C land before the read-back ends
+            entry |= {"alarm_id": alarm_id, "written": True}
         except Exception as exc:
             failed = exc
         try:
