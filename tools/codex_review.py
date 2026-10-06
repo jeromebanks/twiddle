@@ -50,6 +50,10 @@ class ReviewError(Exception):
     """A review that can't start, or a report that doesn't count. `sdlc.SdlcError` is this class."""
 
 
+class CannotStart(Exception):
+    """`codex` couldn't be launched at all: not on the PATH, or not executable."""
+
+
 # --- the report ---------------------------------------------------------------
 
 def parse_verdict(report: str) -> str:
@@ -129,11 +133,13 @@ def latest_response(rounds: list[dict[str, Any]]) -> tuple[int, str | None]:
         return 0, None
     last = rounds[-1]
     body = last.get("body") or ""
-    mark = RESPONSE_MARK if RESPONSE_MARK in body else LEGACY_MARK
-    response = None
-    if mark in body:
-        after = body.split(mark, 1)[1].strip()
-        response = after.removeprefix(RESPONSE_HEADING).strip() or None
+    response, i = None, body.find(RESPONSE_MARK)
+    # the boundary counts where `response_section` puts it: right after the report, before the heading. A legacy
+    # round's response may mention the boundary's text; that mention is neither
+    if i >= 0 and body[:i].endswith("</details>\n\n") and body.startswith(f"{RESPONSE_MARK}\n{RESPONSE_HEADING}", i):
+        response = body[i + len(RESPONSE_MARK):].strip().removeprefix(RESPONSE_HEADING).strip() or None
+    elif LEGACY_MARK in body:
+        response = body.split(LEGACY_MARK, 1)[1].strip() or None
     if response is None and last.get("verdict") == "changes":
         raise ReviewError(f"round {len(rounds)} asked for changes and recorded no response: Codex would never see "
                           "the answers to its findings. Record the round with `pr-review --response`, then run this")
@@ -240,7 +246,10 @@ def run_once(cmd: list[str], wt: Path, out: Path, err: Path, timeout: float) -> 
     """Codex's stdout, or None if it timed out. Codex runs in its own process group, so neither Ctrl-C nor a
     SIGTERM to this process reaches it: however the wait ends, a group still running is killed."""
     with out.open("w") as fo, err.open("a") as fe:
-        proc = subprocess.Popen(cmd, cwd=wt, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe, start_new_session=True)
+        try:
+            proc = subprocess.Popen(cmd, cwd=wt, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe, start_new_session=True)
+        except OSError as exc:
+            raise CannotStart(str(exc)) from exc
         try:
             with _sigterm_interrupts():
                 proc.wait(timeout=timeout)
@@ -249,8 +258,11 @@ def run_once(cmd: list[str], wt: Path, out: Path, err: Path, timeout: float) -> 
             return None
         finally:
             if proc.poll() is None:
-                with contextlib.suppress(ProcessLookupError):
+                # the group can hold a sandbox helper this user may not signal (EPERM): then at least Codex itself
+                with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.killpg(proc.pid, signal.SIGKILL)
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
                 proc.wait()
     return out.read_text()
 
@@ -274,7 +286,7 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, timeout: floa
         raw = scratch / f"codex-{attempt}.out"
         try:
             output = run_once(cmd, wt, raw, err, timeout)
-        except OSError as exc:   # not on the PATH, or not executable
+        except CannotStart as exc:
             log(f"codex can't be started ({exc}): Codex can't run (exit {UNAVAILABLE}: `review-defer`)")
             return UNAVAILABLE, None
         if (now := git_head(wt)) != head:

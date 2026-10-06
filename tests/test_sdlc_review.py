@@ -465,11 +465,24 @@ def test_an_interrupted_run_kills_codex(tmp_path, monkeypatch):
         def poll(self):
             return None if not killed else 0
 
+        def kill(self):
+            killed.append("kill")
+
     monkeypatch.setattr(codex_review.subprocess, "Popen", lambda *a, **k: Proc())
     monkeypatch.setattr(codex_review.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
     with pytest.raises(KeyboardInterrupt):
         codex_review.run_once(["codex"], tmp_path, tmp_path / "o", tmp_path / "e", 30)
-    assert killed == [(4242, codex_review.signal.SIGKILL)]
+    assert killed[0] == (4242, codex_review.signal.SIGKILL)
+    # a group it may not signal (a sandbox helper: EPERM) still kills Codex, and the interrupt isn't
+    # mistaken for "codex can't be started"
+    killed.clear()
+
+    def eperm(pid, sig):
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(codex_review.os, "killpg", eperm)
+    with pytest.raises(KeyboardInterrupt):
+        codex_review.run_once(["codex"], tmp_path, tmp_path / "o", tmp_path / "e", 30)
+    assert killed == ["kill"]
 
 
 def test_codex_gets_the_repos_settings_and_a_config_without_them_is_refused(tmp_path, monkeypatch, capsys):
@@ -561,3 +574,6 @@ def test_the_response_pr_review_records_is_the_one_the_next_round_reads(tmp_path
     assert sdlc.main(["pr-review", "50", "--report", str(report), "--from-file", str(bundle), "--dry-run"]) == 0
     with pytest.raises(sdlc.SdlcError, match="recorded no response"):
         codex_review.latest_response([{"verdict": "changes", "body": capsys.readouterr().out}])
+    # a round recorded before the boundary existed, whose response mentions it (PR #133's round 1)
+    legacy = recorded(1, "changes", f"1. Accepted: write `{codex_review.RESPONSE_MARK}` first.\n2. Accepted.")["body"]
+    assert codex_review.latest_response([{"verdict": "changes", "body": legacy}])[1].startswith("1. Accepted: write")
