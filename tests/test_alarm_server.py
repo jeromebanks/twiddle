@@ -928,6 +928,15 @@ def test_bare_status_asks_about_the_installed_endpoint(launchd_agent, monkeypatc
     assert code == 0 and set(seen) == {(9123, "192.168.1.5")} and json.loads(out)["port"] == 9123
 
 
+def test_status_probes_an_explicit_default_endpoint_as_given(launchd_agent, monkeypatch, capsys, tmp_path):
+    from twiddle import daemon
+    monkeypatch.setattr(daemon, "installed_alarm_endpoint", lambda: (9123, "192.168.1.5"))
+    seen = []
+    monkeypatch.setattr(daemon, "serving", lambda port, host="127.0.0.1", **k: seen.append((port, host)) or True)
+    run(["alarm", "serve", "--status", "--port", "8765", "--host", "0.0.0.0", "--json"], capsys)
+    assert set(seen) == {(8765, "127.0.0.1")}
+
+
 @pytest.mark.parametrize("port", ["0", "-1", "70000"])
 def test_install_refuses_an_unusable_port_before_touching_the_job(fake_house, launchd_agent, sounds,
                                                                   capsys, port):

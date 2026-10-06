@@ -1021,10 +1021,10 @@ def _serve_status(args) -> int:
     port, bind = args.port, args.host
     installed = daemon.installed_alarm_endpoint()
     if installed:
-        if args.port == server.PORT:
-            port = installed[0]
-        if args.host == "0.0.0.0":
-            bind = installed[1]
+        port = installed[0] if port is None else port
+        bind = installed[1] if bind is None else bind
+    port = server.PORT if port is None else port
+    bind = "0.0.0.0" if bind is None else bind
     args.port = port
     host = daemon.probe_host(bind)
     answers = daemon.serving(port, host)
@@ -1113,6 +1113,9 @@ def cmd_serve(args):
     the launchd agent that keeps it running."""
     if args.status:
         return _serve_status(args)
+    # Omitted until here so `--status` can tell "not given" from "given as the default".
+    args.port = server.PORT if args.port is None else args.port
+    args.host = "0.0.0.0" if args.host is None else args.host
     if args.install or args.uninstall:
         return _serve_agent(args)
     if not args.dir:
@@ -1332,9 +1335,9 @@ def register(sub, parents=None):
                       help="remove that agent (WRITES)")
     mode.add_argument("--status", action="store_true",
                       help="is the agent's server answering (read-only)")
-    sv.add_argument("--port", type=int, default=server.PORT,
+    sv.add_argument("--port", type=int, default=None,
                     help=f"port (default {server.PORT}: alarms store the URL)")
-    sv.add_argument("--host", default="0.0.0.0",
+    sv.add_argument("--host", default=None,
                     help="the address to listen on (default every interface, so speakers can reach it)")
     sv.add_argument("--max-s", type=_bound, default=server.DEFAULT_MAX_S,
                     help="the longest one serve may last, in seconds "
