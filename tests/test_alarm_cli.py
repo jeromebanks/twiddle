@@ -1350,7 +1350,8 @@ GUIDE = Path(__file__).parent.parent / "docs" / "GUIDE.md"
 
 
 def _documented_keys() -> set[str]:
-    """The keys in the GUIDE's `alarm list --json` table, from its first column."""
+    """The keys in the GUIDE's `alarm list --json` table, from its first column;
+    every one says whether it is Sonos's or twiddle's."""
     section = GUIDE.read_text().split("#### Fields of `alarm list --json`", 1)[1]
     keys = set()
     for line in section.splitlines()[1:]:
@@ -1358,6 +1359,7 @@ def _documented_keys() -> set[str]:
             break
         if line.startswith("| `"):
             keys.add(line.split("`")[1])
+            assert line.split("|")[2].strip().startswith(("Sonos", "twiddle")), line
     return keys
 
 

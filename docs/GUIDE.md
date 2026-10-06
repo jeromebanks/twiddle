@@ -153,49 +153,6 @@ alarm with no ID). `alarm status` reads the same way. Every other alarm verb
 could change unseen. Fix or delete it in the Sonos app. `alarm stop` and
 `snooze` never read the list, so they still silence a ringing alarm.
 
-#### Fields of `alarm list --json`
-
-The payload sits in the usual ok/error envelope (the `--json` row of the table
-above): `ok` and the error shape are described there, not here. Every key of a
-successful answer is below. **Sonos** means the value is what the speaker sent
-(named by its `AlarmClock` field), only renamed or reshaped; **twiddle** means
-it is worked out here. `alarms[].` is a key of each alarm's object.
-
-| Key | From | Meaning |
-|---|---|---|
-| `version` | Sonos: `ListAlarms` `CurrentAlarmListVersion` | The alarm list's version string; the writing verbs refuse if it moved since they read it. |
-| `household_time` | twiddle | The household's clock and how it writes times, read once per list; its four keys follow. |
-| `household_time.local` | Sonos: `GetTimeNow` `CurrentLocalTime` | The household's local time now, ISO. Every `next_fire` is counted from it. |
-| `household_time.utc` | Sonos: `GetTimeNow` `CurrentUTCTime` | The same instant in UTC, ISO. |
-| `household_time.time_format` | Sonos: `GetFormat` `CurrentTimeFormat` | How the household writes times: `12H`, `24H`, or `INV` (unset, shown 24-hour). |
-| `household_time.date_format` | Sonos: `GetFormat` `CurrentDateFormat` | How it writes dates: `DMY`, `MDY`, or `INV` (unset, shown month-day). |
-| `alarms` | twiddle | Every alarm twiddle could read, grouped by room name, each room's in time order. |
-| `unreadable` | twiddle | The alarms it couldn't read, each `{id, room, status, room_uuid, reason}`; see above. |
-| `alarms[].id` | Sonos: `ID` | The alarm's ID, a string; what the writing verbs take. |
-| `alarms[].room` | twiddle | The room's name for `room_uuid`; `(unknown speaker)` if no speaker owns it. |
-| `alarms[].speaker` | twiddle | The speaker's own name (or, for a vanished one, its last room name); empty if unknown. |
-| `alarms[].status` | twiddle | `ok`, `bonded_follower`, `vanished` or `unknown`: whether the alarm is aimed at something that can sound it. |
-| `alarms[].room_uuid` | Sonos: `RoomUUID` | The speaker the alarm is set on, as `RINCON_...`. |
-| `alarms[].time` | Sonos: `StartLocalTime` | When it goes off, `HH:MM:SS` in the household's local time. |
-| `alarms[].time_text` | twiddle | The same time written the way the household writes times. |
-| `alarms[].recurrence` | Sonos: `Recurrence_Day`, as parsed | `ONCE`, `DAILY`, `WEEKDAYS`, `WEEKENDS` or `ON_<days>`. |
-| `alarms[].days` | twiddle | The days it repeats on as numbers, Sunday 0 to Saturday 6, sorted. |
-| `alarms[].days_text` | twiddle | The recurrence in words: `daily`, `weekdays`, or day names like `Mon Wed Fri`. |
-| `alarms[].enabled` | Sonos: `Enabled` | Whether the alarm is on. |
-| `alarms[].volume` | Sonos: `Volume` | The alarm's volume, 0 to 100. |
-| `alarms[].duration` | Sonos: `Duration` | How long it plays before stopping, `HH:MM:SS`; empty means it never auto-stops. |
-| `alarms[].duration_text` | twiddle | The duration in words, e.g. `no auto-stop`. |
-| `alarms[].play_mode` | Sonos: `PlayMode` | Sonos's play mode (`NORMAL`, `SHUFFLE`, ...), unchanged. |
-| `alarms[].include_linked_zones` | Sonos: `IncludeLinkedZones` | Whether it also plays in the rooms grouped with its room. |
-| `alarms[].source_title` | twiddle | The title for the source: from twiddle's own source if it built the URI, else the `dc:title` in `ProgramMetaData`, else the URI's scheme. For display. |
-| `alarms[].source` | twiddle | The name of twiddle's own source (`alarm sources`) that recognises the URI; null if none does. |
-| `alarms[].needs_mac` | twiddle | True if that source only works while this Mac is serving it. |
-| `alarms[].sound_source` | twiddle | A key for where the sound comes from (table above), read from `program_uri` alone. |
-| `alarms[].sound_source_text` | twiddle | `sound_source` as shown in the list. |
-| `alarms[].program_uri` | Sonos: `ProgramURI` | What the alarm plays, exactly as Sonos stores it. Sonos doesn't document its format: the scheme and `sid=` follow conventions seen on real speakers, so treat it as opaque unless you need to recognise one. |
-| `alarms[].next_fire` | twiddle | The next time it goes off, ISO, in the household's local time, counted from `household_time.local`. `null` when the alarm is disabled (or its time can't be read). |
-| `alarms[].next_fire_text` | twiddle | The same moment as the list prints it (`today 7:30 AM`, `tomorrow 07:30`, `Mon 10-05 07:30`). `-` when `next_fire` is null, so for a disabled alarm. |
-
 ```bash
 uv run twiddle alarm snapshot              # -> logs/snapshots/alarms.json (read-only)
 uv run twiddle alarm restore --dry-run     # every change it would make; writes nothing
@@ -380,6 +337,48 @@ is journalled around each of those moments (`alarm_run_stop_*`,
 `alarm_snooze_ring_*`, a minute before to three after) for `analyse` to
 discount, as with the sleep timer. Each takes `--dry-run`, which reads
 whether anything is ringing but writes and journals nothing.
+
+#### Fields of `alarm list --json`
+
+The payload sits in the usual ok/error envelope ([`--json`](#commands)): `ok` and the error shape are described there, not here. Every key of a
+successful answer is below. **Sonos** means the value is what the speaker sent
+(named by its `AlarmClock` field), only renamed or reshaped; **twiddle** means
+it is worked out here. `alarms[].` is a key of each alarm's object.
+
+| Key | From | Meaning |
+|---|---|---|
+| `version` | Sonos: `ListAlarms` `CurrentAlarmListVersion` | The alarm list's version string; the writing verbs refuse if it moved since they read it. |
+| `household_time` | twiddle | The household's clock and how it writes times, read once per list; its four keys follow. |
+| `household_time.local` | Sonos: `GetTimeNow` `CurrentLocalTime` | The household's local time now, ISO. Every `next_fire` is counted from it. |
+| `household_time.utc` | Sonos: `GetTimeNow` `CurrentUTCTime` | The same instant in UTC, ISO. |
+| `household_time.time_format` | Sonos: `GetFormat` `CurrentTimeFormat` | How the household writes times. Only `INV` (unset) has been seen on a real speaker; twiddle shows `12H` as AM/PM and anything else, `INV` included, as 24-hour. |
+| `household_time.date_format` | Sonos: `GetFormat` `CurrentDateFormat` | How it writes dates. Twiddle shows `DMY` as day/month, `MDY` as month/day and anything else, `INV` included, as month-day. |
+| `alarms` | twiddle | Every alarm twiddle could read, grouped by room name, each room's in time order. |
+| `unreadable` | twiddle | The alarms it couldn't read, each `{id, room, status, room_uuid, reason}`; see above. |
+| `alarms[].id` | Sonos: `ID` | The alarm's ID, a string; what the writing verbs take. |
+| `alarms[].room` | twiddle | The room's name for `room_uuid`; `(unknown speaker)` if no speaker owns it. |
+| `alarms[].speaker` | twiddle | The speaker's own name (or, for a vanished one, its last room name); empty if unknown. |
+| `alarms[].status` | twiddle | `ok`, `bonded_follower`, `vanished` or `unknown`: whether the alarm is aimed at something that can sound it. |
+| `alarms[].room_uuid` | Sonos: `RoomUUID` | The speaker the alarm is set on, as `RINCON_...`. |
+| `alarms[].time` | Sonos: `StartTime` | When it goes off, `HH:MM:SS` in the household's local time. |
+| `alarms[].time_text` | twiddle | The same time written the way the household writes times. |
+| `alarms[].recurrence` | Sonos: `Recurrence`, as parsed | `ONCE`, `DAILY`, `WEEKDAYS`, `WEEKENDS` or `ON_<days>`. |
+| `alarms[].days` | twiddle | The days it repeats on as numbers, Sunday 0 to Saturday 6, sorted. |
+| `alarms[].days_text` | twiddle | The recurrence in words: `once`, `daily`, `weekdays`, `weekends`, or day names like `Mon Wed Fri`. |
+| `alarms[].enabled` | Sonos: `Enabled` | Whether the alarm is on. |
+| `alarms[].volume` | Sonos: `Volume` | The alarm's volume, 0 to 100. |
+| `alarms[].duration` | Sonos: `Duration` | How long it plays before stopping, `HH:MM:SS`; empty means it never auto-stops. |
+| `alarms[].duration_text` | twiddle | The duration in words, e.g. `no auto-stop`. |
+| `alarms[].play_mode` | Sonos: `PlayMode` | Sonos's play mode (`NORMAL`, `SHUFFLE`, ...), unchanged. |
+| `alarms[].include_linked_zones` | Sonos: `IncludeLinkedZones` | Whether it also plays in the rooms grouped with its room. |
+| `alarms[].source_title` | twiddle | The title for the source: from twiddle's own source if it built the URI, else the `dc:title` in `ProgramMetaData`, else the URI's scheme. For display. |
+| `alarms[].source` | twiddle | The name of twiddle's own source (`alarm sources`) that recognises the URI; null if none does. |
+| `alarms[].needs_mac` | twiddle | True if that source only works while this Mac is serving it. |
+| `alarms[].sound_source` | twiddle | A key for where the sound comes from (table above), read from `program_uri` alone. |
+| `alarms[].sound_source_text` | twiddle | `sound_source` as shown in the list. |
+| `alarms[].program_uri` | Sonos: `ProgramURI` | What the alarm plays, exactly as Sonos stores it. Sonos doesn't document its format: the scheme and `sid=` follow conventions seen on real speakers, so treat it as opaque unless you need to recognise one. |
+| `alarms[].next_fire` | twiddle | The next time it goes off, ISO, in the household's local time, counted from `household_time.local`. `null` when the alarm is disabled (or its time can't be read). |
+| `alarms[].next_fire_text` | twiddle | The same moment as the list prints it (`today 7:30 AM`, `tomorrow 07:30`, `Mon 10-05 07:30`). `-` when `next_fire` is null, so for a disabled alarm. |
 
 ### Relay: play anything on this Mac, including Spotify
 
