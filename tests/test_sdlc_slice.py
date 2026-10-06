@@ -218,3 +218,33 @@ def test_plan_issues_are_never_triaged():
 def test_pytest_summary():
     assert sdlc.parse_pytest_summary("....\n1258 passed in 77.78s (0:01:17)\n") == (1258, 0)
     assert sdlc.parse_pytest_summary("FAILED x\n2 failed, 10 passed, 1 error in 3s") == (10, 3)
+
+
+def stub_test_record(monkeypatch, heads):
+    """`test-record` on a clean tree at HEAD, with GitHub reporting each of `heads` in turn (then the last)."""
+    seen, sleeps, runs = iter(heads), [], []
+    last = []
+
+    def fetch_pr(n, cfg):
+        last[:] = [next(seen, last[0] if last else heads[-1])]
+        return pr(headRefOid=last[0]), []
+
+    monkeypatch.setattr(sdlc, "fetch_pr", fetch_pr)
+    monkeypatch.setattr(sdlc, "git", lambda args, cwd=None, check=True: "" if args[0] == "status" else HEAD)
+    monkeypatch.setattr(sdlc, "run_suite", lambda *a: runs.append(1) or {"result": "pass", "passed": 3})
+    monkeypatch.setattr(sdlc.time, "sleep", sleeps.append)
+    monkeypatch.setattr(sdlc, "suite_body", lambda *a: "ok")
+    return sleeps, runs
+
+
+def test_test_record_waits_for_github_to_show_the_pushed_head(monkeypatch, capsys):
+    sleeps, runs = stub_test_record(monkeypatch, [OLD, OLD, HEAD])
+    assert sdlc.main(["test-record", "50", "--dry-run"]) == 0
+    assert runs == [1] and len(sleeps) == 2
+
+
+def test_test_record_gives_up_when_github_never_catches_up(monkeypatch, capsys):
+    sleeps, runs = stub_test_record(monkeypatch, [OLD])
+    assert sdlc.main(["test-record", "50", "--dry-run"]) == 1
+    assert runs == [] and sum(sleeps) == sdlc.HEAD_WAIT_SECONDS
+    assert "is not PR #50's head" in capsys.readouterr().err
