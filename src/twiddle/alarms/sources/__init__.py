@@ -4,8 +4,9 @@ A source is one module here with a `Source` subclass and a `register()` call
 below: it lists or searches what it can play, builds the `ProgramURI` and
 `ProgramMetaData` for one choice, says whether this Mac must be up when the
 alarm fires (`needs_mac`) and what the room does if it can't play
-(`fallback`), recognises an alarm it built (`owns`) and names what that alarm
-plays (`describe`). The CLI reads the
+(`fallback`), recognises an alarm it built (`owns`), names what that alarm
+plays (`describe`) and says where its sound comes from (`sound_source`, for
+`alarm list`'s sound-source column; by default `twiddle:<name>`). The CLI reads the
 registry when it runs, so a new source needs no CLI edit: `alarm sources`
 lists it and `--source <name>[:<choice>]` takes it.
 
@@ -57,6 +58,11 @@ class Source:
         """What an alarm it owns plays, for display: by default the DIDL's
         dc:title."""
         return didl_title(metadata)
+
+    def sound_source(self) -> tuple[str, str]:
+        """`(key, text)` for where an alarm it owns gets its sound: `alarm
+        list --json`'s `sound_source` and `sound_source_text`."""
+        return f"twiddle:{self.name}", f"twiddle {self.title}"
 
 
 def didl_title(metadata: str) -> str | None:

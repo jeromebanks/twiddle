@@ -19,3 +19,6 @@ class Chime(Source):
 
     def describe(self, uri: str, metadata: str) -> str | None:
         return self.title
+
+    def sound_source(self) -> tuple[str, str]:
+        return "sonos_chime", "Sonos chime"         # the speaker's, not twiddle's

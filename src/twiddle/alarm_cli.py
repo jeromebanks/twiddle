@@ -2,7 +2,8 @@
 
 `alarm list` is read-only: one `ListAlarms` plus the household's clock and
 display format, from any speaker (alarms are household-wide), and the
-station catalog, to recognise station alarms. Every alarm is
+station catalog, to recognise station alarms. Where each alarm's sound comes
+from is read from its `ProgramURI` (`alarms/soundsource.py`). Every alarm is
 shown under its room's name, including one aimed at a bonded follower or at a
 speaker that has vanished: labelled, never hidden. An alarm twiddle can't read
 (`model.UnreadableAlarm`) is listed apart with why, and the rest still show;
@@ -54,7 +55,7 @@ from dataclasses import replace
 from datetime import datetime, time, timedelta
 from pathlib import Path
 
-from .alarms import baseline, clock, sources
+from .alarms import baseline, clock, soundsource, sources
 from .alarms.model import NAMED, Alarm, Recurrence, Unreadable, UnreadableAlarm
 from . import play
 from .control_cli import (SNAPSHOT_DIR, BadSpec, add_write_args, emit, fail,
@@ -280,6 +281,7 @@ def row(house: Household, alarm: Alarm, hh: clock.HouseholdTime) -> dict:
     when = next_fire(alarm, hh.local)
     at = _start(alarm)
     source = sources.recognise(alarm.program_uri, alarm.program_metadata)
+    sound = soundsource.classify(alarm.program_uri, alarm.program_metadata)
     return {
         "id": alarm.id,
         **aimed_at(house, alarm.room_uuid),
@@ -298,6 +300,8 @@ def row(house: Household, alarm: Alarm, hh: clock.HouseholdTime) -> dict:
         "source_title": source_title(alarm),
         "source": source.name if source else None,
         "needs_mac": bool(source and source.needs_mac),
+        "sound_source": sound.key,
+        "sound_source_text": sound.text,
         "program_uri": alarm.program_uri,
         "next_fire": when.isoformat() if when else None,
         "next_fire_text": fire_text(when, hh.local, hh),
@@ -339,6 +343,7 @@ def human(rows: list[dict], hh: clock.HouseholdTime, bad: list[dict] = ()) -> st
     if not rows:
         return "no alarms" + (f"\n{unreadable_text(bad)}" if bad else "")
     lines, room = [], None
+    sound_width = max(len(r["sound_source_text"]) for r in rows)
     for r in rows:
         if r["room"] != room:
             room = r["room"]
@@ -346,7 +351,7 @@ def human(rows: list[dict], hh: clock.HouseholdTime, bad: list[dict] = ()) -> st
         on = "on " if r["enabled"] else "off"
         lines.append(
             f"  {'#' + r['id']:>4} {on} {r['time_text']:>8}  {r['days_text']:<18} vol {r['volume']:<3} "
-            f"{r['duration_text']:<7} {r['play_mode']:<11} "
+            f"{r['duration_text']:<7} {r['play_mode']:<11} {r['sound_source_text']:<{sound_width}}  "
             f"{NEEDS_MAC + ' ' if r['needs_mac'] else ''}{r['source_title']}")
         if r["status"] != "ok":
             lines.append(f"      ! {_LABEL[r['status']].format(**r)}")

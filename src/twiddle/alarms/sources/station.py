@@ -41,6 +41,9 @@ class Station(Source):
                              + ": `alarm sources station` lists them")
         return play.radio_uri(st.url), play.radio_didl(st.name, st.logo)
 
+    def sound_source(self) -> tuple[str, str]:
+        return "twiddle:station", "twiddle station (direct stream)"
+
     def owns(self, uri: str, metadata: str) -> bool:
         return uri.startswith(play.RADIO_SCHEME) and any(
             uri == play.radio_uri(st.url) for st in self._catalog().values())
