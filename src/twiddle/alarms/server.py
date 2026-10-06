@@ -95,6 +95,20 @@ def open_stream(url: str, timeout: float = UPSTREAM_S):
         timeout=timeout)
 
 
+def _read(fh, n: int) -> bytes:
+    """What is there to read now, up to `n` (a socket's `read1`; `read` for a file)."""
+    return getattr(fh, "read1", fh.read)(n)
+
+
+def _bound(fh, seconds: float) -> None:
+    """Make the next read of an open response wait at most `seconds` (best
+    effort: anything that isn't a urllib response is left as it is)."""
+    try:
+        fh.fp.raw._sock.settimeout(seconds)
+    except AttributeError:
+        pass
+
+
 def _alive(pid) -> bool:
     if not isinstance(pid, int):
         return False
@@ -184,6 +198,7 @@ class AlarmServer:
                     return self._refuse(504, "Bandcamp did not answer in time")
                 except Exception:
                     return self._refuse(502, "Bandcamp could not be reached for this track")
+                upstream, first = upstream
                 with contextlib.closing(upstream):
                     if head:
                         return self._headers_for("audio/mpeg", None)
@@ -194,7 +209,8 @@ class AlarmServer:
                     try:
                         size = (getattr(upstream, "headers", None) or {}).get("Content-Length")
                         self._headers_for("audio/mpeg", size)
-                        outer._send(upstream, self.connection, time.monotonic() + outer.max_s)
+                        outer._pump(upstream, first, self.connection,
+                                    time.monotonic() + outer.max_s)
                     except OSError:
                         pass   # the speaker hung up, or a stall ran past the bound
                     finally:
@@ -250,8 +266,8 @@ class AlarmServer:
         self.port = self._srv.server_port
 
     def _upstream(self, track: dict):
-        """The track's audio, open: a fresh URL from Bandcamp, then its first
-        response, all within `resolve_s` or `TimeoutError`. A worker does it, so
+        """`(audio, first chunk)`: a fresh URL from Bandcamp, its response and
+        the first audio from it, all within `resolve_s` or `TimeoutError`. A worker does it, so
         a resolver that hangs can't hold the speaker; one that finishes after
         the deadline closes what it opened."""
         done = threading.Event()
@@ -261,6 +277,14 @@ class AlarmServer:
         def work():
             try:
                 result = self._fetch(self._stream_url(track))
+                try:
+                    first = _read(result, CHUNK)
+                    if not first:
+                        raise OSError("Bandcamp sent no audio")
+                except BaseException:
+                    result.close()
+                    raise
+                result = (result, first)
             except BaseException as exc:      # handed to the waiting handler
                 result, exc_ = None, exc
             else:
@@ -268,7 +292,7 @@ class AlarmServer:
             with lock:
                 if box.get("abandoned"):
                     if result is not None:
-                        result.close()
+                        result[0].close()
                     return
                 box["result"], box["exc"] = result, exc_
                 done.set()          # inside the lock: the deadline can't see it unset and abandon it
@@ -308,6 +332,20 @@ class AlarmServer:
         while (left := deadline - time.monotonic()) > 0 and (chunk := fh.read(CHUNK)):
             conn.settimeout(left)
             conn.sendall(chunk)
+
+    @staticmethod
+    def _pump(upstream, first: bytes, conn: socket.socket, deadline: float) -> None:
+        """Send `first`, then the rest of `upstream`, giving up at `deadline`.
+        Unlike a file, a network read can stall, so each one may wait only for
+        the time left, and nothing arriving after the deadline is sent."""
+        chunk = first
+        while chunk and (left := deadline - time.monotonic()) > 0:
+            conn.settimeout(left)
+            conn.sendall(chunk)
+            if (left := deadline - time.monotonic()) <= 0:
+                return
+            _bound(upstream, left)
+            chunk = _read(upstream, CHUNK)
 
     def url_for(self, name: str, peer: str) -> str:
         return (f"http://{play.local_ip_for(peer)}:{self.port}/"

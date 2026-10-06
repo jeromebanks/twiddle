@@ -628,7 +628,8 @@ def test_the_agent_url_is_what_this_source_owns_wherever_the_mac_is():
 @pytest.mark.parametrize("token", [
     "", "!!", "e30", "bnVsbA",                       # nothing, not base64, {}, null
     "eyJwIjoiZmlsZTovLy9ldGMvcGFzc3dkIn0",           # {"p":"file:///etc/passwd"}
-    "eyJwIjoxfQ"])                                   # {"p":1}
+    "eyJwIjoxfQ",                                    # {"p":1}
+    "eyJwIjoiaHR0cDovL1siLCJpIjoxfQ"])               # {"p":"http://[","i":1}
 def test_a_token_that_isnt_a_track_on_an_http_page_decodes_to_nothing(token):
     assert sources.bandcamp.decode(token) is None
 

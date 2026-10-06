@@ -55,10 +55,11 @@ def decode(token: str) -> dict | None:
     try:
         body = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
         page = body["p"]
-    except (binascii.Error, ValueError, KeyError, TypeError):
+        parts = urlsplit(page)              # a ValueError for a malformed host such as "http://["
+        ok = parts.scheme in ("http", "https") and bool(parts.hostname)
+    except (binascii.Error, ValueError, KeyError, TypeError, AttributeError):
         return None
-    if not (isinstance(body, dict) and isinstance(page, str)
-            and urlsplit(page).scheme in ("http", "https") and urlsplit(page).hostname):
+    if not (isinstance(body, dict) and isinstance(page, str) and ok):
         return None
     track = {"page": page}
     for key, field in (("i", "id"), ("t", "title")):

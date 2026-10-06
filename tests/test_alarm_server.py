@@ -492,6 +492,27 @@ def bandcamp_cdn():
             pass
 
         def do_GET(self):
+            if self.path == "/silent":          # headers, then nothing, for a while
+                self.send_response(200)
+                self.end_headers()
+                return time.sleep(3)
+            if self.path == "/empty":
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                return self.end_headers()
+            if self.path == "/trickle":         # a first chunk, then a byte at a time, slowly
+                self.send_response(200)
+                self.end_headers()
+                try:
+                    self.wfile.write(MP3[:100])
+                    self.wfile.flush()
+                    for _ in range(100):
+                        time.sleep(0.1)
+                        self.wfile.write(b"t")
+                        self.wfile.flush()
+                except OSError:
+                    pass
+                return
             if self.path != "/ok":
                 return self.send_error(403)
             self.send_response(200)
@@ -581,6 +602,40 @@ def test_when_bandcamp_cant_be_resolved_the_request_fails_with_no_span(sounds, r
 
 
 @pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_an_upstream_that_sends_headers_and_no_audio_fails_fast_with_no_span(sounds, bandcamp_cdn, method):
+    s = agent(sounds, lambda t: f"{bandcamp_cdn}/silent", resolve_s=0.3)
+    try:
+        t0 = time.monotonic()
+        assert get(s, path_for(), method)[0] == 504
+        assert time.monotonic() - t0 < 2
+        assert journal() == []
+    finally:
+        s.stop()
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_an_upstream_with_an_empty_body_is_a_502_with_no_span(sounds, bandcamp_cdn, method):
+    s = agent(sounds, lambda t: f"{bandcamp_cdn}/empty")
+    try:
+        assert get(s, path_for(), method)[0] == 502
+        assert journal() == []
+    finally:
+        s.stop()
+
+
+def test_a_trickling_upstream_cannot_hold_the_span_past_its_bound(sounds, bandcamp_cdn):
+    s = agent(sounds, lambda t: f"{bandcamp_cdn}/trickle", max_s=0.4)
+    try:
+        t0 = time.monotonic()
+        status, body = get(s, path_for())
+        assert status == 200 and body.startswith(MP3[:100])
+        assert time.monotonic() - t0 < 2
+        wait_for(lambda: len(journal()) == 2, "the span to close")
+    finally:
+        s.stop()
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
 def test_an_upstream_refusal_is_a_502_with_no_span(sounds, bandcamp_cdn, method):
     s = agent(sounds, lambda t: f"{bandcamp_cdn}/expired")
     try:
@@ -607,6 +662,9 @@ def test_audio_opened_after_the_deadline_is_closed_not_leaked(sounds):
     release, closed = threading.Event(), threading.Event()
 
     class Late:
+        def read(self, n):
+            return b"audio"
+
         def close(self):
             closed.set()
 
