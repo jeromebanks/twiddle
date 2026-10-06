@@ -99,7 +99,7 @@ def _response(xml: str, action: str) -> dict[str, str]:
     raise ValueError(f"no {action}Response in the speaker's answer")
 
 
-def parse_list_alarms(xml: str, tolerant: bool = False) -> AlarmList:
+def parse_list_alarms(xml: str, *, tolerant: bool = False) -> AlarmList:
     """The list. Strict by default: one alarm the model can't read raises
     `UnreadableAlarm`. `tolerant` skips it into `unreadable` instead, for
     views only: anything that writes, or compares lists to decide a write,
@@ -131,9 +131,9 @@ def _read(ip: str, action: str) -> str:
     return soap(ip, SERVICE, action)
 
 
-def list_alarms(ip: str, tolerant: bool = False) -> AlarmList:
+def list_alarms(ip: str, *, tolerant: bool = False) -> AlarmList:
     """Every alarm in the household (read-only); `tolerant` as in `parse_list_alarms`."""
-    return parse_list_alarms(_read(ip, "ListAlarms"), tolerant)
+    return parse_list_alarms(_read(ip, "ListAlarms"), tolerant=tolerant)
 
 
 def household_time(ip: str) -> HouseholdTime:

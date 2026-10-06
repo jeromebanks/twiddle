@@ -317,7 +317,7 @@ def unreadable_rows(house: Household, bad: list[Unreadable]) -> list[dict]:
     names one, and why."""
     out = []
     for u in bad:
-        where = aimed_at(house, u.room_uuid) if u.room_uuid else {"room": None}
+        where = aimed_at(house, u.room_uuid) if u.room_uuid else {"room": None, "status": None}
         out.append({"id": u.id, **where, "room_uuid": u.room_uuid, "reason": u.reason})
     return out
 
@@ -506,7 +506,8 @@ def _read_failed(args, ip: str, exc: Exception, doing: str) -> int:
         return fail(args, f"twiddle can't read {name} ({exc.reason}), so it won't "
                           f"{doing}: nothing written",
                     "fix or delete it in the Sonos app; `twiddle alarm list` shows it",
-                    unreadable={"id": exc.alarm_id, "reason": exc.reason})
+                    unreadable=[{"id": exc.alarm_id, "room_uuid": exc.attributes.get("RoomUUID"),
+                                 "reason": exc.reason}])
     return fail(args, f"could not read the alarms from {ip}: {exc}")
 
 

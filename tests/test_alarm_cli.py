@@ -1218,7 +1218,7 @@ def test_every_verb_that_reads_alarms_refuses_while_one_cant_be_read(
                                 "expected ONCE, DAILY, WEEKDAYS, WEEKENDS or ON_<days> "
                                 f"(1-7 digits 0-6, Sunday 0)), so it won't {doing}: "
                                 "nothing written")
-    assert payload["unreadable"]["id"] == "80"
+    assert [u["id"] for u in payload["unreadable"]] == ["80"]
     assert asked == []
     assert clockfake.writes == [] and journal() == []
     assert alarm_cli.SNAPSHOT_FILE.read_text() == saved      # not overwritten
