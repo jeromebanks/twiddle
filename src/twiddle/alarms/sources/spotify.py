@@ -24,6 +24,7 @@ link, which `alarms/soundsource.py` already names `spotify_sonos`.
 """
 from __future__ import annotations
 
+import copy
 import re
 from html import unescape
 from typing import Callable
@@ -89,7 +90,7 @@ def account_from_text(text: str) -> str | None:
     """The Spotify account serial in some Sonos XML or a URI: the `sn=` of the
     first Spotify (`sid=12`) item. The text may be escaped once or twice."""
     for _ in range(3):
-        for m in re.finditer(r"[^\s\"'<>]*sid=12[^\s\"'<>]*", text):
+        for m in re.finditer(r"[^\s\"'<>]*sid=12(?![0-9])[^\s\"'<>]*", text):
             sn = _SN.search(m.group(0))
             if sn:
                 return sn.group(1)
@@ -110,20 +111,52 @@ def alarms_account(alarms) -> str | None:
     return next((sn for a in alarms if (sn := account_from_text(a.program_uri))), None)
 
 
-def _household_account() -> str | None:
-    """The default lookup: ask the household's first speaker, favourites first."""
-    ip = Household.load().groups[0].coordinator.ip
+def _household_account(anchor: str | None = None) -> str | None:
+    """The default lookup: ask the household's first speaker (`anchor`, the
+    CLI's `--anchor`, when given), favourites first. Any failure is a
+    ValueError saying what couldn't be read."""
+    try:
+        house = Household.load(anchor=anchor)
+        ip = house.groups[0].coordinator.ip
+    except Exception as exc:
+        raise ValueError("couldn't reach the household to find the linked Spotify "
+                         f"account ({exc}); check you are on the same LAN, or pass "
+                         "--anchor <ip>") from exc
     try:
         found = favourites_account(ip)
     except Exception:
         found = None
-    return found or alarms_account(clock.list_alarms(ip, tolerant=True).alarms)
+    if found:
+        return found
+    try:
+        return alarms_account(clock.list_alarms(ip, tolerant=True).alarms)
+    except Exception as exc:
+        raise ValueError(f"couldn't read the alarms from {ip} to find the linked "
+                         f"Spotify account: {exc}") from exc
 
 
 def _search(query: str) -> list[dict]:
     from ... import spotify_ops
-    sess = spotify_ops.session()
-    return [dict(item, _kind=kind) for kind in _KINDS for item in sess.search(query, kind, 5)]
+    try:
+        sess = spotify_ops.session()
+        return [dict(item, _kind=kind) for kind in _KINDS for item in sess.search(query, kind, 5)]
+    except spotify_ops.PlaybackError as exc:
+        raise ValueError(f"{exc.message}: {exc.hint}" if exc.hint else exc.message) from exc
+    except Exception as exc:
+        raise ValueError(f"couldn't search Spotify: {exc}") from exc
+
+
+def _lookup(kind: str, ident: str) -> tuple[str, str]:
+    """`(title, cover URL)` of one item from Spotify's Web API, best effort: a
+    link with no search behind it still gets its real name when signed in, else
+    a generic one."""
+    try:
+        from ... import spotify_ops
+        data = spotify_ops.session().request("GET", f"/{kind}s/{ident}") or {}
+        images = data.get("images") or (data.get("album") or {}).get("images") or [{}]
+        return data.get("name") or "", images[0].get("url", "")
+    except Exception:
+        return "", ""
 
 
 class Spotify(Source):
@@ -133,9 +166,11 @@ class Spotify(Source):
     fallback = "the Sonos chime (assumed, not yet verified on a speaker)"
     takes_choice = True
 
-    def __init__(self, account: Callable[[], str | None] = _household_account,
-                 search: Callable[[str], list[dict]] = _search):
-        self.account, self._search = account, search
+    def __init__(self, account: Callable[[str | None], str | None] = _household_account,
+                 search: Callable[[str], list[dict]] = _search,
+                 lookup: Callable[[str, str], tuple[str, str]] = _lookup):
+        self.account, self._search, self._lookup = account, search, lookup
+        self.anchor: str | None = None
         self._seen: dict[str, tuple[str, str]] = {}      # id -> (title, art), from a search
 
     def choices(self, query: str = "") -> list[Choice]:
@@ -154,15 +189,18 @@ class Spotify(Source):
                               f"{kind}" + (f" · {by or owner}" if by or owner else "")))
         return out
 
+    def bind(self, anchor: str | None) -> "Spotify":
+        """The same source asking the speaker the CLI was pointed at."""
+        bound = copy.copy(self)
+        bound.anchor = anchor
+        return bound
+
     def build(self, choice: str = "") -> tuple[str, str]:
         kind, ident = parse_choice(choice)
-        sn = self.account()
+        sn = self.account(self.anchor)
         if not sn:
             raise ValueError("no Spotify account is linked to this household's Sonos: "
                              "add Spotify in the Sonos app first (twiddle won't build "
                              "an alarm that can't play)")
-        title, art = self._seen.get(ident, (f"Spotify {kind}", ""))
-        return program(kind, ident, sn, title, art)
-
-    def sound_source(self) -> tuple[str, str]:
-        return "spotify_sonos", "Spotify through the Sonos app's link"
+        title, art = self._seen.get(ident) or self._lookup(kind, ident)
+        return program(kind, ident, sn, title or f"Spotify {kind}", art)

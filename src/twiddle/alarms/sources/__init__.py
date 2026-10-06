@@ -45,6 +45,11 @@ class Source:
         """What can be played, narrowed by `query` (empty: everything)."""
         return []
 
+    def bind(self, anchor: str | None) -> "Source":
+        """This source for a CLI run pointed at the speaker `anchor` (or None):
+        one that has to ask the household something uses it. Most don't."""
+        return self
+
     def build(self, choice: str = "") -> tuple[str, str]:
         """`(ProgramURI, ProgramMetaData)` for one choice. ValueError says
         why it can't be built."""
@@ -103,10 +108,11 @@ def get(name: str) -> Source:
                          " (`alarm sources` lists them)") from None
 
 
-def build(spec: str) -> tuple[Source, str, str]:
-    """`<name>[:<choice>]` -> the source, its ProgramURI and ProgramMetaData."""
+def build(spec: str, anchor: str | None = None) -> tuple[Source, str, str]:
+    """`<name>[:<choice>]` -> the source, its ProgramURI and ProgramMetaData.
+    `anchor` is the CLI's `--anchor`, for a source that asks the household."""
     name, colon, choice = spec.strip().partition(":")
-    source = get(name)
+    source = get(name).bind(anchor)
     if source.takes_choice and not choice.strip():
         raise ValueError(f"which {source.title}? --source {source.name}:<choice>"
                          f" (`alarm sources {source.name}` lists them)")

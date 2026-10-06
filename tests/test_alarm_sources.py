@@ -12,13 +12,13 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from twiddle import alarm_cli, play
+from twiddle import alarm_cli, devices, play
 from twiddle.alarms import sources
 from twiddle.alarms.sources import spotify as spotify_source
 from twiddle.alarms.model import CHIME_URI, Alarm, Recurrence
 from twiddle.stations import load_catalog
 
-from tests.test_alarm_cli import (ALARMS, LIVING, ROAM_L, SAT_AFTERNOON, alarm_after,  # noqa: F401
+from tests.test_alarm_cli import (ALARMS, ALARMS_XML, LIVING, ROAM_L, SAT_AFTERNOON, alarm_after,  # noqa: F401
                                   clockfake, household, journal, rows, run)
 
 CATALOG = load_catalog(strict=True)
@@ -309,7 +309,18 @@ def _shape(doc):
 
 
 def fake_spotify(sn="92", search=None):
-    return sources.Spotify(account=lambda: sn, search=search or (lambda q: []))
+    return sources.Spotify(account=lambda anchor: sn, search=search or (lambda q: []),
+                           lookup=lambda kind, ident: ("", ""))
+
+
+@pytest.fixture(autouse=True)
+def _no_spotify_or_lan(monkeypatch):
+    """The registered Spotify source reaches the household and Spotify: a test that
+    builds with it must say how (an override below), never quietly use the real ones."""
+    def refuse(*a, **kw):
+        pytest.fail("the registered Spotify source reached for the LAN or Spotify")
+    for name in ("account", "_search", "_lookup"):
+        monkeypatch.setattr(sources.get("spotify"), name, refuse)
 
 
 def test_a_playlist_alarm_has_the_shape_of_the_households_spotify_alarms():
@@ -392,8 +403,8 @@ def test_a_linked_account_with_no_spotify_alarm_can_still_make_one(monkeypatch):
                         lambda alarms: pytest.fail("looked at the alarms"))
     assert spotify_source.favourites_account("192.0.2.1") == "92"
     assert seen == [("ContentDirectory", "Browse")]
-    src = sources.Spotify(account=lambda: spotify_source.favourites_account("192.0.2.1"),
-                          search=lambda q: [])
+    src = fake_spotify()
+    src.account = lambda anchor: spotify_source.favourites_account("192.0.2.1")
     uri, _ = src.build("spotify:playlist:FakePlaylist0000000009")
     assert uri.endswith("?sid=12&flags=0&sn=92")
 
@@ -410,7 +421,7 @@ def test_favourites_with_no_spotify_item_name_no_account():
 
 def test_the_default_household_lookup_prefers_favourites(monkeypatch):
     monkeypatch.setattr(spotify_source, "favourites_account", lambda ip: "4")
-    monkeypatch.setattr(spotify_source.Household, "load", classmethod(lambda cls, **kw: household()))
+    monkeypatch.setattr(spotify_source.Household, "load", classmethod(lambda cls, anchor=None: household()))
     assert spotify_source._household_account() == "4"
 
 
@@ -419,17 +430,106 @@ def test_the_default_lookup_uses_the_alarms_when_the_favourites_fail(monkeypatch
         raise OSError("unreachable")
 
     monkeypatch.setattr(spotify_source, "favourites_account", boom)
-    monkeypatch.setattr(spotify_source.Household, "load", classmethod(lambda cls, **kw: household()))
+    monkeypatch.setattr(spotify_source.Household, "load", classmethod(lambda cls, anchor=None: household()))
     monkeypatch.setattr(spotify_source.clock, "list_alarms",
                         lambda ip, tolerant=False: type("L", (), {"alarms": ALARMS})())
     assert spotify_source._household_account() == "92"
 
 
-def test_alarm_add_with_a_spotify_source_is_dry_run_safe(clockfake, monkeypatch, capsys):
-    monkeypatch.setattr(sources.get("spotify"), "account", lambda: "92")
+def test_a_sid_that_only_starts_with_12_is_another_service():
+    assert spotify_source.account_from_text("x-sonosapi-stream:s1?sid=120&flags=0&sn=7") is None
+    assert spotify_source.account_from_text("x-sonosapi-stream:s1?sid=12&flags=0&sn=7") == "7"
+
+
+def test_a_search_failure_is_a_plain_error_not_a_traceback(monkeypatch):
+    from twiddle import spotify_ops
+    monkeypatch.setattr(spotify_ops, "session", lambda: (_ for _ in ()).throw(
+        spotify_ops.PlaybackError("not signed in", "run `spotify auth`")))
+    with pytest.raises(ValueError, match="not signed in: run `spotify auth`"):
+        spotify_source._search("jazz")
+
+
+def test_an_unreachable_household_is_a_plain_error(monkeypatch):
+    def boom(cls, anchor=None):
+        raise OSError("no route")
+    monkeypatch.setattr(spotify_source.Household, "load", classmethod(boom))
+    with pytest.raises(ValueError, match="--anchor <ip>"):
+        spotify_source._household_account()
+
+
+def test_the_cli_anchor_reaches_the_account_lookup(monkeypatch):
+    seen = []
+    monkeypatch.setattr(spotify_source.Household, "load",
+                        classmethod(lambda cls, anchor=None: seen.append(anchor) or household()))
+    monkeypatch.setattr(spotify_source, "favourites_account", lambda ip: "92")
+    src = sources.Spotify(account=spotify_source._household_account,
+                          lookup=lambda kind, ident: ("", ""))
+    monkeypatch.setitem(sources._REGISTRY, "spotify", src)
+    sources.build("spotify:playlist:FakePlaylist0000000001", anchor="192.0.2.9")
+    assert seen == ["192.0.2.9"]
+
+
+def test_a_link_with_no_search_gets_its_real_name_when_spotify_can_say():
+    src = sources.Spotify(account=lambda anchor: "92",
+                          lookup=lambda kind, ident: ("Real Name", "https://example.test/a.jpg"))
+    _, didl = src.build("playlist:FakePlaylist0000000001")
+    assert "<dc:title>Real Name</dc:title>" in didl and "a.jpg" in didl
+
+
+# ---- spotify end to end: `alarm add` through a fake speaker --------------------
+
+@pytest.fixture
+def spotify_free(monkeypatch, clockfake):
+    """A household whose only Spotify trace is a favourite: no Spotify alarm."""
+    from tests.test_alarm_clock import FakeClock
+    root = ET.fromstring(ALARMS_XML)
+    for alarm in [a for a in root if "spotify" in a.get("ProgramURI", "")]:
+        root.remove(alarm)
+    spotify_free_xml = ET.tostring(root, encoding="unicode")
+    assert "spotify" not in spotify_free_xml
+    f = FakeClock(alarms_xml=spotify_free_xml)
+    real_post = f.post
+    seen = []
+
+    def post(url, data=None, headers=None, timeout=None):
+        if headers["SOAPACTION"].strip('"').endswith("#Browse"):
+            seen.append("Browse")
+            return type("R", (), {"text": FAV_FIXTURE.read_text(),
+                                  "raise_for_status": lambda self: None})()
+        return real_post(url, data=data, headers=headers, timeout=timeout)
+
+    monkeypatch.setattr(devices.requests, "post", post)
+    monkeypatch.setattr(spotify_source.Household, "load",
+                        classmethod(lambda cls, anchor=None: household()))
+    f.browsed = seen
+    return f
+
+
+def _real_spotify(monkeypatch):
+    src = sources.Spotify(lookup=lambda kind, ident: ("", ""))
+    monkeypatch.setitem(sources._REGISTRY, "spotify", src)
+
+
+def test_a_household_with_a_linked_account_and_no_spotify_alarm_can_add_one(
+        spotify_free, monkeypatch, capsys):
+    _real_spotify(monkeypatch)
     code, out, _ = run(["alarm", "add", "--room", "roam", "--time", "07:00", "--days",
-                        "weekdays", "--source", "spotify:playlist:FakePlaylist0000000001",
+                        "weekdays", "--source", "spotify:playlist:FakePlaylist0000000009",
                         "--dry-run", "--json"], capsys)
     assert code == 0, out
-    assert "x-rincon-cpcontainer:00060000spotify%3aplaylist%3aFakePlaylist0000000001" in out
-    assert clockfake.writes == []
+    assert "FakePlaylist0000000009?sid=12&flags=0&sn=92" in out
+    assert spotify_free.browsed == ["Browse"]
+    assert spotify_free.writes == [] and journal() == []
+
+
+def test_add_with_no_linked_account_writes_nothing_and_says_so(
+        spotify_free, monkeypatch, capsys):
+    _real_spotify(monkeypatch)
+    monkeypatch.setattr(spotify_source, "favourites_account", lambda ip: None)
+    code, out, _ = run(["alarm", "add", "--room", "roam", "--time", "07:00", "--days",
+                        "weekdays", "--source", "spotify:playlist:FakePlaylist0000000009",
+                        "--json"], capsys)
+    payload = json.loads(out)
+    assert code == 1 and payload["ok"] is False
+    assert "no Spotify account is linked" in payload["error"]
+    assert spotify_free.writes == [] and journal() == []
