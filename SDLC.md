@@ -202,7 +202,8 @@ several can run at once. A slice's state is read off GitHub:
    result on the PR for the head SHA. The repo has no CI, so this is the test gate.
 4. **Codex** reviews the head read-only, unless the slice is reviewed with its milestone
    (below). `codex-review --pr PR` runs each round on the repo's own settings and stamps the
-   report with the `HEAD:` it checked. The
+   report with the `HEAD:` it checked, then the model, effort, `codex --version` and the sha256 of
+   the exact prompt (see "What a review runs under" below). The
    implementer fixes or rebuts each finding, and each round is posted with `pr-review`. After
    `max_pr_rounds` (5) without approval: `escalate-slice`, and the slice goes to a human.
 5. `merge` is the gate: the PR targets `epic/E` and isn't behind it, Codex's latest review approves
@@ -234,6 +235,38 @@ record on the epic **before** the squash. A milestone with a review owed is in p
 owed slice as closely as a pull request. An approving `ship-review` clears every review
 owed before it; one asking for changes is a demo finding (fix slices). If the head doesn't
 move before the ship, the same approval serves the ship.
+
+### What a review runs under
+
+`codex-review` runs Codex on a scratch `CODEX_HOME`, `<out>/codex-home`, that holds only two
+things: `auth.json`, a link to your own sign-in (`$CODEX_HOME/auth.json` if you set one, else
+`~/.codex/auth.json`), and a `config.toml` the tool writes from `.sdlc/config.json`'s `codex`
+section (model, effort, sandbox, and the `file` sign-in store). So nothing in your own Codex home
+applies to a review: not its `config.toml`, `AGENTS.md`, skills, memories, rules, plugins or MCP
+servers. With no `auth.json` to link, it refuses before starting Codex (exit 3, the
+`review-defer` cue): run `codex login` in a terminal. A sign-in kept only in the keyring can't be
+linked.
+
+The sign-in survives a refresh. Codex's file store writes `auth.json` in place, through the link,
+straight into your file (so its source on GitHub says; the milestone demo checks the installed
+binary). If a version renames a new file over it instead, the tool copies that
+file back atomically once the run ends, however it ends (a verdict, a timeout, a failure, an
+interrupt). It only does that when the copy changed and your own file is still what it was when
+the run started; otherwise your file is kept and a warning says the refreshed token was
+discarded. The link is then removed. If the copy-back itself fails, the refreshed file is left in
+`codex-home` with a warning, and the next run refuses until it's dealt with. The rest of `codex-home` stays, with the run's session log
+under `sessions/`.
+
+What isolation can't cover: anything Codex reads from outside `CODEX_HOME`. That includes the
+repo itself (its `AGENTS.md`, `.agents/skills/`), the environment (`OPENAI_API_KEY` and the
+like), and anything it finds through `HOME`, which is left alone because git and the keychain
+need it. And the tool only sets things up; the real binary decides what it loads. That is
+checked by hand once, in the demo of #100's first milestone, from a real run's session log.
+
+The saved report's header (`HEAD:`, `Model:`, `Effort:`, `Codex:`, `Prompt-SHA256:`) is written
+by the tool. `pr-review` copies it into the round's comment and its marker. Only the lines
+directly under `HEAD:` count, so a report can't claim a model of its own. A report saved before
+the header existed is still recorded, without it.
 
 **Round limits** (`.sdlc/config.json`): `max_pr_rounds` (default 5) is how many Codex rounds
 that ask for changes a slice PR, or a milestone, may take before it escalates.

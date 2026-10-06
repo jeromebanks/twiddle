@@ -289,12 +289,29 @@ from tools import codex_review
 ROOT = Path(__file__).resolve().parent.parent
 FAKE_CODEX = f"""#!{sys.executable}
 import json, os, pathlib, subprocess, sys, time
+if sys.argv[1:] == ["--version"]:
+    with open(os.environ["FAKE_CODEX_LOG"] + ".version", "a") as f:
+        f.write("--version\\n")
+    print("codex-cli 9.9.9-test")
+    sys.exit(0)
 log = pathlib.Path(os.environ["FAKE_CODEX_LOG"])
 n = len(log.read_text().splitlines()) if log.exists() else 0
+home = pathlib.Path(os.environ.get("CODEX_HOME", "/nonexistent"))
+seen = {{"argv": sys.argv[1:], "cwd": os.getcwd(), "stdin_tty": sys.stdin.isatty(), "codex_home": str(home),
+         "entries": {{p.name: p.is_symlink() for p in home.iterdir()}} if home.is_dir() else None,
+         "config": (home / "config.toml").read_text() if (home / "config.toml").exists() else None}}
 with log.open("a") as f:
-    f.write(json.dumps({{"argv": sys.argv[1:], "cwd": os.getcwd(), "stdin_tty": sys.stdin.isatty()}}) + "\\n")
+    f.write(json.dumps(seen) + "\\n")
 plan = json.loads(pathlib.Path(os.environ["FAKE_CODEX_PLAN"]).read_text())
 step = plan[min(n, len(plan) - 1)]
+if step.get("refresh"):                   # Codex's sign-in refreshed: a temp file renamed over auth.json
+    tmp = home / "auth.json.tmp"
+    tmp.write_text(step["refresh"])
+    os.replace(tmp, home / "auth.json")
+if step.get("refresh_in_place"):          # what Codex's file store does: open, truncate, write
+    (home / "auth.json").write_text(step["refresh_in_place"])
+if step.get("user_signs_in"):             # a sign-in elsewhere while the review runs
+    pathlib.Path(os.environ["HOME"], ".codex", "auth.json").write_text(step["user_signs_in"])
 if step.get("edit"):
     pathlib.Path(step["edit"]).write_text("edited during the review\\n")
 if step.get("commit"):
@@ -302,6 +319,7 @@ if step.get("commit"):
 time.sleep(step.get("sleep", 0))
 sys.stdout.write(step.get("out", ""))
 sys.stderr.write("codex progress noise\\n")
+sys.exit(step.get("exit", 0))
 """
 APPROVES = {"out": "1. fine (non-blocking)\n\nVERDICT: approve\n"}
 NO_VERDICT = {"out": "I looked around and ran out of time.\n"}
@@ -311,11 +329,33 @@ SETTINGS = {"model": "test-model", "reasoning_effort": "low", "sandbox": "read-o
 QUICK = {**SETTINGS, "timeout_seconds": 1}
 
 
+SIGNED_IN = '{"tokens": "the original"}'
+# the user's own Codex home, in the tmp HOME: everything a review must not pick up
+USER_CODEX = {"config.toml": 'model = "user-model"\nmodel_reasoning_effort = "minimal"\n[mcp_servers.x]\ncommand = "x"\n',
+              "AGENTS.md": "user instructions", "skills/s/SKILL.md": "a skill", "memories/m.md": "a memory",
+              "rules/r.rules": "a rule", "plugins/p.json": "{}"}
+
+
+@pytest.fixture(autouse=True)
+def no_real_codex_home(tmp_path, monkeypatch):
+    """No test here reads or writes the real ~/.codex: HOME is a tmp dir and CODEX_HOME unset."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    assert codex_review.user_codex_home() == tmp_path / "home" / ".codex"
+
+
 class Codex:
-    """A fake `codex` on PATH, a tmp git repo as the slice's worktree, and a saved PR bundle."""
+    """A fake `codex` on PATH, a tmp git repo as the slice's worktree, a signed-in user Codex home under the
+    tmp HOME, and a saved PR bundle."""
 
     def __init__(self, tmp_path, monkeypatch, plan=(APPROVES,), settings=SETTINGS):
         self.tmp = tmp_path
+        self.user = codex_review.user_codex_home()
+        for name, text in USER_CODEX.items():
+            (self.user / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.user / name).write_text(text)
+        self.auth = self.user / "auth.json"
+        self.auth.write_text(SIGNED_IN)
         for k in ("AUTHOR", "COMMITTER"):
             monkeypatch.setenv(f"GIT_{k}_NAME", "t")
             monkeypatch.setenv(f"GIT_{k}_EMAIL", "t@example.invalid")
@@ -585,3 +625,156 @@ def test_the_response_pr_review_records_is_the_one_the_next_round_reads(tmp_path
     answer_two = "1. Accepted: the marker will say."
     between = f"**Review 2**\n\n<details><summary>x</summary>\n\nr\n\n</details>{codex_review.response_section(answer_two)}"
     assert codex_review.latest_response([{"verdict": "changes", "body": between}]) == (1, answer_two)
+
+
+# --- the isolated CODEX_HOME, the sign-in, and what a round ran under (T3) ----------------------------------------
+
+import hashlib
+
+
+def test_codex_runs_on_a_scratch_home_holding_only_the_sign_in_and_the_repos_config(tmp_path, monkeypatch):
+    c = Codex(tmp_path, monkeypatch)
+    assert c.run() == 0
+    (call,) = c.calls()
+    home = c.out / "codex-home"
+    assert call["codex_home"] == str(home)
+    assert call["entries"] == {"auth.json": True, "config.toml": False}    # a link, and the file the tool wrote
+    # the repo's model and effort, nothing of the user's (model, effort, MCP servers)
+    assert call["config"] == codex_review.config_toml(SETTINGS)
+    assert 'model = "test-model"' in call["config"] and 'model_reasoning_effort = "low"' in call["config"]
+    assert "user-model" not in call["config"] and "minimal" not in call["config"] and "mcp" not in call["config"]
+    # afterwards: no sign-in left in scratch (the rest stays, for the session log), and the user's untouched
+    assert not (home / "auth.json").exists() and not (home / "auth.json").is_symlink() and home.is_dir()
+    assert c.auth.read_text() == SIGNED_IN and not c.auth.is_symlink()
+    assert (c.user / "config.toml").read_text() == USER_CODEX["config.toml"]
+
+
+def test_the_config_strings_are_toml_whatever_they_hold(tmp_path):
+    import tomllib
+    odd = {**SETTINGS, "model": 'a "quoted" \\ model', "reasoning_effort": "high"}
+    assert tomllib.loads(codex_review.config_toml(odd)) == {
+        "model": 'a "quoted" \\ model', "model_reasoning_effort": "high", "sandbox_mode": "read-only",
+        "cli_auth_credentials_store": "file"}
+
+
+def test_no_sign_in_is_refused_before_codex_runs(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch)
+    c.auth.unlink()
+    assert c.run() == codex_review.UNAVAILABLE                 # can't run: the cue for `review-defer`
+    out = capsys.readouterr().out
+    assert "no Codex sign-in" in out and "codex login" in out
+    assert c.calls() == [] and not c.report().exists() and not (c.out / "codex-home").exists()
+    assert not Path(f"{c.log}.version").exists()               # not even `codex --version`
+
+
+def test_the_report_names_what_the_round_ran_under_and_pr_review_shows_it(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch)
+    assert c.run() == 0
+    (call,) = c.calls()
+    digest = hashlib.sha256(call["argv"][-1].encode()).hexdigest()     # the prompt Codex actually received
+    saved = c.report().read_text()
+    assert saved.splitlines()[:5] == [f"HEAD: {c.head}", "Model: test-model", "Effort: low", "Codex: 9.9.9-test",
+                                      f"Prompt-SHA256: {digest}"]
+    assert codex_review.parse_provenance(saved) == {"model": "test-model", "effort": "low", "codex": "9.9.9-test",
+                                                    "prompt": digest}
+    capsys.readouterr()
+    bundle = tmp_path / "pr.json"
+    bundle.write_text(json.dumps({"pr": pr(headRefOid=c.head), "pr_comments": [], "trusted": [OWNER]}))
+    assert sdlc.main(["pr-review", "50", "--report", str(c.report()), "--from-file", str(bundle), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    mk = sdlc.parse_marker(out)
+    assert (mk["model"], mk["effort"], mk["codex"], mk["prompt"]) == ("test-model", "low", "9.9.9-test", digest)
+    assert f"Ran `test-model` at effort `low`, codex `9.9.9-test`, prompt sha256 `{digest[:12]}`" in out
+
+
+def test_a_report_without_provenance_is_still_recorded(tmp_path, capsys):
+    report, bundle = tmp_path / "codex.md", tmp_path / "pr.json"
+    bundle.write_text(json.dumps({"pr": pr(), "pr_comments": [], "trusted": [OWNER]}))
+    # as T2 saved them; and lines Codex wrote itself, below the blank line, are not provenance
+    report.write_text(f"HEAD: {HEAD}\n\nModel: spoofed\n\nVERDICT: approve\n")
+    assert codex_review.parse_provenance(report.read_text()) == {}
+    assert sdlc.main(["pr-review", "50", "--report", str(report), "--from-file", str(bundle), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    mk = sdlc.parse_marker(out)
+    assert mk["verdict"] == "approve" and "model" not in mk and "Ran `" not in out
+
+
+def test_a_sign_in_refreshed_by_a_rename_ends_up_in_the_users_own_file(tmp_path, monkeypatch):
+    c = Codex(tmp_path, monkeypatch, plan=({"refresh": '{"tokens": "refreshed"}', **APPROVES},))
+    assert c.run() == 0
+    assert c.auth.read_text() == '{"tokens": "refreshed"}' and c.auth.is_file() and not c.auth.is_symlink()
+    assert c.auth.stat().st_mode & 0o777 == 0o600
+    assert not (c.out / "codex-home" / "auth.json").exists()
+    # written through the link (Codex's file store): already in place, and the link is all that's removed
+    c.log.unlink()
+    c.set_plan({"refresh_in_place": '{"tokens": "again"}', **APPROVES})
+    assert c.run() == 0
+    assert c.auth.read_text() == '{"tokens": "again"}' and not c.auth.is_symlink()
+
+
+def test_a_users_auth_link_is_kept_a_link(tmp_path, monkeypatch):
+    c = Codex(tmp_path, monkeypatch, plan=({"refresh": '{"tokens": "refreshed"}', **APPROVES},))
+    dotfiles = tmp_path / "dotfiles-auth.json"
+    dotfiles.write_text(SIGNED_IN)
+    c.auth.unlink()
+    c.auth.symlink_to(dotfiles)
+    assert c.run() == 0
+    assert c.auth.is_symlink() and dotfiles.read_text() == '{"tokens": "refreshed"}'
+
+
+def test_the_copy_back_happens_however_the_run_ends(tmp_path, monkeypatch, capsys):
+    refreshed = '{"tokens": "refreshed"}'
+    # timed out twice, then a non-zero exit with no verdict twice: still copied back
+    c = Codex(tmp_path, monkeypatch, plan=({"refresh": refreshed, **SLOW},), settings=QUICK)
+    assert c.run() == codex_review.UNAVAILABLE
+    assert c.auth.read_text() == refreshed and not (c.out / "codex-home" / "auth.json").exists()
+    c.auth.write_text(SIGNED_IN)
+    c.log.unlink()
+    c.set_plan({"refresh": refreshed, "exit": 1, **NO_VERDICT})
+    assert c.run() == codex_review.UNAVAILABLE
+    assert c.auth.read_text() == refreshed
+    # HEAD moving under the review is a refusal, and still copied back
+    c.auth.write_text(SIGNED_IN)
+    c.log.unlink()
+    c.set_plan({"refresh": refreshed, "commit": True, **APPROVES})
+    assert c.run() == 1 and c.auth.read_text() == refreshed
+    capsys.readouterr()
+
+
+def test_an_interrupted_run_still_copies_the_sign_in_back(tmp_path, monkeypatch):
+    c = Codex(tmp_path, monkeypatch)
+
+    def refresh_then_interrupt(cmd, wt, out, err, timeout, env=None):
+        home = Path(env["CODEX_HOME"])
+        (home / "auth.json.tmp").write_text('{"tokens": "refreshed"}')
+        os.replace(home / "auth.json.tmp", home / "auth.json")
+        raise KeyboardInterrupt
+    monkeypatch.setattr(codex_review, "run_once", refresh_then_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        c.run()
+    assert c.auth.read_text() == '{"tokens": "refreshed"}' and not (c.out / "codex-home" / "auth.json").exists()
+
+
+def test_a_sign_in_changed_elsewhere_during_the_run_is_never_overwritten(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch, plan=({"refresh": '{"tokens": "refreshed"}',
+                                            "user_signs_in": '{"tokens": "a new login"}', **APPROVES},))
+    assert c.run() == 0
+    assert c.auth.read_text() == '{"tokens": "a new login"}'
+    assert "refreshed token was discarded" in capsys.readouterr().out
+    assert not (c.out / "codex-home" / "auth.json").exists()
+
+
+def test_a_sign_in_an_earlier_run_could_not_copy_back_is_never_wiped(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch, plan=({"refresh": '{"tokens": "refreshed"}', **APPROVES},))
+
+    def cannot_write(target, data):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(codex_review, "_write_atomic", cannot_write)
+    assert c.run() == 0
+    stranded = c.out / "codex-home" / "auth.json"
+    assert "couldn't copy Codex's refreshed sign-in back" in capsys.readouterr().out
+    assert stranded.read_text() == '{"tokens": "refreshed"}' and c.auth.read_text() == SIGNED_IN
+    # the next run refuses rather than wipe it
+    assert c.run() == 1
+    assert "couldn't copy back" in capsys.readouterr().err and stranded.read_text() == '{"tokens": "refreshed"}'
+    assert len(c.calls()) == 1
