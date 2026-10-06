@@ -1342,3 +1342,31 @@ def test_restore_refuses_a_snapshot_holding_an_alarm_it_cant_read(clockfake, cap
     assert "can't read alarm 80" in json.loads(out)["error"]
     assert clockfake.writes == [] and journal() == []
 
+
+
+# ---- the GUIDE's field reference ------------------------------------------
+
+GUIDE = Path(__file__).parent.parent / "docs" / "GUIDE.md"
+
+
+def _documented_keys() -> set[str]:
+    """The keys in the GUIDE's `alarm list --json` table, from its first column."""
+    section = GUIDE.read_text().split("#### Fields of `alarm list --json`", 1)[1]
+    keys = set()
+    for line in section.splitlines()[1:]:
+        if line.startswith(("```", "#")):
+            break
+        if line.startswith("| `"):
+            keys.add(line.split("`")[1])
+    return keys
+
+
+def test_the_guide_documents_exactly_the_keys_of_the_list_payload(speaker, capsys):
+    _, out, _ = run(["alarm", "list", "--json"], capsys)
+    payload = json.loads(out)
+    keys = {k for k in payload if k != "ok"}                    # ok: the envelope's, not ours
+    keys |= {f"household_time.{k}" for k in payload["household_time"]}
+    assert payload["alarms"]
+    for r in payload["alarms"]:
+        keys |= {f"alarms[].{k}" for k in r}
+    assert _documented_keys() == keys
