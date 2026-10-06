@@ -1212,7 +1212,7 @@ def register(sub, parents=None):
     sv.add_argument("--dir", required=True, help="the folder of audio files to serve")
     sv.add_argument("--port", type=int, default=server.PORT,
                     help=f"port (default {server.PORT}: alarms store the URL)")
-    sv.add_argument("--max-s", type=float, default=server.DEFAULT_MAX_S,
+    sv.add_argument("--max-s", type=_bound, default=server.DEFAULT_MAX_S,
                     help="the longest one serve may last, in seconds "
                          f"(default {server.DEFAULT_MAX_S})")
     sv.add_argument("--room", action="append",
@@ -1236,6 +1236,18 @@ def register(sub, parents=None):
                        help="speaker IP to query instead of SSDP discovery")
         add_write_args(w)
         w.set_defaults(func=fn)
+
+
+def _bound(text: str) -> float:
+    """A `--max-s`: a finite number of seconds above 0 (an unbounded span would
+    discount every fault after a crash)."""
+    try:
+        value = float(text)
+    except ValueError:
+        value = float("nan")
+    if not (value > 0 and value != float("inf")):
+        raise argparse.ArgumentTypeError(f"{text!r} is not a finite number of seconds above 0")
+    return value
 
 
 def _field_args(p, adding: bool):

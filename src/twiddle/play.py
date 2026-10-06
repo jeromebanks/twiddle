@@ -12,6 +12,7 @@ volume), so every entry point is explicit about it.
 from __future__ import annotations
 
 import json
+import math
 import os
 import socket
 import threading
@@ -82,7 +83,12 @@ def journal_span(action: str, ip: str, *, span_id: str | None = None,
     """
     if action.endswith("_start"):
         span_id = span_id or new_span_id()
-        extra["max_s"] = DEFAULT_SPAN_MAX_S if max_s is None else max_s
+        if max_s is None:
+            max_s = DEFAULT_SPAN_MAX_S
+        if not (isinstance(max_s, (int, float)) and math.isfinite(max_s) and max_s > 0):
+            raise ValueError(f"a span's max_s must be a finite number of seconds above 0, "
+                             f"not {max_s!r}")
+        extra["max_s"] = max_s
     if span_id:
         extra["span_id"] = span_id
     _journal(action, ip, span=True, **extra)

@@ -182,17 +182,43 @@ def test_stopping_the_server_closes_the_spans_still_open(sounds):
     r = c.getresponse()
     wait_for(lambda: len(journal()) == 1, "the serve to open")
     s.stop()
+    # the transfer was cut before the span was recorded as over: what is left
+    # to read is only what was already in flight
+    got = 0
+    try:
+        while chunk := r.read(1 << 20):
+            got += len(chunk)
+    except http.client.IncompleteRead:
+        pass
+    assert got < 48 * 1024 * 1024
     r.close()
     c.close()
     assert [j["action"] for j in journal()].count("alarm_serve_end") == 1
     assert report.open_spans(play.INTERVENTION_LOG) == []
 
 
-def test_a_serve_stops_sending_at_its_bound(srv, sounds):
-    srv.max_s = 0
-    with pytest.raises(http.client.IncompleteRead):   # cut short, and it says so
-        get(srv, "/bell.mp3")
-    wait_for(lambda: len(journal()) == 2, "the span to close")
+def test_a_reader_that_stalls_cannot_hold_a_span_past_its_bound(sounds):
+    (sounds / "long.mp3").write_bytes(b"z" * (48 * 1024 * 1024))
+    s = server.AlarmServer(sounds, None, port=0, max_s=0.5, host="127.0.0.1")
+    import threading
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+    c = http.client.HTTPConnection("127.0.0.1", s.port, timeout=10)
+    try:
+        c.request("GET", "/long.mp3")
+        r = c.getresponse()            # headers only; the body is never read
+        started = time.monotonic()
+        wait_for(lambda: len(journal()) == 2, "the stalled serve to end", timeout=4)
+        assert time.monotonic() - started < 3
+        r.close()
+    finally:
+        c.close()
+        s.stop()
+
+
+def test_the_server_refuses_a_bound_that_is_not_finite_and_positive(sounds):
+    for bad in (0, -1, float("inf"), float("nan")):
+        with pytest.raises(ValueError):
+            server.AlarmServer(sounds, None, port=0, max_s=bad)
 
 
 # ---- a serve killed mid-stream -----------------------------------------------
@@ -278,6 +304,53 @@ def test_at_start_it_closes_its_own_open_spans_when_they_could_no_longer_run():
     assert (end["action"], end["span_id"], end["stale"]) == ("alarm_serve_end", "old", True)
     assert datetime.fromisoformat(end["ts"]) == T0 + timedelta(seconds=600)
     assert [o["span_id"] for o in report.open_spans(play.INTERVENTION_LOG)] == ["relay"]
+
+
+def test_a_span_of_a_live_server_is_not_stale_but_a_dead_ones_is(sounds):
+    import os, subprocess, sys
+    dead = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                          capture_output=True, text=True).stdout.strip()
+    for sid, pid in (("live", os.getpid()), ("dead", int(dead))):
+        write({"ts": iso(T0), "action": "alarm_serve_start", "ip": SPEAKER, "span": True,
+               "span_id": sid, "max_s": 600, "pid": pid})
+    closed = server.close_stale(now=T0 + timedelta(hours=1))
+    assert [c["span_id"] for c in closed] == ["dead"]
+    assert [o["span_id"] for o in report.open_spans(play.INTERVENTION_LOG)] == ["live"]
+
+
+def test_a_second_server_on_another_port_leaves_the_first_ones_live_serves_open(sounds):
+    (sounds / "long.mp3").write_bytes(b"z" * (48 * 1024 * 1024))
+    first = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")
+    second = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")   # binds fine
+    import threading
+    threading.Thread(target=first.serve_forever, daemon=True).start()
+    c = http.client.HTTPConnection("127.0.0.1", first.port, timeout=10)
+    try:
+        c.request("GET", "/long.mp3")
+        r = c.getresponse()
+        wait_for(lambda: len(journal()) == 1, "the serve to open")
+        assert server.close_stale() == []          # what `second`'s start would do
+        assert len(report.open_spans(play.INTERVENTION_LOG)) == 1
+        r.close()
+    finally:
+        c.close()
+        first.stop()
+        second.stop()
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), 0, -5, "x"])
+def test_a_span_start_refuses_a_bound_that_is_not_finite_and_positive(bad):
+    with pytest.raises(ValueError):
+        play.journal_span("anything_start", SPEAKER, max_s=bad)
+    assert journal() == []
+
+
+@pytest.mark.parametrize("bad", ["inf", "nan", "0", "-1", "soon"])
+def test_serve_refuses_a_bound_that_is_not_finite_and_positive(bad, sounds, capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["alarm", "serve", "--dir", str(sounds), "--max-s", bad])
+    capsys.readouterr()
+    assert journal() == []
 
 
 def test_a_stale_span_whose_bound_is_not_up_ends_now():

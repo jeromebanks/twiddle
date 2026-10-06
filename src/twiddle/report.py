@@ -293,7 +293,7 @@ def _read_interventions(path: Path):
     one (older journals) pairs by action and speaker exactly as it always did:
     a second start replaces an unclosed first. An end without an id closes that
     kind first, else the latest id-ful open span of that action and speaker.
-    Each open span is `{name, ip, span_id, start, max_s}`; `max_s` is None for
+    Each open span is `{name, ip, span_id, start, max_s, pid}`; `max_s` is None for
     a record that predates it.
     """
     from datetime import datetime
@@ -314,7 +314,7 @@ def _read_interventions(path: Path):
             sid = rec.get("span_id")
             if action.endswith("_start"):
                 st = {"name": action[:-6], "ip": ip, "span_id": sid,
-                      "start": ts, "max_s": rec.get("max_s")}
+                      "start": ts, "max_s": rec.get("max_s"), "pid": rec.get("pid")}
                 if sid:
                     by_id[sid] = st
                 else:

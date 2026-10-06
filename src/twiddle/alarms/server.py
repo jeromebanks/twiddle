@@ -22,6 +22,8 @@ moment they could no longer have been running.
 """
 from __future__ import annotations
 
+import os
+import socket
 import threading
 import time
 import urllib.parse
@@ -69,8 +71,23 @@ def permitted(ip: str, speakers: set[str] | None) -> bool:
     return speakers is None or ip in speakers or ip.startswith("127.")
 
 
+def _alive(pid) -> bool:
+    if not isinstance(pid, int):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass            # exists, but not ours to signal
+    return True
+
+
 def close_stale(now: datetime | None = None) -> list[dict]:
     """Close every `alarm_serve` span a crashed run left open, and return them.
+
+    A span belongs to the process that opened it (its `pid`): one whose
+    process is still running is another live server's, and is left alone.
 
     Each ends at `min(start + max_s, now)`: when it could no longer have been
     running, never later, so a crash two days ago doesn't discount two days of
@@ -79,7 +96,7 @@ def close_stale(now: datetime | None = None) -> list[dict]:
     now = now or datetime.now(timezone.utc)
     closed = []
     for st in report.open_spans(play.INTERVENTION_LOG):
-        if st["name"] != ACTION:
+        if st["name"] != ACTION or _alive(st["pid"]):
             continue
         end = now.timestamp()
         if st["max_s"] is not None:
@@ -97,8 +114,10 @@ class AlarmServer:
 
     def __init__(self, root: Path, speakers: set[str] | None, port: int = PORT,
                  max_s: float = DEFAULT_MAX_S, host: str = "0.0.0.0"):
+        if not (isinstance(max_s, (int, float)) and 0 < max_s < float("inf")):
+            raise ValueError(f"max_s must be a finite number of seconds above 0, not {max_s!r}")
         self.root, self.speakers, self.max_s = Path(root), speakers, max_s
-        self._active: dict[str, tuple[str, float]] = {}   # span_id -> (ip, started)
+        self._active: dict[str, tuple[str, socket.socket]] = {}   # span_id -> (ip, connection)
         self._lock = threading.Lock()
         self._serving = False
         outer = self
@@ -142,12 +161,12 @@ class AlarmServer:
                 except OSError:
                     return self._refuse(404, "no such audio")
                 with fh:
-                    span_id = outer._open(self.client_address[0], path)
+                    span_id = outer._open(self.client_address[0], path, self.connection)
                     try:
                         self._headers(path)
-                        outer._send(fh, self.wfile, time.monotonic() + outer.max_s)
-                    except (BrokenPipeError, ConnectionResetError):
-                        pass   # Sonos buffers ahead and hangs up: normal
+                        outer._send(fh, self.connection, time.monotonic() + outer.max_s)
+                    except OSError:
+                        pass   # Sonos buffers ahead and hangs up, or stalled past the bound
                     finally:
                         outer._close(span_id)
 
@@ -155,11 +174,11 @@ class AlarmServer:
         self._srv.daemon_threads = True
         self.port = self._srv.server_port
 
-    def _open(self, ip: str, path: Path) -> str:
+    def _open(self, ip: str, path: Path, conn: socket.socket) -> str:
         span_id = play.journal_span(f"{ACTION}_start", ip, max_s=self.max_s,
-                                    file=path.name)
+                                    file=path.name, pid=os.getpid())
         with self._lock:
-            self._active[span_id] = (ip, time.time())
+            self._active[span_id] = (ip, conn)
         return span_id
 
     def _close(self, span_id: str) -> None:
@@ -169,9 +188,12 @@ class AlarmServer:
             play.journal_span(f"{ACTION}_end", entry[0], span_id=span_id)
 
     @staticmethod
-    def _send(fh, out, deadline: float) -> None:
-        while time.monotonic() < deadline and (chunk := fh.read(CHUNK)):
-            out.write(chunk)
+    def _send(fh, conn: socket.socket, deadline: float) -> None:
+        """Send the file, giving up at `deadline`: each write may wait only for
+        the time left, so a reader that stalls can't hold the span open."""
+        while (left := deadline - time.monotonic()) > 0 and (chunk := fh.read(CHUNK)):
+            conn.settimeout(left)
+            conn.sendall(chunk)
 
     def url_for(self, name: str, peer: str) -> str:
         return (f"http://{play.local_ip_for(peer)}:{self.port}/"
@@ -188,6 +210,10 @@ class AlarmServer:
             self._srv.shutdown()
         self._srv.server_close()
         with self._lock:
-            left = list(self._active)
-        for span_id in left:
+            left = dict(self._active)
+        for span_id, (_, conn) in left.items():
+            try:                       # stop the sending first: the span is
+                conn.shutdown(socket.SHUT_RDWR)   # only over once nothing more goes out
+            except OSError:
+                pass
             self._close(span_id)
