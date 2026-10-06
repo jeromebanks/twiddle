@@ -839,7 +839,7 @@ def launchd_agent(monkeypatch, tmp_path):
                         lambda *a, **k: calls.append(("install", a)) or daemon.plist_path(daemon.ALARM_LABEL))
     monkeypatch.setattr(daemon, "uninstall", lambda label=daemon.LABEL: calls.append(("uninstall", label)) or True)
     monkeypatch.setattr(daemon, "status", lambda label=daemon.LABEL: "state = running")
-    monkeypatch.setattr(daemon, "serving", lambda port, **k: True)
+    monkeypatch.setattr(daemon, "serving", lambda port, host="127.0.0.1", **k: True)
     return calls
 
 
@@ -888,7 +888,7 @@ def test_status_is_alive_when_the_job_runs_and_the_port_answers_else_stale(
     from twiddle import daemon
     code, out, _ = run(["alarm", "serve", "--status", "--json"], capsys)
     assert code == 0 and json.loads(out)["alive"] is True
-    monkeypatch.setattr(daemon, "serving", lambda port, **k: False)
+    monkeypatch.setattr(daemon, "serving", lambda port, host="127.0.0.1", **k: False)
     code, out, _ = run(["alarm", "serve", "--status", "--json"], capsys)
     p = json.loads(out)
     assert code == 1 and p["alive"] is False and p["stale"] is True
