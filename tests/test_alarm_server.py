@@ -5,6 +5,7 @@ is conftest's temp file. No speaker, network or Spotify is touched.
 """
 import http.client
 import json
+import socket
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -807,3 +808,15 @@ def test_an_unknown_sound_is_a_404_with_no_span(srv, path):
     before = len(journal())
     status, _ = get(srv, path)
     assert status == 404 and len(journal()) == before
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize("target", ["http://[", "/sound/http://[", "//["])
+def test_a_request_target_that_does_not_parse_is_a_404_not_a_dropped_connection(srv, method, target):
+    before = len(journal())
+    with socket.create_connection(("127.0.0.1", srv.port), timeout=5) as c:   # http.client refuses these
+        c.sendall(f"{method} {target} HTTP/1.0\r\n\r\n".encode())
+        reply = b""
+        while chunk := c.recv(4096):
+            reply += chunk
+    assert reply.startswith(b"HTTP/1.0 404") and len(journal()) == before

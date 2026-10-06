@@ -190,7 +190,7 @@ class AlarmServer:
                 if not permitted(ip, outer.speakers):
                     self._refuse(403, "not a speaker of this household")
                     return None
-                if urllib.parse.urlsplit(self.path).path.startswith(snd.ROUTE):
+                if snd.is_route(self.path):
                     name = snd.name_of(self.path)       # exclusive, like /bandcamp/: never DIR
                     path = resolve(snd.SOUNDS_DIR, snd.file_of(name).name) if name else None
                 else:

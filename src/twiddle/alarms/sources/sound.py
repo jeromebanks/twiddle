@@ -34,8 +34,18 @@ SOUNDS = {                      # key -> (title, what it is)
 }
 
 
+def is_route(request_path: str) -> bool:
+    """Whether a request target is under `/sound/` (a target that doesn't parse is not)."""
+    try:
+        return urlsplit(request_path).path.startswith(ROUTE)
+    except ValueError:
+        return False
+
+
 def name_of(request_path: str) -> str | None:
     """The sound a request path names (`/sound/bell.mp3`, query ignored), if we have it."""
+    if not is_route(request_path):
+        return None
     path = urlsplit(request_path).path
     if not (path.startswith(ROUTE) and path.endswith(SUFFIX)):
         return None

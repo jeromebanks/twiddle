@@ -744,12 +744,14 @@ def test_choices_narrow_by_query():
     assert fake_sound().choices("zzz") == []
 
 
-def test_add_a_sound_alarm_dry_run_writes_nothing(clockfake, capsys, monkeypatch):
+@pytest.mark.parametrize("sound", ["bell", "beep", "rise", "birdsong", "chimes"])
+def test_add_a_sound_alarm_dry_run_writes_nothing(clockfake, capsys, monkeypatch, sound):
     monkeypatch.setattr(sources.get("sound"), "bind", lambda anchor: fake_sound())
     code, out, _ = run(["alarm", "add", "--room", "roam", "--time", "09:00", "--days", "sat",
-                        "--source", "sound:bell", "--dry-run", "--json"], capsys)
+                        "--source", f"sound:{sound}", "--dry-run", "--json"], capsys)
     assert code == 0, out
-    assert "/sound/bell.mp3" in out and journal() == []
+    assert f"/sound/{sound}.mp3" in out and journal() == []
+    assert not clockfake.writes
 
 
 def test_the_generated_sounds_come_from_tone_and_the_recording_is_the_only_other():
