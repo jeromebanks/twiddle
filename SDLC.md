@@ -261,7 +261,10 @@ run's session log under `sessions/`.
 What isolation can't cover: anything Codex reads from outside `CODEX_HOME`. That includes the
 repo itself (its `AGENTS.md`, `.agents/skills/`), the environment (`OPENAI_API_KEY` and the
 like), and anything it finds through `HOME`, which is left alone because git and the keychain
-need it. And the tool only sets things up; the real binary decides what it loads. That is
+need it. Nor a sign-in made elsewhere in the instant between the last check of your file and the
+rename over it: the check is made with the new file ready, just before the rename, but `rename`
+has no compare-and-swap, and there is no lock this tool shares with every writer of `auth.json`.
+And the tool only sets things up; the real binary decides what it loads. That is
 checked by hand once, in the demo of #100's first milestone, from a real run's session log.
 
 The saved report's header (`HEAD:`, `Model:`, `Effort:`, `Codex:`, `Prompt-SHA256:`) is written

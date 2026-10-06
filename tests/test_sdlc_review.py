@@ -775,7 +775,7 @@ def test_a_sign_in_changed_elsewhere_during_the_run_is_never_overwritten(tmp_pat
 def test_a_sign_in_an_earlier_run_could_not_copy_back_is_never_wiped(tmp_path, monkeypatch, capsys):
     c = Codex(tmp_path, monkeypatch, plan=({"refresh": '{"tokens": "refreshed"}', **APPROVES},))
 
-    def cannot_write(target, data):
+    def cannot_write(target, data, unless_changed_from=None):
         raise OSError(28, "No space left on device")
     monkeypatch.setattr(codex_review, "_write_atomic", cannot_write)
     assert c.run() == 0
@@ -799,6 +799,22 @@ def test_a_sign_in_elsewhere_before_codex_refreshes_in_place_is_kept(tmp_path, m
     assert c.run() == 0
     assert c.auth.read_text() == '{"tokens": "a new login"}'
     assert "refreshed token was discarded" in capsys.readouterr().out
+
+
+def test_a_sign_in_elsewhere_while_the_copy_back_is_being_written_is_kept(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch, plan=({"refresh": '{"tokens": "refreshed"}', **APPROVES},))
+    real_fsync = os.fsync
+
+    def sign_in_elsewhere_meanwhile(fd):
+        real_fsync(fd)
+        c.auth.write_text('{"tokens": "a new login"}')
+    # after the early checks, while the temp file is prepared: the check just before the rename still sees it
+    monkeypatch.setattr(codex_review.os, "fsync", sign_in_elsewhere_meanwhile)
+    assert c.run() == 0
+    assert c.auth.read_text() == '{"tokens": "a new login"}' and c.auth.is_file() and not c.auth.is_symlink()
+    assert "refreshed token was discarded" in capsys.readouterr().out
+    assert not (c.out / "codex-home" / "auth.json").exists()
+    assert not [p for p in c.auth.parent.iterdir() if p.name.endswith(".tmp")]
 
 
 def test_a_refresh_cut_short_never_reaches_the_users_file(tmp_path, monkeypatch, capsys):

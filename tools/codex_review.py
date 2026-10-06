@@ -270,8 +270,12 @@ def _is_sign_in(data: bytes) -> bool:
         return False
 
 
-def _write_atomic(target: Path, data: bytes) -> None:
-    """`target` holds `data` or what it held before, never half of it: a 0600 temp file beside it, renamed over it."""
+def _write_atomic(target: Path, data: bytes, unless_changed_from: str | None = None) -> bool:
+    """`target` holds `data` or what it held before, never half of it: a 0600 temp file beside it, renamed over it.
+
+    With `unless_changed_from` (a sha256), `target` is re-read once the temp file is ready, just before the rename,
+    and left alone (False) if it no longer matches. That is as late as a check can go: `rename` has no
+    compare-and-swap, so a write landing between that read and the rename can still be lost."""
     fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     try:
         os.fchmod(fd, 0o600)
@@ -279,7 +283,11 @@ def _write_atomic(target: Path, data: bytes) -> None:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
+        if unless_changed_from is not None and ((now := _read(target)) is None or _sha(now) != unless_changed_from):
+            os.unlink(tmp)
+            return False
         os.replace(tmp, target)
+        return True
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
@@ -303,17 +311,15 @@ def restore_sign_in(entry: Path, user_auth: Path, start: str, log=print) -> None
             "was kept as it was; if `codex` says to sign in, run `codex login`")
         entry.unlink()
         return
-    if (now := _read(user_auth)) is None or _sha(now) != start:
-        log(f"warning: Codex refreshed its sign-in during the run, but {user_auth} changed meanwhile (a sign-in "
-            "elsewhere?), so it was kept and the refreshed token was discarded")
-        entry.unlink()
-        return
     try:
-        _write_atomic(user_auth, data)
+        written = _write_atomic(user_auth, data, unless_changed_from=start)
     except OSError as exc:
         log(f"warning: couldn't copy Codex's refreshed sign-in back to {user_auth} ({exc}); it is still in {entry}: "
             f"copy it over yourself, or run `codex login`")
         return
+    if not written:
+        log(f"warning: Codex refreshed its sign-in during the run, but {user_auth} changed meanwhile (a sign-in "
+            "elsewhere?), so it was kept and the refreshed token was discarded")
     entry.unlink()
 
 
