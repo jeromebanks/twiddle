@@ -5,14 +5,17 @@ is conftest's temp file. No speaker, network or Spotify is touched.
 """
 import http.client
 import json
+import threading
 import time
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from twiddle import alarm_cli, cli, play, report
 from twiddle.alarms import server
+from twiddle.alarms.sources import bandcamp as bc
 from tests.test_alarm_cli import household, run
 
 T0 = datetime(2026, 10, 4, 6, 0, 0, tzinfo=timezone.utc)
@@ -47,7 +50,6 @@ def sounds(tmp_path):
 @pytest.fixture
 def srv(sounds):
     s = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")
-    import threading
     threading.Thread(target=s.serve_forever, daemon=True).start()
     yield s
     s.stop()
@@ -118,7 +120,6 @@ def test_a_known_audio_file_is_served_as_audio(srv):
 
 def test_this_mac_can_fetch_so_a_curl_can_try_it(sounds):
     s = server.AlarmServer(sounds, {"10.9.9.9"}, port=0, host="127.0.0.1")
-    import threading
     threading.Thread(target=s.serve_forever, daemon=True).start()
     try:
         assert get(s, "/bell.mp3")[0] == 200      # loopback is this Mac
@@ -156,7 +157,6 @@ def test_a_serve_is_one_span_with_an_id_and_a_bound(srv):
 def test_two_overlapping_serves_to_one_speaker_are_two_independent_spans(sounds):
     (sounds / "long.mp3").write_bytes(b"z" * (48 * 1024 * 1024))   # more than the sockets buffer
     s = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")
-    import threading
     threading.Thread(target=s.serve_forever, daemon=True).start()
     conns = []
     try:
@@ -202,7 +202,6 @@ def test_the_pairing_keeps_interleaved_spans_of_one_action_and_speaker_apart(tmp
 def test_stopping_the_server_closes_the_spans_still_open(sounds):
     (sounds / "long.mp3").write_bytes(b"z" * (48 * 1024 * 1024))
     s = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")
-    import threading
     threading.Thread(target=s.serve_forever, daemon=True).start()
     c = http.client.HTTPConnection("127.0.0.1", s.port, timeout=10)
     c.request("GET", "/long.mp3")
@@ -227,7 +226,6 @@ def test_stopping_the_server_closes_the_spans_still_open(sounds):
 def test_a_reader_that_stalls_cannot_hold_a_span_past_its_bound(sounds):
     (sounds / "long.mp3").write_bytes(b"z" * (48 * 1024 * 1024))
     s = server.AlarmServer(sounds, None, port=0, max_s=0.5, host="127.0.0.1")
-    import threading
     threading.Thread(target=s.serve_forever, daemon=True).start()
     c = http.client.HTTPConnection("127.0.0.1", s.port, timeout=10)
     try:
@@ -250,7 +248,6 @@ def test_the_server_refuses_a_bound_that_is_not_finite_and_positive(sounds):
 
 def test_a_handler_accepted_before_stop_cannot_open_a_span_after_it(sounds):
     s = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")
-    import threading
     threading.Thread(target=s.serve_forever, daemon=True).start()
     paused, go = threading.Event(), threading.Event()
     real = s._open
@@ -384,7 +381,6 @@ def test_a_second_server_on_another_port_leaves_the_first_ones_live_serves_open(
     (sounds / "long.mp3").write_bytes(b"z" * (48 * 1024 * 1024))
     first = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")
     second = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")   # binds fine
-    import threading
     threading.Thread(target=first.serve_forever, daemon=True).start()
     c = http.client.HTTPConnection("127.0.0.1", first.port, timeout=10)
     try:
@@ -480,3 +476,317 @@ def test_serve_runs_until_interrupted_then_closes_its_spans(fake_house, sounds, 
     assert code == 0 and "1 stale span(s) to close" in out
     assert report.open_spans(play.INTERVENTION_LOG) == []
     assert journal()[-1]["stale"] is True
+
+
+# ---- Bandcamp through the agent ----------------------------------------------
+
+TRACK = {"page": "https://gulls.bandcamp.com/album/salt", "id": 42}
+CDN_HUNG_UP = threading.Event()
+MP3 = b"ID3" + b"m" * 5000
+
+
+@pytest.fixture
+def bandcamp_cdn():
+    """A stand-in for Bandcamp's mp3 host on loopback: /ok serves audio, anything else 403s."""
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *_a):
+            pass
+
+        def do_GET(self):
+            if self.path == "/silent":          # headers, then nothing, for a while
+                self.send_response(200)
+                self.end_headers()
+                return time.sleep(3)
+            if self.path == "/empty":
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                return self.end_headers()
+            if self.path == "/trickle":         # a first chunk, then a byte at a time, slowly
+                self.send_response(200)
+                self.end_headers()
+                try:
+                    self.wfile.write(MP3[:100])
+                    self.wfile.flush()
+                    for _ in range(100):
+                        time.sleep(0.1)
+                        self.wfile.write(b"t")
+                        self.wfile.flush()
+                except OSError:
+                    pass
+                return
+            if self.path == "/firstchunk":      # the first chunk's size line, a digit at a time
+                try:
+                    self.wfile.write(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                    for _ in range(100):
+                        time.sleep(0.1)
+                        self.wfile.write(b"0")
+                        self.wfile.flush()
+                except OSError:
+                    CDN_HUNG_UP.set()
+                return
+            if self.path == "/stall":           # a first chunk, then nothing, for a long while
+                try:
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(MP3[:100])
+                    self.wfile.flush()
+                    time.sleep(5)
+                except OSError:
+                    pass
+                return
+            if self.path == "/chunked":         # a chunk, then the next chunk's size a digit at a time
+                try:
+                    self.wfile.write(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                     b"64\r\n" + MP3[:100] + b"\r\n")
+                    self.wfile.flush()
+                    for _ in range(100):
+                        time.sleep(0.1)
+                        self.wfile.write(b"0")
+                        self.wfile.flush()
+                except OSError:
+                    pass
+                return
+            if self.path != "/ok":
+                return self.send_error(403)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(MP3)))
+            self.end_headers()
+            self.wfile.write(MP3)
+
+    cdn = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=cdn.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{cdn.server_port}"
+    cdn.shutdown()
+    cdn.server_close()
+
+
+def agent(sounds, stream_url, **kw):
+    s = server.AlarmServer(sounds, None, port=0, host="127.0.0.1", stream_url=stream_url, **kw)
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+    return s
+
+
+def path_for(track=TRACK):
+    return f"{bc.ROUTE}{bc.encode(track)}.mp3"
+
+
+def test_a_bandcamp_request_resolves_a_fresh_url_and_serves_the_audio_as_a_span(sounds, bandcamp_cdn):
+    asked = []
+    s = agent(sounds, lambda t: asked.append(t) or f"{bandcamp_cdn}/ok", max_s=90)
+    try:
+        for _ in range(2):          # an alarm fires again: each request resolves again
+            status, body = get(s, path_for())
+            assert (status, body) == (200, MP3)
+        assert asked == [TRACK, TRACK]
+        wait_for(lambda: len(journal()) == 4, "both spans to close")
+        start, end = journal()[:2]
+        assert (start["action"], end["action"]) == ("alarm_serve_start", "alarm_serve_end")
+        assert start["span_id"] == end["span_id"] and start["max_s"] == 90
+        assert start["file"] == "bandcamp:42"
+    finally:
+        s.stop()
+
+
+def test_a_bandcamp_response_says_what_it_is(sounds, bandcamp_cdn):
+    s = agent(sounds, lambda t: f"{bandcamp_cdn}/ok")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", s.port, timeout=5)
+        c.request("GET", path_for())
+        r = c.getresponse()
+        assert (r.status, r.getheader("Content-Type"), r.getheader("Content-Length")) == (
+            200, "audio/mpeg", str(len(MP3)))
+        r.read()
+        c.close()
+    finally:
+        s.stop()
+
+
+def test_a_head_on_a_bandcamp_track_is_answered_with_no_span(sounds, bandcamp_cdn):
+    s = agent(sounds, lambda t: f"{bandcamp_cdn}/ok")
+    try:
+        assert get(s, path_for(), "HEAD") == (200, b"")
+        assert get(s, bc.ROUTE + "nope.mp3", "HEAD")[0] == 404
+        assert journal() == []
+    finally:
+        s.stop()
+
+
+def boom(exc):
+    def resolve(_track):
+        raise exc
+    return resolve
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize("resolver, status", [
+    (boom(LookupError("no longer streamable")), 502),
+    (boom(RuntimeError("Bandcamp is resting")), 502),
+    (boom(OSError("network down")), 502),
+    (lambda t: "file:///etc/passwd", 502),
+    (lambda t: "http://127.0.0.1:9/never", 502),     # nothing listening
+])
+def test_when_bandcamp_cant_be_resolved_the_request_fails_with_no_span(sounds, resolver, status, method):
+    s = agent(sounds, resolver)
+    try:
+        assert get(s, path_for(), method)[0] == status
+        assert journal() == []
+    finally:
+        s.stop()
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_an_upstream_that_sends_headers_and_no_audio_fails_fast_with_no_span(sounds, bandcamp_cdn, method):
+    s = agent(sounds, lambda t: f"{bandcamp_cdn}/silent", resolve_s=0.3)
+    try:
+        t0 = time.monotonic()
+        assert get(s, path_for(), method)[0] == 504
+        assert time.monotonic() - t0 < 2
+        assert journal() == []
+    finally:
+        s.stop()
+
+
+def test_a_first_read_that_trickles_is_cut_at_the_deadline_and_its_connection_closed(sounds, bandcamp_cdn):
+    CDN_HUNG_UP.clear()
+    s = agent(sounds, lambda t: f"{bandcamp_cdn}/firstchunk", resolve_s=0.3)
+    try:
+        t0 = time.monotonic()
+        assert get(s, path_for())[0] == 504
+        assert time.monotonic() - t0 < 1
+        assert CDN_HUNG_UP.wait(3), "the abandoned worker still holds the upstream connection"
+        assert journal() == []
+    finally:
+        s.stop()
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_an_upstream_with_an_empty_body_is_a_502_with_no_span(sounds, bandcamp_cdn, method):
+    s = agent(sounds, lambda t: f"{bandcamp_cdn}/empty")
+    try:
+        assert get(s, path_for(), method)[0] == 502
+        assert journal() == []
+    finally:
+        s.stop()
+
+
+def test_an_upstream_that_goes_silent_after_its_first_chunk_hits_the_idle_limit_not_max_s(
+        sounds, bandcamp_cdn, monkeypatch):
+    monkeypatch.setattr(server, "UPSTREAM_S", 0.3)
+    s = agent(sounds, lambda t: f"{bandcamp_cdn}/stall", max_s=600)
+    try:
+        t0 = time.monotonic()
+        status, body = get(s, path_for())
+        assert status == 200 and body == MP3[:100]
+        assert time.monotonic() - t0 < 2
+        wait_for(lambda: len(journal()) == 2, "the span to close")
+    finally:
+        s.stop()
+
+
+@pytest.mark.parametrize("path", ["trickle", "chunked"])
+def test_a_trickling_upstream_cannot_hold_the_span_past_its_bound(sounds, bandcamp_cdn, path):
+    """Bytes (or a chunk header's digits) keep arriving, so no read ever times out."""
+    s = agent(sounds, lambda t: f"{bandcamp_cdn}/{path}", max_s=0.3)
+    try:
+        t0 = time.monotonic()
+        status, body = get(s, path_for())
+        assert status == 200 and body.startswith(MP3[:100])
+        assert time.monotonic() - t0 < 0.9
+        wait_for(lambda: len(journal()) == 2, "the span to close")
+    finally:
+        s.stop()
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_an_upstream_refusal_is_a_502_with_no_span(sounds, bandcamp_cdn, method):
+    s = agent(sounds, lambda t: f"{bandcamp_cdn}/expired")
+    try:
+        assert get(s, path_for(), method)[0] == 502
+        assert journal() == []
+    finally:
+        s.stop()
+
+
+def test_a_resolver_that_hangs_fails_fast_not_when_it_finishes(sounds, bandcamp_cdn):
+    release = threading.Event()
+    s = agent(sounds, lambda t: release.wait(10) and f"{bandcamp_cdn}/ok", resolve_s=0.2)
+    try:
+        t0 = time.monotonic()
+        assert get(s, path_for())[0] == 504
+        assert time.monotonic() - t0 < 2
+        assert journal() == []
+    finally:
+        release.set()
+        s.stop()
+
+
+def test_audio_opened_after_the_deadline_is_closed_not_leaked(sounds):
+    release, closed = threading.Event(), threading.Event()
+
+    class Late:
+        def read(self, n):
+            return b"audio"
+
+        def close(self):
+            closed.set()
+
+    s = agent(sounds, lambda t: "http://x/", resolve_s=0.1,
+              fetch=lambda url: release.wait(5) and Late())
+    try:
+        assert get(s, path_for())[0] == 504
+        release.set()
+        assert closed.wait(5)
+    finally:
+        s.stop()
+
+
+@pytest.mark.parametrize("name", ["", "x.mp3", "e30.mp3", "bnVsbA.mp3", "a/b.mp3",
+                                  "eyJwIjoiZmlsZTovLy9ldGMvcGFzc3dkIn0.mp3"])
+def test_a_bandcamp_path_that_isnt_a_token_for_a_page_is_a_404_that_asks_nobody(sounds, name):
+    asked = []
+    s = agent(sounds, lambda t: asked.append(t))
+    try:
+        assert get(s, bc.ROUTE + name)[0] == 404
+        assert asked == [] and journal() == []
+    finally:
+        s.stop()
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_a_client_that_is_not_a_speaker_gets_no_bandcamp_either(sounds, monkeypatch, method):
+    asked = []
+    s = agent(sounds, lambda t: asked.append(t))
+    monkeypatch.setattr(server, "permitted", lambda ip, speakers: False)
+    try:
+        assert get(s, path_for(), method)[0] == 403
+        assert asked == [] and journal() == []
+    finally:
+        s.stop()
+
+
+def test_stopping_the_agent_closes_a_bandcamp_span_still_open(sounds):
+    class Endless:
+        headers = {}
+
+        def read(self, n):
+            time.sleep(0.01)
+            return b"x" * n
+
+        def close(self):
+            pass
+
+    s = agent(sounds, lambda t: "http://x/", fetch=lambda url: Endless())
+    c = http.client.HTTPConnection("127.0.0.1", s.port, timeout=5)
+    c.request("GET", path_for())
+    c.getresponse()
+    wait_for(lambda: len(journal()) == 1, "the span to open")
+    s.stop()
+    wait_for(lambda: len(journal()) == 2, "the span to close")
+    assert journal()[1]["action"] == "alarm_serve_end"
+    c.close()
+
+
+def test_the_agent_refuses_a_deadline_that_is_not_finite_and_positive(sounds):
+    for bad in (0, -1, float("inf"), None):
+        with pytest.raises(ValueError, match="resolve_s"):
+            server.AlarmServer(sounds, None, port=0, host="127.0.0.1", resolve_s=bad)

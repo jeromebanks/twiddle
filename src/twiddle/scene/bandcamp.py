@@ -207,6 +207,11 @@ def tracks(band_url: str, want: int = 8, max_releases: int = 3) -> list[dict]:
     return found[:want]
 
 
+def page_tracks(page_url: str) -> list[dict]:
+    """The streamable tracks on one release or track page (as `tracks` lists them)."""
+    return _tracks_of(_get(page_url), page_url)
+
+
 def stream_url(track: dict) -> str:
     """A fresh mp3 URL for `track`: the one on its page when it was listed
     has probably expired."""

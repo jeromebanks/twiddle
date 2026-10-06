@@ -260,11 +260,12 @@ the room does if the source can't play:
 uv run twiddle alarm sources               # every source, its needs-this-Mac mark and fallback (read-only)
 uv run twiddle alarm sources station kexp  # a source's choices, narrowed (read-only)
 uv run twiddle alarm sources spotify jazz  # search Spotify (needs `spotify auth`; read-only)
+uv run twiddle alarm sources bandcamp "some band"   # search Bandcamp's tracks (network; read-only)
 uv run twiddle alarm add --room roam --time 07:00 --days weekdays --source station:kalx --dry-run
 ```
 
 `alarm sources` reads only the registry and the catalog: no speaker, no
-network, except `alarm sources spotify <words>`, which searches Spotify with twiddle's own sign-in. A Spotify alarm plays through Sonos's own Spotify link (`x-rincon-cpcontainer`, `sid=12`), not the relay, so the speaker fetches it itself and this Mac has no part in it. It needs the account `sn=` that Spotify is linked under, read from the Spotify favourites already on the speaker (a read-only `Browse`), else from an existing Spotify alarm; with neither (the speaker's own account list is empty on current firmware, and Spotify being linked doesn't put its serial anywhere else), `add` says no account is linked, asks you to save one Spotify playlist as a Sonos favourite, and writes nothing. The album and track forms follow what Sonos uses elsewhere and have not yet been seen accepted on a speaker. A station alarm is the station's own stream as an
+network, except `alarm sources spotify <words>`, which searches Spotify with twiddle's own sign-in, and `alarm sources bandcamp <words>`, which searches Bandcamp (throttled and cached, as `scene` does). A Bandcamp alarm (`--source bandcamp:<track page URL>`, with `#<track id>` for one track of a release) stores `http://<this Mac>:8765/bandcamp/<token>.mp3`, never Bandcamp's own URL, which expires in about a day; it needs `alarm serve` running when it fires, and a speaker's acceptance of an `http://` ProgramURI has not yet been seen. A Spotify alarm plays through Sonos's own Spotify link (`x-rincon-cpcontainer`, `sid=12`), not the relay, so the speaker fetches it itself and this Mac has no part in it. It needs the account `sn=` that Spotify is linked under, read from the Spotify favourites already on the speaker (a read-only `Browse`), else from an existing Spotify alarm; with neither (the speaker's own account list is empty on current firmware, and Spotify being linked doesn't put its serial anywhere else), `add` says no account is linked, asks you to save one Spotify playlist as a Sonos favourite, and writes nothing. The album and track forms follow what Sonos uses elsewhere and have not yet been seen accepted on a speaker. A station alarm is the station's own stream as an
 `x-rincon-mp3radio://` URI, exactly what `tune` hands a speaker, so the
 speaker fetches it itself and this Mac has no part in it; like `tune`, an
 https stream is fetched over http. Neither the chime nor a station needs this
@@ -394,7 +395,11 @@ uv run twiddle alarm serve --dir ~/alarm-sounds             # Ctrl-C stops it
 curl -o /dev/null http://localhost:8765/bell.mp3            # a test fetch; see the span in logs/interventions.jsonl
 ```
 
-It writes to no speaker. It serves audio files under `--dir`, to the
+It writes to no speaker. It serves audio files under `--dir`, and Bandcamp
+tracks under `/bandcamp/<token>.mp3` (a fresh stream URL is fetched for each
+request and the audio passed through; if Bandcamp can't be resolved, opened and
+producing audio within 5 seconds the answer is 502/504 before any header or span,
+and a stalled or trickling stream is cut at `--max-s`), to the
 household's speakers (or just the `--room`s), and refuses everything else at
 once with a 403/404 (a directory, a name outside `--dir`, a file that isn't
 audio, a client that isn't a speaker): a speaker that can't be served falls back

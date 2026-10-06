@@ -5,12 +5,17 @@ machine in the alarm itself; the speaker fetches it at fire time, hours after
 anything here ran. So the port is fixed (`PORT`), not whatever was free, and
 the server runs in the foreground until stopped.
 
-It serves audio files from one directory, to speakers of the household (and to
-this Mac itself, so a `curl` can try it) and nothing else: an unknown name, a directory, a path outside the directory, a
-file that isn't audio, a client that is neither are each refused at once
-with an error status, so a speaker that can't be served falls back to its own
-chime instead of waiting on a page that never plays. Nothing here writes to a
-speaker.
+It serves audio files from one directory, and Bandcamp tracks under
+`/bandcamp/<token>.mp3` (`sources/bandcamp.py`): for those it asks Bandcamp for
+a fresh stream URL at the moment of the request, since a stored one expires in
+about a day, and passes the audio through. Both go to speakers of the
+household (and to this Mac itself, so a `curl` can try it) and nothing else: an
+unknown name, a directory, a path outside the directory, a file that isn't
+audio, a token that isn't ours, a track Bandcamp won't resolve or open within
+`resolve_s`, a client that is neither are each refused at once with an error
+status, before any header or span, so a speaker that can't be served falls back
+to its own chime instead of waiting on a page that never plays. Nothing here
+writes to a speaker.
 
 While a file is being sent this Mac is in the audio path, so every `GET` that
 sends a body is a span in `logs/interventions.jsonl` (`alarm_serve_start`/
@@ -22,6 +27,7 @@ moment they could no longer have been running.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import socket
 import threading
@@ -32,11 +38,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .. import play, report
+from .sources import bandcamp as bc
 
 PORT = 8765          # fixed: an alarm stores the URL, and fires hours later
 ACTION = "alarm_serve"
 DEFAULT_MAX_S = 3600  # the longest one serve can last
 CHUNK = 64 * 1024
+RESOLVE_S = 5.0       # resolving a Bandcamp track and opening its audio, before a byte goes out
+UPSTREAM_S = 10.0     # then each read of it may wait this long
 
 TYPES = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".mp4": "audio/mp4",
          ".aac": "audio/aac", ".flac": "audio/flac", ".wav": "audio/wav",
@@ -69,6 +78,44 @@ def permitted(ip: str, speakers: set[str] | None) -> bool:
     """Whether a client may be served: a speaker of the household, or this Mac
     (loopback) so a `curl` can try it. `speakers` None means anyone (tests)."""
     return speakers is None or ip in speakers or ip.startswith("127.")
+
+
+def resolve_stream(track: dict) -> str:
+    """A fresh audio URL for a Bandcamp track (the default `resolve`)."""
+    return bc.scene_bandcamp().stream_url(track)
+
+
+def open_stream(url: str, timeout: float = UPSTREAM_S):
+    """The audio at `url`, open for reading; urllib raises for any non-2xx."""
+    import urllib.request
+    if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+        raise ValueError(f"not an http(s) URL: {url!r}")
+    return urllib.request.urlopen(
+        urllib.request.Request(url, headers={"User-Agent": bc.scene_bandcamp().UA}),
+        timeout=timeout)
+
+
+def _read(fh, n: int) -> bytes:
+    """What is there to read now, up to `n` (a socket's `read1`; `read` for a file)."""
+    return getattr(fh, "read1", fh.read)(n)
+
+
+def _bound(fh, seconds: float) -> None:
+    """Make the next read of an open response wait at most `seconds` (best
+    effort: anything that isn't a urllib response is left as it is)."""
+    try:
+        fh.fp.raw._sock.settimeout(seconds)
+    except AttributeError:
+        pass
+
+
+def _cut(fh) -> None:
+    """Stop an open response from blocking its reader: shut its socket down
+    (best effort; a urllib response is the only thing that has one)."""
+    try:
+        fh.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+    except (AttributeError, OSError):
+        pass
 
 
 def _alive(pid) -> bool:
@@ -113,10 +160,14 @@ class AlarmServer:
     tests) and to loopback, journalling one bounded span per file sent."""
 
     def __init__(self, root: Path, speakers: set[str] | None, port: int = PORT,
-                 max_s: float = DEFAULT_MAX_S, host: str = "0.0.0.0"):
+                 max_s: float = DEFAULT_MAX_S, host: str = "0.0.0.0", *,
+                 stream_url=resolve_stream, fetch=open_stream, resolve_s: float = RESOLVE_S):
         if not (isinstance(max_s, (int, float)) and 0 < max_s < float("inf")):
             raise ValueError(f"max_s must be a finite number of seconds above 0, not {max_s!r}")
+        if not (isinstance(resolve_s, (int, float)) and 0 < resolve_s < float("inf")):
+            raise ValueError(f"resolve_s must be a finite number of seconds above 0, not {resolve_s!r}")
         self.root, self.speakers, self.max_s = Path(root), speakers, max_s
+        self._stream_url, self._fetch, self.resolve_s = stream_url, fetch, resolve_s
         self._active: dict[str, tuple[str, socket.socket]] = {}   # span_id -> (ip, connection)
         self._lock = threading.Lock()
         self._serving = False
@@ -142,7 +193,41 @@ class AlarmServer:
                     self._refuse(404, "no such audio")
                 return path
 
+            def _bandcamp(self, head: bool):
+                """A Bandcamp track: every refusal comes before a header or a span."""
+                if not permitted(self.client_address[0], outer.speakers):
+                    return self._refuse(403, "not a speaker of this household")
+                token = bc.token_of(self.path)
+                track = bc.decode(token) if token else None
+                if track is None:
+                    return self._refuse(404, "no such audio")
+                try:
+                    upstream = outer._upstream(track)
+                except TimeoutError:
+                    return self._refuse(504, "Bandcamp did not answer in time")
+                except Exception:
+                    return self._refuse(502, "Bandcamp could not be reached for this track")
+                upstream, first = upstream
+                with contextlib.closing(upstream):
+                    if head:
+                        return self._headers_for("audio/mpeg", None)
+                    span_id = outer._open(self.client_address[0], f"bandcamp:{track.get('id') or track.get('title')}",
+                                          self.connection)
+                    if span_id is None:
+                        return self._refuse(503, "shutting down")
+                    try:
+                        size = (getattr(upstream, "headers", None) or {}).get("Content-Length")
+                        self._headers_for("audio/mpeg", size)
+                        outer._pump(upstream, first, self.connection,
+                                    time.monotonic() + outer.max_s)
+                    except OSError:
+                        pass   # the speaker hung up, or a stall ran past the bound
+                    finally:
+                        outer._close(span_id)
+
             def do_HEAD(self):
+                if self.path.startswith(bc.ROUTE):
+                    return self._bandcamp(head=True)
                 path = self._target()
                 if path is None:
                     return
@@ -153,12 +238,18 @@ class AlarmServer:
                 self._headers(path, size)
 
             def _headers(self, path: Path, size: int):
+                self._headers_for(TYPES[path.suffix.lower()], size)
+
+            def _headers_for(self, content_type: str, size):
                 self.send_response(200)
-                self.send_header("Content-Type", TYPES[path.suffix.lower()])
-                self.send_header("Content-Length", str(size))
+                self.send_header("Content-Type", content_type)
+                if size is not None:
+                    self.send_header("Content-Length", str(size))
                 self.end_headers()
 
             def do_GET(self):
+                if self.path.startswith(bc.ROUTE):
+                    return self._bandcamp(head=False)
                 path = self._target()
                 if path is None:
                     return
@@ -168,7 +259,7 @@ class AlarmServer:
                 except OSError:
                     return self._refuse(404, "no such audio")
                 with fh:
-                    span_id = outer._open(self.client_address[0], path, self.connection)
+                    span_id = outer._open(self.client_address[0], path.name, self.connection)
                     if span_id is None:
                         return self._refuse(503, "shutting down")
                     try:
@@ -183,7 +274,55 @@ class AlarmServer:
         self._srv.daemon_threads = True
         self.port = self._srv.server_port
 
-    def _open(self, ip: str, path: Path, conn: socket.socket) -> str | None:
+    def _upstream(self, track: dict):
+        """`(audio, first chunk)`: a fresh URL from Bandcamp, its response and
+        the first audio from it, all within `resolve_s` or `TimeoutError`. A worker does it, so
+        a resolver that hangs can't hold the speaker; one that finishes after
+        the deadline closes what it opened."""
+        done = threading.Event()
+        box: dict = {}
+        lock = threading.Lock()
+
+        def work():
+            try:
+                result = self._fetch(self._stream_url(track))
+                with lock:
+                    if box.get("abandoned"):
+                        result.close()
+                        return
+                    box["open"] = result            # so the deadline can cut a first read that trickles
+                try:
+                    first = _read(result, CHUNK)
+                    if not first:
+                        raise OSError("Bandcamp sent no audio")
+                except BaseException:
+                    result.close()
+                    raise
+                result = (result, first)
+            except BaseException as exc:      # handed to the waiting handler
+                result, exc_ = None, exc
+            else:
+                exc_ = None
+            with lock:
+                if box.get("abandoned"):
+                    if result is not None:
+                        result[0].close()
+                    return
+                box["result"], box["exc"] = result, exc_
+                done.set()          # inside the lock: the deadline can't see it unset and abandon it
+
+        threading.Thread(target=work, daemon=True).start()
+        if not done.wait(self.resolve_s):
+            with lock:
+                if not done.is_set():
+                    box["abandoned"] = True
+                    _cut(box.get("open"))           # the worker's read ends, and it closes the response
+                    raise TimeoutError("Bandcamp did not answer in time")
+        if box["exc"] is not None:
+            raise box["exc"]
+        return box["result"]
+
+    def _open(self, ip: str, name: str, conn: socket.socket) -> str | None:
         """Open a span and register the transfer, unless the server is stopping:
         the check, the journal line and the registration are one step, so a
         handler that was already accepted can't slip in after `stop`."""
@@ -191,7 +330,7 @@ class AlarmServer:
             if self._stopping:
                 return None
             span_id = play.journal_span(f"{ACTION}_start", ip, max_s=self.max_s,
-                                        file=path.name, pid=os.getpid())
+                                        file=name, pid=os.getpid())
             self._active[span_id] = (ip, conn)
         return span_id
 
@@ -208,6 +347,29 @@ class AlarmServer:
         while (left := deadline - time.monotonic()) > 0 and (chunk := fh.read(CHUNK)):
             conn.settimeout(left)
             conn.sendall(chunk)
+
+    @staticmethod
+    def _pump(upstream, first: bytes, conn: socket.socket, deadline: float) -> None:
+        """Send `first`, then the rest of `upstream`, giving up at `deadline`.
+        Unlike a file, a network read can stall, so each one may wait only for
+        the time left, and nothing arriving after the deadline is sent. A socket
+        timeout only limits silence, and a response that trickles (a chunk
+        header a byte at a time) is never silent, so a timer cuts the upstream
+        at the deadline too."""
+        cut = threading.Timer(max(deadline - time.monotonic(), 0), _cut, (upstream,))
+        cut.daemon = True
+        cut.start()
+        try:
+            chunk = first
+            while chunk and (left := deadline - time.monotonic()) > 0:
+                conn.settimeout(left)
+                conn.sendall(chunk)
+                if (left := deadline - time.monotonic()) <= 0:
+                    return
+                _bound(upstream, min(UPSTREAM_S, left))   # still an idle limit too
+                chunk = _read(upstream, CHUNK)
+        finally:
+            cut.cancel()
 
     def url_for(self, name: str, peer: str) -> str:
         return (f"http://{play.local_ip_for(peer)}:{self.port}/"
