@@ -5,6 +5,7 @@ is conftest's temp file. No speaker, network or Spotify is touched.
 """
 import http.client
 import json
+import socket
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -790,3 +791,32 @@ def test_the_agent_refuses_a_deadline_that_is_not_finite_and_positive(sounds):
     for bad in (0, -1, float("inf"), None):
         with pytest.raises(ValueError, match="resolve_s"):
             server.AlarmServer(sounds, None, port=0, host="127.0.0.1", resolve_s=bad)
+
+
+def test_a_bundled_sound_is_served_from_its_route_whatever_dir_is_served(srv):
+    from twiddle.alarms.sources import sound
+    assert get(srv, "/sound/bell.mp3") == (200, sound.file_of("bell").read_bytes())
+    assert get(srv, "/sound/bell.mp3", "HEAD")[0] == 200
+    assert [r["action"] for r in journal()] == ["alarm_serve_start", "alarm_serve_end"]
+    assert journal()[0]["file"] == "sound:bell"
+
+
+@pytest.mark.parametrize("path", ["/sound/nope.mp3", "/sound/",
+                                  "/sound/bell.wav", "/sound/%2e%2e/secret.mp3",
+                                  "/sound/../bell.mp3", "/sound/sub/rise.wav"])
+def test_an_unknown_sound_is_a_404_with_no_span(srv, path):
+    before = len(journal())
+    status, _ = get(srv, path)
+    assert status == 404 and len(journal()) == before
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize("target", ["http://[", "/sound/http://[", "//["])
+def test_a_request_target_that_does_not_parse_is_a_404_not_a_dropped_connection(srv, method, target):
+    before = len(journal())
+    with socket.create_connection(("127.0.0.1", srv.port), timeout=5) as c:   # http.client refuses these
+        c.sendall(f"{method} {target} HTTP/1.0\r\n\r\n".encode())
+        reply = b""
+        while chunk := c.recv(4096):
+            reply += chunk
+    assert reply.startswith(b"HTTP/1.0 404") and len(journal()) == before
