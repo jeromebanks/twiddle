@@ -20,9 +20,10 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "twiddle"
 
 # Every (module, function) allowed to read the alarm list tolerantly, and why.
 # A new view (the alarm TUI's list, say) is added here on purpose, with its
-# reason; the scan fails until it is. Anything that writes reads strictly: the
-# TUI's editor, toggle, delete and try each read the list with the default
-# `tolerant=False`, which refuses on an unreadable alarm before any write.
+# reason; the scan fails until it is. Anything that writes must read strictly
+# (the default `tolerant=False`, which refuses on an unreadable alarm before any
+# write): the TUI's editor, toggle, delete and try too, and the scan fails if
+# one of them doesn't.
 ALLOWLIST = {
     ("alarm_cli", "cmd_list"):
         "`alarm list`: shows every readable alarm and names the unreadable",
@@ -40,6 +41,7 @@ ALLOWLIST = {
 FORWARDER = ("alarms.clock", "list_alarms", "tolerant")
 
 MODULE = "<module>"
+READERS = {"list_alarms", "parse_list_alarms"}
 
 
 def module_name(path: Path) -> str:
@@ -55,16 +57,23 @@ class _Reads(ast.NodeVisitor):
         self.found: list[tuple[str, ast.expr]] = []
 
     def _scope(self, node):
-        self.names.append(node.name)
+        self.names.append(getattr(node, "name", "<lambda>"))
         self.generic_visit(node)
         self.names.pop()
 
-    visit_FunctionDef = visit_AsyncFunctionDef = visit_ClassDef = _scope
+    visit_FunctionDef = visit_AsyncFunctionDef = visit_ClassDef = visit_Lambda = _scope
 
     def visit_Call(self, node):
+        where = ".".join(self.names) or MODULE
+        callee = getattr(node.func, "attr", getattr(node.func, "id", None))
         for k in node.keywords:
             if k.arg == "tolerant":
-                self.found.append((".".join(self.names) or MODULE, k.value))
+                self.found.append((where, k.value))
+            elif k.arg is None:                     # **spread: never a named view's read
+                d = k.value
+                keys = [getattr(x, "value", None) for x in d.keys] if isinstance(d, ast.Dict) else []
+                if "tolerant" in keys or callee in READERS:
+                    self.found.append((where, d))
         self.generic_visit(node)
 
 
@@ -130,10 +139,14 @@ def test_tolerant_is_keyword_only_so_the_scan_sees_it():
                      "    return parse_list_alarms(_read(ip), tolerant=tolerant)\n"),
     ("alarms.clock", "def list_alarms(ip, *, flag):\n"
                      "    return parse_list_alarms(_read(ip), tolerant=flag)\n"),
+    ("alarm_cli", "def cmd_list(ip):\n    f = lambda: clock.list_alarms(ip, tolerant=True)\n"),
+    ("alarm_cli", "def cmd_list(ip):\n    clock.list_alarms(ip, **{'tolerant': True})\n"),
+    ("alarm_cli", "def cmd_list(ip, opts):\n    clock.list_alarms(ip, **opts)\n"),
 ], ids=["new module", "allowlisted name, other module", "async def", "module level",
         "class method", "nested in a view", "async nested in a view", "function, not the method",
         "the parser, truthy", "a flag", "a flag in a view", "forwarding, other clock function",
-        "list_alarms, another name"])
+        "list_alarms, another name",
+        "a lambda in a view", "a spread dict", "a spread into the reader"])
 def test_the_checker_fails(module, source):
     assert violations(source, module)
 
