@@ -316,6 +316,9 @@ def _read_interventions(path: Path):
                 st = {"name": action[:-6], "ip": ip, "span_id": sid,
                       "start": ts, "max_s": rec.get("max_s"), "pid": rec.get("pid")}
                 if sid:
+                    # the old reader's next start replaced a crashed one of its
+                    # kind, and an id-ful start is that next start
+                    legacy.pop((st["name"], ip), None)
                     by_id[sid] = st
                 else:
                     legacy[(st["name"], ip)] = st

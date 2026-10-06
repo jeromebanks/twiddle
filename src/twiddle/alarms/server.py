@@ -120,6 +120,7 @@ class AlarmServer:
         self._active: dict[str, tuple[str, socket.socket]] = {}   # span_id -> (ip, connection)
         self._lock = threading.Lock()
         self._serving = False
+        self._stopping = False
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -162,6 +163,8 @@ class AlarmServer:
                     return self._refuse(404, "no such audio")
                 with fh:
                     span_id = outer._open(self.client_address[0], path, self.connection)
+                    if span_id is None:
+                        return self._refuse(503, "shutting down")
                     try:
                         self._headers(path)
                         outer._send(fh, self.connection, time.monotonic() + outer.max_s)
@@ -174,10 +177,15 @@ class AlarmServer:
         self._srv.daemon_threads = True
         self.port = self._srv.server_port
 
-    def _open(self, ip: str, path: Path, conn: socket.socket) -> str:
-        span_id = play.journal_span(f"{ACTION}_start", ip, max_s=self.max_s,
-                                    file=path.name, pid=os.getpid())
+    def _open(self, ip: str, path: Path, conn: socket.socket) -> str | None:
+        """Open a span and register the transfer, unless the server is stopping:
+        the check, the journal line and the registration are one step, so a
+        handler that was already accepted can't slip in after `stop`."""
         with self._lock:
+            if self._stopping:
+                return None
+            span_id = play.journal_span(f"{ACTION}_start", ip, max_s=self.max_s,
+                                        file=path.name, pid=os.getpid())
             self._active[span_id] = (ip, conn)
         return span_id
 
@@ -206,6 +214,8 @@ class AlarmServer:
     def stop(self) -> None:
         """Stop listening and close every span still open: handler threads are
         daemons, so their own cleanup does not run when this process ends."""
+        with self._lock:
+            self._stopping = True
         if self._serving:   # `shutdown` waits forever on a loop that never ran
             self._srv.shutdown()
         self._srv.server_close()

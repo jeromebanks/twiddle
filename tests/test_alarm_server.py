@@ -221,6 +221,31 @@ def test_the_server_refuses_a_bound_that_is_not_finite_and_positive(sounds):
             server.AlarmServer(sounds, None, port=0, max_s=bad)
 
 
+def test_a_handler_accepted_before_stop_cannot_open_a_span_after_it(sounds):
+    s = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")
+    import threading
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+    paused, go = threading.Event(), threading.Event()
+    real = s._open
+
+    def slow(*a):
+        paused.set()
+        go.wait(5)
+        return real(*a)
+    s._open = slow
+    c = http.client.HTTPConnection("127.0.0.1", s.port, timeout=10)
+    try:
+        c.request("GET", "/bell.mp3")
+        assert paused.wait(5)          # the handler is accepted, not yet registered
+        s.stop()
+        go.set()
+        assert c.getresponse().status == 503
+        assert journal() == []
+    finally:
+        go.set()
+        c.close()
+
+
 # ---- a serve killed mid-stream -----------------------------------------------
 
 VANISH = {"kind": "vanish", "ip": SPEAKER, "name": "Sonos Roam", "probe": {"http_ok": True}}
@@ -266,6 +291,16 @@ def test_an_old_crashed_span_is_still_replaced_by_the_next_start_of_its_kind(tmp
         VANISH | {"ts": iso(T0 + timedelta(hours=5))})))
     assert any("left the household" in f.title
                for f in report.summarise_log(mon, play.INTERVENTION_LOG))
+
+
+def test_an_old_crashed_span_is_replaced_by_the_next_start_even_an_id_ful_one():
+    write({"ts": iso(T0), "action": "relay_start", "ip": SPEAKER, "span": True})  # crashed, old
+    write({"ts": iso(T0 + timedelta(seconds=100)), "action": "relay_start", "ip": SPEAKER,
+           "span": True, "span_id": "new", "max_s": 600})
+    write({"ts": iso(T0 + timedelta(seconds=160)), "action": "relay_end", "ip": SPEAKER,
+           "span": True, "span_id": "new"})
+    _, spans = report._load_interventions(play.INTERVENTION_LOG)
+    assert spans == [(T0.timestamp() + 100, T0.timestamp() + 160, "relay", SPEAKER)]
 
 
 def test_an_end_without_an_id_closes_the_latest_open_span_that_has_one(tmp_path):
