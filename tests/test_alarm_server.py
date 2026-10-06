@@ -513,6 +513,18 @@ def bandcamp_cdn():
                 except OSError:
                     pass
                 return
+            if self.path == "/chunked":         # a chunk, then the next chunk's size a digit at a time
+                try:
+                    self.wfile.write(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                     b"64\r\n" + MP3[:100] + b"\r\n")
+                    self.wfile.flush()
+                    for _ in range(100):
+                        time.sleep(0.1)
+                        self.wfile.write(b"0")
+                        self.wfile.flush()
+                except OSError:
+                    pass
+                return
             if self.path != "/ok":
                 return self.send_error(403)
             self.send_response(200)
@@ -623,13 +635,15 @@ def test_an_upstream_with_an_empty_body_is_a_502_with_no_span(sounds, bandcamp_c
         s.stop()
 
 
-def test_a_trickling_upstream_cannot_hold_the_span_past_its_bound(sounds, bandcamp_cdn):
-    s = agent(sounds, lambda t: f"{bandcamp_cdn}/trickle", max_s=0.4)
+@pytest.mark.parametrize("path", ["trickle", "chunked"])
+def test_a_trickling_upstream_cannot_hold_the_span_past_its_bound(sounds, bandcamp_cdn, path):
+    """Bytes (or a chunk header's digits) keep arriving, so no read ever times out."""
+    s = agent(sounds, lambda t: f"{bandcamp_cdn}/{path}", max_s=0.3)
     try:
         t0 = time.monotonic()
         status, body = get(s, path_for())
         assert status == 200 and body.startswith(MP3[:100])
-        assert time.monotonic() - t0 < 2
+        assert time.monotonic() - t0 < 0.9
         wait_for(lambda: len(journal()) == 2, "the span to close")
     finally:
         s.stop()

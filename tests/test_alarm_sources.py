@@ -661,3 +661,10 @@ def test_add_a_bandcamp_alarm_dry_run_resolves_without_writing(clockfake, capsys
                         "--dry-run", "--json"], capsys)
     assert code == 0, out
     assert "/bandcamp/" in out and journal() == []
+
+
+@pytest.mark.parametrize("uri", ["http://[", "http://[::1", "http://host:notaport/bandcamp/x.mp3"])
+def test_a_malformed_stored_uri_is_unknown_not_a_crash_in_the_listing(uri):
+    assert sources.recognise(uri, "") is None
+    a = dataclasses.replace(ALARMS[0], program_uri=uri, program_metadata="")
+    assert rows([a])[a.id]["source"] is None

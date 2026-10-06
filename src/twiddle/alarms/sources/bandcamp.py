@@ -166,10 +166,10 @@ class Bandcamp(Source):
     def owns(self, uri: str, metadata: str) -> bool:
         """Matches the route and port, not the address: it is the Mac's, and DHCP moves it."""
         from .. import server
-        parts = urlsplit(uri)
         try:
+            parts = urlsplit(uri)
             port = parts.port
-        except ValueError:
+        except ValueError:                  # an alarm's stored URI can be anything
             return False
         return (parts.scheme == "http" and port == server.PORT
                 and token_of(parts.path) is not None and decode(token_of(parts.path)) is not None)

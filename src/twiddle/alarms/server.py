@@ -109,6 +109,15 @@ def _bound(fh, seconds: float) -> None:
         pass
 
 
+def _cut(fh) -> None:
+    """Stop an open response from blocking its reader: shut its socket down
+    (best effort; a urllib response is the only thing that has one)."""
+    try:
+        fh.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+    except (AttributeError, OSError):
+        pass
+
+
 def _alive(pid) -> bool:
     if not isinstance(pid, int):
         return False
@@ -337,15 +346,24 @@ class AlarmServer:
     def _pump(upstream, first: bytes, conn: socket.socket, deadline: float) -> None:
         """Send `first`, then the rest of `upstream`, giving up at `deadline`.
         Unlike a file, a network read can stall, so each one may wait only for
-        the time left, and nothing arriving after the deadline is sent."""
-        chunk = first
-        while chunk and (left := deadline - time.monotonic()) > 0:
-            conn.settimeout(left)
-            conn.sendall(chunk)
-            if (left := deadline - time.monotonic()) <= 0:
-                return
-            _bound(upstream, left)
-            chunk = _read(upstream, CHUNK)
+        the time left, and nothing arriving after the deadline is sent. A socket
+        timeout only limits silence, and a response that trickles (a chunk
+        header a byte at a time) is never silent, so a timer cuts the upstream
+        at the deadline too."""
+        cut = threading.Timer(max(deadline - time.monotonic(), 0), _cut, (upstream,))
+        cut.daemon = True
+        cut.start()
+        try:
+            chunk = first
+            while chunk and (left := deadline - time.monotonic()) > 0:
+                conn.settimeout(left)
+                conn.sendall(chunk)
+                if (left := deadline - time.monotonic()) <= 0:
+                    return
+                _bound(upstream, left)
+                chunk = _read(upstream, CHUNK)
+        finally:
+            cut.cancel()
 
     def url_for(self, name: str, peer: str) -> str:
         return (f"http://{play.local_ip_for(peer)}:{self.port}/"
