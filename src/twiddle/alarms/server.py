@@ -5,9 +5,10 @@ machine in the alarm itself; the speaker fetches it at fire time, hours after
 anything here ran. So the port is fixed (`PORT`), not whatever was free, and
 the server runs in the foreground until stopped.
 
-It serves audio files from one directory, and Bandcamp tracks under
-`/bandcamp/<token>.mp3` (`sources/bandcamp.py`): for those it asks Bandcamp for
-a fresh stream URL at the moment of the request, since a stored one expires in
+It serves audio files from one directory; the standard alarm sounds bundled
+with twiddle under `/sound/<name>.mp3` (`sources/sound.py`), whatever the
+directory is; and Bandcamp tracks under `/bandcamp/<token>.mp3`
+(`sources/bandcamp.py`): for those it asks Bandcamp for a fresh stream URL at the moment of the request, since a stored one expires in
 about a day, and passes the audio through. Both go to speakers of the
 household (and to this Mac itself, so a `curl` can try it) and nothing else: an
 unknown name, a directory, a path outside the directory, a file that isn't
@@ -39,6 +40,7 @@ from pathlib import Path
 
 from .. import play, report
 from .sources import bandcamp as bc
+from .sources import sound as snd
 
 PORT = 8765          # fixed: an alarm stores the URL, and fires hours later
 ACTION = "alarm_serve"
@@ -188,7 +190,9 @@ class AlarmServer:
                 if not permitted(ip, outer.speakers):
                     self._refuse(403, "not a speaker of this household")
                     return None
-                path = resolve(outer.root, self.path)
+                name = snd.name_of(self.path)
+                path = (resolve(snd.SOUNDS_DIR, snd.file_of(name).name) if name
+                        else resolve(outer.root, self.path))
                 if path is None:
                     self._refuse(404, "no such audio")
                 return path

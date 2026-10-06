@@ -219,7 +219,7 @@ def test_sources_lists_every_source(offline, capsys):
     payload = json.loads(out)
     assert [s["name"] for s in payload["sources"]][:2] == ["chime", "station"]
     assert {s["name"]: s["needs_mac"] for s in payload["sources"]} == {
-        "chime": False, "station": False, "spotify": False, "bandcamp": True}
+        "chime": False, "station": False, "spotify": False, "bandcamp": True, "sound": True}
     assert journal() == []
 
 
@@ -668,3 +668,85 @@ def test_a_malformed_stored_uri_is_unknown_not_a_crash_in_the_listing(uri):
     assert sources.recognise(uri, "") is None
     a = dataclasses.replace(ALARMS[0], program_uri=uri, program_metadata="")
     assert rows([a])[a.id]["source"] is None
+
+
+# ---- standard alarm sounds, from this Mac -----------------------------------
+
+def fake_sound(host="10.0.0.5"):
+    return sources.Sound(host=lambda anchor: host)
+
+
+def test_at_least_four_sounds_are_choices_and_each_has_a_file_and_a_licence():
+    from twiddle.alarms import server
+    keys = [c.key for c in fake_sound().choices()]
+    assert len(keys) >= 4 and "bell" in keys
+    licences = (sources.sound.SOUNDS_DIR / "LICENSES.md").read_text()
+    for key in keys:
+        f = sources.sound.file_of(key)
+        assert f.is_file() and f.stat().st_size < 400_000, key
+        row = next((r for r in licences.splitlines() if f"`{f.name}`" in r), "")
+        assert re.search(r"generated, CC0|\bCC0\b|public domain", row, re.I), key
+        assert server.resolve(sources.sound.SOUNDS_DIR, f.name) == f.resolve()
+    assert {p.name for p in sources.sound.SOUNDS_DIR.glob("*.mp3")} == {f"{k}.mp3" for k in keys}
+
+
+def test_a_sound_alarm_points_at_the_agent():
+    from twiddle.alarms import server
+    uri, meta = fake_sound().build("bell")
+    parts = urlsplit(uri)
+    assert (parts.scheme, parts.hostname, parts.port, parts.path) == (
+        "http", "10.0.0.5", server.PORT, "/sound/bell.mp3")
+    assert sources.didl_title(meta) == "Classic bell"
+    assert f'protocolInfo="http-get:*:audio/mpeg:*">{uri}<' in meta
+
+
+@pytest.mark.parametrize("bad", ["", "nope", "../bell", "bell.mp3"])
+def test_an_unknown_sound_is_refused_naming_the_ones_there_are(bad):
+    with pytest.raises(ValueError, match="bell"):
+        fake_sound().build(bad)
+
+
+def test_the_sound_source_needs_the_mac_and_falls_back_to_the_chime():
+    s = fake_sound()
+    assert s.needs_mac and "chime" in s.fallback
+
+
+def test_a_sound_alarm_is_owned_wherever_the_mac_is_and_nothing_else_is():
+    src = fake_sound()
+    uri, meta = src.build("bell")
+    moved = uri.replace("10.0.0.5", "192.168.9.9")
+    assert src.owns(moved, meta) and sources.recognise(moved, meta).name == "sound"
+    assert src.describe(moved, meta) == "Classic bell"
+    for other in (uri.replace(":8765", ":9"), uri.replace("/sound/", "/other/"),
+                  uri.replace("bell", "nope"), CHIME_URI, "http://[", "http://h:x/sound/bell.mp3"):
+        assert not src.owns(other, meta), other
+
+
+def test_a_built_sound_alarm_lists_as_needing_this_mac():
+    uri, meta = fake_sound().build("bell")
+    a = dataclasses.replace(ALARMS[0], program_uri=uri, program_metadata=meta)
+    got = rows([a])[a.id]
+    assert (got["source"], got["needs_mac"]) == ("sound", True)
+    assert got["sound_source"] == "twiddle:sound" and got["source_title"] == "Classic bell"
+
+
+def test_alarm_list_marks_a_sound_alarm_with_the_mac_mark():
+    uri, meta = fake_sound().build("bell")
+    mac = Alarm(id="91", start_time="06:00:00", recurrence=Recurrence.parse("DAILY"),
+                room_uuid=LIVING, program_uri=uri, program_metadata=meta)
+    text = alarm_cli.human(alarm_cli.listing(household(), [mac], SAT_AFTERNOON), SAT_AFTERNOON)
+    [line] = [l for l in text.splitlines() if l.lstrip().startswith("#91 ")]
+    assert line.endswith("⌁ Classic bell")
+
+
+def test_choices_narrow_by_query():
+    assert [c.key for c in fake_sound().choices("bird")] == ["birdsong"]
+    assert fake_sound().choices("zzz") == []
+
+
+def test_add_a_sound_alarm_dry_run_writes_nothing(clockfake, capsys, monkeypatch):
+    monkeypatch.setattr(sources.get("sound"), "bind", lambda anchor: fake_sound())
+    code, out, _ = run(["alarm", "add", "--room", "roam", "--time", "09:00", "--days", "sat",
+                        "--source", "sound:bell", "--dry-run", "--json"], capsys)
+    assert code == 0, out
+    assert "/sound/bell.mp3" in out and journal() == []
