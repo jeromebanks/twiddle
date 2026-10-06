@@ -45,7 +45,7 @@ class History:
 
 
 # one milestone's story so far (markers only); "complete" comes from its slices
-STORIES = ["none", "demoed", "accepted", "shipped", "voided", "found"]
+STORIES = ["none", "demoed", "accepted", "shipped", "voided", "found", "owed"]
 SLICES = ["open", "inflight", "done", "escalated"]
 
 
@@ -60,6 +60,9 @@ def build(keys, created, stories, slice_states, debt, cleanup_in):
     for k in keys:
         s = stories[k]
         if s == "none":
+            continue
+        if s == "owed":   # a slice merged without its own Codex review: the milestone's review is due first
+            h.add("review-owed", milestone=k, slice=f"T{k}.0", number="101", why="routine")
             continue
         h.add("demo", 1, milestone=k, sha="d" * 40)
         if s in ("accepted", "shipped", "voided", "found"):
@@ -192,6 +195,8 @@ def check(case):
         has_cleanup = cur == cleanup_in        # its cleanup slice is open, so it isn't complete
         if complete and not has_cleanup and stories[cur] in ("none", "voided") and "/milestone-demo" not in nxt:
             problems.append(f"{cur} is complete and unshown, but next is {nxt!r}")
+        if complete and not has_cleanup and stories[cur] == "owed" and "Codex hasn't reviewed" not in nxt:
+            problems.append(f"{cur} is complete with a review owed, but next is {nxt!r}")
         if complete and not has_cleanup and stories[cur] == "accepted" and "ship it" not in nxt:
             problems.append(f"{cur} is accepted and unshipped, but next is {nxt!r}")
 
@@ -256,6 +261,7 @@ def _start():
 
 DEMO = ("demo", 1, {"milestone": "M1", "sha": "d" * 40})
 ACCEPT = ("demo-approval", 1, {"milestone": "M1", "by": POSTER})
+OWED = ("review-owed", None, {"milestone": "M1", "slice": "T0", "number": "100", "why": "routine"})
 # each step: (a marker to post, or None), then how many of M1's slices are merged, of how many
 JOURNEYS = {
     "straight through": [(None, 0, 2), (None, 1, 2), (None, 2, 2), (DEMO, 2, 2), (ACCEPT, 2, 2),
@@ -266,6 +272,13 @@ JOURNEYS = {
                                   (None, 3, 3), (DEMO, 3, 3)],
     "a slice is reverted after acceptance": [(None, 2, 2), (DEMO, 2, 2), (ACCEPT, 2, 2),
                                              (("demo-void", None, {"milestone": "M1"}), 1, 2), (None, 2, 2)],
+    # a routine slice merged without its own Codex review: the milestone's review comes before the demo
+    "a review owed at the milestone": [(OWED, 1, 2), (None, 2, 2),
+                                       (("ship-review", None, {"milestone": "M1", "sha": "d" * 40, "verdict": "changes"}), 2, 2),
+                                       (("demo-changes", None, {"milestone": "M1", "found": "agent"}), 2, 3),
+                                       (None, 3, 3),
+                                       (("ship-review", None, {"milestone": "M1", "sha": "d" * 40, "verdict": "approve"}), 3, 3),
+                                       (DEMO, 3, 3), (ACCEPT, 3, 3)],
 }
 
 

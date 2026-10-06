@@ -23,6 +23,7 @@
     {"name": "sdlc:escalated", "color": "B60205", "description": "SDLC: a human is needed (no consensus, or the agent is stuck)"}
   ],
   "models": {"routine": "sonnet", "judgment": "opus", "novel": "opus"},
+  "slice_review": {"routine": "milestone", "judgment": "slice", "novel": "slice"},
   "extra_labels": [
     {"name": "complexity:routine", "color": "C2E0C6", "description": "SDLC plan: a clear pattern to follow, little design"},
     {"name": "complexity:judgment", "color": "FEF2C0", "description": "SDLC plan: real design choices, safety or the evidence path"},

@@ -176,6 +176,9 @@ class Ledger:
     untested: dict[str, str] = field(default_factory=dict)  # releases holding commits no run saw, until verified
     ship_reviews: list[dict[str, Any]] = field(default_factory=list)   # Codex on main...epic/N, per head
     epic_tests: list[dict[str, Any]] = field(default_factory=list)     # full runs on the epic head
+    # milestone -> its slices that merged without their own Codex approval (routine, or Codex unavailable),
+    # until an approving milestone review after them
+    review_owed: dict[str, list[dict[str, str]]] = field(default_factory=dict)
 
 
 def _rev(mk: dict[str, str]) -> int | None:
@@ -296,6 +299,13 @@ def _on_main_tests(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> 
 def _on_ship_review(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     L.ship_reviews.append({"milestone": mk.get("milestone"), "sha": mk.get("sha"), "verdict": mk.get("verdict"),
                            "url": c.get("url")})
+    if mk.get("verdict") == "approve":
+        L.review_owed.pop(_ms(mk), None)   # the milestone's review covered every slice merged before it
+
+
+def _on_review_owed(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    L.review_owed.setdefault(_ms(mk), []).append({"slice": mk.get("slice", "?"), "number": mk.get("number", ""),
+                                                  "why": mk.get("why", "?"), "sha": mk.get("sha", "")})
 
 
 def _on_epic_tests(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
@@ -310,7 +320,7 @@ MARKERS = {
     "demo": _on_demo, "demo-approval": _on_demo_approval, "demo-changes": _on_demo_changes,
     "demo-void": _on_demo_void, "demo-request": _on_demo_request,
     "shipped": _on_shipped, "ship-review": _on_ship_review, "epic-tests": _on_epic_tests,
-    "main-tests": _on_main_tests,
+    "main-tests": _on_main_tests, "review-owed": _on_review_owed,
 }
 
 
@@ -364,6 +374,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     feedback, feedback_plan, plan_after_created = L.feedback, L.feedback_plan, L.plan_after_created
     created, cleanups = L.created, L.cleanups
     shipped, ship_reviews, epic_tests = L.shipped, L.ship_reviews, L.epic_tests
+    review_owed = L.review_owed
     untested = L.untested
 
     replies = [c for c in ordered[last_marked + 1:] if c.get("id") not in marked_ids]
@@ -488,6 +499,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "plan_verdict": plan_verdict, "plan_rounds": plan_rounds, "max_plan_rounds": max_plan_rounds,
         "demos": demos, "latest_demo": latest_demo, "feedback": feedback,
         "shipped": shipped, "ship_reviews": ship_reviews, "epic_tests": epic_tests, "untested": untested,
+        "review_owed": review_owed,
         "demo_request": request, "cleanups": sorted(cleanups),
         "planned_milestones": planned_ms, "created_milestones": sorted(created_ms, key=natural_key),
         "uncreated_milestones": uncreated, "create_mode": latest_plan_json.get("create") or config.get("create", "milestone"),
@@ -550,7 +562,9 @@ def done_phrase(m: dict[str, Any]) -> str:
 
 MILESTONE_FLOW = {
     "uncreated": {"building"},              # plan-create makes its issues (after the previous one's demo)
-    "building": {"complete"},               # its slices merge into epic/N
+    "building": {"complete", "review"},     # its slices merge into epic/N
+    "review": {"complete", "building"},     # slices merged without their own Codex review: the milestone's
+                                            # review (ship-review) comes before its demo; or it finds fixes
     "complete": {"demoed", "building"},     # demo-post; or the agent's demo finds it broken (fix slices)
     "demoed": {"accepted", "building"},     # the poster's /approve; or /changes (fix slices)
     "accepted": {"shipped", "building"},    # ship; or a revert / later findings void the acceptance
@@ -573,6 +587,8 @@ def milestone_phases(st: dict[str, Any], progress: dict[str, Any]) -> list[dict[
             phase = "uncreated"
         elif not (m["total"] and m["done"] == m["total"]):
             phase = "building"           # even if accepted: a reopened slice (a revert) is being built again
+        elif (st.get("review_owed") or {}).get(k):
+            phase = "review"
         elif d.get("accepted"):
             phase = "accepted"
         elif d and not d.get("voided") and not d.get("changes"):
@@ -618,7 +634,7 @@ def current_cleanup(progress: dict[str, Any], cur: dict[str, Any] | None) -> lis
 
 
 def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
-    """{phases, current, due, cleanup, offered, next}: due is one of verify, done, plan_next, demo, ship,
+    """{phases, current, due, cleanup, offered, next}: due is one of verify, done, plan_next, review, demo, ship,
     cleanup, sync, build."""
     n = st["number"]
     phases = milestone_phases(st, progress)
@@ -641,6 +657,12 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
         nxt = (f"/plan-issue {n}: plan {cur['key']} with what earlier milestones taught"
                + (f" (and up to {progress['cleanup_budget']} of its {len(debt)} tech-debt issue(s))"
                   if debt and progress.get("cleanup_budget") else ""))
+    elif cur["phase"] == "review":
+        due = "review"
+        owed = (st.get("review_owed") or {}).get(cur["key"]) or []
+        nxt = (f"/milestone-demo {n}: {done_phrase(cur)}, but Codex hasn't reviewed "
+               + ", ".join(f"{o['slice']} ({o['why']})" for o in owed)
+               + ": the milestone's review comes before its demo, and new slices wait")
     elif cur["phase"] in ("complete", "demoed"):
         due = "demo"
         nxt = f"/milestone-demo {n}: {done_phrase(cur)}, and new slices wait for its demo"
@@ -686,6 +708,8 @@ def pause_errors(view: dict[str, Any]) -> list[str]:
         return [f"{cur['title']} is accepted but not shipped to main: new slices wait (`/milestone-demo {n}`)"]
     if view["due"] == "demo":
         return [f"{done_phrase(cur)}: new slices wait for its demo (`/milestone-demo {n}`)"]
+    if view["due"] == "review":
+        return [f"{done_phrase(cur)}: new slices wait for its Codex review and its demo (`/milestone-demo {n}`)"]
     return []
 
 
@@ -710,10 +734,11 @@ def merge_errors(view: dict[str, Any], milestone: str | None) -> list[str]:
 
 
 def due_milestone(demos: dict[str, dict[str, Any]], progress: dict[str, Any],
-                  shipped: dict[str, str] | None = None) -> dict[str, Any] | None:
-    """The current milestone when it waits for its demo, or (`ship`: True) for its release. Else None."""
-    v = epic_view({"number": 0, "demos": demos, "shipped": shipped or {}}, progress)
-    return {**v["current"], "ship": v["due"] == "ship"} if v["due"] in ("demo", "ship") else None
+                  shipped: dict[str, str] | None = None,
+                  review_owed: dict[str, list[dict[str, str]]] | None = None) -> dict[str, Any] | None:
+    """The current milestone when it waits for its review or demo, or (`ship`: True) for its release. Else None."""
+    v = epic_view({"number": 0, "demos": demos, "shipped": shipped or {}, "review_owed": review_owed or {}}, progress)
+    return {**v["current"], "ship": v["due"] == "ship"} if v["due"] in ("review", "demo", "ship") else None
 
 
 def current_milestone(epic: dict[str, Any], progress: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -800,6 +825,8 @@ HEADERS = {
     "revert": "reverted",
     "main-tests": "test run on main",
     "retry": "retried on a stronger model",
+    "review-deferred": "Codex review deferred to the milestone",
+    "review-owed": "Codex review owed at the milestone",
 }
 FOOTERS = {
     "question": "Reply in a comment. Anything you leave unanswered, I will assume the stated default.",
@@ -1156,6 +1183,16 @@ COMPLEXITY_LINE_RE = re.compile(r"^Complexity: (\w+) — .*$", re.MULTILINE)
 def complexity_of(labels: list[str]) -> str | None:
     return next((l[len(COMPLEXITY_PREFIX):] for l in labels if l.startswith(COMPLEXITY_PREFIX)
                  and l[len(COMPLEXITY_PREFIX):] in COMPLEXITY), None)
+
+
+REVIEW_MODES = ("slice", "milestone")
+
+
+def review_mode(level: str | None, config: dict[str, Any]) -> str:
+    """Where a slice's Codex review happens: on its own PR ("slice", the default, and for unrated slices),
+    or with its milestone's review before the demo ("milestone"), per `slice_review` in the config."""
+    mode = (config.get("slice_review") or {}).get(level or "", "slice")
+    return mode if mode in REVIEW_MODES else "slice"
 
 
 def model_for(level: str | None, config: dict[str, Any]) -> str | None:
@@ -2016,6 +2053,23 @@ def pr_records(comments: list[dict[str, Any]], trusted: set[str]) -> tuple[list[
     return tests, reviews
 
 
+def pr_deferrals(comments: list[dict[str, Any]], trusted: set[str]) -> list[dict[str, Any]]:
+    """`review-defer` records on a pull request: Codex couldn't run on that head, so its review moves to the milestone."""
+    return [{"sha": mk.get("sha"), "url": c.get("url")} for mk, c in _marked(comments, trusted)
+            if mk.get("kind") == "review-deferred"]
+
+
+def owed_why(pr: dict[str, Any], reviews: list[dict[str, Any]], deferrals: list[dict[str, Any]], mode: str) -> str | None:
+    """Why this head would merge without its own Codex approval ("unavailable", "routine"), or None if it has one."""
+    head = pr.get("headRefOid")
+    r = [x for x in reviews if x["sha"] == head]
+    if r and r[-1]["verdict"] == "approve":
+        return None
+    if any(d["sha"] == head for d in deferrals):
+        return "unavailable"
+    return "routine" if mode == "milestone" else None
+
+
 def changes_rounds(reviews: list[dict[str, Any]]) -> int:
     return sum(1 for r in reviews if r.get("verdict") == "changes" and not r.get("before_retry"))
 
@@ -2079,6 +2133,7 @@ def derive_slice(issue: dict[str, Any], comments: list[dict[str, Any]], trusted:
     claim = claim_status(comments, trusted)
     tests, reviews = pr_records(pr_comments, trusted) if pr else ([], [])
     t, r = head_records(pr, tests, reviews) if pr else (None, None)
+    deferred = bool(pr) and any(d["sha"] == pr.get("headRefOid") for d in pr_deferrals(pr_comments, trusted))
     unmet = unmet_blockers(blockers)
     epic = int(mk["epic"]) if mk.get("epic", "").isdigit() else None
     if issue.get("state") == "closed":
@@ -2104,12 +2159,13 @@ def derive_slice(issue: dict[str, Any], comments: list[dict[str, Any]], trusted:
     return {"number": n, "title": issue.get("title"), "epic": epic, "key": mk.get("key"), "state": state,
             "complexity": complexity_of(issue.get("labels", [])),
             "claim": claim, "unmet": unmet, "pr": (pr or {}).get("number"), "pr_state": (pr or {}).get("state"),
-            "head": (pr or {}).get("headRefOid"), "tests_on_head": t, "review_on_head": r,
+            "head": (pr or {}).get("headRefOid"), "tests_on_head": t, "review_on_head": r, "deferred_on_head": deferred,
             "pr_rounds": changes_rounds(reviews), "next": nxt}
 
 
 def merge_gate_errors(pr: dict[str, Any], slice_issue: dict[str, Any] | None, tests: list[dict[str, Any]],
-                      reviews: list[dict[str, Any]], base: str, behind_by: int | None = 0) -> list[str]:
+                      reviews: list[dict[str, Any]], base: str, behind_by: int | None = 0,
+                      deferrals: list[dict[str, Any]] | None = None, mode: str = "slice") -> list[str]:
     """Why the agent may not merge this pull request (empty list = merge).
 
     `base` is the slice's epic branch (`epic/N`): slices never land on main directly.
@@ -2117,6 +2173,11 @@ def merge_gate_errors(pr: dict[str, Any], slice_issue: dict[str, Any] | None, te
     even when GitHub could squash cleanly: the tests and the review saw the head
     without those commits, and with parallel slices that combination was never
     tested (there is no CI to catch it).
+
+    Codex's approval of the head is needed unless the slice's review happens at the
+    milestone (`mode` "milestone": a routine slice) or Codex couldn't run on this head
+    (`review-defer`); either way `merge` records the review as owed by the milestone.
+    A review that asks for changes always blocks.
     """
     errs = []
     if pr.get("state") != "OPEN":
@@ -2134,10 +2195,10 @@ def merge_gate_errors(pr: dict[str, Any], slice_issue: dict[str, Any] | None, te
         errs.append(f"#{refs[0]} is not an open plan:slice issue")
     t, r = head_records(pr, tests, reviews)
     head = (pr.get("headRefOid") or "")[:12]
-    if not r:
-        errs.append(f"no Codex review of the current head {head}")
-    elif r["verdict"] != "approve":
+    if r and r["verdict"] != "approve":
         errs.append(f"Codex's latest review of {head} asks for changes")
+    elif not r and not owed_why(pr, reviews, deferrals or [], mode):
+        errs.append(f"no Codex review of the current head {head} (if Codex can't run: `review-defer {pr.get('number')} --reason ...`)")
     if not t:
         errs.append(f"no recorded test run on the current head {head} (`test-record`)")
     elif t["result"] != "pass":
@@ -2146,7 +2207,8 @@ def merge_gate_errors(pr: dict[str, Any], slice_issue: dict[str, Any] | None, te
         errs.append(f"could not tell whether the head is up to date with {base}")
     elif behind_by:
         errs.append(f"the head is {behind_by} commit(s) behind {base}: rebase onto origin/{base}, "
-                    "push with --force-with-lease, then `test-record` and a Codex round on the new head")
+                    "push with --force-with-lease, then `test-record` and its review (a Codex round, or a "
+                    "new deferral) on the new head")
     mergeable = pr.get("mergeable")
     if mergeable == "UNKNOWN":
         errs.append("GitHub is still computing mergeability (UNKNOWN): wait a few seconds and run `merge` again")
@@ -2283,18 +2345,21 @@ def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> in
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(args.number, config)
     st = bundle_slice(b)
     st["model"] = model_for(st["complexity"], config)
+    st["review"] = review_mode(st["complexity"], config)
     if args.json:
         print(json.dumps(st, indent=2))
         return 0
     print(f"#{st['number']} {st['title']}\n  state: {st['state']}   epic: #{st['epic']}   key: {st['key']}"
-          + (f"   complexity: {st['complexity']} (model {st['model']})" if st["complexity"] else ""))
+          + (f"   complexity: {st['complexity']} (model {st['model']})" if st["complexity"] else "")
+          + f"   Codex review: {'with the milestone' if st['review'] == 'milestone' else 'on the PR'}")
     if st["claim"]:
         print(f"  claimed: {st['claim']['url']} (branch {st['claim']['branch']}"
               + (f", model {st['claim']['model']})" if st["claim"].get("model") else ")"))
     if st["pr"]:
         t, r = st["tests_on_head"], st["review_on_head"]
         print(f"  PR #{st['pr']} ({st['pr_state']}) head {(st['head'] or '')[:12]}: tests {t['result'] if t else 'not run'}, "
-              f"Codex {r['verdict'] if r else 'not yet'}, rounds {st['pr_rounds']}/{config.get('max_pr_rounds', 5)}")
+              f"Codex {r['verdict'] if r else 'deferred to the milestone' if st['deferred_on_head'] else 'not yet'}, "
+              f"rounds {st['pr_rounds']}/{config.get('max_pr_rounds', 5)}")
     print(f"  next: {st['next']}")
     return 0
 
@@ -2465,12 +2530,50 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     return 0
 
 
+def command_review_defer(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Codex couldn't run on the PR's head: record that, so the slice may merge and its review moves to the
+    milestone's, before the demo. Never after Codex asked for changes that no later round approved."""
+    if args.from_file:
+        b = json.loads(Path(args.from_file).read_text())
+        pr, comments, trusted, slice_issue = b["pr"], b["pr_comments"], set(b["trusted"]), b.get("slice")
+    else:
+        (pr, comments), trusted = fetch_pr(args.pr, config), fetch_trusted(config)
+        refs = closes_refs(pr.get("body", ""))
+        slice_issue = fetch_slice(refs[0], config)[0] if len(refs) == 1 else None
+    if not args.reason.strip():
+        raise SdlcError("--reason is required: what failed when Codex was run (its error, verbatim)")
+    _, reviews = pr_records(comments, trusted)
+    head = pr.get("headRefOid") or ""
+    errs = []
+    if pr.get("state") != "OPEN":
+        errs.append(f"PR #{pr['number']} is {pr.get('state')}")
+    if reviews and reviews[-1]["verdict"] == "changes":
+        errs.append(f"Codex asked for changes (round {len(reviews)}) and no later round approved: answer them and "
+                    "get its review; findings nobody has checked can't be deferred")
+    if any(r["sha"] == head and r["verdict"] == "approve" for r in reviews):
+        errs.append(f"Codex already approved {head[:12]}: nothing to defer")
+    if slice_issue and review_mode(complexity_of(slice_issue.get("labels", [])), config) == "milestone":
+        errs.append("this slice is reviewed with its milestone anyway (routine): no deferral needed, `merge` it")
+    if errs:
+        raise SdlcError("; ".join(errs))
+    comment = render_comment("review-deferred", None, f"Codex couldn't review `{head[:12]}`:\n\n```\n{args.reason.strip()}\n```\n\n"
+                             "This slice may merge without it; Codex reviews it with its milestone, before the demo.",
+                             config, sha=head)
+    if args.dry_run:
+        print(comment)
+        return 0
+    posted = post_comment(pr["number"], comment, config)
+    print(f"PR #{pr['number']}: Codex review of {head[:12]} deferred to the milestone  {posted.get('html_url', '')}")
+    return 0
+
+
 def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """The merge gate: Codex approved this head, the tests passed on it, it closes one slice. Then squash-merge."""
     repo = repo_of(config)
     pr, comments = fetch_pr(args.pr, config)
     trusted = fetch_trusted(config)
     tests, reviews = pr_records(comments, trusted)
+    deferrals = pr_deferrals(comments, trusted)
     refs = closes_refs(pr.get("body", ""))
     slice_issue = fetch_slice(refs[0], config)[0] if len(refs) == 1 else None
     epic = slice_epic(slice_issue) if slice_issue else None
@@ -2479,16 +2582,30 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
         behind = gh_json(["api", f"repos/{repo}/compare/{branch}...{pr['headRefOid']}"]).get("behind_by")
     except SdlcError:
         behind = None
-    errs = merge_gate_errors(pr, slice_issue, tests, reviews, branch, behind)
+    mode = review_mode(complexity_of((slice_issue or {}).get("labels", [])), config)
+    errs = merge_gate_errors(pr, slice_issue, tests, reviews, branch, behind, deferrals, mode)
+    why = owed_why(pr, reviews, deferrals, mode)
+    if why and not epic:
+        errs.append("this slice has no epic to owe its Codex review to")
     if epic:
         est = bundle_state(fetch_bundle(epic, config, trusted), config)
         errs += milestone_hold_errors(est, epic_progress(epic, config, trusted), slice_issue.get("milestone"))
     if errs:
         raise SdlcError("; ".join(errs))
     n = refs[0]
+    key = (parse_marker(slice_issue.get("body", "")) or {}).get("key", f"#{n}")
     if args.dry_run:
-        print(f"would squash-merge PR #{args.pr} (closes #{n}) at {pr['headRefOid'][:12]}")
+        print(f"would squash-merge PR #{args.pr} (closes #{n}) at {pr['headRefOid'][:12]}"
+              + (f"; its Codex review owed at the milestone ({why})" if why else ""))
         return 0
+    if why:   # recorded before the squash: a failed merge leaves an extra review, never a missing one
+        what = ("Codex couldn't run on it" if why == "unavailable"
+                else "it is rated routine, and routine slices are reviewed with their milestone")
+        post_comment(epic, render_comment(
+            "review-owed", None, f"**{key}** (#{n}, PR #{args.pr}) merges into `{branch}` without its own Codex review: "
+            f"{what}. Codex reviews it with the milestone, before the demo.", config,
+            milestone=milestone_key(slice_issue.get("milestone")), slice=key, number=str(n), why=why,
+            sha=pr["headRefOid"]), config)
     gh(["pr", "merge", str(args.pr), "--repo", repo, "--squash", "--match-head-commit", pr["headRefOid"]])
     gh(["api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{pr['headRefName']}"], check=False)
     # `Closes #N` only acts on the default branch, and slices merge into epic/N: close it here, then check
@@ -2762,6 +2879,17 @@ def ship_target(st: dict[str, Any], progress: dict[str, Any], key: str | None = 
     return cur
 
 
+def review_target(st: dict[str, Any], progress: dict[str, Any], key: str | None = None) -> dict[str, Any] | None:
+    """The milestone a Codex milestone review (`ship-review`) is for: the current one, once complete with
+    reviews owed (before its demo), or once accepted (before it ships)."""
+    cur = epic_view(st, progress)["current"]
+    if cur and cur["phase"] == "review":
+        if key and cur["key"] != key:
+            raise SdlcError(f"{cur['title']} is the milestone being reviewed")
+        return cur
+    return ship_target(st, progress, key)
+
+
 def ship_gate_errors(st: dict[str, Any], key: str, head: str, synced: bool, carried: list[str]) -> list[str]:
     """Why milestone `key` may not ship epic/N's `head` to main (empty list = ship)."""
     errs = []
@@ -2779,6 +2907,8 @@ def ship_gate_errors(st: dict[str, Any], key: str, head: str, synced: bool, carr
         errs.append(f"Codex's latest review of {key} on {head[:12]} asks for changes")
     if carried:
         errs.append("epic branch carries slices of milestones that aren't accepted: " + ", ".join(carried))
+    if owed := (st.get("review_owed") or {}).get(key):
+        errs.append(f"Codex hasn't reviewed {', '.join(o['slice'] for o in owed)} of {key}: `ship-review` first")
     return errs
 
 
@@ -2847,7 +2977,8 @@ def command_sync(args: argparse.Namespace, config: dict[str, Any]) -> int:
 
 
 def command_ship_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """Record one Codex round on the milestone's diff (main...epic/N), bound to the epic head it reviewed."""
+    """Record one Codex round on the milestone's diff (main...epic/N), bound to the epic head it reviewed:
+    before its demo when slices of it merged without their own review, and before it ships."""
     if args.from_file:
         b = json.loads(Path(args.from_file).read_text())
         bundle, progress, head = b, b["progress"], b["epic_head"]
@@ -2859,7 +2990,7 @@ def command_ship_review(args: argparse.Namespace, config: dict[str, Any]) -> int
         leaves = [r for r in fetch_plan_issues(args.number, config, set(bundle["trusted"])) if r["kind"] == "slice"]
         already = lambda title: milestone_on_main(title, leaves, config)  # noqa: E731
     st = bundle_state(bundle, config)
-    if not (target := ship_target(st, progress, args.milestone)):
+    if not (target := review_target(st, progress, args.milestone)):
         raise SdlcError(f"#{st['number']}: every milestone has shipped")
     key = target["key"]
     # main...epic/N holds none of a milestone built straight onto main (it would be a later milestone's diff)
@@ -3342,8 +3473,9 @@ def demo_brief(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str
         out.append({**m, "complete": m["total"] > 0 and m["done"] == m["total"], "milestone_number": ghm.get("number"),
                     "steps": ghm.get("description") or "\n".join(f"- {x['key']}: {x['demo']}" for x in slices if x["demo"]),
                     "slices": slices, "before": before, "after": after, "on_main": legacy,
-                    "demo": (st.get("demos") or {}).get(m["key"]), "shipped": (st.get("shipped") or {}).get(m["key"])})
-    due = due_milestone(st.get("demos") or {}, progress, st.get("shipped"))
+                    "demo": (st.get("demos") or {}).get(m["key"]), "shipped": (st.get("shipped") or {}).get(m["key"]),
+                    "review_owed": (st.get("review_owed") or {}).get(m["key"]) or []})
+    due = due_milestone(st.get("demos") or {}, progress, st.get("shipped"), st.get("review_owed"))
     return {"epic": epic, "title": st["title"], "state": st["state"], "action": st["action"],
             "due": due["key"] if due else None, "milestones": out, "progress": progress,
             "next": next_command(st, progress if st["action"] in ("work_slices", "plan_next_milestone") else None)}
@@ -3367,6 +3499,9 @@ def command_demo_status(args: argparse.Namespace, config: dict[str, Any]) -> int
                   + (f" PR #{x['pr']} ({(x['merge_commit'] or '')[:10]})" if x["pr"] else "") + f"  {x['title']}")
         if m["before"]:
             print(f"  before: {m['before']}   after: {m['after']}" + ("   (built straight onto main)" if m["on_main"] else ""))
+        if m.get("review_owed"):
+            print("  Codex review owed at the milestone, before its demo: "
+                  + ", ".join(f"{o['slice']} ({o['why']})" for o in m["review_owed"]))
         if m["shipped"]:
             print(f"  shipped to main: {m['shipped'][:12]}")
     if debt := (brief["progress"] or {}).get("debt"):
@@ -3420,6 +3555,9 @@ def command_demo_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
         errs.append(f"#{n} has no milestone {key} (it has {', '.join(ms) or 'none'})")
     elif m["done"] != m["total"]:
         errs.append(f"{m['title']} is not complete ({m['done']}/{m['total']} merged)")
+    if owed := (st.get("review_owed") or {}).get(key):
+        errs.append(f"Codex hasn't reviewed {', '.join(o['slice'] for o in owed)} of {key} yet: the milestone's "
+                    "review (`ship-review`) comes before its demo")
     folder, body = Path(args.dir), Path(args.body_file).read_text()
     errs += demo_post_errors(body, folder)
     prev = (st.get("demos") or {}).get(key)
@@ -3722,6 +3860,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--from-file")
     p.set_defaults(fn=command_pr_review)
+
+    p = sub.add_parser("review-defer", help="Codex can't run on the PR's head: its review moves to the milestone's")
+    p.add_argument("pr", type=int)
+    p.add_argument("--reason", required=True, help="what failed when Codex was run, verbatim")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--from-file")
+    p.set_defaults(fn=command_review_defer)
 
     p = sub.add_parser("merge", help="the merge gate, then squash-merge a slice's PR")
     p.add_argument("pr", type=int)
