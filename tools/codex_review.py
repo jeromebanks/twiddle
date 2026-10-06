@@ -4,7 +4,7 @@
 (the prompt, filled from the repo's template), with which settings (`.sdlc/config.json`'s `codex` section,
 never the user's own Codex config), on which commit (it checks the worktree before and after, and writes
 the `HEAD:` line itself), and what counts as a finished review (`parse_verdict`, one retry). Codex runs on a
-scratch `CODEX_HOME` holding only a link to the user's sign-in and a `config.toml` written from those settings
+scratch `CODEX_HOME` holding only a copy of the user's sign-in and a `config.toml` written from those settings
 (`isolated_home`), so no user-level instructions, skills, memories, rules, plugins or MCP servers apply; the
 saved report names the model, effort, `codex --version` and the prompt's sha256 under its `HEAD:` line.
 
@@ -150,7 +150,7 @@ def codex_command(settings: dict[str, Any], prompt: str) -> list[str]:
 
 def config_toml(settings: dict[str, Any]) -> str:
     """The scratch `CODEX_HOME`'s whole `config.toml`: the repo's settings and nothing of the user's. The sign-in
-    is read from the file `isolated_home` links (`file` is Codex's default store; pinned, so no keyring applies)."""
+    is read from the copy `isolated_home` writes (`file` is Codex's default store; pinned, so no keyring applies)."""
     q = json.dumps                      # a JSON string is a TOML basic string
     return (f"model = {q(settings['model'])}\nmodel_reasoning_effort = {q(settings['reasoning_effort'])}\n"
             f"sandbox_mode = {q(settings['sandbox'])}\ncli_auth_credentials_store = \"file\"\n")
@@ -246,16 +246,28 @@ def sign_in() -> Path:
     auth = user_codex_home() / "auth.json"
     if not auth.is_file():
         raise ReviewError(f"no Codex sign-in at {auth}: run `codex login` in a terminal, then run this again. "
-                          "A review runs on a scratch CODEX_HOME that links this file, so a sign-in kept only in "
-                          "the keyring (`cli_auth_credentials_store`) can't be used")
+                          "A review runs on a scratch CODEX_HOME given a copy of this file, so a sign-in kept only "
+                          "in the keyring (`cli_auth_credentials_store`) can't be used")
     return auth.resolve()
 
 
-def _sha(path: Path) -> str | None:
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _read(path: Path) -> bytes | None:
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        return path.read_bytes()
     except OSError:
         return None
+
+
+def _is_sign_in(data: bytes) -> bool:
+    """A whole `auth.json` (a JSON object), not one an interrupted write left half-written."""
+    try:
+        return isinstance(json.loads(data), dict)
+    except ValueError:
+        return False
 
 
 def _write_atomic(target: Path, data: bytes) -> None:
@@ -275,21 +287,23 @@ def _write_atomic(target: Path, data: bytes) -> None:
 
 
 def restore_sign_in(entry: Path, user_auth: Path, start: str, log=print) -> None:
-    """After a run, make sure a token Codex refreshed ends up in the user's own `auth.json`, then drop the scratch
-    entry. Codex writing through the link (what its file store does: open, truncate, write) already put it there.
-    A rename replaces the link with a file: that file is copied back, atomically, only when it changed and the
-    user's is still what it was when the run started, so a sign-in made elsewhere meanwhile is never overwritten."""
-    if entry.is_symlink():
-        entry.unlink()
-        return
+    """After a run, bring a sign-in Codex refreshed in its private copy back to the user's own `auth.json`, then
+    drop the copy. Written back atomically, and only when the copy changed, is a whole `auth.json`, and the user's
+    is still what it was when the run started (`start`, its sha256): a sign-in made elsewhere meanwhile is never
+    overwritten, and a half-written refresh never reaches it."""
     if not entry.exists():
         log(f"warning: Codex removed {entry} during the run; your sign-in at {user_auth} was left as it was")
         return
     data = entry.read_bytes()
-    if hashlib.sha256(data).hexdigest() == start:
+    if _sha(data) == start:
         entry.unlink()
         return
-    if _sha(user_auth) != start:
+    if not _is_sign_in(data):
+        log(f"warning: Codex's refreshed sign-in was left half-written (the run was cut short?), so {user_auth} "
+            "was kept as it was; if `codex` says to sign in, run `codex login`")
+        entry.unlink()
+        return
+    if (now := _read(user_auth)) is None or _sha(now) != start:
         log(f"warning: Codex refreshed its sign-in during the run, but {user_auth} changed meanwhile (a sign-in "
             "elsewhere?), so it was kept and the refreshed token was discarded")
         entry.unlink()
@@ -305,25 +319,31 @@ def restore_sign_in(entry: Path, user_auth: Path, start: str, log=print) -> None
 
 @contextlib.contextmanager
 def isolated_home(scratch: Path, settings: dict[str, Any], user_auth: Path, log=print):
-    """A fresh `<scratch>/codex-home` holding only `auth.json` (a link to `user_auth`, from `sign_in`) and the
-    generated `config.toml`; yields the environment Codex runs with. However the run ends, the sign-in is reconciled
-    (`restore_sign_in`) and the link removed; the rest stays, so the session log can be read afterwards."""
+    """A fresh `<scratch>/codex-home` holding only `auth.json` (a private 0600 copy of `user_auth`, from `sign_in`)
+    and the generated `config.toml`; yields the environment Codex runs with.
+
+    A copy, not a link: Codex's file store refreshes `auth.json` in place (open, truncate, write), which through a
+    link would land in the user's file unguarded. However the run ends, `restore_sign_in` reconciles the copy and
+    removes it; the rest stays, so the session log can be read afterwards."""
     home = scratch / "codex-home"
-    left = home / "auth.json"
-    if left.exists() and not left.is_symlink():
-        raise ReviewError(f"{left} holds a sign-in an earlier run couldn't copy back: copy it over {user_auth} "
+    entry = home / "auth.json"
+    data = user_auth.read_bytes()             # read once: the copy and the start hash are the same bytes
+    if entry.is_symlink() or (entry.exists() and entry.read_bytes() == data):
+        entry.unlink()                        # what a killed run leaves when nothing was refreshed
+    elif entry.exists():
+        raise ReviewError(f"{entry} holds a sign-in an earlier run couldn't copy back: copy it over {user_auth} "
                           "(or delete it and run `codex login`), then run this again")
     shutil.rmtree(home, ignore_errors=True)
     home.mkdir(parents=True)
     (home / "config.toml").write_text(config_toml(settings))
-    entry = home / "auth.json"
-    start = _sha(user_auth)
-    entry.symlink_to(user_auth)
+    fd = os.open(entry, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
     try:
         yield {**os.environ, "CODEX_HOME": str(home)}
     finally:
         try:
-            restore_sign_in(entry, user_auth, start, log)
+            restore_sign_in(entry, user_auth, _sha(data), log)
         except OSError as exc:          # never hide how the run itself ended
             log(f"warning: couldn't check Codex's sign-in after the run ({exc}): look at {entry} and {user_auth}")
 

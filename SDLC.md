@@ -239,23 +239,24 @@ move before the ship, the same approval serves the ship.
 ### What a review runs under
 
 `codex-review` runs Codex on a scratch `CODEX_HOME`, `<out>/codex-home`, that holds only two
-things: `auth.json`, a link to your own sign-in (`$CODEX_HOME/auth.json` if you set one, else
-`~/.codex/auth.json`), and a `config.toml` the tool writes from `.sdlc/config.json`'s `codex`
-section (model, effort, sandbox, and the `file` sign-in store). So nothing in your own Codex home
-applies to a review: not its `config.toml`, `AGENTS.md`, skills, memories, rules, plugins or MCP
-servers. With no `auth.json` to link, it refuses before starting Codex (exit 3, the
-`review-defer` cue): run `codex login` in a terminal. A sign-in kept only in the keyring can't be
-linked.
+things: `auth.json`, a private 0600 copy of your sign-in (`$CODEX_HOME/auth.json` if you set
+one, else `~/.codex/auth.json`), and a `config.toml` the tool writes from `.sdlc/config.json`'s
+`codex` section (model, effort, sandbox, and the `file` sign-in store). So nothing in your own
+Codex home applies to a review: not its `config.toml`, `AGENTS.md`, skills, memories, rules,
+plugins or MCP servers. With no `auth.json` to copy, it refuses before starting Codex (exit 3,
+the `review-defer` cue): run `codex login` in a terminal. A sign-in kept only in the keyring
+can't be used.
 
-The sign-in survives a refresh. Codex's file store writes `auth.json` in place, through the link,
-straight into your file (so its source on GitHub says; the milestone demo checks the installed
-binary). If a version renames a new file over it instead, the tool copies that
-file back atomically once the run ends, however it ends (a verdict, a timeout, a failure, an
-interrupt). It only does that when the copy changed and your own file is still what it was when
-the run started; otherwise your file is kept and a warning says the refreshed token was
-discarded. The link is then removed. If the copy-back itself fails, the refreshed file is left in
-`codex-home` with a warning, and the next run refuses until it's dealt with. The rest of `codex-home` stays, with the run's session log
-under `sessions/`.
+The sign-in survives a refresh. It's a copy, not a link, because Codex's file store rewrites
+`auth.json` in place (open, truncate, write): through a link, a refresh would land in your file
+unguarded, over a sign-in made elsewhere, or half-written if the run were cut short. Instead,
+once the run ends, however it ends (a verdict, a timeout, a failure, an interrupt), the tool
+writes a changed copy back to your file atomically, and only when the copy is a whole
+`auth.json` and your own file is still what it was when the run started. Otherwise your file is
+kept and a warning says why (the refreshed token was discarded, or `codex login` may be needed).
+The copy is then removed. If the write-back itself fails, the copy is left in `codex-home` with a
+warning, and the next run refuses until it's dealt with. The rest of `codex-home` stays, with the
+run's session log under `sessions/`.
 
 What isolation can't cover: anything Codex reads from outside `CODEX_HOME`. That includes the
 repo itself (its `AGENTS.md`, `.agents/skills/`), the environment (`OPENAI_API_KEY` and the

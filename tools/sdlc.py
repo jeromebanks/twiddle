@@ -2622,7 +2622,7 @@ def command_codex_review(args: argparse.Namespace, config: dict[str, Any]) -> in
     cmd = codex_review.codex_command(settings, prompt)
     print(f"PR #{pr['number']} round {len(rounds) + 1} on {head[:12]}\n"
           + "".join(f"  {k}: {v}\n" for k, v in files.items())
-          + f"  CODEX_HOME: {out / 'codex-home'} (only a link to your sign-in and the config.toml written from "
+          + f"  CODEX_HOME: {out / 'codex-home'} (only a copy of your sign-in and the config.toml written from "
             f"`.sdlc/config.json`; its sessions/ holds the run's log)\n"
           + f"  run (timeout {settings['timeout_seconds']}s): {codex_review.show_command(cmd, wt, files['prompt'])}")
     if args.dry_run:
