@@ -75,6 +75,7 @@ PREFIX = "sdlc:"
 MARKER_TAG = "sdlc:v1"
 MARKER_RE = re.compile(r"\A\s*<!--\s*sdlc:v1\s+([^>]*?)\s*-->")
 ATTR_RE = re.compile(r"(\w+)=(\S+)")
+MARKER_VALUE_RE = re.compile(r"[\w.:+/@-]+")   # a value a marker can carry: no space, no `>`, no `--`
 KEYWORD_RE = re.compile(r"^ {0,3}/(approve|changes)\b[ \t]*(.*)$", re.IGNORECASE)
 
 DOC_KINDS = {"prd", "diagnosis"}
@@ -2529,13 +2530,17 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     response = Path(args.response).read_text().strip() if args.response else ""
     rnd = len(reviews) + 1
     # the next round's prompt reads the response back from after its boundary (codex_review.response_section)
+    # what it ran under, from the block `codex-review` stamps under HEAD (none in a report saved before that)
+    prov = {k: v for k, v in codex_review.parse_provenance(report).items() if MARKER_VALUE_RE.fullmatch(v) and "--" not in v}
+    ran = (f"Ran `{prov.get('model', '?')}` at effort `{prov.get('effort', '?')}`, codex `{prov.get('codex', '?')}`, "
+           f"prompt sha256 `{prov.get('prompt', '?')[:12]}`\n\n") if prov else ""
     body = (f"**Review {rnd} — Codex on `{pr['headRefOid'][:12]}`: `{verdict}`** "
-            f"({changes_rounds(reviews) + (verdict == 'changes')}/{limit} change rounds used)\n\n"
+            f"({changes_rounds(reviews) + (verdict == 'changes')}/{limit} change rounds used)\n\n{ran}"
             f"<details><summary>Codex's review</summary>\n\n{codex_review.unmarked(report).strip()}\n\n</details>")
     if response:
         body += codex_review.response_section(response)
     comment = render_comment("pr-review", None, body, config, sha=pr["headRefOid"], verdict=verdict, round=str(rnd),
-                             response="1" if response else "0")
+                             response="1" if response else "0", **prov)
     if len(comment) > COMMENT_LIMIT:
         raise SdlcError(f"the review comment is {len(comment)} characters, over GitHub's limit")
     if args.dry_run:
@@ -2617,11 +2622,13 @@ def command_codex_review(args: argparse.Namespace, config: dict[str, Any]) -> in
     cmd = codex_review.codex_command(settings, prompt)
     print(f"PR #{pr['number']} round {len(rounds) + 1} on {head[:12]}\n"
           + "".join(f"  {k}: {v}\n" for k, v in files.items())
+          + f"  CODEX_HOME: {out / 'codex-home'} (only a copy of your sign-in and the config.toml written from "
+            f"`.sdlc/config.json`; its sessions/ holds the run's log)\n"
           + f"  run (timeout {settings['timeout_seconds']}s): {codex_review.show_command(cmd, wt, files['prompt'])}")
     if args.dry_run:
         print(f"\n{prompt}")
         return 0
-    status, report = codex_review.run_review(cmd, wt, head, out, settings["timeout_seconds"])
+    status, report = codex_review.run_review(cmd, wt, head, out, settings)
     if report:
         print(f"\n{report.read_text()}\nsaved: {report}\n"
               f"record it: uv run python tools/sdlc.py pr-review {pr['number']} --report {report} --response <your answers>")
