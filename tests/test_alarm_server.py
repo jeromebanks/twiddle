@@ -481,6 +481,7 @@ def test_serve_runs_until_interrupted_then_closes_its_spans(fake_house, sounds, 
 # ---- Bandcamp through the agent ----------------------------------------------
 
 TRACK = {"page": "https://gulls.bandcamp.com/album/salt", "id": 42}
+CDN_HUNG_UP = threading.Event()
 MP3 = b"ID3" + b"m" * 5000
 
 
@@ -512,6 +513,16 @@ def bandcamp_cdn():
                         self.wfile.flush()
                 except OSError:
                     pass
+                return
+            if self.path == "/firstchunk":      # the first chunk's size line, a digit at a time
+                try:
+                    self.wfile.write(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                    for _ in range(100):
+                        time.sleep(0.1)
+                        self.wfile.write(b"0")
+                        self.wfile.flush()
+                except OSError:
+                    CDN_HUNG_UP.set()
                 return
             if self.path == "/chunked":         # a chunk, then the next chunk's size a digit at a time
                 try:
@@ -620,6 +631,19 @@ def test_an_upstream_that_sends_headers_and_no_audio_fails_fast_with_no_span(sou
         t0 = time.monotonic()
         assert get(s, path_for(), method)[0] == 504
         assert time.monotonic() - t0 < 2
+        assert journal() == []
+    finally:
+        s.stop()
+
+
+def test_a_first_read_that_trickles_is_cut_at_the_deadline_and_its_connection_closed(sounds, bandcamp_cdn):
+    CDN_HUNG_UP.clear()
+    s = agent(sounds, lambda t: f"{bandcamp_cdn}/firstchunk", resolve_s=0.3)
+    try:
+        t0 = time.monotonic()
+        assert get(s, path_for())[0] == 504
+        assert time.monotonic() - t0 < 1
+        assert CDN_HUNG_UP.wait(3), "the abandoned worker still holds the upstream connection"
         assert journal() == []
     finally:
         s.stop()

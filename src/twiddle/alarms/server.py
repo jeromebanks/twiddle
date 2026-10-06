@@ -286,6 +286,11 @@ class AlarmServer:
         def work():
             try:
                 result = self._fetch(self._stream_url(track))
+                with lock:
+                    if box.get("abandoned"):
+                        result.close()
+                        return
+                    box["open"] = result            # so the deadline can cut a first read that trickles
                 try:
                     first = _read(result, CHUNK)
                     if not first:
@@ -311,6 +316,7 @@ class AlarmServer:
             with lock:
                 if not done.is_set():
                     box["abandoned"] = True
+                    _cut(box.get("open"))           # the worker's read ends, and it closes the response
                     raise TimeoutError("Bandcamp did not answer in time")
         if box["exc"] is not None:
             raise box["exc"]
