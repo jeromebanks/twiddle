@@ -278,7 +278,6 @@ def test_an_epic_without_milestones_owes_and_clears_the_same_way(monkeypatch):
 
 import ast
 import os
-import pwd
 import re
 import shutil
 import subprocess
@@ -518,7 +517,8 @@ def test_round_two_on_takes_the_latest_recorded_response(tmp_path, monkeypatch, 
 
 def test_the_review_logic_lives_in_codex_review():
     src = (ROOT / "tools" / "sdlc.py").read_text()
-    for name in ("def parse_verdict", "VERDICT_RE =", "HEAD_RE =", "def fill_pr_prompt", "<SLICE_FILE>"):
+    for name in ("def parse_verdict", "VERDICT_RE =", "HEAD_RE =", "def fill_pr_prompt", "def fill_prompt", "<SLICE_FILE>",
+                 "<PLAN_FILE>", "<MILESTONE_FILE>", "<DEFERRED", "def prepare_plan_round", "def prepare_milestone_round"):
         assert name not in src, f"{name} belongs in tools/codex_review.py"
     assert sdlc.parse_verdict is codex_review.parse_verdict and sdlc.HEAD_RE is codex_review.HEAD_RE
     assert sdlc.SdlcError is codex_review.ReviewError

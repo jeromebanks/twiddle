@@ -10,6 +10,10 @@ saved report names the model, effort, `codex --version` and the prompt's sha256 
 
     uv run python tools/sdlc.py codex-review --pr 50 --out <scratch>            # one round on a slice PR
     uv run python tools/sdlc.py codex-review --pr 50 --out <scratch> --dry-run  # the prompt and command only
+    uv run python tools/sdlc.py codex-review --plan 12 --out <scratch>          # the posted plan revision
+    uv run python tools/sdlc.py codex-review --milestone 12 --out <scratch>     # main...epic/12, from .worktrees/epic-12
+
+It is the only way the skills run Codex: never `codex exec review`, the Codex plugin, or `codex exec` by hand.
 
 Exit status: 0 a report was saved (either verdict), 1 a refusal (fix it and run again), `UNAVAILABLE` (3)
 Codex can't run: the skill's cue for `review-defer`.
@@ -308,10 +312,10 @@ def prepare_milestone_round(epic: int, milestone: dict[str, Any], slices: list[d
     files["milestone"].write_text("\n".join(lines))
 
     def one(s: dict[str, Any]) -> str:
-        return f"#{s['number']} {s['key']} (PR #{s.get('pr')}, squash `{s['merge_commit']}`, brief `{files[f'slice-' + str(s['number'])]}`)"
+        return f"#{s['number']} {s['key']} (PR #{s.get('pr')}, squash `{s['merge_commit']}`, brief `{files['slice-' + str(s['number'])]}`)"
     why = {"routine": "routine", "unavailable": "Codex couldn't run on its PR"}
     deferred = [f"{one(by_number[str(o['number'])])}: {why.get(o.get('why'), o.get('why') or '?')}" for o in owed]
-    k = _write_response(rounds, "ship-review", scratch, files)
+    _write_response(rounds, "ship-review", scratch, files)
     prompt = fill_prompt(MILESTONE_PROMPT.read_text() if template is None else template,
                          {"N": str(epic), "MILESTONE_FILE": str(files["milestone"]),
                           "SLICES": "; ".join(one(s) for s in slices), "DEFERRED_SLICES": "; ".join(deferred),

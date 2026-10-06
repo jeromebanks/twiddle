@@ -12,7 +12,8 @@ and every label change and agent comment. Config is `.sdlc/config.json`.
     uv run python tools/sdlc.py reconcile 12
     uv run python tools/sdlc.py plan-validate plan.json
     uv run python tools/sdlc.py plan-post 12 plan.json --dry-run
-    uv run python tools/sdlc.py plan-review 12 --plan plan.json --report codex.md --response response.md
+    uv run python tools/sdlc.py codex-review --plan 12 --out review       # Codex on the posted plan revision
+    uv run python tools/sdlc.py plan-review 12 --plan review/plan.json --report review/codex.md --response response.md
     uv run python tools/sdlc.py plan-create 12 --dry-run
     uv run python tools/sdlc.py ready --epic 12
     uv run python tools/sdlc.py slice-check 28 && uv run python tools/sdlc.py claim 28
@@ -23,7 +24,8 @@ and every label change and agent comment. Config is `.sdlc/config.json`.
     uv run python tools/sdlc.py demo-post 12 --milestone M1 --dir demo --body-file comment.md --dry-run
     uv run python tools/sdlc.py demo-accept 12      # or demo-changes 12 --body-file changes.md
     uv run python tools/sdlc.py epic-branch 12      # slices land on epic/12 (plan-create makes it)
-    uv run python tools/sdlc.py sync 12 && uv run python tools/sdlc.py ship-review 12 --report codex.md
+    uv run python tools/sdlc.py sync 12 && uv run python tools/sdlc.py codex-review --milestone 12 --out ship
+    uv run python tools/sdlc.py ship-review 12 --report ship/codex.md
     uv run python tools/sdlc.py ship 12             # an accepted milestone: epic/12 -> main, a merge commit
     uv run python tools/sdlc.py revert-slice 28     # undo one slice on epic/12 before it ships
 
@@ -2769,7 +2771,6 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
         bundle, progress, head, slices = b, b["progress"], b["epic_head"], b["slices"]
         steps = lambda title: b.get("steps", "")  # noqa: E731
         already = lambda title: bool(b.get("on_main"))  # noqa: E731
-        wt = Path(b["worktree"]) if b.get("worktree") else primary_root() / config.get("worktree_dir", ".worktrees") / f"epic-{n}"
     else:
         bundle = fetch_bundle(n, config)
         progress = epic_progress(n, config, set(bundle["trusted"]))
@@ -2779,7 +2780,7 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
         steps = lambda title: (gh_ms.get(title) or {}).get("description") or ""  # noqa: E731
         leaves = [r for r in fetch_plan_issues(n, config, set(bundle["trusted"])) if r["kind"] == "slice"]
         already = lambda title: milestone_on_main(title, leaves, config)  # noqa: E731
-        wt = primary_root() / config.get("worktree_dir", ".worktrees") / f"epic-{n}"
+    wt = primary_root() / config.get("worktree_dir", ".worktrees") / f"epic-{n}"   # as `sync` left it: never reset here
     st = bundle_state(bundle, config)
     trusted = set(bundle["trusted"])
     if not (target := review_target(st, progress, None)):

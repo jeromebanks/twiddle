@@ -772,3 +772,132 @@ def test_nothing_ships_while_an_earlier_release_is_unverified():
                  agent("demo", 1, 14, milestone="M2", sha="d" * 40), agent("demo-approval", 1, 15, milestone="M2", by=POSTER)])
     with pytest.raises(sdlc.SdlcError, match="verify-main 12"):
         sdlc.ship_target(st, progress(ms("M1", 3, 3), ms("M2", 2, 2), open_=0))
+
+
+# --- codex-review --milestone: Codex on main...epic/N, from .worktrees/epic-N -----------------------------
+
+import re  # noqa: E402
+
+from tests.fake_codex import APPROVES, NO_VERDICT, SETTINGS, calls, install, no_real_codex_home  # noqa: E402,F401
+
+
+def brief(key, outcome):
+    return (sdlc.marker("slice", None, epic="12", key=key) + f"\n## Outcome\n\n{outcome}\n\n## Acceptance criteria\n\n"
+            f"- [ ] {key} works\n\n## Non-goals\n\nnone\n")
+
+
+class MilestoneReview:
+    """`.worktrees/epic-12` under a tmp primary checkout: main, then one squash commit per slice of M1. T1.1 had its
+    own review; T1.2 is routine and T1.3's PR Codex couldn't review, so both are owed."""
+
+    SLICES = (("T1.1", 28, 55), ("T1.2", 29, 56), ("T1.3", 30, 57))
+
+    def __init__(self, tmp_path, monkeypatch, plan=(APPROVES,)):
+        self.tmp, root = tmp_path, tmp_path / "primary"
+        self.log, _, _ = install(tmp_path, monkeypatch, plan)
+        for k in ("AUTHOR", "COMMITTER"):
+            monkeypatch.setenv(f"GIT_{k}_NAME", "t")
+            monkeypatch.setenv(f"GIT_{k}_EMAIL", "t@example.invalid")
+        self.wt = root / ".worktrees" / "epic-12"
+        self.wt.mkdir(parents=True)
+        _git("init", "-q", cwd=self.wt)
+        _git("commit", "--allow-empty", "-qm", "main", cwd=self.wt)
+        _git("update-ref", "refs/remotes/origin/main", "HEAD", cwd=self.wt)
+        self.squash = {}
+        for key, n, pr_ in self.SLICES:
+            (self.wt / f"{key}.py").write_text(f"# {key}\n")
+            _git("add", ".", cwd=self.wt)
+            _git("commit", "-qm", f"{key} (#{pr_})", cwd=self.wt)
+            self.squash[key] = _git("rev-parse", "HEAD", cwd=self.wt)
+        self.head = _git("rev-parse", "HEAD", cwd=self.wt)
+        monkeypatch.setattr(sdlc, "primary_root", lambda: root)
+        monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("codex-review --from-file must not call gh"))
+        self.config = tmp_path / "config.json"
+        self.config.write_text(json.dumps({**CONFIG, "codex": SETTINGS}))
+        self.out = tmp_path / "scratch"
+        self.owed = [agent("review-owed", None, 20, milestone="M1", slice="T1.2", number="29", why="routine", sha=OLD),
+                     agent("review-owed", None, 21, milestone="M1", slice="T1.3", number="30", why="unavailable", sha=OLD)]
+
+    def slices(self):
+        return [{"number": n, "key": key, "title": f"<{key}> the {key} part", "body": brief(key, f"{key} outcome"),
+                 "pr": pr_, "merge_commit": self.squash[key]} for key, n, pr_ in self.SLICES]
+
+    def bundle(self, comments=(), head=None, slices=None):
+        f = self.tmp / "bundle.json"
+        f.write_text(json.dumps({"issue": {"number": 12, "title": "Alarm manager", "state": "open", "author": POSTER,
+                                           "labels": ["sdlc:in-progress"]},
+                                 "comments": HISTORY + self.owed + list(comments), "trusted": [OWNER],
+                                 "progress": progress(ms("M1", 3, 3)), "epic_head": head or self.head,
+                                 "steps": "1. `alarm list` shows every alarm", "slices": self.slices() if slices is None else slices}))
+        return str(f)
+
+    def run(self, *extra, **kw):
+        return sdlc.main(["--config", str(self.config), "codex-review", "--milestone", "12", "--out", str(self.out),
+                          "--from-file", self.bundle(**kw), *extra])
+
+
+def test_a_milestone_round_names_every_slice_and_both_deferred_ones(tmp_path, monkeypatch, capsys):
+    r = MilestoneReview(tmp_path, monkeypatch)
+    assert r.run() == 0
+    prompt = (r.out / "prompt.md").read_text()
+    assert not re.search(r"<[A-Za-z/]", prompt) and "HEAD:" not in prompt and "rev-parse" not in prompt
+    assert f"`{r.out / 'milestone.md'}`" in prompt and "epic/12" in prompt
+    for key, n, pr_ in r.SLICES:
+        b = r.out / f"slice-{n}.md"
+        assert f"#{n} {key} (PR #{pr_}, squash `{r.squash[key]}`, brief `{b}`)" in prompt
+        assert f"## Outcome\n\n{key} outcome" in b.read_text()
+    deferred = prompt[prompt.index("merged without a review of their own"):prompt.index("This is\n  their first review")]
+    assert "T1.2" in deferred and "routine" in deferred and "T1.3" in deferred and "couldn't run" in deferred
+    assert "T1.1" not in deferred
+    ms_file = (r.out / "milestone.md").read_text()
+    assert "`alarm list` shows every alarm" in ms_file and "T1.3 outcome" in ms_file and "- [ ] T1.2 works" in ms_file
+    (call,) = calls(r.log)
+    assert call["cwd"] == str(r.wt.resolve()) and call["codex_home"] == str(r.out / "codex-home")
+    assert call["entries"] == {"auth.json": False, "config.toml": False}
+    saved = (r.out / "codex.md").read_text()
+    assert saved.startswith(f"HEAD: {r.head}\nModel: test-model\n")
+    capsys.readouterr()
+    rep = ["ship-review", "12", "--report", str(r.out / "codex.md"), "--dry-run", "--from-file", r.bundle()]
+    assert sdlc.main(rep) == 0
+    out = capsys.readouterr().out
+    assert f"sha={r.head} verdict=approve round=1 response=0 model=test-model" in out and "Ran `test-model`" in out
+    # nothing owed: no deferred bullet at all
+    r.owed = []
+    assert sdlc.main(["--config", str(r.config), "codex-review", "--milestone", "12", "--out", str(r.out),
+                      "--from-file", r.bundle([agent("demo", 1, 30, milestone="M1", sha=r.head),
+                                               agent("demo-approval", 1, 31, milestone="M1", by=POSTER)]),
+                      "--dry-run"]) == 0
+    assert "without a review of their own" not in (r.out / "prompt.md").read_text()
+
+
+def test_a_milestone_round_refuses_a_dirty_or_stale_epic_worktree(tmp_path, monkeypatch, capsys):
+    r = MilestoneReview(tmp_path, monkeypatch)
+    (r.wt / "notes.md").write_text("scratch")
+    assert r.run() == 1 and "not clean" in capsys.readouterr().err
+    (r.wt / "notes.md").unlink()
+    assert r.run(head="c" * 40) == 1
+    err = capsys.readouterr().err
+    assert "is not epic/12's head" in err and "`sync 12`" in err
+    assert sdlc.main(["--config", str(r.config), "codex-review", "--milestone", "12", "--out", str(r.wt / "s"),
+                      "--from-file", r.bundle()]) == 1
+    assert "inside the worktree" in capsys.readouterr().err
+    # a slice whose squash isn't on the branch, an owed slice that isn't one of the milestone's
+    gone = r.slices()
+    gone[0]["merge_commit"] = OLD
+    assert r.run(slices=gone) == 1 and "isn't on epic/12" in capsys.readouterr().err
+    assert r.run(slices=r.slices()[:2]) == 1 and "T1.3 (#30)" in capsys.readouterr().err
+    assert calls(r.log) == [] and not (r.out / "codex.md").exists()
+
+
+def test_a_milestone_round_two_reads_the_recorded_response_and_retries_once(tmp_path, monkeypatch, capsys):
+    r = MilestoneReview(tmp_path, monkeypatch, plan=(NO_VERDICT, APPROVES))
+    body, extra = sdlc.review_body("**M1, review 1**", "Codex's review", "1. T1.2 drops an error\n\nVERDICT: changes",
+                                   "1. Rebutted: it is returned at alarms/clock.py:40.")
+    round1 = comment(OWNER, sdlc.render_comment("ship-review", None, body, CONFIG, milestone="M1", sha=OLD,
+                                                verdict="changes", round="1", **extra), 25)
+    assert r.run(comments=[round1]) == 0 and len(calls(r.log)) == 2
+    prompt, resp = (r.out / "prompt.md").read_text(), r.out / "response-round-1.md"
+    assert f"`{resp}`" in prompt and resp.read_text().startswith("1. Rebutted")
+    assert "round 2" in capsys.readouterr().out
+    bare = agent("ship-review", None, 25, milestone="M1", sha=OLD, verdict="changes", round="1", response="0")
+    assert r.run("--dry-run", comments=[bare]) == 1 and "ship-review --response" in capsys.readouterr().err

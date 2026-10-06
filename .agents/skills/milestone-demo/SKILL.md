@@ -75,13 +75,11 @@ review (`review-defer`) is too. `demo-status` lists them under "Codex review owe
 1. `uv run python tools/sdlc.py sync N` (`timeout: 600000`): it brings `main` in, runs the
    suite on the head and records it, so the review and the demo see the same code. A
    conflict or a failure escalates, and you stop.
-2. Save each owed slice's brief where Codex can read it (its sandbox has no network):
-   `gh issue view S --json title,body -q '.title + "\n\n" + .body' > <SCRATCH>/slice-S.md`, one per
-   slice. Fill `references/codex-milestone-prompt.md` into `<SCRATCH>/ship-prompt.md`, **including
-   its deferred-slices part** (`<SLICE_FILES>` = those files): each owed slice's key, issue and squash commit on `epic/N`
-   (`git -C <PRIMARY>/.worktrees/epic-N log --oneline origin/main..HEAD` finds them). Run
-   it from `<PRIMARY>/.worktrees/epic-N`, as in step 10.2, then record the round:
-   `uv run python tools/sdlc.py ship-review N --report <SCRATCH>/ship-codex.md --response <SCRATCH>/ship-response.md`.
+2. Have Codex review the milestone, **including the owed slices**, with the tool (step 10.2
+   says how), then record the round:
+   `uv run python tools/sdlc.py ship-review N --report <REVIEW>/codex.md --response <SCRATCH>/ship-response.md`.
+   The tool lists each owed slice under the prompt's deferred part, with its key, issue, squash
+   commit on `epic/N` and brief, and Codex reviews each one as closely as a pull request.
 3. Its verdict:
    - **approve**: the review is no longer owed. Go on to step 2. If `epic/N` doesn't move
      before the ship, the same approval serves step 10's review.
@@ -269,15 +267,38 @@ tool step; never merge or push by hand.
    the epic, and pushes only on a pass. Run it even when `epic/N` is current: it
    records the run on the head that ships. A conflict or a failing suite escalates
    the epic to a human, and you stop.
-2. **Codex reviews the milestone's whole diff** on that head. Fill
-   `references/codex-milestone-prompt.md` into `<SCRATCH>/ship-prompt.md` and run it
-   from `<PRIMARY>/.worktrees/epic-N`, as `work-slice` §8 runs Codex
-   (`< /dev/null`, stdout to `<SCRATCH>/ship-codex.md`, stderr apart, `timeout: 600000`).
+2. **Codex reviews the milestone's whole diff** on that head, run by the tool. Run the Bash
+   call in the background (`run_in_background`) and wait for it to finish: with its one retry
+   it can take longer than a foreground call is allowed to.
+
+   ```bash
+   uv run python tools/sdlc.py codex-review --milestone N --out <REVIEW>
+   ```
+
+   `<REVIEW>` is a folder of its own in your scratchpad (say `ship-review/`). Don't run Codex
+   any other way. The tool:
+   - refuses unless `<PRIMARY>/.worktrees/epic-N` is clean and at `epic/N`'s head (`sync N`
+     leaves it there), checks that again after the run, and writes the report's `HEAD:` line
+     itself;
+   - writes `milestone.md` (the demo steps, each slice's Outcome and Acceptance criteria) and
+     one brief per slice to `<REVIEW>`, since Codex's sandbox has no network, and fills
+     `references/codex-milestone-prompt.md` with each slice's key, issue, squash commit and
+     brief, and the slices owed a review (step 1b);
+   - from round 2 on, adds your response from the latest recorded round of this milestone,
+     and refuses if that round asked for changes and has no response;
+   - runs Codex on the repo's settings (`.sdlc/config.json`'s `codex` section), never your
+     own Codex config, retries once on a timeout or no verdict, and saves the report, with what
+     the round ran under, to `<REVIEW>/codex.md`.
+
+   `--dry-run` prints the prompt and the command and runs nothing. Exit 1 is a refusal: fix
+   what it says. Exit 3 is "Codex can't run" (the end of `<REVIEW>/codex.err` says why): report
+   the `next:` line and stop; the milestone waits for its review.
+
    Answer each finding in `<SCRATCH>/ship-response.md`, then record the round **before
    anything changes on `epic/N`**:
 
    ```bash
-   uv run python tools/sdlc.py ship-review N --report <SCRATCH>/ship-codex.md --response <SCRATCH>/ship-response.md
+   uv run python tools/sdlc.py ship-review N --report <REVIEW>/codex.md --response <SCRATCH>/ship-response.md
    ```
 
    Every slice was already reviewed, so this looks for what only shows up

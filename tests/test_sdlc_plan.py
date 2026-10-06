@@ -529,7 +529,6 @@ def test_a_milestone_needs_units_of_work():
 
 import re  # noqa: E402
 import subprocess  # noqa: E402
-from pathlib import Path  # noqa: E402
 
 from tools import codex_review  # noqa: E402
 from tests.fake_codex import APPROVES, NO_VERDICT, SETTINGS, calls, install, no_real_codex_home  # noqa: E402,F401

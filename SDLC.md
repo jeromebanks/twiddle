@@ -150,6 +150,8 @@ Instead the agents review it:
 
 1. The planner checks it with its `advisor`.
 2. **Codex** reviews it read-only, ending in `VERDICT: approve` or `VERDICT: changes`.
+   `codex-review --plan N` runs each round on the revision as posted, held to the currently
+   approved PRD or diagnosis, in a scratch checkout of `origin/main` it makes and removes.
 3. The planner accepts or rebuts each finding, and each round is posted as a
    `plan-review` comment.
 4. When Codex approves the latest revision, that's consensus, and `plan-create`
@@ -216,8 +218,15 @@ several can run at once. A slice's state is read off GitHub:
 
 ### Codex reviews
 
+**`codex-review` is the only way a review is run**: `--pr PR` for a slice, `--plan N` for a plan
+revision, `--milestone N` for a milestone's diff. It fills the repo's prompt, runs Codex on the
+repo's settings, checks the commit it reads and stamps the report. Never Codex's own
+`codex exec review`, the Codex plugin for Claude Code, or a `codex exec` run by hand: each brings
+instructions or settings the repo doesn't own, and nothing on the record would show it.
+
 Codex reviews twice: each slice on its PR, and each milestone's whole diff before it ships
-(`ship-review`). A slice's own review moves to its milestone's in two cases:
+(`codex-review --milestone N`, recorded with `ship-review`). A slice's own review moves to its
+milestone's in two cases:
 
 - **Routine slices.** `.sdlc/config.json`'s `slice_review` maps a complexity to `slice` or
   `milestone`. Here `routine` is `milestone`; `judgment`, `novel` and unrated slices are
@@ -268,7 +277,7 @@ And the tool only sets things up; the real binary decides what it loads. That is
 checked by hand once, in the demo of #100's first milestone, from a real run's session log.
 
 The saved report's header (`HEAD:`, `Model:`, `Effort:`, `Codex:`, `Prompt-SHA256:`) is written
-by the tool. `pr-review` copies it into the round's comment and its marker. Only the lines
+by the tool. `pr-review`, `plan-review` and `ship-review` copy it into the round's comment and its marker. Only the lines
 directly under `HEAD:` count, so a report can't claim a model of its own. A report saved before
 the header existed is still recorded, without it.
 
