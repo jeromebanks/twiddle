@@ -40,14 +40,14 @@ default 10), refused when no alarm is going off there. Each takes
 `--dry-run` and is journalled (`alarm_run`/`alarm_stop`/`alarm_snooze`).
 
 `alarm sources [<name> [<query>]]` is read-only and offline (but for
-`alarm sources spotify <words>`, which searches Spotify): every source
-`--source` takes, whether it needs this Mac at fire time and its fallback; or
+`alarm sources spotify <words>` and `bandcamp <words>`, which search Spotify and
+Bandcamp): every source `--source` takes, whether it needs this Mac at fire time and its fallback; or
 one source's choices (`alarm sources station kexp`). `alarm list` marks an
 alarm whose source needs this Mac with ⌁.
 
-`alarm serve --dir DIR` runs in the foreground and serves DIR's audio files to
-the household's speakers (or just `--room`'s) on a fixed port, for an alarm
-whose source needs this Mac (`alarms/server.py`). It writes to no speaker; each
+`alarm serve --dir DIR` runs in the foreground and serves DIR's audio files, and
+Bandcamp tracks (a fresh stream URL per request), to the household's speakers
+(or just `--room`'s) on a fixed port, for an alarm whose source needs this Mac (`alarms/server.py`). It writes to no speaker; each
 file sent is a bounded span in the journal, and it closes the spans a crash of
 its own left open. Anything it can't serve is refused at once. `--dry-run`
 resolves everything and prints the plan without listening or journalling.

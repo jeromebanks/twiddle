@@ -5,14 +5,17 @@ is conftest's temp file. No speaker, network or Spotify is touched.
 """
 import http.client
 import json
+import threading
 import time
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from twiddle import alarm_cli, cli, play, report
 from twiddle.alarms import server
+from twiddle.alarms.sources import bandcamp as bc
 from tests.test_alarm_cli import household, run
 
 T0 = datetime(2026, 10, 4, 6, 0, 0, tzinfo=timezone.utc)
@@ -47,7 +50,6 @@ def sounds(tmp_path):
 @pytest.fixture
 def srv(sounds):
     s = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")
-    import threading
     threading.Thread(target=s.serve_forever, daemon=True).start()
     yield s
     s.stop()
@@ -118,7 +120,6 @@ def test_a_known_audio_file_is_served_as_audio(srv):
 
 def test_this_mac_can_fetch_so_a_curl_can_try_it(sounds):
     s = server.AlarmServer(sounds, {"10.9.9.9"}, port=0, host="127.0.0.1")
-    import threading
     threading.Thread(target=s.serve_forever, daemon=True).start()
     try:
         assert get(s, "/bell.mp3")[0] == 200      # loopback is this Mac
@@ -156,7 +157,6 @@ def test_a_serve_is_one_span_with_an_id_and_a_bound(srv):
 def test_two_overlapping_serves_to_one_speaker_are_two_independent_spans(sounds):
     (sounds / "long.mp3").write_bytes(b"z" * (48 * 1024 * 1024))   # more than the sockets buffer
     s = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")
-    import threading
     threading.Thread(target=s.serve_forever, daemon=True).start()
     conns = []
     try:
@@ -202,7 +202,6 @@ def test_the_pairing_keeps_interleaved_spans_of_one_action_and_speaker_apart(tmp
 def test_stopping_the_server_closes_the_spans_still_open(sounds):
     (sounds / "long.mp3").write_bytes(b"z" * (48 * 1024 * 1024))
     s = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")
-    import threading
     threading.Thread(target=s.serve_forever, daemon=True).start()
     c = http.client.HTTPConnection("127.0.0.1", s.port, timeout=10)
     c.request("GET", "/long.mp3")
@@ -227,7 +226,6 @@ def test_stopping_the_server_closes_the_spans_still_open(sounds):
 def test_a_reader_that_stalls_cannot_hold_a_span_past_its_bound(sounds):
     (sounds / "long.mp3").write_bytes(b"z" * (48 * 1024 * 1024))
     s = server.AlarmServer(sounds, None, port=0, max_s=0.5, host="127.0.0.1")
-    import threading
     threading.Thread(target=s.serve_forever, daemon=True).start()
     c = http.client.HTTPConnection("127.0.0.1", s.port, timeout=10)
     try:
@@ -250,7 +248,6 @@ def test_the_server_refuses_a_bound_that_is_not_finite_and_positive(sounds):
 
 def test_a_handler_accepted_before_stop_cannot_open_a_span_after_it(sounds):
     s = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")
-    import threading
     threading.Thread(target=s.serve_forever, daemon=True).start()
     paused, go = threading.Event(), threading.Event()
     real = s._open
@@ -384,7 +381,6 @@ def test_a_second_server_on_another_port_leaves_the_first_ones_live_serves_open(
     (sounds / "long.mp3").write_bytes(b"z" * (48 * 1024 * 1024))
     first = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")
     second = server.AlarmServer(sounds, None, port=0, host="127.0.0.1")   # binds fine
-    import threading
     threading.Thread(target=first.serve_forever, daemon=True).start()
     c = http.client.HTTPConnection("127.0.0.1", first.port, timeout=10)
     try:
@@ -483,11 +479,6 @@ def test_serve_runs_until_interrupted_then_closes_its_spans(fake_house, sounds, 
 
 
 # ---- Bandcamp through the agent ----------------------------------------------
-
-import threading                                                       # noqa: E402
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer    # noqa: E402
-
-from twiddle.alarms.sources import bandcamp as bc                      # noqa: E402
 
 TRACK = {"page": "https://gulls.bandcamp.com/album/salt", "id": 42}
 MP3 = b"ID3" + b"m" * 5000

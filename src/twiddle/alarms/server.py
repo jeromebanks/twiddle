@@ -82,8 +82,7 @@ def permitted(ip: str, speakers: set[str] | None) -> bool:
 
 def resolve_stream(track: dict) -> str:
     """A fresh audio URL for a Bandcamp track (the default `resolve`)."""
-    from ..scene import bandcamp
-    return bandcamp.stream_url(track)
+    return bc.scene_bandcamp().stream_url(track)
 
 
 def open_stream(url: str, timeout: float = UPSTREAM_S):
@@ -91,9 +90,9 @@ def open_stream(url: str, timeout: float = UPSTREAM_S):
     import urllib.request
     if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
         raise ValueError(f"not an http(s) URL: {url!r}")
-    from ..scene import bandcamp
     return urllib.request.urlopen(
-        urllib.request.Request(url, headers={"User-Agent": bandcamp.UA}), timeout=timeout)
+        urllib.request.Request(url, headers={"User-Agent": bc.scene_bandcamp().UA}),
+        timeout=timeout)
 
 
 def _alive(pid) -> bool:
@@ -272,7 +271,7 @@ class AlarmServer:
                         result.close()
                     return
                 box["result"], box["exc"] = result, exc_
-            done.set()
+                done.set()          # inside the lock: the deadline can't see it unset and abandon it
 
         threading.Thread(target=work, daemon=True).start()
         if not done.wait(self.resolve_s):

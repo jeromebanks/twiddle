@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import json
 import re
 from typing import Callable
@@ -84,8 +85,15 @@ def _household_host(anchor: str | None = None) -> str:
                          "LAN, or pass --anchor <ip>") from exc
 
 
-def _page_tracks(page: str) -> list[dict]:
+def scene_bandcamp():
+    """The module holding scene's Bandcamp search, tracks and `stream_url`; the
+    one place that names it (lazy: scene stays out of `alarm list`'s imports)."""
     from ...scene import bandcamp
+    return bandcamp
+
+
+def _page_tracks(page: str) -> list[dict]:
+    bandcamp = scene_bandcamp()
     try:
         return bandcamp.page_tracks(page)
     except Exception as exc:
@@ -94,7 +102,7 @@ def _page_tracks(page: str) -> list[dict]:
 
 def _search(query: str) -> list[dict]:
     """Streamable tracks of the bands named exactly `query`, each with its band."""
-    from ...scene import bandcamp
+    bandcamp = scene_bandcamp()
     try:
         out = []
         for band in [b for b in bandcamp.search(query) or [] if not b.get("is_label")][:3]:
@@ -128,8 +136,8 @@ class Bandcamp(Source):
 
     def bind(self, anchor: str | None) -> "Bandcamp":
         """The same source asking the speaker the CLI was pointed at."""
-        bound = type(self).__new__(type(self))
-        bound.__dict__.update(self.__dict__, anchor=anchor)
+        bound = copy.copy(self)
+        bound.anchor = anchor
         return bound
 
     def build(self, choice: str = "") -> tuple[str, str]:
