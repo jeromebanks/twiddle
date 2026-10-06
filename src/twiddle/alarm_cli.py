@@ -23,7 +23,8 @@ write is refused if the alarm list moved since it was read (`alarms/clock.py`).
 `alarm add` WRITES one `CreateAlarm`; `alarm edit <id>` one `UpdateAlarm`
 changing only the fields named on the command line. Between them every field
 `AlarmClock` takes is settable: time, days, duration, volume, play mode,
-include-grouped-rooms, room, on/off and source (the chime; on edit, by
+include-grouped-rooms, room, on/off and source (`--source chime`,
+`station:<key>`, or any other registered in `alarms/sources/`; on edit, by
 default, the source as it is, byte-for-byte). A room is named, never
 addressed: a bonded follower's alarm goes on its room's primary, and the
 answer says so. Both take `--dry-run`.
@@ -35,6 +36,11 @@ speaker's `RunAlarm`, now, on the alarm's room. `alarm stop|snooze --room`
 WRITE: the group's own `Stop` / `SnoozeAlarm` (5, 10, 15 or 30 minutes,
 default 10), refused when no alarm is going off there. Each takes
 `--dry-run` and is journalled (`alarm_run`/`alarm_stop`/`alarm_snooze`).
+
+`alarm sources [<name> [<query>]]` is read-only and offline: every source
+`--source` takes, whether it needs this Mac at fire time and its fallback; or
+one source's choices (`alarm sources station kexp`). `alarm list` marks an
+alarm whose source needs this Mac with ⌁.
 
 Follows the rest of the package: the `ok`/`error` envelope, `--json` anywhere.
 """
@@ -48,14 +54,15 @@ from dataclasses import replace
 from datetime import datetime, time, timedelta
 from pathlib import Path
 
-from .alarms import baseline, clock
-from .alarms.model import CHIME_URI, NAMED, Alarm, Recurrence, Unreadable, UnreadableAlarm
+from .alarms import baseline, clock, sources
+from .alarms.model import NAMED, Alarm, Recurrence, Unreadable, UnreadableAlarm
 from . import play
 from .control_cli import (SNAPSHOT_DIR, BadSpec, add_write_args, emit, fail,
                           parse_sleep_spec)
 from .household import Ambiguous, Household, NotFound, Speaker
 
 CHIME = "Sonos chime"
+NEEDS_MAC = "⌁"
 SNAPSHOT_FILE = SNAPSHOT_DIR / "alarms.json"
 # Monday first for reading; Sonos numbers the days from Sunday = 0.
 _READING_ORDER = (1, 2, 3, 4, 5, 6, 0)
@@ -279,6 +286,7 @@ def row(house: Household, alarm: Alarm, hh: clock.HouseholdTime) -> dict:
     """Everything `alarm list` shows about one alarm, JSON-ready."""
     when = next_fire(alarm, hh.local)
     at = _start(alarm)
+    source = sources.recognise(alarm.program_uri, alarm.program_metadata)
     return {
         "id": alarm.id,
         **aimed_at(house, alarm.room_uuid),
@@ -295,6 +303,8 @@ def row(house: Household, alarm: Alarm, hh: clock.HouseholdTime) -> dict:
         "play_mode": alarm.play_mode,
         "include_linked_zones": alarm.include_linked_zones,
         "source_title": source_title(alarm),
+        "source": source.name if source else None,
+        "needs_mac": bool(source and source.needs_mac),
         "program_uri": alarm.program_uri,
         "next_fire": when.isoformat() if when else None,
         "next_fire_text": fire_text(when, hh.local, hh),
@@ -343,11 +353,14 @@ def human(rows: list[dict], hh: clock.HouseholdTime, bad: list[dict] = ()) -> st
         on = "on " if r["enabled"] else "off"
         lines.append(
             f"  {'#' + r['id']:>4} {on} {r['time_text']:>8}  {r['days_text']:<18} vol {r['volume']:<3} "
-            f"{r['duration_text']:<7} {r['play_mode']:<11} {r['source_title']}")
+            f"{r['duration_text']:<7} {r['play_mode']:<11} "
+            f"{NEEDS_MAC + ' ' if r['needs_mac'] else ''}{r['source_title']}")
         if r["status"] != "ok":
             lines.append(f"      ! {_LABEL[r['status']].format(**r)}")
         if r["next_fire"]:
             lines.append(f"      next: {r['next_fire_text']}")
+    if any(r["needs_mac"] for r in rows):
+        lines.append(f"\n{NEEDS_MAC} needs this Mac when it goes off")
     if bad:
         lines.append(unreadable_text(bad))
     lines.append(f"\nhousehold time {clock_text(hh.local.time(), hh.time_format)}"
@@ -382,7 +395,6 @@ PLAY_MODES = {name: play.encode_play_mode(*k) for k, name in _MODE_NAME.items()}
 _DAY_NAMES = ("sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday")
 DAYS_HELP = ("once, daily, weekdays, weekends, days like mon,wed,fri or mon-fri, "
              "or the speaker's own ON_<days> (Sunday 0)")
-SOURCES = {"chime": (CHIME_URI, "")}
 
 
 def parse_time(text: str) -> str:
@@ -468,8 +480,10 @@ def settings(args) -> dict:
         out["enabled"] = args.enabled
     if getattr(args, "include_grouped_rooms", None) is not None:
         out["include_linked_zones"] = args.include_grouped_rooms
-    if getattr(args, "source", None) in SOURCES:
-        out["program_uri"], out["program_metadata"] = SOURCES[args.source]
+    spec = getattr(args, "source", None)
+    editing = getattr(args, "alarm_id", None) is not None
+    if spec is not None and not (editing and spec.strip().lower() == sources.KEEP):
+        _, out["program_uri"], out["program_metadata"] = sources.build(spec)
     return out
 
 
@@ -849,6 +863,40 @@ def cmd_edit(args):
                 f"updated {what(after)}")
 
 
+def cmd_sources(args):
+    """Every registered source, or one source's choices. Reads the registry
+    and the files behind it; asks no speaker."""
+    if args.name is None:
+        rows = [{"name": s.name, "title": s.title, "needs_mac": s.needs_mac,
+                 "takes_choice": s.takes_choice, "fallback": s.fallback}
+                for s in sources.all_sources()]
+        lines = [f"  {(r['name'] + ':<choice>') if r['takes_choice'] else r['name']:<18} "
+                 f"{NEEDS_MAC if r['needs_mac'] else ' '} {r['title']}"
+                 f"\n{'':<23}if it can't play: {r['fallback']}" for r in rows]
+        mark = any(r["needs_mac"] for r in rows)
+        return emit(args, {"sources": rows},
+                    "--source takes:\n" + "\n".join(lines)
+                    + (f"\n\n{NEEDS_MAC} needs this Mac when the alarm goes off" if mark else ""))
+    try:
+        source = sources.get(args.name)
+    except ValueError as exc:
+        return fail(args, str(exc))
+    found = source.choices(args.query)
+    rows = [{"key": c.key, "title": c.title, "detail": c.detail} for c in found]
+    head = f"{source.title}{' ' + NEEDS_MAC if source.needs_mac else ''}"
+    if not source.takes_choice:
+        text = f"{head}: --source {source.name} (no choice to make)"
+    elif not rows:
+        text = f"{head}: nothing matches {args.query!r}" if args.query else f"{head}: nothing"
+    else:
+        width = max(len(r["key"]) for r in rows)
+        text = f"{head}, --source {source.name}:<key>\n" + "\n".join(
+            f"  {r['key']:<{width}}  {r['title']}" + (f" -- {r['detail']}" if r["detail"] else "")
+            for r in rows)
+    return emit(args, {"source": source.name, "needs_mac": source.needs_mac,
+                       "query": args.query, "choices": rows}, text)
+
+
 # ---- ringing: status, try, stop, snooze ----------------------------------------
 
 def ringing_row(house: Household, group, running: clock.Running | None,
@@ -1064,6 +1112,13 @@ def register(sub, parents=None):
     _field_args(ed, adding=False)
     ed.set_defaults(func=cmd_edit)
 
+    so = asub.add_parser(**kw, name="sources",
+                         help="what an alarm can play, or one source's choices (read-only)")
+    so.add_argument("name", nargs="?", default=None,
+                    help="one source, to list what it can play")
+    so.add_argument("query", nargs="?", default="", help="narrow that list")
+    so.set_defaults(func=cmd_sources)
+
     st = asub.add_parser(**kw, name="status",
                          help="is an alarm going off, and where (read-only)")
     st.add_argument("--room", default=None, help="only this room, by name")
@@ -1117,12 +1172,12 @@ def _field_args(p, adding: bool):
                     help="switched on" + default("on"))
     on.add_argument("--off", dest="enabled", action="store_const", const=False,
                     help="switched off")
-    if adding:
-        p.add_argument("--source", choices=sorted(SOURCES), default=None,
-                       help="what it plays (default chime)")
-    else:
-        p.add_argument("--source", choices=[*sorted(SOURCES), "keep"], default=None,
-                       help="what it plays (default keep: the source as it is, byte-for-byte)")
+    # No `choices`: the registry is read when the command runs, so a source
+    # registered in `alarms/sources/` needs no edit here.
+    p.add_argument("--source", default=None, metavar="NAME[:CHOICE]",
+                   help="what it plays: chime, station:<key>, ... (`alarm sources` lists them)"
+                        + (" (default chime)" if adding
+                           else "; keep (the default) leaves it byte-for-byte"))
     p.add_argument("--anchor", default=None,
                    help="speaker IP to query instead of SSDP discovery")
     add_write_args(p)

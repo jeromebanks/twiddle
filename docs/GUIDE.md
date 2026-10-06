@@ -220,7 +220,7 @@ every field `AlarmClock` takes is settable:
 | `--include-grouped-rooms` / `--no-...` | `IncludeLinkedZones` | also play in the rooms grouped with it when it fires (no) |
 | `--room` | `RoomUUID` | a room by name (required on `add`) |
 | `--on` / `--off` | `Enabled` | (on) |
-| `--source` | `ProgramURI`, `ProgramMetaData` | `chime`; on `edit`, `keep` (the default) leaves the source byte-for-byte (`chime`) |
+| `--source` | `ProgramURI`, `ProgramMetaData` | `chime`, `station:<key>` (any station in dial's catalog), or any other source `alarm sources` lists; on `edit`, `keep` (the default) leaves the source byte-for-byte (`chime`) |
 
 So editing anything about an alarm whose source twiddle doesn't recognise (an
 iHeart or Spotify alarm) sends its `ProgramURI` and `ProgramMetaData` back
@@ -228,6 +228,26 @@ untouched; as with `enable`, whether a real speaker keeps a Spotify alarm's
 `<Content>` child through that `UpdateAlarm` is unverified (see above). An edit
 that would change nothing writes nothing. In `--json`, `room` is where the
 alarm was and `to_room` where `--room` moves it.
+
+What an alarm can play comes from `alarms/sources/`, one module per source,
+each saying whether **this Mac must be up when the alarm goes off** and what
+the room does if the source can't play:
+
+```bash
+uv run twiddle alarm sources               # every source, its needs-this-Mac mark and fallback (read-only)
+uv run twiddle alarm sources station kexp  # a source's choices, narrowed (read-only)
+uv run twiddle alarm add --room roam --time 07:00 --days weekdays --source station:kalx --dry-run
+```
+
+`alarm sources` reads only the registry and the catalog: no speaker, no
+network. A station alarm is the station's own stream as an
+`x-rincon-mp3radio://` URI, exactly what `tune` hands a speaker, so the
+speaker fetches it itself and this Mac has no part in it; like `tune`, an
+https stream is fetched over http. Neither the chime nor a station needs this
+Mac. A source that does is marked `⌁` by `alarm sources` and `alarm list`
+(`needs_mac` in `--json`, beside `source`, the source's name, or null for one
+twiddle doesn't recognise). That a station alarm falls back to the chime when
+its stream can't be reached is assumed, not yet verified on a speaker.
 
 The room is named, never addressed. An alarm belongs to a room, so it goes on
 the room's primary unit: naming a bonded follower (`"Sonos Roam (R)"`, a

@@ -340,15 +340,19 @@ def track_didl(title: str, art: str | None = None, url: str | None = None,
     )
 
 
+def radio_uri(stream_url: str) -> str:
+    """The URI a speaker fetches a stream by itself: `x-rincon-mp3radio://`
+    in place of http(s), which a Sonos fetches over http."""
+    for prefix in ("http://", "https://"):
+        if stream_url.startswith(prefix):
+            return RADIO_SCHEME + stream_url[len(prefix):]
+    return stream_url
+
+
 def play_radio(ip: str, stream_url: str, title: str = "Stream",
                art: str | None = None) -> None:
     """Play an internet radio stream directly, bypassing all Sonos services."""
-    url = stream_url
-    for prefix in ("http://", "https://"):
-        if url.startswith(prefix):
-            url = RADIO_SCHEME + url[len(prefix):]
-            break
-    set_uri(ip, url, radio_didl(title, art))
+    set_uri(ip, radio_uri(stream_url), radio_didl(title, art))
     play(ip)
 
 
