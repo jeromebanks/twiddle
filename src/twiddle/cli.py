@@ -15,6 +15,8 @@ from . import limits_cli
 from .scene import cli as scene_cli
 
 DEFAULT_LOG = Path("logs/monitor.jsonl")
+# A soak is bounded by its own deadline; the margin covers the clip still playing.
+SOAK_SPAN_MARGIN_S = 600
 
 
 def _inventory(ips: list[str]):
@@ -483,7 +485,8 @@ def cmd_soak(args):
           "prev_volume": prev_vol})
 
     # From here until we stop, this Mac is part of the audio path.
-    play.journal_span("serving_start", target, url=url)
+    span_id = play.journal_span("serving_start", target, url=url,
+                                max_s=args.duration * 60 + SOAK_SPAN_MARGIN_S)
     play.set_volume(target, args.volume)
     play.clear_queue(target)
     for _ in range(reps):
@@ -544,7 +547,7 @@ def cmd_soak(args):
         emit({"kind": "soak_end", "gaps": gaps, "stalls": stalls,
               "unknown": unknown})
         play.stop(target)
-        play.journal_span("serving_end", target)
+        play.journal_span("serving_end", target, span_id=span_id)
         play.set_volume(target, prev_vol)
         srv.stop()
         fh.close()

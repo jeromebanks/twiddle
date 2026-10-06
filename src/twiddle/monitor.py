@@ -343,7 +343,9 @@ class Monitor:
         record for an offset change alone carries `offset_from`, the last read:
         a fire in that gap is scored under both offsets rather than neither.
         """
-        found = clock.list_alarms(self.anchor)
+        # Tolerant: an alarm the model can't read is named in the record, not
+        # left to end it, so the other alarms are still discounted.
+        found = clock.list_alarms(self.anchor, tolerant=True)
         hh = clock.household_time(self.anchor)
         offset = round((hh.local - hh.utc).total_seconds() / 900) * 900
         now, last_read = _now(), self._alarms_read_at
@@ -362,6 +364,10 @@ class Monitor:
                         "room_uuid": a.room_uuid,
                         "room": rooms.get(a.room_uuid, a.room_uuid)}
                        for a in found.alarms],
+            **({"unreadable": [{"id": u.id, "room_uuid": u.room_uuid,
+                                "room": rooms.get(u.room_uuid, u.room_uuid),
+                                "reason": u.reason} for u in found.unreadable]}
+               if found.unreadable else {}),
         }
         self._alarm_schedule = schedule
         self._emit(schedule | {"ts": now})

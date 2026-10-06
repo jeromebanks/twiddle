@@ -7,10 +7,12 @@ change what your next `np` asks about.
 The intervention journal, `scene`'s cache and its published dataset are redirected too: a test that
 plays through a fake must never leave a line in the real
 `logs/interventions.jsonl`, where `analyse` would discount a real fault.
+So are the launchd agents: an alarm points at the installed agent's port, and
+this Mac's real agent must not decide what a test builds.
 """
 import pytest
 
-from twiddle import comedy, lookup, netstats, play, ratelimit, spotify_ops, stations, streaminfo
+from twiddle import comedy, daemon, lookup, netstats, play, ratelimit, spotify_ops, stations, streaminfo
 from twiddle.dial import state as dial_state
 from twiddle.scene import cache as scene_cache
 from twiddle.scenedata import cache as scenedata_cache
@@ -30,6 +32,7 @@ def _isolated_state_files(tmp_path, monkeypatch):
     monkeypatch.setattr(lookup, "DISCOGS_TOKEN_FILE", tmp_path / "discogs.json")
     monkeypatch.delenv("DISCOGS_TOKEN", raising=False)
     monkeypatch.setattr(play, "INTERVENTION_LOG", tmp_path / "interventions.jsonl")
+    monkeypatch.setattr(daemon, "AGENT_DIR", tmp_path / "LaunchAgents")
     monkeypatch.setattr(scene_cache, "CACHE_DIR", tmp_path / "scene")
     monkeypatch.setattr(scenedata_cache, "CACHE_DIR", tmp_path / "scene")
     monkeypatch.setattr(scene_dataset, "DATASET_PATH", tmp_path / "scene-dataset" / "dataset.json")

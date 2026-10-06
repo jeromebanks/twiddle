@@ -569,9 +569,11 @@ def start_queue(sess: spotify.Session, dev: dict, picks: list[QueuePick],
     if timer_armed:
         tail_start = queue_ends_at - timedelta(seconds=60)
         tail_end = fires_at + timedelta(seconds=JOURNAL_MARGIN_S)
-        play.journal_span("comedy_sleep_tail_start", room_ip,
+        sid = play.new_span_id()
+        bound = (tail_end - tail_start).total_seconds()
+        play.journal_span("comedy_sleep_tail_start", room_ip, span_id=sid, max_s=bound,
                            ts=tail_start.isoformat(timespec="milliseconds"))
-        play.journal_span("comedy_sleep_tail_end", room_ip,
+        play.journal_span("comedy_sleep_tail_end", room_ip, span_id=sid,
                            ts=tail_end.isoformat(timespec="milliseconds"))
 
     return {"albums": [{"name": p.name, "artist": p.artist} for p in picks],
