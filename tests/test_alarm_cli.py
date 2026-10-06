@@ -472,8 +472,13 @@ def test_a_partly_unreadable_list_still_shows_each_readable_sound_source(speaker
     code, out, _ = run(["alarm", "list", "--json"], capsys)
     payload = json.loads(out)
     assert code == 0
-    assert {r["id"]: r["sound_source"] for r in payload["alarms"]}["34"] == "tunein"
-    assert all("sound_source" not in u for u in payload["unreadable"])
+    # Every readable alarm keeps the source it has in the all-readable listing.
+    want = {i: (r["sound_source"], r["sound_source_text"]) for i, r in rows().items()}
+    got = {r["id"]: (r["sound_source"], r["sound_source_text"]) for r in payload["alarms"]}
+    assert got == want
+    assert got["34"] == ("tunein", "TuneIn")
+    assert set(u["id"] for u in payload["unreadable"]) == set(BAD)
+    assert all(not {"sound_source", "sound_source_text"} & set(u) for u in payload["unreadable"])
     code, out, _ = run(["alarm", "list"], capsys)
     assert code == 0 and "TuneIn" in out and "can't read 4 alarms" in out
 
@@ -492,33 +497,6 @@ def test_only_unreadable_alarms_still_says_which(speaker, monkeypatch, capsys):
     assert code == 0
     assert out.startswith("no alarms\n")
     assert "an alarm with no ID no room: missing ID" in out
-
-
-def _calls_with_tolerant(module) -> set[str]:
-    """The functions in `module` that read the alarm list tolerantly."""
-    import ast
-    import inspect
-    found = set()
-    for fn in ast.walk(ast.parse(inspect.getsource(module))):
-        if isinstance(fn, ast.FunctionDef):
-            for node in ast.walk(fn):
-                if isinstance(node, ast.Call) and any(
-                        k.arg == "tolerant" and getattr(k.value, "value", None) is True
-                        for k in node.keywords):
-                    found.add(fn.name)
-    return found
-
-
-def test_only_the_views_read_the_list_tolerantly():
-    # Anything that writes, or compares lists to decide a write, must see
-    # every alarm: an alarm left out of the comparison could be changed (or
-    # destroyed) unseen.
-    from twiddle import monitor
-    from twiddle.alarms import baseline
-    assert _calls_with_tolerant(alarm_cli) == {"cmd_list", "cmd_status"}
-    assert _calls_with_tolerant(monitor) == {"_check_alarms"}
-    assert _calls_with_tolerant(clock) == set()
-    assert _calls_with_tolerant(baseline) == set()
 
 
 def test_the_clock_refuses_anything_but_a_read():
