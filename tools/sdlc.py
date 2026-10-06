@@ -2528,11 +2528,12 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
                         "review the current head (record each round before pushing its fixes)")
     response = Path(args.response).read_text().strip() if args.response else ""
     rnd = len(reviews) + 1
-    # the next round's prompt reads the response back from after RESPONSE_MARK
+    # the next round's prompt reads the response back from after its boundary (codex_review.response_section)
     body = (f"**Review {rnd} — Codex on `{pr['headRefOid'][:12]}`: `{verdict}`** "
             f"({changes_rounds(reviews) + (verdict == 'changes')}/{limit} change rounds used)\n\n"
-            f"<details><summary>Codex's review</summary>\n\n{report.strip()}\n\n"
-            + (codex_review.RESPONSE_MARK + response if response else "</details>"))
+            f"<details><summary>Codex's review</summary>\n\n{codex_review.unmarked(report).strip()}\n\n</details>")
+    if response:
+        body += codex_review.response_section(response)
     comment = render_comment("pr-review", None, body, config, sha=pr["headRefOid"], verdict=verdict, round=str(rnd))
     if len(comment) > COMMENT_LIMIT:
         raise SdlcError(f"the review comment is {len(comment)} characters, over GitHub's limit")

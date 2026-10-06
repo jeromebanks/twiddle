@@ -30,8 +30,12 @@ VERDICT_RE = re.compile(r"\A[*_`]*VERDICT:[*_`\s]*(approve|changes)[*_`.\s]*\Z",
 HEAD_RE = re.compile(r"^\s*[*_`]*HEAD:[*_`\s]*([0-9a-f]{40})\b", re.MULTILINE | re.IGNORECASE)
 PLACEHOLDER_RE = re.compile(r"<[A-Z]")
 ROUND2_RE = re.compile(r"^- <ROUND2>(.*?)</ROUND2>\n", re.MULTILINE | re.DOTALL)
-# how `pr-review` records a round: Codex's report folded in <details>, then the implementer's answer
-RESPONSE_MARK = "</details>\n\n### Claude's response\n\n"
+# How `pr-review` records a round: Codex's report folded in <details>, then the implementer's answer after
+# RESPONSE_MARK, a boundary `pr-review` removes from the report and the response first, so its first occurrence
+# is the real one. Rounds recorded before it fall back to the heading that follows the report (LEGACY_MARK).
+RESPONSE_MARK = "<!-- sdlc:response -->"
+RESPONSE_HEADING = "### Claude's response"
+LEGACY_MARK = f"</details>\n\n{RESPONSE_HEADING}\n\n"
 
 UNAVAILABLE = 3   # Codex can't run: not on PATH, or no verdict twice (timeouts included)
 ATTEMPTS = 2      # the first run, and one retry
@@ -118,18 +122,32 @@ def latest_response(rounds: list[dict[str, Any]]) -> tuple[int, str | None]:
     """(the latest recorded round's number, its "Claude's response") for the next round's prompt.
 
     `rounds` are the PR's recorded `pr-review` rounds, oldest first, each with its `verdict` and comment
-    `body`. The response is what follows `RESPONSE_MARK` (the report's closing `</details>` and the heading,
-    as `pr-review` writes them), so neither a heading quoted in the report nor a `<details>` block in the
-    response itself confuses it. A round that asked for changes must carry one."""
+    `body`. The response is what follows `RESPONSE_MARK` (see `response_section`), so nothing quoted in the
+    report and no `<details>` block in the response itself is taken for it. A round that asked for changes
+    must carry one."""
     if not rounds:
         return 0, None
     last = rounds[-1]
     body = last.get("body") or ""
-    response = body.split(RESPONSE_MARK, 1)[1].strip() or None if RESPONSE_MARK in body else None
+    mark = RESPONSE_MARK if RESPONSE_MARK in body else LEGACY_MARK
+    response = None
+    if mark in body:
+        after = body.split(mark, 1)[1].strip()
+        response = after.removeprefix(RESPONSE_HEADING).strip() or None
     if response is None and last.get("verdict") == "changes":
         raise ReviewError(f"round {len(rounds)} asked for changes and recorded no response: Codex would never see "
                           "the answers to its findings. Record the round with `pr-review --response`, then run this")
     return len(rounds), response
+
+
+def unmarked(text: str) -> str:
+    """Text that can't be mistaken for a round's response boundary."""
+    return text.replace(RESPONSE_MARK, "")
+
+
+def response_section(response: str) -> str:
+    """What `pr-review` appends after the folded report: the boundary, then the implementer's answer."""
+    return f"\n\n{RESPONSE_MARK}\n{RESPONSE_HEADING}\n\n{unmarked(response).strip()}"
 
 
 def fill_pr_prompt(template: str, slice_file: Path, base: str, epic: int, response_file: Path | None) -> str:
@@ -178,6 +196,11 @@ def _git(args: list[str], cwd: Path) -> str:
     return proc.stdout
 
 
+def dirty_files(wt: Path) -> list[str]:
+    """What `git status` says isn't committed (the porcelain lines' paths; their leading status column kept intact)."""
+    return [l[3:] for l in _git(["status", "--porcelain"], wt).splitlines() if l.strip()]
+
+
 def git_head(cwd: Path) -> str:
     return _git(["rev-parse", "HEAD"], cwd).strip()
 
@@ -186,10 +209,9 @@ def check_worktree(wt: Path, pr_head: str) -> str:
     """The worktree's HEAD, once it's clean and is the PR's head; otherwise say which it isn't."""
     if not (wt / ".git").exists():
         raise ReviewError(f"no worktree at {wt}: `claim N --resume` makes it")
-    dirty = _git(["status", "--porcelain"], wt)
-    if dirty.strip():
+    if dirty := dirty_files(wt):
         raise ReviewError(f"the worktree {wt} is not clean, so Codex would not review the pushed head: "
-                          + ", ".join(l[3:] for l in dirty.splitlines()[:8])
+                          + ", ".join(dirty[:8])
                           + " (commit and push, or keep scratch files outside the worktree)")
     head = git_head(wt)
     if head != pr_head:
@@ -258,6 +280,9 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, timeout: floa
         if (now := git_head(wt)) != head:
             raise ReviewError(f"HEAD moved from {head[:12]} to {now[:12]} while Codex ran: nothing it said "
                               "can be bound to a commit, so no report was saved. Run the review again")
+        if dirty := dirty_files(wt):
+            raise ReviewError("the worktree changed while Codex ran (" + ", ".join(dirty[:8])
+                              + "): it didn't review the pushed head, so no report was saved. Restore it and run again")
         if output is None:
             log(f"attempt {attempt}: Codex timed out after {timeout:g}s")
             continue

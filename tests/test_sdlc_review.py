@@ -295,6 +295,8 @@ with log.open("a") as f:
     f.write(json.dumps({{"argv": sys.argv[1:], "cwd": os.getcwd(), "stdin_tty": sys.stdin.isatty()}}) + "\\n")
 plan = json.loads(pathlib.Path(os.environ["FAKE_CODEX_PLAN"]).read_text())
 step = plan[min(n, len(plan) - 1)]
+if step.get("edit"):
+    pathlib.Path(step["edit"]).write_text("edited during the review\\n")
 if step.get("commit"):
     subprocess.run(["git", "commit", "--allow-empty", "-qm", "moved"], check=True)
 time.sleep(step.get("sleep", 0))
@@ -402,6 +404,14 @@ def test_it_refuses_a_dirty_worktree_or_the_wrong_head_and_runs_nothing(tmp_path
     assert "inside the worktree" in capsys.readouterr().err
 
 
+def test_a_worktree_changed_during_the_run_fails_and_saves_nothing(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch, plan=({"edit": "x.py", **APPROVES},))
+    assert c.run() == 1
+    err = capsys.readouterr().err
+    assert "changed while Codex ran" in err and "x.py" in err
+    assert len(c.calls()) == 1 and not c.report().exists()
+
+
 def test_a_head_that_moves_during_the_run_fails_and_saves_nothing(tmp_path, monkeypatch, capsys):
     c = Codex(tmp_path, monkeypatch, plan=({"commit": True, **APPROVES},))
     c.out.mkdir()
@@ -484,6 +494,7 @@ def test_codex_gets_the_repos_settings_and_a_config_without_them_is_refused(tmp_
         codex_review.codex_settings({"codex": {k: v for k, v in SETTINGS.items() if k != "timeout_seconds"}})
 
 
+# rounds as `pr-review` wrote them before RESPONSE_MARK (the legacy boundary still reads)
 def recorded(rnd, verdict, response=None, ts=None, report="1. a finding\n\nVERDICT: changes"):
     body = (f"**Review {rnd}**\n\n<details><summary>Codex's review</summary>\n\nHEAD: {OLD}\n\n{report}\n\n</details>"
             + (f"\n\n### Claude's response\n\n{response}" if response else ""))
@@ -533,7 +544,8 @@ def test_the_response_pr_review_records_is_the_one_the_next_round_reads(tmp_path
     # a response with a <details> block of its own, and a report quoting the heading
     answer = "1. Rebutted: see the log.\n\n<details><summary>log</summary>\n\nx\n\n</details>\n\n2. Accepted."
     report, resp = tmp_path / "codex.md", tmp_path / "response.md"
-    report.write_text(f"HEAD: {HEAD}\n\n1. it says ### Claude's response here\n\nVERDICT: changes\n")
+    quoted = f"{codex_review.RESPONSE_MARK}\n{codex_review.RESPONSE_HEADING}\n\nnot a response"
+    report.write_text(f"HEAD: {HEAD}\n\n1. a fenced example:\n```\n</details>\n\n{quoted}\n```\n\nVERDICT: changes\n")
     resp.write_text(answer)
     bundle = tmp_path / "pr.json"
     bundle.write_text(json.dumps({"pr": pr(), "pr_comments": [], "trusted": [OWNER]}))
@@ -541,6 +553,11 @@ def test_the_response_pr_review_records_is_the_one_the_next_round_reads(tmp_path
                       "--dry-run"]) == 0
     body = capsys.readouterr().out
     assert codex_review.latest_response([{"verdict": "changes", "body": body}]) == (1, answer)
+    resp.write_text(f"{answer}\n\nquoting {codex_review.RESPONSE_MARK} too")
+    assert sdlc.main(["pr-review", "50", "--report", str(report), "--response", str(resp), "--from-file", str(bundle),
+                      "--dry-run"]) == 0
+    assert codex_review.latest_response([{"verdict": "changes", "body": capsys.readouterr().out}])[1] \
+        == f"{answer}\n\nquoting  too"
     assert sdlc.main(["pr-review", "50", "--report", str(report), "--from-file", str(bundle), "--dry-run"]) == 0
     with pytest.raises(sdlc.SdlcError, match="recorded no response"):
         codex_review.latest_response([{"verdict": "changes", "body": capsys.readouterr().out}])
