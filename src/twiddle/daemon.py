@@ -155,6 +155,15 @@ def serving(port: int, host: str = "127.0.0.1", timeout: float = 1.0) -> bool:
         return False
 
 
+def installed_alarm_endpoint() -> tuple[int, str] | None:
+    """The port and bind address the installed agent was given, or None."""
+    try:
+        args = plistlib.loads(plist_path(ALARM_LABEL).read_bytes())["ProgramArguments"]
+        return int(args[args.index("--port") + 1]), args[args.index("--host") + 1]
+    except (OSError, ValueError, KeyError, IndexError, plistlib.InvalidFileException):
+        return None
+
+
 def probe_host(bind: str) -> str:
     """Where to knock for a server bound to `bind`: a wildcard answers on loopback."""
     return "127.0.0.1" if bind in ("", "0.0.0.0", "::") else bind

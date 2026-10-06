@@ -916,6 +916,27 @@ def test_status_probes_the_address_the_server_binds(launchd_agent, monkeypatch, 
     assert seen[0] == "192.168.1.5" and seen[-1] == "127.0.0.1"
 
 
+def test_bare_status_asks_about_the_installed_endpoint(launchd_agent, monkeypatch, capsys, tmp_path):
+    from twiddle import daemon
+    monkeypatch.setattr(daemon, "_which", lambda cmd: f"/bin/{cmd}")
+    plist = daemon.build_alarm_plist(tmp_path, tmp_path, 9123, 600.0, [], "", "192.168.1.5")
+    daemon.plist_path(daemon.ALARM_LABEL).parent.mkdir(parents=True, exist_ok=True)
+    daemon.plist_path(daemon.ALARM_LABEL).write_bytes(__import__("plistlib").dumps(plist))
+    seen = []
+    monkeypatch.setattr(daemon, "serving", lambda port, host="127.0.0.1", **k: seen.append((port, host)) or True)
+    code, out, _ = run(["alarm", "serve", "--status", "--json"], capsys)
+    assert code == 0 and set(seen) == {(9123, "192.168.1.5")} and json.loads(out)["port"] == 9123
+
+
+@pytest.mark.parametrize("port", ["0", "-1", "70000"])
+def test_install_refuses_an_unusable_port_before_touching_the_job(fake_house, launchd_agent, sounds,
+                                                                  capsys, port):
+    calls = launchd_agent
+    code, _, err = run(["alarm", "serve", "--install", "--dir", str(sounds), "--port", port], capsys)
+    assert code == 1 and "port" in err
+    assert calls == [] and not play.INTERVENTION_LOG.exists()
+
+
 def test_a_failed_bootstrap_is_still_journalled(fake_house, sounds, capsys, monkeypatch, tmp_path):
     from twiddle import daemon
     monkeypatch.setattr(daemon, "AGENT_DIR", tmp_path / "agents")

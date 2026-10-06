@@ -1017,8 +1017,17 @@ def _serve_status(args) -> int:
     project = Path(__file__).resolve().parents[2]
     job = daemon.status(daemon.ALARM_LABEL)
     running = "state = running" in job
-    host = daemon.probe_host(args.host)
-    answers = daemon.serving(args.port, host)
+    # Bare `--status` asks about what is installed, not the defaults.
+    port, bind = args.port, args.host
+    installed = daemon.installed_alarm_endpoint()
+    if installed:
+        if args.port == server.PORT:
+            port = installed[0]
+        if args.host == "0.0.0.0":
+            bind = installed[1]
+    args.port = port
+    host = daemon.probe_host(bind)
+    answers = daemon.serving(port, host)
     # Alive is the agent's own server answering: some other listener on the
     # port, with the job not running, is a collision, not a live server.
     alive = running and answers
@@ -1055,6 +1064,9 @@ def _serve_agent(args) -> int:
         removed = daemon.uninstall(daemon.ALARM_LABEL)
         return emit(args, about | {"performed": True, "removed": removed},
                     "Removed." if removed else "Was not installed.")
+    if not 1 <= args.port <= 65535:
+        return fail(args, f"port {args.port} can't be installed",
+                    "an alarm stores the URL, so the port must be fixed: 1-65535")
     if not args.dir:
         return fail(args, "--install needs --dir", "`--dir` names the folder to serve")
     root = Path(args.dir).expanduser().resolve()
