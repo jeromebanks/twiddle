@@ -620,7 +620,8 @@ def test_the_agent_url_is_what_this_source_owns_wherever_the_mac_is():
     uri, meta = src.build("https://gulls.bandcamp.com/album/salt")
     moved = uri.replace("10.0.0.5", "192.168.9.9")
     assert src.owns(moved, meta) and sources.recognise(moved, meta).name == "bandcamp"
-    for other in (uri.replace(":8765", ":9"), uri.replace("/bandcamp/", "/other/"),
+    assert src.owns(uri.replace(":8765", ":9"), meta)     # whichever port the agent was on
+    for other in (uri.replace("/bandcamp/", "/other/"),
                   "http://10.0.0.5:8765/bandcamp/not-a-token.mp3", CHIME_URI):
         assert not src.owns(other, meta), other
 
@@ -717,7 +718,8 @@ def test_a_sound_alarm_is_owned_wherever_the_mac_is_and_nothing_else_is():
     moved = uri.replace("10.0.0.5", "192.168.9.9")
     assert src.owns(moved, meta) and sources.recognise(moved, meta).name == "sound"
     assert src.describe(moved, meta) == "Classic bell"
-    for other in (uri.replace(":8765", ":9"), uri.replace("/sound/", "/other/"),
+    assert src.owns(uri.replace(":8765", ":9"), meta)     # whichever port the agent was on
+    for other in (uri.replace("/sound/", "/other/"),
                   uri.replace("bell", "nope"), CHIME_URI, "http://[", "http://h:x/sound/bell.mp3"):
         assert not src.owns(other, meta), other
 
@@ -764,3 +766,67 @@ def test_the_generated_sounds_come_from_tone_and_the_recording_is_the_only_other
     licences = (sources.sound.SOUNDS_DIR / "LICENSES.md").read_text()
     assert "creativecommons" not in licences and "CC0 1.0" in licences
     assert "commons.wikimedia.org/wiki/File:" in licences
+
+
+# ---- the port: the installed agent's, else the default ----------------------
+
+def install_fake_agent(monkeypatch, port=9123):
+    """An installed `alarm serve` agent on `port`: a plist in the tmp LaunchAgents."""
+    import plistlib
+    from twiddle import daemon
+    monkeypatch.setattr(daemon, "_which", lambda cmd: f"/bin/{cmd}")
+    path = daemon.plist_path(daemon.ALARM_LABEL)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(plistlib.dumps(daemon.build_alarm_plist(
+        Path("/project"), Path("/sounds"), port, 600.0, [], "", "0.0.0.0")))
+
+
+def add_dry_run(capsys, monkeypatch, source):
+    monkeypatch.setattr(sources.get("sound"), "bind", lambda anchor: fake_sound())
+    monkeypatch.setattr(sources.get("bandcamp"), "bind", lambda anchor: fake_bandcamp())
+    code, out, _ = run(["alarm", "add", "--room", "roam", "--time", "07:00",
+                        "--source", source, "--dry-run", "--json"], capsys)
+    assert code == 0, out
+    [port] = {int(p) for p in re.findall(r'"http://[^":/]+:(\d+)/(?:sound|bandcamp)/', out)}
+    return port
+
+
+@pytest.mark.parametrize("source", ["sound:bell", "bandcamp:https://gulls.bandcamp.com/album/salt"])
+def test_a_new_alarm_points_at_the_installed_agents_port_else_the_default(
+        clockfake, capsys, monkeypatch, source):
+    from twiddle import daemon
+    assert daemon.installed_alarm_endpoint() is None
+    assert add_dry_run(capsys, monkeypatch, source) == 8765
+    install_fake_agent(monkeypatch, 9123)
+    assert add_dry_run(capsys, monkeypatch, source) == 9123
+    assert journal() == [] and not clockfake.writes
+
+
+@pytest.mark.parametrize("port", [8765, 9123, 80, 49152])
+def test_an_alarm_on_any_port_is_its_source_without_reading_the_agent(monkeypatch, port):
+    from twiddle import daemon
+    from twiddle.alarms import server
+    monkeypatch.setattr(daemon, "installed_alarm_endpoint",
+                        lambda: (_ for _ in ()).throw(AssertionError("a recogniser read the plist")))
+    for src, choice, name, title in (
+            (fake_sound(), "bell", "sound", "Classic bell"),
+            (fake_bandcamp(), "https://gulls.bandcamp.com/album/salt", "bandcamp", "Low Tide")):
+        monkeypatch.setattr(server, "alarm_port", lambda: port)
+        uri, meta = src.build(choice)
+        assert urlsplit(uri).port == port
+        assert sources.recognise(uri, meta).name == name
+        a = dataclasses.replace(ALARMS[0], program_uri=uri, program_metadata=meta)
+        got = rows([a])[a.id]
+        assert got["sound_source"] == f"twiddle:{name}" and got["source_title"] == title
+        text = alarm_cli.human(alarm_cli.listing(household(), [a], SAT_AFTERNOON), SAT_AFTERNOON)
+        [line] = [l for l in text.splitlines() if l.lstrip().startswith(f"#{a.id} ")]
+        assert line.endswith(f"⌁ {title}")
+
+
+@pytest.mark.parametrize("uri", [
+    "http://10.0.0.5:9123/other/bell.mp3", "http://10.0.0.5:9123/sound/nope.mp3",
+    "http://10.0.0.5:9123/bandcamp/not-a-token.mp3", "https://10.0.0.5:9123/sound/bell.mp3",
+    "http://10.0.0.5/sound/bell.mp3", "http://10.0.0.5:x/sound/bell.mp3"])
+def test_off_the_alarm_routes_stays_unknown_on_any_port(uri):
+    assert not fake_sound().owns(uri, "") and not fake_bandcamp().owns(uri, "")
+    assert sources.recognise(uri, "") is None

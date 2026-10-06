@@ -1154,6 +1154,14 @@ def cmd_serve(args):
     plan = (f"serving {len(files)} file(s) from {root} on port {args.port} to "
             f"{len(allowed)} speaker(s), each serve bounded to {args.max_s:.0f}s; "
             f"{len(stale)} stale span(s) to close")
+    # New alarms point at the agent's port (else the default): say so rather
+    # than serve audio no alarm will ask for.
+    points = server.alarm_port()
+    if args.port != points:
+        about["warning"] = (f"new alarms point at port {points}, not {args.port}: they won't "
+                            f"reach this server (`alarm serve --install --port {args.port}` "
+                            "points them here)")
+        plan += f"\n  warning: {about['warning']}"
     if getattr(args, "dry_run", False):
         return emit(args, about | {"would": "serve", "performed": False},
                     f"[dry-run] would start: {plan}")

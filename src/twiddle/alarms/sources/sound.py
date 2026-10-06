@@ -84,18 +84,18 @@ class Sound(Source):
         if key not in SOUNDS:
             raise ValueError(f"no alarm sound {choice!r}: {', '.join(SOUNDS)}")
         from .. import server           # the agent's port and types; it imports this module
-        uri = f"http://{self.host(self.anchor)}:{server.PORT}{ROUTE}{key}{SUFFIX}"
+        uri = f"http://{self.host(self.anchor)}:{server.alarm_port()}{ROUTE}{key}{SUFFIX}"
         return uri, play.track_didl(SOUNDS[key][0], url=uri, mime=server.TYPES[SUFFIX])
 
     def owns(self, uri: str, metadata: str) -> bool:
-        """Matches the route, port and a sound we have, not the address: it is the Mac's, and DHCP moves it."""
-        from .. import server
+        """Matches the route and a sound we have, not the address (it is the Mac's,
+        and DHCP moves it) nor which port (the agent's, when the alarm was made)."""
         try:
             parts = urlsplit(uri)
             port = parts.port
         except ValueError:
             return False
-        return parts.scheme == "http" and port == server.PORT and name_of(parts.path) is not None
+        return parts.scheme == "http" and port is not None and name_of(parts.path) is not None
 
     def describe(self, uri: str, metadata: str) -> str | None:
         name = name_of(urlsplit(uri).path)

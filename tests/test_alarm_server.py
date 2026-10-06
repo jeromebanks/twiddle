@@ -984,3 +984,37 @@ def test_install_pins_the_given_anchor_else_a_mains_powered_one(fake_house, laun
     run(["alarm", "serve", "--install", "--dir", str(sounds)], capsys)
     run(["alarm", "serve", "--install", "--dir", str(sounds), "--anchor", "10.0.0.99"], capsys)
     assert [c[1][5] for c in calls] == ["10.0.0.13", "10.0.0.99"]
+
+
+# ---- which port alarms point at ----------------------------------------------
+
+def test_a_foreground_server_off_the_alarms_port_says_so(fake_house, sounds, capsys, monkeypatch, tmp_path):
+    from tests.test_alarm_sources import install_fake_agent
+    argv = ["alarm", "serve", "--dir", str(sounds), "--port", "9123", "--dry-run"]
+    code, out, _ = run(argv + ["--json"], capsys)       # no agent: alarms point at 8765
+    assert code == 0 and "8765" in json.loads(out)["warning"]
+    code, out, _ = run(argv, capsys)
+    assert "warning: new alarms point at port 8765, not 9123" in out
+    install_fake_agent(monkeypatch, 9123)
+    code, out, _ = run(argv + ["--json"], capsys)
+    assert code == 0 and "warning" not in json.loads(out)
+    code, out, _ = run(argv, capsys)
+    assert "warning" not in out
+
+
+def test_installing_the_agent_on_a_port_points_new_alarms_at_it(sounds, capsys, monkeypatch):
+    from tests.test_alarm_sources import add_dry_run
+    from tests.test_alarm_clock import FakeClock
+    from twiddle import daemon, devices
+    monkeypatch.setattr(devices.requests, "post", FakeClock().post)
+    monkeypatch.setattr(alarm_cli, "_household", lambda args: household())
+    monkeypatch.setattr(daemon, "_which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(daemon, "pick_anchor", lambda: "10.0.0.13")
+    ran = []
+    monkeypatch.setattr(daemon.subprocess, "run",
+                        lambda cmd, **_kw: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""))
+    code, _, err = run(["alarm", "serve", "--install", "--dir", str(sounds), "--port", "9123"], capsys)
+    assert code == 0, err
+    assert ran and all(cmd[0] == "launchctl" for cmd in ran)
+    assert daemon.installed_alarm_endpoint()[0] == 9123
+    assert add_dry_run(capsys, monkeypatch, "sound:bell") == 9123

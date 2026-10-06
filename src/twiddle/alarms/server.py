@@ -2,8 +2,9 @@
 
 A source that needs this Mac (a sound, a Bandcamp track) stores a URL on this
 machine in the alarm itself; the speaker fetches it at fire time, hours after
-anything here ran. So the port is fixed (`PORT`), not whatever was free, and
-the server runs in the foreground until stopped.
+anything here ran. So the port is fixed, not whatever was free: the installed
+agent's (`alarm serve --install --port`), else `PORT` (`alarm_port`). The
+server runs in the foreground until stopped.
 
 It serves audio files from one directory; the standard alarm sounds bundled
 with twiddle under `/sound/<name>.mp3` (`sources/sound.py`), whatever the
@@ -38,7 +39,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .. import play, report
+from .. import daemon, play, report
 from .sources import bandcamp as bc
 from .sources import sound as snd
 
@@ -53,6 +54,14 @@ TYPES = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".mp4": "audio/mp4",
          ".aac": "audio/aac", ".flac": "audio/flac", ".wav": "audio/wav",
          ".ogg": "audio/ogg", ".oga": "audio/ogg", ".aiff": "audio/aiff",
          ".wma": "audio/x-ms-wma"}
+
+
+def alarm_port() -> int:
+    """The port a new alarm's URL points at: the installed agent's, else `PORT`.
+    Only building an alarm asks; recognising one never does, so reinstalling
+    the agent on another port leaves the alarms already made as they were."""
+    installed = daemon.installed_alarm_endpoint()
+    return installed[0] if installed and 1 <= installed[0] <= 65535 else PORT
 
 
 def resolve(root: Path, request_path: str) -> Path | None:

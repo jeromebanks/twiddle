@@ -265,7 +265,7 @@ uv run twiddle alarm add --room roam --time 07:00 --days weekdays --source stati
 ```
 
 `alarm sources` reads only the registry and the catalog: no speaker, no
-network, except `alarm sources spotify <words>`, which searches Spotify with twiddle's own sign-in, and `alarm sources bandcamp <words>`, which searches Bandcamp (throttled and cached, as `scene` does). A Bandcamp alarm (`--source bandcamp:<track page URL>`, with `#<track id>` for one track of a release) stores `http://<this Mac>:8765/bandcamp/<token>.mp3`, never Bandcamp's own URL, which expires in about a day; it needs `alarm serve` running when it fires, and a speaker's acceptance of an `http://` ProgramURI has not yet been seen. An alarm sound (`--source sound:bell`; `bell`, `beep`, `rise`, `birdsong`, `chimes`, each 45 s, four generated and one a CC0 recording, listed by `alarm sources sound`) stores `http://<this Mac>:8765/sound/<name>.mp3`, served by `alarm serve` whatever `--dir` is; it needs the Mac like a Bandcamp alarm and has the same unverified fallback. A Spotify alarm plays through Sonos's own Spotify link (`x-rincon-cpcontainer`, `sid=12`), not the relay, so the speaker fetches it itself and this Mac has no part in it. It needs the account `sn=` that Spotify is linked under, read from the Spotify favourites already on the speaker (a read-only `Browse`), else from an existing Spotify alarm; with neither (the speaker's own account list is empty on current firmware, and Spotify being linked doesn't put its serial anywhere else), `add` says no account is linked, asks you to save one Spotify playlist as a Sonos favourite, and writes nothing. The album and track forms follow what Sonos uses elsewhere and have not yet been seen accepted on a speaker. A station alarm is the station's own stream as an
+network, except `alarm sources spotify <words>`, which searches Spotify with twiddle's own sign-in, and `alarm sources bandcamp <words>`, which searches Bandcamp (throttled and cached, as `scene` does). A Bandcamp alarm (`--source bandcamp:<track page URL>`, with `#<track id>` for one track of a release) stores `http://<this Mac>:<port>/bandcamp/<token>.mp3` (the installed `alarm serve` agent's port, else 8765), never Bandcamp's own URL, which expires in about a day; it needs `alarm serve` running when it fires, and a speaker's acceptance of an `http://` ProgramURI has not yet been seen. An alarm sound (`--source sound:bell`; `bell`, `beep`, `rise`, `birdsong`, `chimes`, each 45 s, four generated and one a CC0 recording, listed by `alarm sources sound`) stores `http://<this Mac>:<port>/sound/<name>.mp3`, served by `alarm serve` whatever `--dir` is; it needs the Mac like a Bandcamp alarm and has the same unverified fallback. A Spotify alarm plays through Sonos's own Spotify link (`x-rincon-cpcontainer`, `sid=12`), not the relay, so the speaker fetches it itself and this Mac has no part in it. It needs the account `sn=` that Spotify is linked under, read from the Spotify favourites already on the speaker (a read-only `Browse`), else from an existing Spotify alarm; with neither (the speaker's own account list is empty on current firmware, and Spotify being linked doesn't put its serial anywhere else), `add` says no account is linked, asks you to save one Spotify playlist as a Sonos favourite, and writes nothing. The album and track forms follow what Sonos uses elsewhere and have not yet been seen accepted on a speaker. A station alarm is the station's own stream as an
 `x-rincon-mp3radio://` URI, exactly what `tune` hands a speaker, so the
 speaker fetches it itself and this Mac has no part in it; like `tune`, an
 https stream is fetched over http. Neither the chime nor a station needs this
@@ -386,14 +386,21 @@ it is worked out here. `alarms[].` is a key of each alarm's object.
 
 A source that needs this Mac (an alarm sound, a Bandcamp track) stores a URL on
 this machine in the alarm, and the speaker fetches it at fire time. `alarm
-serve` is what answers, in the foreground, on a fixed port (8765: the alarm
-stores the URL, so it can't be whatever was free):
+serve` is what answers, in the foreground, on a fixed port (8765 by default: the
+alarm stores the URL, so it can't be whatever was free):
 
 ```bash
 uv run twiddle alarm serve --dir ~/alarm-sounds --dry-run   # the plan; binds and journals nothing
 uv run twiddle alarm serve --dir ~/alarm-sounds             # Ctrl-C stops it
 curl -o /dev/null http://localhost:8765/bell.mp3            # a test fetch; see the span in logs/interventions.jsonl
 ```
+
+The port is the installed agent's when there is one: after `alarm serve --install
+--port P`, a sound or Bandcamp alarm made by `alarm add`/`edit` points at `P`
+(else 8765), while alarms made before keep the port they were made with:
+reinstalling on another port doesn't move them, though `alarm list` still marks
+them ⌁; and a foreground `alarm serve --port` other than the one new alarms point
+at prints a warning.
 
 It writes to no speaker. It serves audio files under `--dir`, and Bandcamp
 tracks under `/bandcamp/<token>.mp3` (a fresh stream URL is fetched for each
