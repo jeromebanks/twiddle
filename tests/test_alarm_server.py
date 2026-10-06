@@ -830,10 +830,15 @@ def launchd_agent(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(daemon, "AGENT_DIR", tmp_path / "agents")
     monkeypatch.setattr(daemon, "_which", lambda cmd: f"/bin/{cmd}")
+    # No SSDP, no load_device: anchor choice is mocked, and a tripwire guards the rest.
+    monkeypatch.setattr(daemon, "pick_anchor", lambda: "10.0.0.13")
+    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: (_ for _ in ()).throw(
+        OSError("no network in tests")))
     monkeypatch.setattr(daemon, "install_alarm",
                         lambda *a, **k: calls.append(("install", a)) or daemon.plist_path(daemon.ALARM_LABEL))
     monkeypatch.setattr(daemon, "uninstall", lambda label=daemon.LABEL: calls.append(("uninstall", label)) or True)
     monkeypatch.setattr(daemon, "status", lambda label=daemon.LABEL: "state = running")
+    monkeypatch.setattr(daemon, "serving", lambda port, **k: True)
     return calls
 
 
@@ -877,19 +882,34 @@ def test_uninstall_is_journalled_and_dry_run_is_not(launchd_agent, capsys):
     assert json.loads(play.INTERVENTION_LOG.read_text().splitlines()[-1])["action"] == "alarm_serve_uninstall"
 
 
-def test_status_is_alive_when_the_port_answers_and_stale_when_not(launchd_agent, capsys):
-    calls = launchd_agent
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        s.listen()
-        port = str(s.getsockname()[1])
-        code, out, _ = run(["alarm", "serve", "--status", "--port", port, "--json"], capsys)
-        assert code == 0 and json.loads(out)["alive"] is True
-    code, out, _ = run(["alarm", "serve", "--status", "--port", port, "--json"], capsys)
+def test_status_is_alive_when_the_job_runs_and_the_port_answers_else_stale(
+        launchd_agent, monkeypatch, capsys):
+    from twiddle import daemon
+    code, out, _ = run(["alarm", "serve", "--status", "--json"], capsys)
+    assert code == 0 and json.loads(out)["alive"] is True
+    monkeypatch.setattr(daemon, "serving", lambda port, **k: False)
+    code, out, _ = run(["alarm", "serve", "--status", "--json"], capsys)
     p = json.loads(out)
     assert code == 1 and p["alive"] is False and p["stale"] is True
-    code, out, _ = run(["alarm", "serve", "--status", "--port", port], capsys)
+    code, out, _ = run(["alarm", "serve", "--status"], capsys)
     assert "STALE" in out and not play.INTERVENTION_LOG.exists()
+
+
+def test_another_listener_on_the_port_is_a_collision_not_a_live_server(
+        launchd_agent, monkeypatch, capsys):
+    from twiddle import daemon
+    monkeypatch.setattr(daemon, "status", lambda label=daemon.LABEL: "not loaded")
+    code, out, _ = run(["alarm", "serve", "--status", "--json"], capsys)    # serving() says True
+    p = json.loads(out)
+    assert code == 1 and p["alive"] is False and p["port_answers"] is True
+    code, out, _ = run(["alarm", "serve", "--status"], capsys)
+    assert "something else answers" in out
+
+
+def test_install_keeps_the_requested_host_in_the_agent(fake_house, launchd_agent, sounds, capsys):
+    calls = launchd_agent
+    run(["alarm", "serve", "--install", "--dir", str(sounds), "--host", "127.0.0.1"], capsys)
+    assert calls[0][1][-1] == "127.0.0.1"
 
 
 def test_the_agents_own_command_line_is_one_the_cli_accepts(fake_house, sounds, capsys, tmp_path,
@@ -897,17 +917,14 @@ def test_the_agents_own_command_line_is_one_the_cli_accepts(fake_house, sounds, 
     from twiddle import daemon
     monkeypatch.setattr(daemon, "_which", lambda cmd: f"/bin/{cmd}")
     argv = daemon.build_alarm_plist(tmp_path, sounds, 0, 600.0, ["Living Room"],
-                                    "10.0.0.13")["ProgramArguments"]
-    argv = argv[argv.index("twiddle") + 1:] + ["--host", "127.0.0.1", "--dry-run", "--json"]
+                                    "10.0.0.13", "127.0.0.1")["ProgramArguments"]
+    argv = argv[argv.index("twiddle") + 1:] + ["--dry-run", "--json"]
     code, out, _ = run(argv, capsys)
     assert code == 0 and json.loads(out)["would"] == "serve"
 
 
-def test_install_pins_the_given_anchor_else_a_mains_powered_one(fake_house, launchd_agent, sounds, capsys,
-                                                               monkeypatch):
-    from twiddle import daemon
+def test_install_pins_the_given_anchor_else_a_mains_powered_one(fake_house, launchd_agent, sounds, capsys):
     calls = launchd_agent
-    monkeypatch.setattr(daemon, "pick_anchor", lambda: "10.0.0.13")
     run(["alarm", "serve", "--install", "--dir", str(sounds)], capsys)
     run(["alarm", "serve", "--install", "--dir", str(sounds), "--anchor", "10.0.0.99"], capsys)
     assert [c[1][5] for c in calls] == ["10.0.0.13", "10.0.0.99"]

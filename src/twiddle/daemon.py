@@ -109,13 +109,14 @@ def _install(plist: dict, label: str, project: Path) -> Path:
 
 
 def build_alarm_plist(project: Path, audio_dir: Path, port: int, max_s: float,
-                      rooms: list[str], anchor: str) -> dict:
+                      rooms: list[str], anchor: str, host: str = "0.0.0.0") -> dict:
     """The agent that keeps `twiddle alarm serve` up, so a Mac-hosted alarm
     (Bandcamp, a sound, a file) has something to answer when it fires hours
     after anyone had a terminal open."""
     args = [
         _which("uv"), "run", "--project", str(project), "twiddle", "alarm", "serve",
         "--dir", str(audio_dir), "--port", str(port), "--max-s", str(max_s),
+        "--host", host,
     ]
     for room in rooms:
         args += ["--room", room]
@@ -138,8 +139,8 @@ def build_alarm_plist(project: Path, audio_dir: Path, port: int, max_s: float,
 
 
 def install_alarm(project: Path, audio_dir: Path, port: int, max_s: float,
-                  rooms: list[str], anchor: str = "") -> Path:
-    return _install(build_alarm_plist(project, audio_dir, port, max_s, rooms, anchor),
+                  rooms: list[str], anchor: str = "", host: str = "0.0.0.0") -> Path:
+    return _install(build_alarm_plist(project, audio_dir, port, max_s, rooms, anchor, host),
                     ALARM_LABEL, project)
 
 

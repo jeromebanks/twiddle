@@ -1016,15 +1016,23 @@ def _serve_status(args) -> int:
     from . import daemon
     project = Path(__file__).resolve().parents[2]
     job = daemon.status(daemon.ALARM_LABEL)
-    alive = daemon.serving(args.port)
-    blocked = daemon.alarm_blocked_by_local_network(project, args.port)
+    running = "state = running" in job
+    answers = daemon.serving(args.port)
+    # Alive is the agent's own server answering: some other listener on the
+    # port, with the job not running, is a collision, not a live server.
+    alive = running and answers
+    loaded = job != "not loaded"
+    blocked = loaded and daemon.alarm_blocked_by_local_network(project, args.port)
     about = {"job": job, "plist": str(daemon.plist_path(daemon.ALARM_LABEL)),
              "port": args.port, "alive": alive, "stale": not alive,
+             "job_running": running, "port_answers": answers,
              "blocked_by_local_network": blocked}
+    why = ("" if alive else
+           " (something else answers on that port: the job isn't running)" if answers else
+           " (the job is not running)" if not running else " (the port does not answer)")
     human = (f"launchd job {daemon.ALARM_LABEL}: {job}\n"
              f"plist: {about['plist']}\n"
-             f"server: {'alive' if alive else 'STALE'} "
-             f"(port {args.port} {'answers' if alive else 'does not answer'})")
+             f"server: {'alive' if alive else 'STALE'}{why}")
     if blocked:
         human += "\n" + daemon.ALARM_LOCAL_NETWORK_HINT
     emit(args, about, human)
@@ -1067,12 +1075,12 @@ def _serve_agent(args) -> int:
             return fail(args, str(exc), "run `twiddle rooms` to list targets",
                         known=exc.known)
     about = {"plist": str(path), "dir": str(root), "port": args.port,
-             "max_s": args.max_s, "rooms": args.room or [], "anchor": ip}
+             "max_s": args.max_s, "host": args.host, "rooms": args.room or [], "anchor": ip}
     if dry:
         return emit(args, about | {"would": "install", "performed": False},
                     f"[dry-run] would install {path}: serve {root} on port {args.port}")
     installed = daemon.install_alarm(project, root, args.port, args.max_s,
-                                     args.room or [], ip or "")
+                                     args.room or [], ip or "", args.host)
     _agent_journal("alarm_serve_install", dir=str(root), port=args.port)
     return emit(args, about | {"performed": True},
                 f"Installed {installed}\n  serving {root} on port {args.port}, "
