@@ -1397,14 +1397,16 @@ def test_the_guide_documents_the_keys_of_every_kind_of_unreadable_entry(speaker,
     bad = {"84": _bad("84", Volume="101"),                      # a live room
            "85": _bad("85", Volume="101", RoomUUID=GONE),       # a vanished speaker
            "86": _bad("86", Volume="101", RoomUUID=STRANGER),   # a UUID no speaker owns
-           "87": _bad("87", Volume="101", RoomUUID=None)}       # no RoomUUID at all
+           "87": _bad("87", Volume="101", RoomUUID=None),       # no RoomUUID at all
+           "88": _bad("88", Volume="101", RoomUUID=SURROUND)}   # a bonded follower
     monkeypatch.setitem(ANSWERS, "ListAlarms", _list_answer(with_bad(bad=bad)))
     _, out, _ = run(["alarm", "list", "--json"], capsys)
     got = {u["id"]: u for u in json.loads(out)["unreadable"]}
     assert set(got) == set(bad)
     documented = _documented_unreadable_keys()
-    for aid in ("84", "85", "86"):
+    for aid in ("84", "85", "86", "88"):
         assert set(got[aid]) == documented, aid
     # No RoomUUID: nothing to look up, so no speaker, and a null room and status.
     assert set(got["87"]) == documented - {"speaker"}
     assert got["87"]["room"] is None and got["87"]["status"] is None
+    assert got["87"]["room_uuid"] is None

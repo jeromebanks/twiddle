@@ -145,7 +145,7 @@ An alarm twiddle can't read (a recurrence it doesn't know, a volume over 100,
 a flag that isn't 0/1, a missing attribute) doesn't hide the others: `alarm
 list` shows every alarm it can read, then a `can't read` section naming each
 one it couldn't, its room and why (`--json`: an `unreadable` list beside
-`alarms`, each `{id, room, status, room_uuid, reason}`; `id` is null for an
+`alarms`, each `{id, room, speaker, status, room_uuid, reason}`; `id` is null for an
 alarm with no ID). `alarm status` reads the same way. Every other alarm verb
 (`add`, `edit`, `rm`, `enable`, `disable`, `try`, `snapshot`, `restore`)
 **refuses while one is unreadable**, even for a readable alarm and even with
