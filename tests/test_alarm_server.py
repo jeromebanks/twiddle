@@ -90,6 +90,21 @@ def test_a_name_the_filesystem_rejects_is_a_404(srv, name):
     assert get(srv, "/" + name)[0] == 404
 
 
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_a_file_deleted_after_its_name_resolved_is_a_404(srv, sounds, monkeypatch, method):
+    gone = sounds / "gone.mp3"
+    gone.write_bytes(b"x")
+    real = server.resolve
+
+    def resolve_then_delete(root, request_path):
+        found = real(root, request_path)
+        gone.unlink()
+        return found
+    monkeypatch.setattr(server, "resolve", resolve_then_delete)
+    assert get(srv, "/gone.mp3", method)[0] == 404
+    assert journal() == []
+
+
 def test_a_symlink_loop_is_a_404_not_a_dropped_request(srv, sounds):
     (sounds / "loop.mp3").symlink_to(sounds / "loop.mp3")
     assert server.resolve(sounds, "/loop.mp3") is None

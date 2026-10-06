@@ -144,21 +144,27 @@ class AlarmServer:
 
             def do_HEAD(self):
                 path = self._target()
-                if path is not None:
-                    self._headers(path)
+                if path is None:
+                    return
+                try:
+                    size = path.stat().st_size
+                except OSError:        # gone since the name was resolved
+                    return self._refuse(404, "no such audio")
+                self._headers(path, size)
 
-            def _headers(self, path: Path):
+            def _headers(self, path: Path, size: int):
                 self.send_response(200)
                 self.send_header("Content-Type", TYPES[path.suffix.lower()])
-                self.send_header("Content-Length", str(path.stat().st_size))
+                self.send_header("Content-Length", str(size))
                 self.end_headers()
 
             def do_GET(self):
                 path = self._target()
                 if path is None:
                     return
-                try:
+                try:       # size from the open file: a delete after this can't matter
                     fh = path.open("rb")
+                    size = os.fstat(fh.fileno()).st_size
                 except OSError:
                     return self._refuse(404, "no such audio")
                 with fh:
@@ -166,7 +172,7 @@ class AlarmServer:
                     if span_id is None:
                         return self._refuse(503, "shutting down")
                     try:
-                        self._headers(path)
+                        self._headers(path, size)
                         outer._send(fh, self.connection, time.monotonic() + outer.max_s)
                     except OSError:
                         pass   # Sonos buffers ahead and hangs up, or stalled past the bound
