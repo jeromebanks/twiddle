@@ -1,7 +1,10 @@
 # The Codex PR-review prompt
 
-Fill the `<...>` placeholders and pass the text below the line to `codex exec`
-as one argument. Run it from the slice's worktree, so `git` sees the branch.
+`uv run python tools/sdlc.py codex-review --pr PR` fills this and runs it: the text
+below the line, `<SLICE_FILE>`, `<BASE>`, `<EPIC>` and `<RESPONSE_FILE>` replaced, and
+the `<ROUND2>` bullet kept only from round 2 on. Don't fill it by hand. The tool
+checks the worktree's HEAD itself and writes the report's `HEAD:` line, so the
+prompt doesn't ask Codex for it.
 
 ---
 
@@ -10,20 +13,17 @@ work in the twiddle repository (the current directory is its git worktree). You
 did not write this code. Judge it on its merits, and do not assume any claim in
 the PR, the commits or a previous review is true.
 
-First, run `git rev-parse HEAD` and print the result on a line of its own, exactly:
-`HEAD: <the 40-character sha>`
-
-Then read:
+Read:
 - the slice's brief: `<SLICE_FILE>` (its Outcome, Scope, Acceptance criteria,
   Validation, Demo, Non-goals and Context sections define the job);
 - the change: `git diff <BASE>...HEAD` and `git log <BASE>..HEAD` (`<BASE>` is
-  `origin/epic/<EPIC>`, the branch this slice merges into);
+  epic #<EPIC>'s branch, which this slice merges into);
 - `CLAUDE.md`, especially the read-only vs writing table;
 - the code around the change, as far as you need it;
-- <ROUND 2+: the implementer's answer to the previous round: `<RESPONSE_FILE>`. Where they
+- <ROUND2>the implementer's answer to the previous round: `<RESPONSE_FILE>`. Where they
   rebutted a finding, decide whether the rebuttal holds, and don't repeat a finding it
   answered unless you can show why it's wrong. Check that each finding they accepted is
-  actually fixed in this head.>
+  actually fixed in this head.</ROUND2>
 
 Do not modify anything, and do not run the full test suite: a passing run on
 this head is recorded on the PR separately. You may run a few focused tests if

@@ -49,3 +49,13 @@ def test_every_skill_is_described(skill):
 @pytest.mark.parametrize("phase", list(sdlc.MILESTONE_FLOW))
 def test_every_milestone_phase_is_drawn(phase):
     assert re.search(rf">{phase}<", GUIDE), f"milestone phase {phase} isn't in the guide's diagram"
+
+
+def test_the_pr_review_is_run_by_the_tool_not_by_hand():
+    prompt = (ROOT / ".agents" / "skills" / "work-slice" / "references" / "codex-pr-prompt.md").read_text()
+    assert "HEAD:" not in prompt.split("\n---\n", 1)[1] and "rev-parse" not in prompt   # the tool stamps the head
+    skill = (ROOT / ".agents" / "skills" / "work-slice" / "SKILL.md").read_text()
+    section = skill[skill.index("## 8. Codex rounds"):skill.index("## 9.")]
+    fenced = "\n".join(re.findall(r"```[a-z]*\n(.*?)```", section, re.DOTALL))
+    assert "codex exec" not in fenced and "codex-review --pr" in fenced
+    assert not re.search(r"\$[0-9]", skill)          # the skill loader substitutes dollar-digit sequences
