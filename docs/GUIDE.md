@@ -243,7 +243,7 @@ every field `AlarmClock` takes is settable:
 | `--include-grouped-rooms` / `--no-...` | `IncludeLinkedZones` | also play in the rooms grouped with it when it fires (no) |
 | `--room` | `RoomUUID` | a room by name (required on `add`) |
 | `--on` / `--off` | `Enabled` | (on) |
-| `--source` | `ProgramURI`, `ProgramMetaData` | `chime`, `station:<key>` (any station in dial's catalog), or any other source `alarm sources` lists; on `edit`, `keep` (the default) leaves the source byte-for-byte (`chime`) |
+| `--source` | `ProgramURI`, `ProgramMetaData` | `chime`, `station:<key>` (any station in dial's catalog), `spotify:playlist:<id>`, `spotify:album:<id>`, `spotify:track:<id>` or `spotify:<an open.spotify.com link>`, or any other source `alarm sources` lists; on `edit`, `keep` (the default) leaves the source byte-for-byte (`chime`) |
 
 So editing anything about an alarm whose source twiddle doesn't recognise (an
 iHeart or Spotify alarm) sends its `ProgramURI` and `ProgramMetaData` back
@@ -259,11 +259,12 @@ the room does if the source can't play:
 ```bash
 uv run twiddle alarm sources               # every source, its needs-this-Mac mark and fallback (read-only)
 uv run twiddle alarm sources station kexp  # a source's choices, narrowed (read-only)
+uv run twiddle alarm sources spotify jazz  # search Spotify (needs `spotify auth`; read-only)
 uv run twiddle alarm add --room roam --time 07:00 --days weekdays --source station:kalx --dry-run
 ```
 
 `alarm sources` reads only the registry and the catalog: no speaker, no
-network. A station alarm is the station's own stream as an
+network, except `alarm sources spotify <words>`, which searches Spotify with twiddle's own sign-in. A Spotify alarm plays through Sonos's own Spotify link (`x-rincon-cpcontainer`, `sid=12`), not the relay, so the speaker fetches it itself and this Mac has no part in it. It needs the account `sn=` that Spotify is linked under, read from the Spotify favourites already on the speaker (a read-only `Browse`), else from an existing Spotify alarm; with neither (the speaker's own account list is empty on current firmware, and Spotify being linked doesn't put its serial anywhere else), `add` says no account is linked, asks you to save one Spotify playlist as a Sonos favourite, and writes nothing. The album and track forms follow what Sonos uses elsewhere and have not yet been seen accepted on a speaker. A station alarm is the station's own stream as an
 `x-rincon-mp3radio://` URI, exactly what `tune` hands a speaker, so the
 speaker fetches it itself and this Mac has no part in it; like `tune`, an
 https stream is fetched over http. Neither the chime nor a station needs this

@@ -39,7 +39,8 @@ WRITE: the group's own `Stop` / `SnoozeAlarm` (5, 10, 15 or 30 minutes,
 default 10), refused when no alarm is going off there. Each takes
 `--dry-run` and is journalled (`alarm_run`/`alarm_stop`/`alarm_snooze`).
 
-`alarm sources [<name> [<query>]]` is read-only and offline: every source
+`alarm sources [<name> [<query>]]` is read-only and offline (but for
+`alarm sources spotify <words>`, which searches Spotify): every source
 `--source` takes, whether it needs this Mac at fire time and its fallback; or
 one source's choices (`alarm sources station kexp`). `alarm list` marks an
 alarm whose source needs this Mac with ⌁.
@@ -481,7 +482,8 @@ def settings(args) -> dict:
     spec = getattr(args, "source", None)
     editing = getattr(args, "alarm_id", None) is not None
     if spec is not None and not (editing and spec.strip().lower() == sources.KEEP):
-        _, out["program_uri"], out["program_metadata"] = sources.build(spec)
+        _, out["program_uri"], out["program_metadata"] = sources.build(
+            spec, getattr(args, "anchor", None))
     return out
 
 
@@ -879,7 +881,10 @@ def cmd_sources(args):
         source = sources.get(args.name)
     except ValueError as exc:
         return fail(args, str(exc))
-    found = source.choices(args.query)
+    try:
+        found = source.choices(args.query)
+    except ValueError as exc:
+        return fail(args, str(exc))
     rows = [{"key": c.key, "title": c.title, "detail": c.detail} for c in found]
     head = f"{source.title}{' ' + NEEDS_MAC if source.needs_mac else ''}"
     if not source.takes_choice:
