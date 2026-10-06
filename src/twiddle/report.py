@@ -428,16 +428,24 @@ def _alarm_points(schedules: list[dict],
 
 
 def _unreadable_alarms(schedules: list[dict]) -> list[dict]:
-    """Each alarm any schedule couldn't read, once. The same alarm is in
-    every schedule (and checkpoint) until it's repaired; alarms with no ID
-    are told apart by how many one schedule holds."""
+    """Each alarm any schedule couldn't read, once, with every reason seen
+    (`reasons`) and its room as last logged. The same alarm is in every
+    schedule (and checkpoint) until it's repaired, so one with an ID is
+    that ID; alarms with no ID are told apart by how many one schedule holds."""
     seen: dict[tuple, dict] = {}
     for rec in schedules:
         counts: dict[tuple, int] = {}
         for b in rec.get("unreadable", []):
-            k = (b.get("id"), b.get("room_uuid"), b.get("reason"))
-            counts[k] = counts.get(k, 0) + 1
-            seen.setdefault(k + (counts[k],), b)
+            if b.get("id"):
+                k = ("id", b["id"])
+            else:
+                k = (None, b.get("room_uuid"), b.get("reason"))
+                counts[k] = counts.get(k, 0) + 1
+                k += (counts[k],)
+            reasons = seen.get(k, {}).get("reasons", [])
+            if b.get("reason", "?") not in reasons:
+                reasons = reasons + [b.get("reason", "?")]
+            seen[k] = b | {"reasons": reasons}
     return list(seen.values())
 
 
@@ -535,6 +543,20 @@ def summarise_log(path: Path,
                     names[s["ip"]] = s.get("name", "")
 
     findings: list[Finding] = []
+    # Before the samples check: a schedule alone still says what it can't discount.
+    bad = _unreadable_alarms(schedules)
+    if bad:
+        named = "; ".join(
+            f"{'alarm ' + b['id'] if b.get('id') else 'an alarm with no ID'}"
+            f" ({b.get('room') or b.get('room_uuid') or 'no room'}): {', then '.join(b['reasons'])}"
+            for b in bad)
+        findings.append(Finding(
+            "info", f"{len(bad)} alarm{'s' if len(bad) != 1 else ''} in the schedule "
+                    "couldn't be read",
+            f"{named}. Their fires and stops are not discounted, so a drop one "
+            "of them caused would be scored as a fault. The other alarms are.",
+        ))
+
     if not samples:
         return findings
 
@@ -581,19 +603,6 @@ def summarise_log(path: Path,
                if alarm else "") +
             ". Real-world evidence has to come from windows where nothing was "
             "sent to the speakers.",
-        ))
-
-    bad = _unreadable_alarms(schedules)
-    if bad:
-        named = "; ".join(
-            f"{'alarm ' + b['id'] if b.get('id') else 'an alarm with no ID'}"
-            f" ({b.get('room') or b.get('room_uuid') or 'no room'}): {b.get('reason', '?')}"
-            for b in bad)
-        findings.append(Finding(
-            "info", f"{len(bad)} alarm{'s' if len(bad) != 1 else ''} in the schedule "
-                    "couldn't be read",
-            f"{named}. Their fires and stops are not discounted, so a drop one "
-            "of them caused would be scored as a fault. The other alarms are.",
         ))
 
     if not vanish and not induced:

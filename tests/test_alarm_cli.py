@@ -802,7 +802,7 @@ def test_add_each_recurrence_form_reads_back_identically(clockfake, capsys, days
     argv = ["alarm", "add", "--room", "Sonos Roam", "--time", "7:15", "--days", days, "--json"]
     code, out, _ = run([*argv, "--dry-run"], capsys)
     planned = json.loads(out)["alarm"]
-    assert code == 0 and "ID" not in planned and clockfake.sent == []
+    assert code == 0 and "ID" not in planned and clockfake.sent == ["ListAlarms"]
     code, out, _ = run(argv, capsys)
     payload = json.loads(out)
     assert code == 0 and payload["performed"] is True
@@ -852,7 +852,7 @@ def test_add_dry_run_prints_the_alarm_and_writes_nothing(clockfake, capsys):
     assert out == ("[dry-run] would create an alarm: Sonos Roam 07:15:00 weekdays "
                    "(on, vol 25) Sonos chime\n"
                    "  stops after 2h00, play mode normal, this room only\n")
-    assert clockfake.sent == [] and journal() == []
+    assert clockfake.sent == ["ListAlarms"] and journal() == []   # read, so it refuses as add would
 
 
 @pytest.mark.parametrize("room, uuid", [("Sonos Roam (R)", ROAM_L), ("10.0.0.12", ROAM_L),
@@ -1192,18 +1192,24 @@ def _break_one(f):
     f.alarms["80"], f.children["80"] = dict(BAD["80"]), []
 
 
-@pytest.mark.parametrize("argv, doing", [
+_REFUSING = [
     (["add", "--room", "Living Room", "--time", "06:05"], "add an alarm"),
     (["edit", "2", "--volume", "30"], "edit alarm 2"),
     (["rm", "2"], "delete alarm 2"),
     (["enable", "66"], "enable alarm 66"),
     (["disable", "2"], "disable alarm 2"),
     (["try", "34"], "fire alarm 34"),
-    (["snapshot"], "take a snapshot"),
     (["restore"], "restore"),
+]
+
+
+# A dry run refuses too: it says what the real one would do.
+@pytest.mark.parametrize("argv, doing, dry", [
+    *[(argv, doing, dry) for argv, doing in _REFUSING for dry in ([], ["--dry-run"])],
+    (["snapshot"], "take a snapshot", []),                 # read-only: no --dry-run
 ])
 def test_every_verb_that_reads_alarms_refuses_while_one_cant_be_read(
-        clockfake, capsys, monkeypatch, argv, doing):
+        clockfake, capsys, monkeypatch, argv, doing, dry):
     # Even aimed at a readable alarm: the list it would check against has a
     # hole in it, and the change could land unseen.
     run(["alarm", "snapshot"], capsys)                     # for restore
@@ -1211,7 +1217,7 @@ def test_every_verb_that_reads_alarms_refuses_while_one_cant_be_read(
     clockfake.alarms.pop("1"), clockfake.children.pop("1")  # so restore has work to do
     _break_one(clockfake)
     asked = answers(monkeypatch, "y", "2")
-    code, out, _ = run(["alarm", *argv, "--json"], capsys)
+    code, out, _ = run(["alarm", *argv, *dry, "--json"], capsys)
     assert code == 1
     payload = json.loads(out)
     assert payload["error"] == (f"twiddle can't read alarm 80 ({BAD_REASONS['80']}: "

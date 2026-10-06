@@ -125,8 +125,8 @@ one it couldn't, its room and why (`--json`: an `unreadable` list beside
 `alarms`, each `{id, room, status, room_uuid, reason}`; `id` is null for an
 alarm with no ID). `alarm status` reads the same way. Every other alarm verb
 (`add`, `edit`, `rm`, `enable`, `disable`, `try`, `snapshot`, `restore`)
-**refuses while one is unreadable**, even for a readable alarm, and writes
-nothing: its checks compare whole lists, and an alarm missing from both sides
+**refuses while one is unreadable**, even for a readable alarm and even with
+`--dry-run`, and writes nothing: its checks compare whole lists, and an alarm missing from both sides
 could change unseen. Fix or delete it in the Sonos app. `alarm stop` and
 `snooze` never read the list, so they still silence a ringing alarm.
 

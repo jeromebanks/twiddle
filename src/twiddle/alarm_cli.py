@@ -781,13 +781,14 @@ def cmd_add(args):
                           room_uuid=target["room_uuid"]), **found_set)
     about = {"room": target["room"], "alarm": alarm.to_attributes(), **_aim(target)}
     what = f"{brief(house, alarm)}\n  {details(alarm)}{_note(target)}"
-    if getattr(args, "dry_run", False):
-        return emit(args, about | {"would": "create", "performed": False},
-                    f"[dry-run] would create an alarm: {what}")
+    # Read before the dry run too, so it refuses whatever the real one would.
     try:
         found = clock.list_alarms(ip)
     except Exception as exc:
         return _read_failed(args, ip, exc, "add an alarm")
+    if getattr(args, "dry_run", False):
+        return emit(args, about | {"would": "create", "performed": False},
+                    f"[dry-run] would create an alarm: {what}")
     try:
         after, now = clock.create_alarm(ip, alarm, found.version)
     except Exception as exc:

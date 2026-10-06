@@ -500,7 +500,7 @@ def test_unreadable_alarms_are_named_once_and_not_discounted(tmp_path: Path):
     [f] = [f for f in findings if "couldn't be read" in f.title]
     assert f.severity == "info"
     assert f.title == "3 alarms in the schedule couldn't be read"
-    assert "alarm 9 (Bedroom): invalid alarm recurrence" in f.detail
+    assert "alarm 9 (Bedroom): invalid alarm recurrence 'EVERY_OTHER_DAY';" in f.detail
     assert f.detail.count("an alarm with no ID (Bedroom): missing ID") == 2
     assert "not discounted" in f.detail
 
@@ -522,3 +522,24 @@ def test_a_repaired_alarm_is_discounted_only_from_its_repair(tmp_path: Path):
 def test_no_unreadable_no_finding(tmp_path: Path):
     mon = _log(tmp_path, [_schedule("2026-10-04T12:00:00.000Z", [_alarm()])])
     assert not any("couldn't be read" in f.title for f in report.summarise_log(mon))
+
+
+def test_a_schedule_with_no_samples_still_names_the_unreadable(tmp_path: Path):
+    mon = tmp_path / "daemon.jsonl"
+    mon.write_text(json.dumps(_schedule("2026-10-04T12:00:00.000Z", [_alarm()],
+                                        unreadable=[_unreadable()])) + "\n")
+    [f] = report.summarise_log(mon)
+    assert f.title == "1 alarm in the schedule couldn't be read"
+
+
+def test_an_alarm_whose_reason_changes_is_still_one_alarm(tmp_path: Path):
+    mon = _log(tmp_path, [
+        _schedule("2026-10-04T12:00:00.000Z", [], unreadable=[_unreadable()]),
+        _schedule("2026-10-05T12:00:00.000Z", [],
+                  unreadable=[_unreadable(reason="missing StartTime", room="Kitchen")],
+                  version="RINCON_00000000000101400:2"),
+    ])
+    [f] = [f for f in report.summarise_log(mon) if "couldn't be read" in f.title]
+    assert f.title == "1 alarm in the schedule couldn't be read"
+    assert ("alarm 9 (Kitchen): invalid alarm recurrence 'EVERY_OTHER_DAY', "
+            "then missing StartTime.") in f.detail
