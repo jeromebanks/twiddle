@@ -233,3 +233,51 @@ def test_an_unanswered_alarmclock_never_disturbs_sampling(tmp_path: Path, monkey
               if r["kind"] == "sample_error"]
     assert [e["err"] for e in errors] == ["OSError('anchor down')"]   # never AlarmClock's
     assert m._consecutive_errors == 0
+
+
+BAD_ALARM = (f'<Alarm ID="8" StartTime="06:00:00" Duration="01:00:00" '
+             f'Recurrence="EVERY_OTHER_DAY" Enabled="1" RoomUUID="{ROAM_L}" '
+             f'ProgramURI="x-rincon-buzzer:0" ProgramMetaData="" PlayMode="NORMAL" '
+             f'Volume="20" IncludeLinkedZones="0"/>')
+
+
+def test_an_unreadable_alarm_is_named_and_the_rest_still_logged(tmp_path: Path, monkeypatch):
+    monkeypatch.setitem(globals(), "ALARMS_XML", ALARMS_XML.replace("</Alarms>",
+                                                                   BAD_ALARM + "</Alarms>"))
+    speaker = FakeSpeaker(monkeypatch)
+    m, out = _monitor(tmp_path)
+    m.watches[ROAM_L] = monitor.Watch(uuid=ROAM_L, ip="192.168.1.2", name="Sonos Roam")
+    m._check_alarms()
+    m._fh.close()
+    [rec] = _records(out, "alarm_schedule")
+    assert [a["id"] for a in rec["alarms"]] == ["7"]
+    assert rec["unreadable"] == [{"id": "8", "room_uuid": ROAM_L, "room": "Sonos Roam",
+                                  "reason": rec["unreadable"][0]["reason"]}]
+    assert "EVERY_OTHER_DAY" in rec["unreadable"][0]["reason"]
+    assert {a for _, a in speaker.sent} <= {"ListAlarms", "GetTimeNow", "GetFormat"}
+    assert not play.INTERVENTION_LOG.exists()
+
+
+def test_a_readable_schedule_has_no_unreadable_key(tmp_path: Path, monkeypatch):
+    FakeSpeaker(monkeypatch)
+    m, out = _monitor(tmp_path)
+    m._check_alarms()
+    m._fh.close()
+    assert "unreadable" not in _records(out, "alarm_schedule")[0]
+
+
+def test_the_rotation_checkpoint_carries_the_unreadable(tmp_path: Path, monkeypatch):
+    monkeypatch.setitem(globals(), "ALARMS_XML", ALARMS_XML.replace("</Alarms>",
+                                                                   BAD_ALARM + "</Alarms>"))
+    FakeSpeaker(monkeypatch)
+    m, out = _monitor(tmp_path, max_bytes=600, keep=2)
+    m._check_alarms()
+    for i in range(30):
+        m._emit({"kind": "sample", "samples": [], "n": i, "pad": "x" * 40})
+    m._fh.close()
+    checkpoints = [r for p in report.rotated_logs(out)
+                   for r in map(json.loads, p.read_text().splitlines())
+                   if r["kind"] == "alarm_schedule" and r.get("checkpoint")]
+    assert checkpoints and all(r["unreadable"][0]["id"] == "8" for r in checkpoints)
+    findings = [f for f in report.summarise_log(out) if "couldn't be read" in f.title]
+    assert len(findings) == 1                  # one finding, however many copies

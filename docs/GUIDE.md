@@ -110,12 +110,317 @@ Alarms are household-wide, so any speaker answers for all of them: one
 and how it writes it (a format of `INV`, i.e. unset, prints 24-hour). Each
 alarm shows its time, days, on/off, volume, duration (the auto-stop), play
 mode, the source's title from the alarm's own metadata, and when it next goes
-off in the household's local time.
+off in the household's local time, and its ID (`#34`), which the writing
+verbs below take.
+
+Beside the title, a column says where the alarm's sound comes from (`--json`:
+`sound_source`, a key, and `sound_source_text`, as shown). It is read from the
+alarm's `ProgramURI` alone, never from its title. Twiddle's own sources
+(`alarm sources`) are asked first and recognise the URIs they build: a dial
+station is `twiddle:station`, "twiddle station (direct stream)", and a source
+added later is `twiddle:<name>` unless it says otherwise. Then the URI's
+scheme, its `sid=` and the start of its item ID are matched, all three
+exactly, against what this household's speakers were seen to use:
+
+| `sound_source` | shown as | `ProgramURI` |
+|---|---|---|
+| `sonos_chime` | Sonos chime | `x-rincon-buzzer:<n>` |
+| `sonos_radio` | Sonos Radio | `x-sonosapi-radio:sonos:…?sid=303` |
+| `iheart_sonos_radio` | iHeart through Sonos Radio | `x-sonosapi-stream:ihr:…?sid=303` |
+| `tunein` | TuneIn | `x-sonosapi-stream:s<digits>?sid=333` |
+| `spotify_sonos` | Spotify through the Sonos app's link | `x-rincon-cpcontainer:<8 hex>spotify:…?sid=12` |
+
+These service IDs and prefixes are **observed conventions, not a table Sonos
+publishes**, and twiddle asks no speaker or service to name them. Anything
+else, including another service ID for a service already listed, is
+`unknown`, shown with the URI's scheme (`unknown (x-sonosapi-hls)`), rather
+than a guess.
 
 An alarm aimed at a bonded follower (the right Roam, a surround), at a speaker
 that has vanished from the household, or at a UUID no speaker owns is listed
 with a `!` line saying so, never hidden. `alarm list` writes nothing: no
 `AlarmClock` or `AVTransport` write, no journal entry.
+
+An alarm twiddle can't read (a recurrence it doesn't know, a volume over 100,
+a flag that isn't 0/1, a missing attribute) doesn't hide the others: `alarm
+list` shows every alarm it can read, then a `can't read` section naming each
+one it couldn't, its room and why (`--json`: an `unreadable` list beside
+`alarms`, each `{id, room, speaker, status, room_uuid, reason}`; `id` is null for an
+alarm with no ID). `alarm status` reads the same way. Every other alarm verb
+(`add`, `edit`, `rm`, `enable`, `disable`, `try`, `snapshot`, `restore`)
+**refuses while one is unreadable**, even for a readable alarm and even with
+`--dry-run`, and writes nothing: its checks compare whole lists, and an alarm missing from both sides
+could change unseen. Fix or delete it in the Sonos app. `alarm stop` and
+`snooze` never read the list, so they still silence a ringing alarm.
+
+```bash
+uv run twiddle alarm snapshot              # -> logs/snapshots/alarms.json (read-only)
+uv run twiddle alarm restore --dry-run     # every change it would make; writes nothing
+uv run twiddle alarm restore               # WRITES: make the alarms match the snapshot
+```
+
+`alarm snapshot` saves the `CurrentAlarmList` exactly as `ListAlarms` sent it,
+with its version; like `alarm list` it writes nothing to a speaker or the
+journal. `alarm restore` makes the household match it again: alarms the
+snapshot lacks are destroyed, deleted ones recreated, changed ones updated.
+A recreated alarm gets a new ID from the speaker, so alarms are compared by
+everything but their ID: time, days, duration, enabled, room, volume, play
+mode, include-grouped-rooms, and `ProgramURI`/`ProgramMetaData` as exact
+strings. An equal alarm under another ID is left alone, so restoring twice
+does nothing the second time. The old-to-new ID mapping is printed and
+journalled (`alarm_restore`).
+
+Every alarm write (`CreateAlarm`, `UpdateAlarm`, `DestroyAlarm`) first re-reads
+the list and is **refused if its version moved** since twiddle read it: someone
+changed an alarm in the Sonos app meanwhile, and that edit is not overwritten.
+AlarmClock has no compare-and-swap, so the list read back after each write must
+differ only in the alarm written; if anything else moved in that window, the
+write is reported done and everything after it stops. Each write is journalled
+as `alarm_create`/`alarm_update`/`alarm_destroy` with the whole alarm before
+and after (or the error, if it failed), so a deleted or clobbered alarm can be
+recreated from `logs/interventions.jsonl`. A write whose answer is lost (a
+timeout after the speaker acted) is judged from the list read back: `written`
+in the journal is true, false, or null when that can't be told. A restore
+stops at the first write that fails or is refused, reads the list again and
+reports everything still different, exiting 1. Some Spotify alarms carry a
+`<Content>` child that `CreateAlarm` can't set: a recreated one comes back
+without it, and restore says so in a `note:` rather than failing.
+
+```bash
+uv run twiddle alarm disable 34 --dry-run   # the room and alarm it resolves to; writes nothing
+uv run twiddle alarm disable 34             # WRITES: switch alarm 34 off
+uv run twiddle alarm enable 34              # WRITES: and on again
+uv run twiddle alarm rm 34                  # WRITES: delete it, after asking twice
+```
+
+`enable` and `disable` send one `UpdateAlarm` that changes `Enabled` and
+nothing else: every other field goes back exactly as `ListAlarms` gave it, so
+an alarm whose source twiddle doesn't recognise (an iHeart station, say) keeps
+its `ProgramURI` and `ProgramMetaData` byte-for-byte. An alarm already in the
+state asked for is left alone, with nothing written or journalled. That is
+what is *sent*: whether a real speaker keeps a Spotify alarm's `<Content>`
+child through an `UpdateAlarm` is unverified, and the journal entry's
+`before`/`after` children show it.
+
+`rm` asks twice, on the terminal: `y`, then the alarm's ID typed out. Anything
+else, or no terminal to ask (answers piped in, a script), deletes nothing. The prompts go
+to stderr, so `--json` still prints one envelope. If someone changed an alarm
+in the Sonos app while it was asking, the delete is refused. The
+`alarm_destroy` journal entry keeps the whole alarm (every attribute and child
+element), so a deleted alarm can be made again from it, with a new ID
+(refused if an equal alarm is already there):
+
+```bash
+uv run python -c "from twiddle.alarms import clock; ip = '<any speaker>'; \
+  print(clock.recreate(ip, '34', clock.list_alarms(ip).version))"
+```
+
+That is a write too (journalled `alarm_create`); `alarm restore` from a
+snapshot taken before the delete brings it back as well. Every field
+`CreateAlarm` takes comes back exactly; what it has no argument for can't: a
+Spotify alarm's `<Content>` child (see above) and any attribute twiddle's
+model doesn't know. `recreate` returns a list of what it couldn't bring back.
+
+```bash
+uv run twiddle alarm add --room roam --time 07:15 --days weekdays --dry-run   # the alarm it would create
+uv run twiddle alarm add --room roam --time 07:15 --days weekdays --volume 20 --duration 1h
+uv run twiddle alarm edit 34 --volume 15 --mode shuffle --dry-run               # the change; writes nothing
+uv run twiddle alarm edit 34 --days sat,sun --off                               # WRITES
+```
+
+`add` sends one `CreateAlarm` and prints the ID the speaker gave it; `edit`
+sends one `UpdateAlarm` that changes only the fields named on the command line
+and sends every other one back exactly as `ListAlarms` gave it. Between them
+every field `AlarmClock` takes is settable:
+
+| Flag | Field | Values (`add`'s default) |
+|---|---|---|
+| `--time` | `StartLocalTime` | 24-hour `HH:MM` or `HH:MM:SS`, the household's time (required on `add`) |
+| `--days` | `Recurrence` | `once`, `daily`, `weekdays`, `weekends`, days like `mon,wed,fri` or `mon-fri`, or the speaker's own `ON_<days>` (Sunday 0); written the speaker's way, so `sat,sun` is `WEEKENDS` (`daily`) |
+| `--duration` | `Duration` | the auto-stop: `1h`, `30m`, `1h30`, `HH:MM:SS`; `none` sends an empty `Duration`, as soco does for no auto-stop (unverified on a real speaker) (`2h`) |
+| `--volume` | `Volume` | 0-100 (25) |
+| `--mode` | `PlayMode` | `normal`, `repeat`, `repeat-one`, `shuffle`, `shuffle-repeat`, `shuffle-repeat-one`, or the speaker's own value. The speaker's `SHUFFLE` is shuffle *and* repeat (`shuffle-repeat`); plain `shuffle` is `SHUFFLE_NOREPEAT` (`normal`) |
+| `--include-grouped-rooms` / `--no-...` | `IncludeLinkedZones` | also play in the rooms grouped with it when it fires (no) |
+| `--room` | `RoomUUID` | a room by name (required on `add`) |
+| `--on` / `--off` | `Enabled` | (on) |
+| `--source` | `ProgramURI`, `ProgramMetaData` | `chime`, `station:<key>` (any station in dial's catalog), `spotify:playlist:<id>`, `spotify:album:<id>`, `spotify:track:<id>` or `spotify:<an open.spotify.com link>`, or any other source `alarm sources` lists; on `edit`, `keep` (the default) leaves the source byte-for-byte (`chime`) |
+
+So editing anything about an alarm whose source twiddle doesn't recognise (an
+iHeart or Spotify alarm) sends its `ProgramURI` and `ProgramMetaData` back
+untouched; as with `enable`, whether a real speaker keeps a Spotify alarm's
+`<Content>` child through that `UpdateAlarm` is unverified (see above). An edit
+that would change nothing writes nothing. In `--json`, `room` is where the
+alarm was and `to_room` where `--room` moves it.
+
+What an alarm can play comes from `alarms/sources/`, one module per source,
+each saying whether **this Mac must be up when the alarm goes off** and what
+the room does if the source can't play:
+
+```bash
+uv run twiddle alarm sources               # every source, its needs-this-Mac mark and fallback (read-only)
+uv run twiddle alarm sources station kexp  # a source's choices, narrowed (read-only)
+uv run twiddle alarm sources spotify jazz  # search Spotify (needs `spotify auth`; read-only)
+uv run twiddle alarm sources bandcamp "some band"   # search Bandcamp's tracks (network; read-only)
+uv run twiddle alarm add --room roam --time 07:00 --days weekdays --source station:kalx --dry-run
+```
+
+`alarm sources` reads only the registry and the catalog: no speaker, no
+network, except `alarm sources spotify <words>`, which searches Spotify with twiddle's own sign-in, and `alarm sources bandcamp <words>`, which searches Bandcamp (throttled and cached, as `scene` does). A Bandcamp alarm (`--source bandcamp:<track page URL>`, with `#<track id>` for one track of a release) stores `http://<this Mac>:<port>/bandcamp/<token>.mp3` (the installed `alarm serve` agent's port, else 8765), never Bandcamp's own URL, which expires in about a day; it needs `alarm serve` running when it fires, and a speaker's acceptance of an `http://` ProgramURI has not yet been seen. An alarm sound (`--source sound:bell`; `bell`, `beep`, `rise`, `birdsong`, `chimes`, each 45 s, four generated and one a CC0 recording, listed by `alarm sources sound`) stores `http://<this Mac>:<port>/sound/<name>.mp3`, served by `alarm serve` whatever `--dir` is; it needs the Mac like a Bandcamp alarm and has the same unverified fallback. A Spotify alarm plays through Sonos's own Spotify link (`x-rincon-cpcontainer`, `sid=12`), not the relay, so the speaker fetches it itself and this Mac has no part in it. It needs the account `sn=` that Spotify is linked under, read from the Spotify favourites already on the speaker (a read-only `Browse`), else from an existing Spotify alarm; with neither (the speaker's own account list is empty on current firmware, and Spotify being linked doesn't put its serial anywhere else), `add` says no account is linked, asks you to save one Spotify playlist as a Sonos favourite, and writes nothing. The album and track forms follow what Sonos uses elsewhere and have not yet been seen accepted on a speaker. A station alarm is the station's own stream as an
+`x-rincon-mp3radio://` URI, exactly what `tune` hands a speaker, so the
+speaker fetches it itself and this Mac has no part in it; like `tune`, an
+https stream is fetched over http. Neither the chime nor a station needs this
+Mac. A source that does is marked `⌁` by `alarm sources` and `alarm list`
+(`needs_mac` in `--json`, beside `source`, the source's name, or null for one
+twiddle doesn't recognise). That a station alarm falls back to the chime when
+its stream can't be reached is assumed, not yet verified on a speaker.
+
+The room is named, never addressed. An alarm belongs to a room, so it goes on
+the room's primary unit: naming a bonded follower (`"Sonos Roam (R)"`, a
+surround, or its IP) puts the alarm on the left Roam or the soundbar, and the
+output says so in a `note:` (`redirected_from`/`reason` in `--json`). Naming
+the room itself is never a redirect. It is never the group coordinator: a
+room grouped with another today keeps its own alarm. For the same reason a
+name that matches two rooms is refused as ambiguous even when they are
+grouped (`--room Den` with Den North and Den South), where transport commands
+would act on the group. `edit` without `--room`
+leaves the alarm where it is, even on a follower (`alarm list` labels those).
+`--dry-run` resolves the room and prints the whole alarm it would write;
+like every alarm write, the real thing is refused if the list moved since it
+was read, and journalled (`alarm_create`/`alarm_update`) before and after.
+
+```bash
+uv run twiddle alarm status                          # is one going off, and where (read-only)
+uv run twiddle alarm try 34 --dry-run                # the room and alarm it would fire; writes nothing
+uv run twiddle alarm try 34                          # WRITES: fire alarm 34 now, to hear it
+uv run twiddle alarm snooze --room roam              # WRITES: the speaker's own snooze, 10 minutes
+uv run twiddle alarm snooze --room roam --minutes 5  # 5, 10, 15 or 30
+uv run twiddle alarm stop --room roam                # WRITES: stop it
+```
+
+Ringing belongs to a group's transport, so these go to `AVTransport` on a
+group coordinator, not to `AlarmClock`. `status` asks every group's
+coordinator `GetRunningAlarmProperties`, which names the alarm going off
+(`AlarmID`, `GroupID`, `LoggedStartTime`) and answers UPnP error 800 when
+none is. It also takes one GENA event from each (the subscription the daemon
+keeps on its anchor) for `AlarmRunning` and `SnoozeRunning`, which no action
+returns; without an event it still answers from `GetRunningAlarmProperties`.
+An event that says plainly neither is running wins over an alarm ID
+`GetRunningAlarmProperties` still names: `stop` acts on this answer, and
+refusing wrongly costs less than stopping ordinary playback.
+The alarm is named from `ListAlarms` by its ID, under its own room. `status`
+writes nothing and journals nothing.
+
+`try` is the speaker's `RunAlarm` with every field of the alarm (time aside),
+on the coordinator of the alarm's room, so a bonded follower's alarm fires on
+its pair's coordinator. It is refused for an alarm aimed at a speaker that
+isn't here. `LoggedStartTime` is sent as the household's local time
+`YYYY-MM-DD HH:MM:SS`, from `GetTimeNow`. Tried on the Roam (2026-10-04,
+alarm 34): it rang, `GetRunningAlarmProperties` named alarm 34 with that
+`LoggedStartTime` and the group's ID, LastChange had `AlarmRunning=1`, and
+`alarm stop` ended it (`status` then read nothing ringing).
+
+`stop` and `snooze` resolve the room the way transport commands do (a bonded
+follower goes to its coordinator, and the output says so) and send the
+group's own `Stop` or `SnoozeAlarm` (`Duration` `00:10:00`). Both are
+**refused when no alarm is going off there**: a bare `Stop` would silence
+whatever the room is playing, and `twiddle stop --room` is the command for
+that. A snoozed alarm (`SnoozeRunning`) can still be stopped. Whether a snoozed
+alarm also answers `GetRunningAlarmProperties`, and whether `Stop` ends a
+snooze, are unverified.
+
+A tried alarm stopped early leaves its duration-stop span in the journal: a
+few minutes wrongly discounted two hours on, the cheaper mistake (as with a
+cancelled sleep timer).
+
+All three writes are journalled (`alarm_run` with the whole alarm,
+`alarm_stop`, `alarm_snooze` with its minutes). The speaker acts again later
+on its own when a tried alarm's duration runs out or a snooze ends, so a span
+is journalled around each of those moments (`alarm_run_stop_*`,
+`alarm_snooze_ring_*`, a minute before to three after) for `analyse` to
+discount, as with the sleep timer. Each takes `--dry-run`, which reads
+whether anything is ringing but writes and journals nothing.
+
+#### Fields of `alarm list --json`
+
+The payload sits in the usual ok/error envelope ([`--json`](#commands)): `ok` and the error shape are described there, not here. Every key of a
+successful answer is below. **Sonos** means the value is what the speaker sent
+(named by its `AlarmClock` field), only renamed or reshaped; **twiddle** means
+it is worked out here. `alarms[].` is a key of each alarm's object.
+
+| Key | From | Meaning |
+|---|---|---|
+| `version` | Sonos: `ListAlarms` `CurrentAlarmListVersion` | The alarm list's version string; the writing verbs refuse if it moved since they read it. |
+| `household_time` | twiddle | The household's clock and how it writes times, read once per list; its four keys follow. |
+| `household_time.local` | Sonos: `GetTimeNow` `CurrentLocalTime` | The household's local time now, ISO. Every `next_fire` is counted from it. |
+| `household_time.utc` | Sonos: `GetTimeNow` `CurrentUTCTime` | The same instant in UTC, ISO. |
+| `household_time.time_format` | Sonos: `GetFormat` `CurrentTimeFormat` | How the household writes times. Only `INV` (unset) has been seen on a real speaker; twiddle shows `12H` as AM/PM and anything else, `INV` included, as 24-hour. |
+| `household_time.date_format` | Sonos: `GetFormat` `CurrentDateFormat` | How it writes dates. Twiddle shows `DMY` as day/month, `MDY` as month/day and anything else, `INV` included, as month-day. |
+| `alarms` | twiddle | Every alarm twiddle could read, grouped by room name, each room's in time order. |
+| `unreadable` | twiddle | The alarms it couldn't read, each `{id, room, speaker, status, room_uuid, reason}`; see above. `id` is the alarm's ID (null if it has none); `room`, `speaker` and `status` mean what they do for `alarms[]` (below); `room_uuid` is its `RoomUUID` as the speaker sent it (null if missing); `reason` is why it couldn't be read. An alarm with no `RoomUUID` has no `speaker` key, and its `room` and `status` are null. |
+| `alarms[].id` | Sonos: `ID` | The alarm's ID, a string; what the writing verbs take. |
+| `alarms[].room` | twiddle | The room's name for `room_uuid`; `(unknown speaker)` if no speaker owns it. |
+| `alarms[].speaker` | twiddle | The speaker's own name (or, for a vanished one, its last room name); empty if unknown. |
+| `alarms[].status` | twiddle | `ok`, `bonded_follower`, `vanished` or `unknown`: whether the alarm is aimed at something that can sound it. |
+| `alarms[].room_uuid` | Sonos: `RoomUUID` | The speaker the alarm is set on, as `RINCON_...`. |
+| `alarms[].time` | Sonos: `StartTime` | When it goes off, `HH:MM:SS` in the household's local time. |
+| `alarms[].time_text` | twiddle | The same time written the way the household writes times. |
+| `alarms[].recurrence` | Sonos: `Recurrence`, as parsed | `ONCE`, `DAILY`, `WEEKDAYS`, `WEEKENDS` or `ON_<days>`. |
+| `alarms[].days` | twiddle | The days it repeats on as numbers, Sunday 0 to Saturday 6, sorted. |
+| `alarms[].days_text` | twiddle | The recurrence in words: `once`, `daily`, `weekdays`, `weekends`, or day names like `Mon Wed Fri`. |
+| `alarms[].enabled` | Sonos: `Enabled` | Whether the alarm is on. |
+| `alarms[].volume` | Sonos: `Volume` | The alarm's volume, 0 to 100. |
+| `alarms[].duration` | Sonos: `Duration` | How long it plays before stopping, `HH:MM:SS`; empty means it never auto-stops. |
+| `alarms[].duration_text` | twiddle | The duration in words, e.g. `no auto-stop`. |
+| `alarms[].play_mode` | Sonos: `PlayMode` | Sonos's play mode (`NORMAL`, `SHUFFLE`, ...), unchanged. |
+| `alarms[].include_linked_zones` | Sonos: `IncludeLinkedZones` | Whether it also plays in the rooms grouped with its room. |
+| `alarms[].source_title` | twiddle | The title for the source: from twiddle's own source if it built the URI, else the `dc:title` in `ProgramMetaData`, else the URI's scheme. For display. |
+| `alarms[].source` | twiddle | The name of twiddle's own source (`alarm sources`) that recognises the URI; null if none does. |
+| `alarms[].needs_mac` | twiddle | True if that source only works while this Mac is serving it. |
+| `alarms[].sound_source` | twiddle | A key for where the sound comes from (table above), read from `program_uri` alone. |
+| `alarms[].sound_source_text` | twiddle | `sound_source` as shown in the list. |
+| `alarms[].program_uri` | Sonos: `ProgramURI` | What the alarm plays, exactly as Sonos stores it. Sonos doesn't document its format: the scheme and `sid=` follow conventions seen on real speakers, so treat it as opaque unless you need to recognise one. |
+| `alarms[].next_fire` | twiddle | The next time it goes off, ISO, in the household's local time, counted from `household_time.local`. `null` when the alarm is disabled (or its time can't be read). |
+| `alarms[].next_fire_text` | twiddle | The same moment as the list prints it (`today 7:30 AM`, `tomorrow 07:30`, `Mon 10-05 07:30`). `-` when `next_fire` is null, so for a disabled alarm. |
+
+### Serving alarm audio from this Mac
+
+A source that needs this Mac (an alarm sound, a Bandcamp track) stores a URL on
+this machine in the alarm, and the speaker fetches it at fire time. `alarm
+serve` is what answers, in the foreground, on a fixed port (8765 by default: the
+alarm stores the URL, so it can't be whatever was free):
+
+```bash
+uv run twiddle alarm serve --dir ~/alarm-sounds --dry-run   # the plan; binds and journals nothing
+uv run twiddle alarm serve --dir ~/alarm-sounds             # Ctrl-C stops it
+curl -o /dev/null http://localhost:8765/bell.mp3            # a test fetch; see the span in logs/interventions.jsonl
+```
+
+The port is the installed agent's when there is one: after `alarm serve --install
+--port P`, a sound or Bandcamp alarm made by `alarm add`/`edit` points at `P`
+(else 8765). Alarms made before keep the port they were made with: reinstalling
+on another port doesn't move them, so nothing answers them and they should fall
+back to the chime (not yet seen on a speaker; `alarm list` still marks them ⌁); `alarm edit <id> --source
+sound:<name>` (or `bandcamp:...`) rebuilds one on the new port. A foreground
+`alarm serve --port` other than the one new alarms point at prints a warning.
+
+It writes to no speaker. It serves audio files under `--dir`, and Bandcamp
+tracks under `/bandcamp/<token>.mp3` (a fresh stream URL is fetched for each
+request and the audio passed through; if Bandcamp can't be resolved, opened and
+producing audio within 5 seconds the answer is 502/504 before any header or span,
+and a stalled or trickling stream is cut at `--max-s`), to the
+household's speakers (or just the `--room`s), and refuses everything else at
+once with a 403/404 (a directory, a name outside `--dir`, a file that isn't
+audio, a client that isn't a speaker): a speaker that can't be served falls back
+to its own chime instead of waiting. Each file sent is a **span** in the
+journal, `alarm_serve_start`/`alarm_serve_end` with its own `span_id` (two at
+once to one speaker stay two) and a finite `max_s` (`--max-s`, default 3600):
+the server stops sending there, and `analyse` ends a span a crash left open at
+start + `max_s`, so a killed server doesn't discount every fault after it. At
+start, once the port is bound, it closes any span of its own a crash left open,
+at the moment it could no longer have been running. A second `alarm serve` on
+the port fails without touching the first one's spans. Every span start any
+command writes carries a `span_id` and `max_s`; journal records from before
+that still read as they did.
 
 ### Relay: play anything on this Mac, including Spotify
 
@@ -474,6 +779,9 @@ that half-worked is worse than one that failed loudly — the next measurement
 inherits the difference silently. A live stream has no seekable position, so
 restoring one re-issues the URI rather than seeking into it.
 
+Room snapshots don't cover alarms, which belong to the whole household:
+`alarm snapshot` before touching them, `alarm restore` after (see *Alarms*).
+
 ### Playback and long-running tests (these **write**)
 
 ```bash
@@ -484,8 +792,9 @@ uv run twiddle diag soak --room roam --duration 120
 ```
 
 `rooms`, `status`, `snapshot`, and all of `diag scan|ping|watch|analyse` are
-strictly read-only. Every write goes through `play.py`, which journals it to
-`logs/interventions.jsonl` — see *Telling real dropouts from ones you caused*.
+strictly read-only. Every write goes through `play.py`, or for alarms through
+`alarms/clock.py`, and both journal it to `logs/interventions.jsonl` — see
+*Telling real dropouts from ones you caused*.
 
 ## Reading PHY error rates
 
@@ -620,6 +929,11 @@ the schedule in force when it fired:
 
 A log written before this has no schedule, so the alarms in it still count.
 
+An alarm the monitor can't read is named in the schedule (`unreadable`) and the
+rest are still logged and discounted. Its own fires can't be, so `analyse`
+says so once, as an info finding naming each one: a drop one of them caused
+would otherwise count as a fault without a word.
+
 Evidence about the speakers has to come from windows where nothing was sent to
 them. `watch` on its own never writes, so its windows are clean by construction.
 
@@ -674,8 +988,8 @@ you add analysis.
 | `report.py` | Findings, severities, hardware-vs-setup discriminators |
 | `household.py` | Speakers, groups, name resolution, snapshot/restore |
 | `control_cli.py` | The room-naming control commands |
-| `alarms/` | Sonos alarms: `model.py` (an `Alarm` that round-trips ListAlarms, its `Recurrence`), `clock.py` (the `AlarmClock` reads) |
-| `alarm_cli.py` | `alarm list` (read-only) |
+| `alarms/` | Sonos alarms: `model.py` (an `Alarm` that round-trips ListAlarms, its `Recurrence`), `clock.py` (the `AlarmClock` reads, and the version-checked, journalled writes), `baseline.py` (`AlarmSnapshot`, the restore plan and restore) |
+| `alarm_cli.py` | `alarm list`, `alarm snapshot` (read-only); `alarm restore` (writes) |
 | `play.py` | HTTP file server and transport control (writes) |
 | `tone.py` | Soak-test signal generator |
 | `spotify_ops.py` | Spotify playback logic with no CLI attached (shared by `spotify_cli` and `scene`) |

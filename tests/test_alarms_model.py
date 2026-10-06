@@ -134,6 +134,59 @@ def test_not_an_alarm_list():
         parse_alarms("<Nope/>")
 
 
+# -- an alarm the model can't read ---------------------------------------------
+
+def _with(*changes) -> str:
+    """The fixture with alarm 1's attributes changed, one copy per change."""
+    root = ET.fromstring(TEXT)
+    for i, change in enumerate(changes):
+        el = ET.fromstring(ET.tostring(ELEMENTS[0]))
+        el.set("ID", f"9{i}")
+        for k, v in change.items():
+            if v is None:
+                del el.attrib[k]
+            else:
+                el.set(k, v)
+        root.append(el)
+    return ET.tostring(root, encoding="unicode")
+
+
+BROKEN = ({"Recurrence": "EVERY_OTHER_DAY"}, {"Volume": "101"}, {"Enabled": "2"},
+          {"StartTime": None})
+
+
+def test_one_unreadable_alarm_ends_a_strict_parse():
+    with pytest.raises(model.UnreadableAlarm) as e:
+        parse_alarms(_with({"Volume": "101"}))
+    assert isinstance(e.value, ValueError)            # what callers already catch
+    assert (e.value.alarm_id, e.value.reason) == ("90", "expected a volume 0-100, got '101'")
+    assert e.value.attributes["Volume"] == "101"
+    assert str(e.value) == "alarm 90: expected a volume 0-100, got '101'"
+
+
+def test_read_alarms_keeps_the_rest_and_says_which_it_couldnt_read():
+    alarms, bad = model.read_alarms(_with(*BROKEN))
+    assert alarms == ALARMS
+    assert [b.id for b in bad] == ["90", "91", "92", "93"]
+    assert [b.reason.split(":")[0] for b in bad] == [
+        "invalid alarm recurrence 'EVERY_OTHER_DAY'", "expected a volume 0-100, got '101'",
+        "expected 0 or 1, got '2'", "missing StartTime"]
+    assert {b.room_uuid for b in bad} == {ELEMENTS[0].get("RoomUUID")}
+    assert bad[0].attributes["Recurrence"] == "EVERY_OTHER_DAY"
+
+
+def test_an_alarm_with_no_id_or_room_is_still_reported():
+    [b] = model.read_alarms("<Alarms><Alarm Volume='7'/></Alarms>")[1]
+    assert (b.id, b.room_uuid) == (None, None) and b.reason.startswith("missing ID")
+
+
+@pytest.mark.parametrize("doc", ["<Alarms><Alarm", "<Nope/>"])
+def test_only_single_alarms_are_skipped_never_the_document(doc):
+    with pytest.raises((ValueError, ET.ParseError)) as e:
+        model.read_alarms(doc)
+    assert not isinstance(e.value, model.UnreadableAlarm)
+
+
 # -- recurrence --------------------------------------------------------------
 
 @pytest.mark.parametrize("text, days", [

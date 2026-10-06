@@ -17,6 +17,13 @@ gives back what the speaker said:
   firmware). Neither is a CreateAlarm/UpdateAlarm argument, and whether an
   update keeps, drops or regenerates an existing `<Content>` is unverified.
 
+An `<Alarm>` the model can't read (an unexpected recurrence, a volume over
+100, a missing attribute) raises `UnreadableAlarm`. `parse_alarms` lets it
+end the whole list, which is what anything about to write wants: no check
+runs over a list with an alarm missing from it. `read_alarms` skips it
+instead and says so, as the station catalog skips a bad file, for the views
+that only show alarms.
+
 No soco and no speaker here: `clock.py` does the calls.
 """
 from __future__ import annotations
@@ -88,6 +95,29 @@ _ATTRS = (
 CHIME_URI = "x-rincon-buzzer:0"
 
 
+class UnreadableAlarm(ValueError):
+    """One `<Alarm>` the model can't read. `alarm_id` is None when it has no ID."""
+
+    def __init__(self, alarm_id: str | None, reason: str, attributes: dict[str, str]):
+        super().__init__(f"alarm {alarm_id or '?'}: {reason}")
+        self.alarm_id, self.reason, self.attributes = alarm_id, reason, attributes
+
+
+@dataclass
+class Unreadable:
+    """An alarm `read_alarms` skipped: its ID and room as the speaker gave
+    them (None if absent), its raw attributes, and why."""
+    id: str | None
+    room_uuid: str | None
+    reason: str
+    attributes: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def of(cls, exc: UnreadableAlarm) -> "Unreadable":
+        return cls(exc.alarm_id, exc.attributes.get("RoomUUID"), exc.reason,
+                   dict(exc.attributes))
+
+
 @dataclass
 class Alarm:
     """One alarm. `id` is None until the speaker has assigned one."""
@@ -110,7 +140,7 @@ class Alarm:
         a = dict(el.attrib)
         missing = [k for k, _ in _ATTRS if k not in a]
         if missing:
-            raise ValueError(f"alarm {a.get('ID', '?')}: missing {', '.join(missing)}")
+            raise UnreadableAlarm(a.get("ID"), f"missing {', '.join(missing)}", dict(el.attrib))
         try:
             return cls(
                 id=a.pop("ID"),
@@ -128,7 +158,7 @@ class Alarm:
                 children=tuple(_child(c) for c in el),
             )
         except ValueError as e:
-            raise ValueError(f"alarm {el.get('ID')}: {e}") from None
+            raise UnreadableAlarm(el.get("ID"), str(e), dict(el.attrib)) from None
 
     def _field(self, name: str) -> str:
         v = getattr(self, name)
@@ -153,12 +183,39 @@ class Alarm:
         return [("ID", self.id), *self.create_args()]
 
 
-def parse_alarms(xml: str | bytes) -> list[Alarm]:
-    """Every alarm in a ListAlarms `CurrentAlarmList`."""
+def key(a: Alarm) -> tuple:
+    """What CreateAlarm/UpdateAlarm can set, compared: everything but the ID,
+    `extra` and children, with the recurrence by its days and the program URI
+    and metadata as exact strings."""
+    return (a.start_time, a.recurrence.days, a.duration, a.enabled, a.room_uuid,
+            a.program_uri, a.program_metadata, a.play_mode, a.volume,
+            a.include_linked_zones)
+
+
+def _alarm_elements(xml: str | bytes) -> list[ET.Element]:
     root = ET.fromstring(xml)
     if root.tag != "Alarms":
         raise ValueError(f"expected an <Alarms> document, got <{root.tag}>")
-    return [Alarm.from_element(el) for el in root.iter("Alarm")]
+    return list(root.iter("Alarm"))
+
+
+def parse_alarms(xml: str | bytes) -> list[Alarm]:
+    """Every alarm in a ListAlarms `CurrentAlarmList`; `UnreadableAlarm` if
+    any one can't be read."""
+    return [Alarm.from_element(el) for el in _alarm_elements(xml)]
+
+
+def read_alarms(xml: str | bytes) -> tuple[list[Alarm], list[Unreadable]]:
+    """The alarms that can be read, and the ones that can't. Only a single
+    `<Alarm>` is skipped: a document that isn't XML, or isn't `<Alarms>`,
+    still raises."""
+    alarms, unreadable = [], []
+    for el in _alarm_elements(xml):
+        try:
+            alarms.append(Alarm.from_element(el))
+        except UnreadableAlarm as exc:
+            unreadable.append(Unreadable.of(exc))
+    return alarms, unreadable
 
 
 def _flag(text: str) -> bool:

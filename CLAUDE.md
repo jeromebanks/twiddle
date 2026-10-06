@@ -51,9 +51,16 @@ aliases — the launchd plist depends on them.
 | `v` in `dial` / `scene`, `viz list/snapshot/demo` | **read-only — no speaker.** Its own ffmpeg decode of the playing stream (a second listener); on the relay only as an *observer* (`?observer`), never counted in `listeners`/`clients_total`/`dropped_chunks`; an older relay without `X-Twiddle-Observer` is not tapped at all. Shows the stream, **not** the speaker: never evidence that sound came out |
 | `dial` (TUI) | **writes only on `enter`/`s`/`D`/`R`/`d`/volume/mute** (`t` filters by tag: display only) — to the chosen Sonos room (journalled) or this Mac / a Bluetooth device (`ffmpeg` with dial's own live volume and mute, not the system's; Linux the same through `ffmpeg -f pulse`; only an ffmpeg without PulseAudio falls back to `ffplay` + the sink volume. The volume keys also work inside `v`). Spotify is consulted only when the room is on the relay; if music is playing through it, tuning asks twice, pauses Spotify, journals `spotify_paused_for_radio`; `R` puts it back. `d` moves a playing station to the new output and stops it on the old (only if that still plays what dial started; never the relay) |
 | `diag scan/ping/watch/analyse/baseline/baseline-diff`, `daemon status` | **read-only — safe any time** |
-| `alarm list` | **read-only — `ListAlarms` + the household's time and format from any speaker; no `AlarmClock`/`AVTransport` write, no journal entry** |
+| `alarm list`, `alarm snapshot`, `alarm status` | **read-only — `ListAlarms` + the household's time and format from any speaker; no `AlarmClock`/`AVTransport` write, no journal entry** (`list` marks ⌁ an alarm whose source needs this Mac; `snapshot` saves the list to `logs/snapshots/alarms.json`; `status` asks each group coordinator `GetRunningAlarmProperties` and takes one GENA event for `AlarmRunning`/`SnoozeRunning`) |
+| `alarm sources [<name> [<query>]]` | **read-only — the source registry (`alarms/sources/`) and the station catalog; no speaker, no network** (`alarm sources spotify <words>` searches Spotify with your sign-in; `bandcamp <words>` searches Bandcamp) |
 | `play`, `pause`, `stop`, `next`, `prev`, `volume`/`vol`, `mute`, `bass`, `treble`, `balance`, `loudness`, `shuffle`, `repeat`, `stream`, `restore`, `group`, `ungroup`, `sleep <duration|off>` | **writes to a speaker** (bare `sleep` only reads the timer; setting one journals a span around when it will stop the room) |
 | `diag serve`, `diag radio`, `diag soak`, `relay start/up/down`, `tune`, `spotify play`, `spotify discover` | **writes transport + volume to a speaker** |
+| `alarm restore` | **writes alarms — a deferred transport + volume write**: `CreateAlarm`/`UpdateAlarm`/`DestroyAlarm` until the household's alarms match `alarm snapshot`. Each write is refused if the alarm list's version moved since it was read, and journalled with the alarm before and after; the old-to-new ID map is journalled too |
+| `alarm enable <id>`, `alarm disable <id>`, `alarm rm <id>` | **writes alarms — a deferred transport + volume write**: one `UpdateAlarm` changing only `Enabled` (every other field, the source included, sent back byte-for-byte), or one `DestroyAlarm` after asking twice (a `y`, then the ID typed out; no terminal means no). Refused if the list moved since it was read; journalled with the whole alarm, so `clock.recreate` can make a deleted one again from `logs/interventions.jsonl` (every `CreateAlarm` field; not the child elements or unknown attributes it has no argument for) |
+| `alarm add`, `alarm edit <id>` | **writes alarms — a deferred transport + volume write**: one `CreateAlarm`, or one `UpdateAlarm` changing only the fields named (time, days, duration, volume, play mode, include-grouped-rooms, room, on/off, source); `--source chime`, `station:<key>` or any registered source (a station is its own stream, played by the speaker with no Mac involved); on edit the source stays byte-for-byte unless `--source` names one. The room is named: a bonded follower's alarm goes on its room's primary (never the group coordinator), and the output says so. Refused if the list moved since it was read; journalled before and after; `--dry-run` resolves the room and prints the alarm |
+| `alarm try <id>` | **writes transport + volume now** — the speaker's own `RunAlarm` with the alarm's fields, on the coordinator of the alarm's room; journalled `alarm_run` with the whole alarm, plus a span around when its duration will stop it |
+| `alarm serve --dir DIR [--room] [--port] [--max-s]` | **no speaker write — foreground HTTP server on this Mac** (fixed port 8765, since an alarm stores the URL) serving DIR's audio files, the bundled alarm sounds under `/sound/<name>.mp3` (whatever DIR is), and Bandcamp tracks under `/bandcamp/<token>.mp3` (a fresh stream URL fetched per request, refused with 502/504 before any span if Bandcamp can't be resolved in time), to the household's speakers only; anything else is refused at once, so the speaker falls back to its chime. Each file sent is a span `alarm_serve_start`/`_end` in `logs/interventions.jsonl` with its own `span_id` and a finite `max_s` (the server stops sending there, and `analyse` ends an unclosed span there). At start, once the port is bound, it closes the spans a crash of its own left open. `--dry-run` binds nothing and journals nothing |
+| `alarm stop --room`, `alarm snooze --room [--minutes 5/10/15/30]` | **writes transport** — the group's own `Stop` / `SnoozeAlarm` (default 10 minutes), **refused unless an alarm is going off (or snoozed) there**, so neither silences ordinary playback; journalled `alarm_stop`/`alarm_snooze`, a snooze with a span around when it rings again |
 | `comedy sleep` | **writes transport + a native Sonos sleep timer** — plays 2-3 whole albums back-to-back on the target room (default the room `roam`) and arms `ConfigureSleepTimer` to stop it; see `comedy.py` |
 
 Every writing command takes `--dry-run`, which resolves the target and prints
@@ -81,6 +88,10 @@ uv run twiddle snapshot --room roam    # before you touch anything
 uv run twiddle restore  --room roam    # after
 ```
 
+`snapshot` covers one room's transport and volume, not alarms, which belong to
+the whole household. Before touching alarms, `uv run twiddle alarm snapshot`;
+after, `uv run twiddle alarm restore` (`--dry-run` first shows every change).
+
 **Do not assume what is playing — ask.** `uv run twiddle status` is the only
 trustworthy answer, and `snapshot` captures whatever is actually there rather
 than what some doc once claimed. People change sources and volume freely, so
@@ -103,6 +114,27 @@ privacy: a launchd agent cannot show the consent prompt, so it is denied LAN
 access — the same request succeeds from a terminal. Fix is
 *System Settings → Privacy & Security → Local Network*, enable the `uv` entry;
 launchd retries every 60s and recovers on its own.
+
+### The alarm server agent
+
+`alarm serve` can run as a second launchd agent, `local.twiddle.alarmserver`, so
+a Mac-hosted alarm (a Bandcamp track, a sound, a file) has something to answer
+when it fires with no terminal open:
+
+```bash
+uv run twiddle alarm serve --install --dir ~/alarm-sounds [--room "Living Room"] [--dry-run]
+uv run twiddle alarm serve --status       # read-only
+uv run twiddle alarm serve --uninstall
+```
+
+It is restarted by launchd like the monitor, with its own `logs/alarm_server.err`.
+`--status` reports **alive** when something answers on the server's port (a
+local connect that sends nothing), else **STALE**, and exits 1. Install and
+uninstall are journalled (`alarm_serve_install`/`alarm_serve_uninstall`).
+
+It has the same **Local Network** trap: if `--status` says STALE and
+`alarm_server.err` shows "No route to host", enable the `uv` entry in *System
+Settings → Privacy & Security → Local Network*; launchd retries every 60s.
 
 **Known gap:** the daemon subscribes AVTransport on the anchor only, so it
 records no transport state for the other speakers: "what was playing, and
@@ -152,11 +184,11 @@ Under `src/twiddle/`:
 | `topology.py` | groups, bonds, satellites, `VanishedDevices` |
 | `monitor.py` | GENA subscriptions + polling; JSONL; rotation |
 | `report.py` | findings, severities, hardware-vs-setup discriminators |
-| `daemon.py` | launchd agent install/status |
+| `daemon.py` | launchd agents install/status: the monitor and the alarm server's (`ALARM_LABEL`) |
 | `household.py` | speakers, groups, name resolution, snapshot/restore |
 | `control_cli.py` | the room-naming control commands |
-| `alarms/` | Sonos alarms, no UI. `model.py` = an `Alarm` that round-trips every ListAlarms field (program URI/metadata opaque, unknown attributes and children kept) + `Recurrence` (ONCE/DAILY/WEEKDAYS/WEEKENDS/ON_<days>); `clock.py` = the `AlarmClock` reads (`ListAlarms`, `GetTimeNow`, `GetFormat`) with pure parsers beside them |
-| `alarm_cli.py` | `alarm list` (read-only): every alarm under its room's name, bonded-follower / vanished / unknown rooms labelled, next fire in the household's time |
+| `alarms/` | Sonos alarms, no UI. `model.py` = an `Alarm` that round-trips every ListAlarms field (program URI/metadata opaque, unknown attributes and children kept) + `Recurrence` (ONCE/DAILY/WEEKDAYS/WEEKENDS/ON_<days>); `clock.py` = the `AlarmClock` reads (`ListAlarms`, `GetTimeNow`, `GetFormat`) with pure parsers beside them, and the writes (`create_alarm`/`update_alarm`/`destroy_alarm`: refused with `VersionChanged` if the list moved since it was read, journalled before and after, **write**); `deleted`/`recreate` = a deleted alarm back from its `alarm_destroy` journal entry (**recreate writes**); and the `AVTransport` side: `running_alarm` (`GetRunningAlarmProperties`; UPnP 800 = none), `last_change` (one GENA event: `AlarmRunning`/`SnoozeRunning`), `alarm_now`, and `run_alarm`/`snooze_alarm`/`stop_alarm` (journalled, **write**); `server.py` = `alarm serve`'s HTTP server (audio from this Mac, one bounded span per serve, `close_stale`); `baseline.py` = `AlarmSnapshot` (the raw `CurrentAlarmList`), `plan` (alarms compared by `key`, not ID) and `restore` (**writes**); `sources/` = what an alarm plays: a `Source` (choices, build URI + DIDL, `needs_mac`, `fallback`, `owns`, `describe`, `sound_source`) per module and a registry the CLI reads at run time (`chime.py`, `station.py` = dial's catalog via `play.radio_uri`, `bandcamp.py` = a track served by the Mac's agent: the URI holds a token, never an expiring Bandcamp URL; `sound.py` = five standard alarm sounds (four generated, one a CC0 recording), from `alarms/sounds/` (licences in its `LICENSES.md`, regenerate with `tools/make_alarm_sounds.py`), served at `/sound/<name>.mp3`); a new source is one module + `register()`, no CLI edit; `soundsource.py` = where an alarm's sound comes from, from its `ProgramURI` alone (a registered source first, then the observed Sonos shapes: scheme + `sid` + item prefix, exactly; else `unknown`) |
+| `alarm_cli.py` | `alarm serve --install/--uninstall/--status` (the server as the launchd agent `daemon.ALARM_LABEL`; install/uninstall **write** a plist, `--status` read-only); `alarm list`, `alarm snapshot` (read-only): every alarm under its room's name, bonded-follower / vanished / unknown rooms labelled, next fire in the household's time; `alarm restore [--dry-run]`, `alarm enable/disable/rm <id> [--dry-run]`, `alarm add`, `alarm edit <id>`, `alarm try <id>`, `alarm stop/snooze --room` (**write**; `alarm status`, `alarm sources` read-only; `rm` asks twice; stop/snooze refuse when nothing is ringing; `add`/`edit` parse every field, and `room_target` = a room name to its primary unit's RoomUUID) |
 | `play.py` | HTTP file server + transport control (**writes**) |
 | `relay.py` | live audio -> paced PCM -> MP3 -> HTTP fan-out (no speaker writes) |
 | `relay_cli.py` | `relay doctor/login/measure/start` (**start writes**) |
