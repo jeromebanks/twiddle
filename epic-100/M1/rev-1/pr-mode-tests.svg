@@ -1,0 +1,146 @@
+<svg class="rich-terminal" viewBox="0 0 1482 586.8" xmlns="http://www.w3.org/2000/svg">
+    <!-- Generated with Rich https://www.textualize.io -->
+    <style>
+
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Regular"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Regular.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Regular.woff") format("woff");
+        font-style: normal;
+        font-weight: 400;
+    }
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Bold"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Bold.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Bold.woff") format("woff");
+        font-style: bold;
+        font-weight: 700;
+    }
+
+    .terminal-2439799388-matrix {
+        font-family: Fira Code, monospace;
+        font-size: 20px;
+        line-height: 24.4px;
+        font-variant-east-asian: full-width;
+    }
+
+    .terminal-2439799388-title {
+        font-size: 18px;
+        font-weight: bold;
+        font-family: arial;
+    }
+
+    .terminal-2439799388-r1 { fill: #c5c8c6 }
+.terminal-2439799388-r2 { fill: #c5c8c6;font-weight: bold }
+.terminal-2439799388-r3 { fill: #98a84b }
+.terminal-2439799388-r4 { fill: #98a84b;font-weight: bold }
+.terminal-2439799388-r5 { fill: #d0b344 }
+    </style>
+
+    <defs>
+    <clipPath id="terminal-2439799388-clip-terminal">
+      <rect x="0" y="0" width="1463.0" height="535.8" />
+    </clipPath>
+    <clipPath id="terminal-2439799388-line-0">
+    <rect x="0" y="1.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-1">
+    <rect x="0" y="25.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-2">
+    <rect x="0" y="50.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-3">
+    <rect x="0" y="74.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-4">
+    <rect x="0" y="99.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-5">
+    <rect x="0" y="123.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-6">
+    <rect x="0" y="147.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-7">
+    <rect x="0" y="172.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-8">
+    <rect x="0" y="196.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-9">
+    <rect x="0" y="221.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-10">
+    <rect x="0" y="245.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-11">
+    <rect x="0" y="269.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-12">
+    <rect x="0" y="294.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-13">
+    <rect x="0" y="318.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-14">
+    <rect x="0" y="343.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-15">
+    <rect x="0" y="367.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-16">
+    <rect x="0" y="391.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-17">
+    <rect x="0" y="416.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-18">
+    <rect x="0" y="440.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-19">
+    <rect x="0" y="465.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2439799388-line-20">
+    <rect x="0" y="489.5" width="1464" height="24.65"/>
+            </clipPath>
+    </defs>
+
+    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1480" height="584.8" rx="8"/><text class="terminal-2439799388-title" fill="#c5c8c6" text-anchor="middle" x="740" y="27">codex-review&#160;--pr,&#160;shown&#160;by&#160;its&#160;offline&#160;tests&#160;(a&#160;fake&#160;codex)</text>
+            <g transform="translate(26,22)">
+            <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
+            <circle cx="22" cy="0" r="7" fill="#febc2e"/>
+            <circle cx="44" cy="0" r="7" fill="#28c840"/>
+            </g>
+        
+    <g transform="translate(9, 41)" clip-path="url(#terminal-2439799388-clip-terminal)">
+    
+    <g class="terminal-2439799388-matrix">
+    <text class="terminal-2439799388-r1" x="0" y="20" textLength="756.4" clip-path="url(#terminal-2439799388-line-0)">$&#160;codex-review&#160;--pr,&#160;shown&#160;by&#160;its&#160;offline&#160;tests&#160;(a&#160;fake&#160;codex)</text><text class="terminal-2439799388-r1" x="1464" y="20" textLength="12.2" clip-path="url(#terminal-2439799388-line-0)">
+</text><text class="terminal-2439799388-r2" x="0" y="44.4" textLength="1464" clip-path="url(#terminal-2439799388-line-1)">=================================================&#160;test&#160;session&#160;starts&#160;==================================================</text><text class="terminal-2439799388-r1" x="1464" y="44.4" textLength="12.2" clip-path="url(#terminal-2439799388-line-1)">
+</text><text class="terminal-2439799388-r2" x="0" y="68.8" textLength="183" clip-path="url(#terminal-2439799388-line-2)">collecting&#160;...&#160;</text><text class="terminal-2439799388-r1" x="183" y="68.8" textLength="585.6" clip-path="url(#terminal-2439799388-line-2)">collected&#160;38&#160;items&#160;/&#160;22&#160;deselected&#160;/&#160;16&#160;selected</text><text class="terminal-2439799388-r1" x="1464" y="68.8" textLength="12.2" clip-path="url(#terminal-2439799388-line-2)">
+</text><text class="terminal-2439799388-r1" x="1464" y="93.2" textLength="12.2" clip-path="url(#terminal-2439799388-line-3)">
+</text><text class="terminal-2439799388-r1" x="0" y="117.6" textLength="1061.4" clip-path="url(#terminal-2439799388-line-4)">tests/test_sdlc_review.py::test_the_tool_writes_the_head_line_and_pr_review_accepts_it&#160;</text><text class="terminal-2439799388-r3" x="1061.4" y="117.6" textLength="73.2" clip-path="url(#terminal-2439799388-line-4)">PASSED</text><text class="terminal-2439799388-r3" x="1134.6" y="117.6" textLength="317.2" clip-path="url(#terminal-2439799388-line-4)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[&#160;&#160;6%]</text><text class="terminal-2439799388-r1" x="1464" y="117.6" textLength="12.2" clip-path="url(#terminal-2439799388-line-4)">
+</text><text class="terminal-2439799388-r1" x="0" y="142" textLength="1159" clip-path="url(#terminal-2439799388-line-5)">tests/test_sdlc_review.py::test_it_refuses_a_dirty_worktree_or_the_wrong_head_and_runs_nothing&#160;</text><text class="terminal-2439799388-r3" x="1159" y="142" textLength="73.2" clip-path="url(#terminal-2439799388-line-5)">PASSED</text><text class="terminal-2439799388-r3" x="1232.2" y="142" textLength="219.6" clip-path="url(#terminal-2439799388-line-5)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[&#160;12%]</text><text class="terminal-2439799388-r1" x="1464" y="142" textLength="12.2" clip-path="url(#terminal-2439799388-line-5)">
+</text><text class="terminal-2439799388-r1" x="0" y="166.4" textLength="1098" clip-path="url(#terminal-2439799388-line-6)">tests/test_sdlc_review.py::test_a_worktree_changed_during_the_run_fails_and_saves_nothing&#160;</text><text class="terminal-2439799388-r3" x="1098" y="166.4" textLength="73.2" clip-path="url(#terminal-2439799388-line-6)">PASSED</text><text class="terminal-2439799388-r3" x="1171.2" y="166.4" textLength="280.6" clip-path="url(#terminal-2439799388-line-6)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[&#160;18%]</text><text class="terminal-2439799388-r1" x="1464" y="166.4" textLength="12.2" clip-path="url(#terminal-2439799388-line-6)">
+</text><text class="terminal-2439799388-r1" x="0" y="190.8" textLength="1085.8" clip-path="url(#terminal-2439799388-line-7)">tests/test_sdlc_review.py::test_a_head_that_moves_during_the_run_fails_and_saves_nothing&#160;</text><text class="terminal-2439799388-r3" x="1085.8" y="190.8" textLength="73.2" clip-path="url(#terminal-2439799388-line-7)">PASSED</text><text class="terminal-2439799388-r3" x="1159" y="190.8" textLength="292.8" clip-path="url(#terminal-2439799388-line-7)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[&#160;25%]</text><text class="terminal-2439799388-r1" x="1464" y="190.8" textLength="12.2" clip-path="url(#terminal-2439799388-line-7)">
+</text><text class="terminal-2439799388-r1" x="0" y="215.2" textLength="1061.4" clip-path="url(#terminal-2439799388-line-8)">tests/test_sdlc_review.py::test_no_verdict_is_retried_once_then_it_is_the_defer_status&#160;</text><text class="terminal-2439799388-r3" x="1061.4" y="215.2" textLength="73.2" clip-path="url(#terminal-2439799388-line-8)">PASSED</text><text class="terminal-2439799388-r3" x="1134.6" y="215.2" textLength="317.2" clip-path="url(#terminal-2439799388-line-8)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[&#160;31%]</text><text class="terminal-2439799388-r1" x="1464" y="215.2" textLength="12.2" clip-path="url(#terminal-2439799388-line-8)">
+</text><text class="terminal-2439799388-r1" x="0" y="239.6" textLength="1207.8" clip-path="url(#terminal-2439799388-line-9)">tests/test_sdlc_review.py::test_codex_gets_the_repos_settings_and_a_config_without_them_is_refused&#160;</text><text class="terminal-2439799388-r3" x="1207.8" y="239.6" textLength="73.2" clip-path="url(#terminal-2439799388-line-9)">PASSED</text><text class="terminal-2439799388-r3" x="1281" y="239.6" textLength="170.8" clip-path="url(#terminal-2439799388-line-9)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[&#160;37%]</text><text class="terminal-2439799388-r1" x="1464" y="239.6" textLength="12.2" clip-path="url(#terminal-2439799388-line-9)">
+</text><text class="terminal-2439799388-r1" x="0" y="264" textLength="976" clip-path="url(#terminal-2439799388-line-10)">tests/test_sdlc_review.py::test_round_two_on_takes_the_latest_recorded_response&#160;</text><text class="terminal-2439799388-r3" x="976" y="264" textLength="73.2" clip-path="url(#terminal-2439799388-line-10)">PASSED</text><text class="terminal-2439799388-r3" x="1049.2" y="264" textLength="402.6" clip-path="url(#terminal-2439799388-line-10)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[&#160;43%]</text><text class="terminal-2439799388-r1" x="1464" y="264" textLength="12.2" clip-path="url(#terminal-2439799388-line-10)">
+</text><text class="terminal-2439799388-r1" x="0" y="288.4" textLength="1305.4" clip-path="url(#terminal-2439799388-line-11)">tests/test_sdlc_review.py::test_codex_runs_on_a_scratch_home_holding_only_the_sign_in_and_the_repos_config&#160;</text><text class="terminal-2439799388-r3" x="1305.4" y="288.4" textLength="73.2" clip-path="url(#terminal-2439799388-line-11)">PASSED</text><text class="terminal-2439799388-r3" x="1378.6" y="288.4" textLength="85.4" clip-path="url(#terminal-2439799388-line-11)">&#160;[&#160;50%]</text><text class="terminal-2439799388-r1" x="1464" y="288.4" textLength="12.2" clip-path="url(#terminal-2439799388-line-11)">
+</text><text class="terminal-2439799388-r1" x="0" y="312.8" textLength="878.4" clip-path="url(#terminal-2439799388-line-12)">tests/test_sdlc_review.py::test_no_sign_in_is_refused_before_codex_runs&#160;</text><text class="terminal-2439799388-r3" x="878.4" y="312.8" textLength="73.2" clip-path="url(#terminal-2439799388-line-12)">PASSED</text><text class="terminal-2439799388-r3" x="951.6" y="312.8" textLength="500.2" clip-path="url(#terminal-2439799388-line-12)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[&#160;56%]</text><text class="terminal-2439799388-r1" x="1464" y="312.8" textLength="12.2" clip-path="url(#terminal-2439799388-line-12)">
+</text><text class="terminal-2439799388-r1" x="0" y="337.2" textLength="951.6" clip-path="url(#terminal-2439799388-line-13)">tests/test_sdlc_review.py::test_a_report_without_provenance_is_still_recorded&#160;</text><text class="terminal-2439799388-r3" x="951.6" y="337.2" textLength="73.2" clip-path="url(#terminal-2439799388-line-13)">PASSED</text><text class="terminal-2439799388-r3" x="1024.8" y="337.2" textLength="427" clip-path="url(#terminal-2439799388-line-13)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[&#160;62%]</text><text class="terminal-2439799388-r1" x="1464" y="337.2" textLength="12.2" clip-path="url(#terminal-2439799388-line-13)">
+</text><text class="terminal-2439799388-r1" x="0" y="361.6" textLength="1146.8" clip-path="url(#terminal-2439799388-line-14)">tests/test_sdlc_review.py::test_a_sign_in_refreshed_by_a_rename_ends_up_in_the_users_own_file&#160;</text><text class="terminal-2439799388-r3" x="1146.8" y="361.6" textLength="73.2" clip-path="url(#terminal-2439799388-line-14)">PASSED</text><text class="terminal-2439799388-r3" x="1220" y="361.6" textLength="231.8" clip-path="url(#terminal-2439799388-line-14)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[&#160;68%]</text><text class="terminal-2439799388-r1" x="1464" y="361.6" textLength="12.2" clip-path="url(#terminal-2439799388-line-14)">
+</text><text class="terminal-2439799388-r1" x="0" y="386" textLength="988.2" clip-path="url(#terminal-2439799388-line-15)">tests/test_sdlc_review.py::test_an_interrupted_run_still_copies_the_sign_in_back&#160;</text><text class="terminal-2439799388-r3" x="988.2" y="386" textLength="73.2" clip-path="url(#terminal-2439799388-line-15)">PASSED</text><text class="terminal-2439799388-r3" x="1061.4" y="386" textLength="390.4" clip-path="url(#terminal-2439799388-line-15)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[&#160;75%]</text><text class="terminal-2439799388-r1" x="1464" y="386" textLength="12.2" clip-path="url(#terminal-2439799388-line-15)">
+</text><text class="terminal-2439799388-r1" x="0" y="410.4" textLength="1171.2" clip-path="url(#terminal-2439799388-line-16)">tests/test_sdlc_review.py::test_a_sign_in_changed_elsewhere_during_the_run_is_never_overwritten&#160;</text><text class="terminal-2439799388-r3" x="1171.2" y="410.4" textLength="73.2" clip-path="url(#terminal-2439799388-line-16)">PASSED</text><text class="terminal-2439799388-r3" x="1244.4" y="410.4" textLength="207.4" clip-path="url(#terminal-2439799388-line-16)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[&#160;81%]</text><text class="terminal-2439799388-r1" x="1464" y="410.4" textLength="12.2" clip-path="url(#terminal-2439799388-line-16)">
+</text><text class="terminal-2439799388-r1" x="0" y="434.8" textLength="1122.4" clip-path="url(#terminal-2439799388-line-17)">tests/test_sdlc_review.py::test_a_sign_in_an_earlier_run_could_not_copy_back_is_never_wiped&#160;</text><text class="terminal-2439799388-r3" x="1122.4" y="434.8" textLength="73.2" clip-path="url(#terminal-2439799388-line-17)">PASSED</text><text class="terminal-2439799388-r3" x="1195.6" y="434.8" textLength="256.2" clip-path="url(#terminal-2439799388-line-17)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[&#160;87%]</text><text class="terminal-2439799388-r1" x="1464" y="434.8" textLength="12.2" clip-path="url(#terminal-2439799388-line-17)">
+</text><text class="terminal-2439799388-r1" x="0" y="459.2" textLength="1122.4" clip-path="url(#terminal-2439799388-line-18)">tests/test_sdlc_review.py::test_a_sign_in_elsewhere_before_codex_refreshes_in_place_is_kept&#160;</text><text class="terminal-2439799388-r3" x="1122.4" y="459.2" textLength="73.2" clip-path="url(#terminal-2439799388-line-18)">PASSED</text><text class="terminal-2439799388-r3" x="1195.6" y="459.2" textLength="256.2" clip-path="url(#terminal-2439799388-line-18)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[&#160;93%]</text><text class="terminal-2439799388-r1" x="1464" y="459.2" textLength="12.2" clip-path="url(#terminal-2439799388-line-18)">
+</text><text class="terminal-2439799388-r1" x="0" y="483.6" textLength="1183.4" clip-path="url(#terminal-2439799388-line-19)">tests/test_sdlc_review.py::test_a_sign_in_elsewhere_while_the_copy_back_is_being_written_is_kept&#160;</text><text class="terminal-2439799388-r3" x="1183.4" y="483.6" textLength="73.2" clip-path="url(#terminal-2439799388-line-19)">PASSED</text><text class="terminal-2439799388-r3" x="1256.6" y="483.6" textLength="195.2" clip-path="url(#terminal-2439799388-line-19)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;[100%]</text><text class="terminal-2439799388-r1" x="1464" y="483.6" textLength="12.2" clip-path="url(#terminal-2439799388-line-19)">
+</text><text class="terminal-2439799388-r1" x="1464" y="508" textLength="12.2" clip-path="url(#terminal-2439799388-line-20)">
+</text><text class="terminal-2439799388-r3" x="0" y="532.4" textLength="524.6" clip-path="url(#terminal-2439799388-line-21)">==========================================&#160;</text><text class="terminal-2439799388-r4" x="524.6" y="532.4" textLength="109.8" clip-path="url(#terminal-2439799388-line-21)">16&#160;passed</text><text class="terminal-2439799388-r1" x="634.4" y="532.4" textLength="24.4" clip-path="url(#terminal-2439799388-line-21)">,&#160;</text><text class="terminal-2439799388-r5" x="658.8" y="532.4" textLength="158.6" clip-path="url(#terminal-2439799388-line-21)">22&#160;deselected</text><text class="terminal-2439799388-r3" x="817.4" y="532.4" textLength="109.8" clip-path="url(#terminal-2439799388-line-21)">&#160;in&#160;3.76s</text><text class="terminal-2439799388-r3" x="927.2" y="532.4" textLength="536.8" clip-path="url(#terminal-2439799388-line-21)">&#160;===========================================</text><text class="terminal-2439799388-r1" x="1464" y="532.4" textLength="12.2" clip-path="url(#terminal-2439799388-line-21)">
+</text>
+    </g>
+    </g>
+</svg>
