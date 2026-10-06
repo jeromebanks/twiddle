@@ -19,6 +19,7 @@ import re
 import shlex
 import signal
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -29,14 +30,16 @@ VERDICT_RE = re.compile(r"\A[*_`]*VERDICT:[*_`\s]*(approve|changes)[*_`.\s]*\Z",
 HEAD_RE = re.compile(r"^\s*[*_`]*HEAD:[*_`\s]*([0-9a-f]{40})\b", re.MULTILINE | re.IGNORECASE)
 PLACEHOLDER_RE = re.compile(r"<[A-Z]")
 ROUND2_RE = re.compile(r"^- <ROUND2>(.*?)</ROUND2>\n", re.MULTILINE | re.DOTALL)
-RESPONSE_HEADING = "### Claude's response"
+# how `pr-review` records a round: Codex's report folded in <details>, then the implementer's answer
+RESPONSE_MARK = "</details>\n\n### Claude's response\n\n"
 
 UNAVAILABLE = 3   # Codex can't run: not on PATH, or no verdict twice (timeouts included)
 ATTEMPTS = 2      # the first run, and one retry
 CODEX_KEYS = ("model", "reasoning_effort", "sandbox", "timeout_seconds", "flags")
-# flags that would override a pinned setting (or the read-only sandbox the HEAD stamp relies on)
-FORBIDDEN_FLAGS = ("-m", "--model", "-c", "--config", "-s", "--sandbox", "-p", "--profile", "--oss",
-                   "--dangerously", "--approve-for-me", "--add-dir", "--worktree", "-C", "--cd")
+# the only `codex exec` flags `codex.flags` may add: none overrides a pinned setting, loosens the read-only
+# sandbox the HEAD stamp relies on, or changes what goes to stdout (the report)
+ALLOWED_FLAGS = {"--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--strict-config"}
+COLORS = {"never", "auto", "always"}
 
 
 class ReviewError(Exception):
@@ -82,8 +85,17 @@ def codex_settings(config: dict[str, Any]) -> dict[str, Any]:
     flags = s["flags"]
     if not isinstance(flags, list) or not all(isinstance(f, str) for f in flags):
         raise ReviewError("`codex.flags` must be a list of strings")
-    if bad := [f for f in flags if f.split("=")[0] in FORBIDDEN_FLAGS or f.startswith("--dangerously")]:
-        raise ReviewError(f"`codex.flags` may not set {', '.join(bad)}: the model, effort and sandbox have keys of their own")
+    bad, i = [], 0
+    while i < len(flags):
+        f = flags[i]
+        if f == "--color" and i + 1 < len(flags) and flags[i + 1] in COLORS:
+            i += 1
+        elif not (f in ALLOWED_FLAGS or (f.startswith("--color=") and f[8:] in COLORS)):
+            bad.append(f)
+        i += 1
+    if bad:
+        raise ReviewError(f"`codex.flags` may not pass {', '.join(bad)}: only {', '.join(sorted(ALLOWED_FLAGS))} and "
+                          "`--color`; the model, effort and sandbox have keys of their own")
     return s
 
 
@@ -94,8 +106,10 @@ def codex_command(settings: dict[str, Any], prompt: str) -> list[str]:
             "--sandbox", settings["sandbox"], *settings["flags"], prompt]
 
 
-def show_command(cmd: list[str]) -> str:
-    return " ".join(shlex.quote(a) for a in cmd[:-1]) + ' "$(cat prompt.md)" < /dev/null'
+def show_command(cmd: list[str], wt: Path, prompt_file: Path) -> str:
+    """The command as a shell line, the prompt read from its file."""
+    return (f"cd {shlex.quote(str(wt))} && " + " ".join(shlex.quote(a) for a in cmd[:-1])
+            + f' "$(cat {shlex.quote(str(prompt_file))})" < /dev/null')
 
 
 # --- the prompt ---------------------------------------------------------------
@@ -104,16 +118,14 @@ def latest_response(rounds: list[dict[str, Any]]) -> tuple[int, str | None]:
     """(the latest recorded round's number, its "Claude's response") for the next round's prompt.
 
     `rounds` are the PR's recorded `pr-review` rounds, oldest first, each with its `verdict` and comment
-    `body`. The response is the section after the report's closing `</details>`, so a heading quoted inside
-    Codex's report is never taken for it. A round that asked for changes must carry one."""
+    `body`. The response is what follows `RESPONSE_MARK` (the report's closing `</details>` and the heading,
+    as `pr-review` writes them), so neither a heading quoted in the report nor a `<details>` block in the
+    response itself confuses it. A round that asked for changes must carry one."""
     if not rounds:
         return 0, None
     last = rounds[-1]
     body = last.get("body") or ""
-    tail = body[body.rfind("</details>"):] if "</details>" in body else body
-    response = None
-    if RESPONSE_HEADING in tail:
-        response = tail.split(RESPONSE_HEADING, 1)[1].strip() or None
+    response = body.split(RESPONSE_MARK, 1)[1].strip() or None if RESPONSE_MARK in body else None
     if response is None and last.get("verdict") == "changes":
         raise ReviewError(f"round {len(rounds)} asked for changes and recorded no response: Codex would never see "
                           "the answers to its findings. Record the round with `pr-review --response`, then run this")
@@ -159,15 +171,22 @@ def prepare_pr_round(pr: dict[str, Any], slice_issue: dict[str, Any], epic: int,
 
 # --- the run ------------------------------------------------------------------
 
+def _git(args: list[str], cwd: Path) -> str:
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise ReviewError(f"git {' '.join(args)} failed in {cwd}: {proc.stderr.strip()}")
+    return proc.stdout
+
+
 def git_head(cwd: Path) -> str:
-    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+    return _git(["rev-parse", "HEAD"], cwd).strip()
 
 
 def check_worktree(wt: Path, pr_head: str) -> str:
     """The worktree's HEAD, once it's clean and is the PR's head; otherwise say which it isn't."""
     if not (wt / ".git").exists():
         raise ReviewError(f"no worktree at {wt}: `claim N --resume` makes it")
-    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=wt, capture_output=True, text=True, check=True).stdout
+    dirty = _git(["status", "--porcelain"], wt)
     if dirty.strip():
         raise ReviewError(f"the worktree {wt} is not clean, so Codex would not review the pushed head: "
                           + ", ".join(l[3:] for l in dirty.splitlines()[:8])
@@ -179,18 +198,38 @@ def check_worktree(wt: Path, pr_head: str) -> str:
     return head
 
 
+@contextlib.contextmanager
+def _sigterm_interrupts():
+    """While Codex runs, SIGTERM interrupts the wait like Ctrl-C does, so the cleanup below still runs."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+    old = signal.signal(signal.SIGTERM, interrupt)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, old)
+
+
 def run_once(cmd: list[str], wt: Path, out: Path, err: Path, timeout: float) -> str | None:
-    """Codex's stdout, or None if it timed out (its whole process group is killed)."""
+    """Codex's stdout, or None if it timed out. Codex runs in its own process group, so neither Ctrl-C nor a
+    SIGTERM to this process reaches it: however the wait ends, a group still running is killed."""
     with out.open("w") as fo, err.open("a") as fe:
         proc = subprocess.Popen(cmd, cwd=wt, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe, start_new_session=True)
         try:
-            proc.wait(timeout=timeout)
+            with _sigterm_interrupts():
+                proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
             fe.write(f"\n[codex-review] timed out after {timeout:g}s\n")
             return None
+        finally:
+            if proc.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
     return out.read_text()
 
 
@@ -213,8 +252,8 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, timeout: floa
         raw = scratch / f"codex-{attempt}.out"
         try:
             output = run_once(cmd, wt, raw, err, timeout)
-        except FileNotFoundError:
-            log(f"codex is not on the PATH: Codex can't run (exit {UNAVAILABLE}: `review-defer`)")
+        except OSError as exc:   # not on the PATH, or not executable
+            log(f"codex can't be started ({exc}): Codex can't run (exit {UNAVAILABLE}: `review-defer`)")
             return UNAVAILABLE, None
         if (now := git_head(wt)) != head:
             raise ReviewError(f"HEAD moved from {head[:12]} to {now[:12]} while Codex ran: nothing it said "

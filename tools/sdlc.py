@@ -2042,8 +2042,7 @@ def pr_records(comments: list[dict[str, Any]], trusted: set[str]) -> tuple[list[
         if mk.get("kind") == "tests":
             tests.append({"sha": mk.get("sha"), "result": mk.get("result"), "passed": mk.get("passed"), "url": c.get("url")})
         elif mk.get("kind") == "pr-review":
-            reviews.append({"sha": mk.get("sha"), "verdict": mk.get("verdict"), "round": mk.get("round"), "url": c.get("url"),
-                            "body": c.get("body", "")})
+            reviews.append({"sha": mk.get("sha"), "verdict": mk.get("verdict"), "round": mk.get("round"), "url": c.get("url")})
         elif mk.get("kind") == "retry":
             for r in reviews:
                 r["before_retry"] = True
@@ -2522,17 +2521,18 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     verdict = parse_verdict(report)
     m = HEAD_RE.search(report)
     if not m:
-        raise SdlcError("the Codex report has no `HEAD: <40-hex sha>` line: it can't show what it reviewed; run it again")
+        raise SdlcError("the Codex report has no `HEAD: <40-hex sha>` line: save it with `codex-review --pr`, "
+                        "which writes the head it checked")
     if m.group(1) != pr["headRefOid"]:
         raise SdlcError(f"Codex reviewed {m.group(1)[:12]} but the PR head is {pr['headRefOid'][:12]}: "
                         "review the current head (record each round before pushing its fixes)")
     response = Path(args.response).read_text().strip() if args.response else ""
     rnd = len(reviews) + 1
+    # the next round's prompt reads the response back from after RESPONSE_MARK
     body = (f"**Review {rnd} — Codex on `{pr['headRefOid'][:12]}`: `{verdict}`** "
             f"({changes_rounds(reviews) + (verdict == 'changes')}/{limit} change rounds used)\n\n"
-            f"<details><summary>Codex's review</summary>\n\n{report.strip()}\n\n</details>")
-    if response:
-        body += f"\n\n### Claude's response\n\n{response}"
+            f"<details><summary>Codex's review</summary>\n\n{report.strip()}\n\n"
+            + (codex_review.RESPONSE_MARK + response if response else "</details>"))
     comment = render_comment("pr-review", None, body, config, sha=pr["headRefOid"], verdict=verdict, round=str(rnd))
     if len(comment) > COMMENT_LIMIT:
         raise SdlcError(f"the review comment is {len(comment)} characters, over GitHub's limit")
@@ -2609,12 +2609,13 @@ def command_codex_review(args: argparse.Namespace, config: dict[str, Any]) -> in
     git(["fetch", "origin", epic_branch(epic)], cwd=wt, check=False)
     if not git(["rev-parse", "--verify", "--quiet", base], cwd=wt, check=False):
         raise SdlcError(f"the worktree has no {base} to diff against: `git fetch origin {epic_branch(epic)}`")
-    _, reviews = pr_records(comments, trusted)
-    prompt, files = codex_review.prepare_pr_round(pr, slice_issue, epic, reviews, out)
+    rounds = [{"verdict": mk.get("verdict"), "body": c.get("body", "")} for mk, c in _marked(comments, trusted)
+              if mk.get("kind") == "pr-review"]
+    prompt, files = codex_review.prepare_pr_round(pr, slice_issue, epic, rounds, out)
     cmd = codex_review.codex_command(settings, prompt)
-    print(f"PR #{pr['number']} round {len(reviews) + 1} on {head[:12]}, in {wt}\n"
+    print(f"PR #{pr['number']} round {len(rounds) + 1} on {head[:12]}\n"
           + "".join(f"  {k}: {v}\n" for k, v in files.items())
-          + f"  run (timeout {settings['timeout_seconds']}s): {codex_review.show_command(cmd)}")
+          + f"  run (timeout {settings['timeout_seconds']}s): {codex_review.show_command(cmd, wt, files['prompt'])}")
     if args.dry_run:
         print(f"\n{prompt}")
         return 0
@@ -3913,7 +3914,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("pr-review", help="record a Codex review round of the PR's current head")
     p.add_argument("pr", type=int)
-    p.add_argument("--report", required=True, help="Codex's stdout: a `HEAD: <sha>` line, last line the verdict")
+    p.add_argument("--report", required=True, help="the report `codex-review` saved: its `HEAD: <sha>` line, last line the verdict")
     p.add_argument("--response", help="Claude's answer to each finding (markdown)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--from-file")

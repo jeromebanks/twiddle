@@ -304,8 +304,9 @@ sys.stderr.write("codex progress noise\\n")
 APPROVES = {"out": "1. fine (non-blocking)\n\nVERDICT: approve\n"}
 NO_VERDICT = {"out": "I looked around and ran out of time.\n"}
 SLOW = {"sleep": 5, "out": "VERDICT: approve\n"}
-SETTINGS = {"model": "test-model", "reasoning_effort": "low", "sandbox": "read-only", "timeout_seconds": 1,
+SETTINGS = {"model": "test-model", "reasoning_effort": "low", "sandbox": "read-only", "timeout_seconds": 30,
             "flags": ["--skip-git-repo-check"]}
+QUICK = {**SETTINGS, "timeout_seconds": 1}
 
 
 class Codex:
@@ -421,7 +422,7 @@ def test_no_verdict_is_retried_once_then_it_is_the_defer_status(tmp_path, monkey
 
 
 def test_the_timeout_from_config_reaches_the_run_once_then_succeeds_twice_defers(tmp_path, monkeypatch):
-    c = Codex(tmp_path, monkeypatch, plan=(SLOW, APPROVES))
+    c = Codex(tmp_path, monkeypatch, plan=(SLOW, APPROVES), settings=QUICK)
     assert c.run() == 0 and len(c.calls()) == 2              # killed after codex.timeout_seconds (1s), not 5s
     assert c.report().read_text().startswith(f"HEAD: {c.head}") and "timed out after 1s" in (c.out / "codex.err").read_text()
     c.log.unlink()
@@ -429,13 +430,36 @@ def test_the_timeout_from_config_reaches_the_run_once_then_succeeds_twice_defers
     assert c.run() == codex_review.UNAVAILABLE and len(c.calls()) == 2
 
 
-def test_codex_not_on_the_path_is_the_defer_status(tmp_path, monkeypatch):
+def test_codex_not_on_the_path_or_not_runnable_is_the_defer_status(tmp_path, monkeypatch):
     c = Codex(tmp_path, monkeypatch)
+    (tmp_path / "bin" / "codex").chmod(0o644)
+    assert c.run() == codex_review.UNAVAILABLE and c.calls() == []
     only_git = tmp_path / "only-git"
     only_git.mkdir()
     (only_git / "git").symlink_to(shutil.which("git"))
     monkeypatch.setenv("PATH", str(only_git))
     assert c.run() == codex_review.UNAVAILABLE and c.calls() == []
+
+
+def test_an_interrupted_run_kills_codex(tmp_path, monkeypatch):
+    killed = []
+
+    class Proc:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise KeyboardInterrupt
+            return 0
+
+        def poll(self):
+            return None if not killed else 0
+
+    monkeypatch.setattr(codex_review.subprocess, "Popen", lambda *a, **k: Proc())
+    monkeypatch.setattr(codex_review.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    with pytest.raises(KeyboardInterrupt):
+        codex_review.run_once(["codex"], tmp_path, tmp_path / "o", tmp_path / "e", 30)
+    assert killed == [(4242, codex_review.signal.SIGKILL)]
 
 
 def test_codex_gets_the_repos_settings_and_a_config_without_them_is_refused(tmp_path, monkeypatch, capsys):
@@ -450,8 +474,10 @@ def test_codex_gets_the_repos_settings_and_a_config_without_them_is_refused(tmp_
     assert c.run() == 1 and c.calls() == []
     assert "no `codex` section" in capsys.readouterr().err
     assert codex_review.codex_settings(CONFIG)["sandbox"] == "read-only"    # the repo's own section is valid
-    for bad in ({"sandbox": "workspace-write"}, {"flags": ["-m", "other"]}, {"flags": ["-c", "x=1"]},
-                {"flags": ["--dangerously-bypass-approvals-and-sandbox"]}, {"timeout_seconds": 0}, {"model": ""}):
+    assert codex_review.codex_settings({"codex": {**SETTINGS, "flags": ["--color", "never", "--ephemeral"]}})
+    for bad in ({"sandbox": "workspace-write"}, {"flags": ["-m", "other"]}, {"flags": ["-c", "x=1"]}, {"flags": ["-mo3"]},
+                {"flags": ["--dangerously-bypass-approvals-and-sandbox"]}, {"flags": ["--json"]}, {"flags": ["-o", "f"]},
+                {"flags": ["--color"]}, {"flags": ["--enable", "x"]}, {"timeout_seconds": 0}, {"model": ""}):
         with pytest.raises(sdlc.SdlcError):
             codex_review.codex_settings({"codex": {**SETTINGS, **bad}})
     with pytest.raises(sdlc.SdlcError, match="lacks timeout_seconds"):
@@ -480,7 +506,8 @@ def test_round_two_on_takes_the_latest_recorded_response(tmp_path, monkeypatch, 
     assert f"`{resp}`" in prompt and resp.read_text().strip() == "ROUND TWO ANSWER"
     assert "ROUND ONE" not in prompt and not re.search(r"<[A-Za-z/]", prompt)
     out = capsys.readouterr().out
-    assert "codex exec -m test-model" in out and "--sandbox read-only" in out and "timeout 1s" in out
+    assert "codex exec -m test-model" in out and "--sandbox read-only" in out and "timeout 30s" in out
+    assert f"cd {c.wt} && " in out and f'"$(cat {c.out / "prompt.md"})" < /dev/null' in out
     # the latest round asked for changes and recorded no answer: refused
     assert c.run("--dry-run", comments=rounds + [recorded(3, "changes", ts=3)]) == 1
     assert "recorded no response" in capsys.readouterr().err
@@ -500,3 +527,20 @@ def test_the_review_logic_lives_in_codex_review():
     imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     imported |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.level == 0}
     assert imported - {"__future__"} <= sys.stdlib_module_names         # stdlib only: no sdlc, no twiddle
+
+
+def test_the_response_pr_review_records_is_the_one_the_next_round_reads(tmp_path, capsys):
+    # a response with a <details> block of its own, and a report quoting the heading
+    answer = "1. Rebutted: see the log.\n\n<details><summary>log</summary>\n\nx\n\n</details>\n\n2. Accepted."
+    report, resp = tmp_path / "codex.md", tmp_path / "response.md"
+    report.write_text(f"HEAD: {HEAD}\n\n1. it says ### Claude's response here\n\nVERDICT: changes\n")
+    resp.write_text(answer)
+    bundle = tmp_path / "pr.json"
+    bundle.write_text(json.dumps({"pr": pr(), "pr_comments": [], "trusted": [OWNER]}))
+    assert sdlc.main(["pr-review", "50", "--report", str(report), "--response", str(resp), "--from-file", str(bundle),
+                      "--dry-run"]) == 0
+    body = capsys.readouterr().out
+    assert codex_review.latest_response([{"verdict": "changes", "body": body}]) == (1, answer)
+    assert sdlc.main(["pr-review", "50", "--report", str(report), "--from-file", str(bundle), "--dry-run"]) == 0
+    with pytest.raises(sdlc.SdlcError, match="recorded no response"):
+        codex_review.latest_response([{"verdict": "changes", "body": capsys.readouterr().out}])

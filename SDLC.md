@@ -201,7 +201,8 @@ several can run at once. A slice's state is read off GitHub:
 3. The PR closes exactly that slice. `test-record` runs the full `pytest` itself and records the
    result on the PR for the head SHA. The repo has no CI, so this is the test gate.
 4. **Codex** reviews the head read-only, unless the slice is reviewed with its milestone
-   (below). Its report must name the `HEAD:` it reviewed. The
+   (below). `codex-review --pr PR` runs each round on the repo's own settings and stamps the
+   report with the `HEAD:` it checked. The
    implementer fixes or rebuts each finding, and each round is posted with `pr-review`. After
    `max_pr_rounds` (5) without approval: `escalate-slice`, and the slice goes to a human.
 5. `merge` is the gate: the PR targets `epic/E` and isn't behind it, Codex's latest review approves
