@@ -757,8 +757,8 @@ def test_the_generated_sounds_come_from_tone_and_the_recording_is_the_only_other
     gen = {"bell", "beep", "rise", "chimes"}
     assert {k for k in sources.sound.SOUNDS} == gen | {"birdsong"}
     for fn in (tone.classic_bell, tone.digital_beep, tone.gentle_rise, tone.chimes):
-        track = fn(4.0)
-        assert len(track) == 4 * tone.SOUND_RATE and max(abs(v) for v in track) > 0.1
+        track = fn(20.0)
+        assert len(track) == 20 * tone.SOUND_RATE and max(abs(v) for v in track) > 0.1
     licences = (sources.sound.SOUNDS_DIR / "LICENSES.md").read_text()
     assert "creativecommons" not in licences and "CC0 1.0" in licences
     assert "commons.wikimedia.org/wiki/File:" in licences
