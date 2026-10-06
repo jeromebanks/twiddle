@@ -358,6 +358,12 @@ def test_album_and_track_forms_are_built(choice, uri, klass):
     assert "Svc3079-0-Token" in didl
 
 
+@pytest.mark.parametrize("tail", ["", "/", "?si=abc", "/?si=abc#frag"])
+def test_a_whole_spotify_link_with_a_query_or_fragment_is_a_choice(tail):
+    link = "https://open.spotify.com/playlist/FakePlaylist0000000001" + tail
+    assert spotify_source.parse_choice(link) == ("playlist", "FakePlaylist0000000001")
+
+
 def test_a_spotify_link_is_a_choice_and_the_ids_case_survives():
     link = "https://open.spotify.com/intl-de/playlist/FakePlaylist0000000001?si=abc"
     assert fake_spotify().build(link) == fake_spotify().build("spotify:playlist:FakePlaylist0000000001")
@@ -365,7 +371,9 @@ def test_a_spotify_link_is_a_choice_and_the_ids_case_survives():
 
 
 @pytest.mark.parametrize("bad", ["", "spotify:artist:abc", "spotify:playlist:", "kalx",
-                                 "https://example.com/playlist/abc"])
+                                 "https://example.com/playlist/abc",
+                                 "https://open.spotify.com/playlist/FakePlaylist0000000001-invalid",
+                                 "https://open.spotify.com/playlist/FakePlaylist0000000001/extra"])
 def test_anything_that_is_not_a_spotify_item_is_refused(bad):
     with pytest.raises(ValueError, match="isn't a Spotify"):
         fake_spotify().build(bad)

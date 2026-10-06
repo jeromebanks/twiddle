@@ -243,7 +243,7 @@ every field `AlarmClock` takes is settable:
 | `--include-grouped-rooms` / `--no-...` | `IncludeLinkedZones` | also play in the rooms grouped with it when it fires (no) |
 | `--room` | `RoomUUID` | a room by name (required on `add`) |
 | `--on` / `--off` | `Enabled` | (on) |
-| `--source` | `ProgramURI`, `ProgramMetaData` | `chime`, `station:<key>` (any station in dial's catalog), `spotify:playlist:<id>` / `album:<id>` / `track:<id>` (or an open.spotify.com link), or any other source `alarm sources` lists; on `edit`, `keep` (the default) leaves the source byte-for-byte (`chime`) |
+| `--source` | `ProgramURI`, `ProgramMetaData` | `chime`, `station:<key>` (any station in dial's catalog), `spotify:playlist:<id>`, `spotify:album:<id>`, `spotify:track:<id>` or `spotify:<an open.spotify.com link>`, or any other source `alarm sources` lists; on `edit`, `keep` (the default) leaves the source byte-for-byte (`chime`) |
 
 So editing anything about an alarm whose source twiddle doesn't recognise (an
 iHeart or Spotify alarm) sends its `ProgramURI` and `ProgramMetaData` back

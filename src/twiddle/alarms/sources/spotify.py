@@ -3,7 +3,8 @@ the speaker fetches it from Spotify itself, so neither this Mac nor the relay
 has any part in it once the alarm is set.
 
 `--source spotify:<choice>`, where a choice is `playlist:<id>` (or
-`album` / `track`; a full `spotify:playlist:<id>` URI also works) or the open.spotify.com link for one. `alarm sources
+`album` / `track`; a full `spotify:playlist:<id>` URI also works) or a whole
+open.spotify.com link or the open.spotify.com link for one. `alarm sources
 spotify <words>` searches Spotify with twiddle's own sign-in for choices.
 
 The URI and DIDL copy the shape of the household's existing Sonos-Spotify
@@ -46,7 +47,7 @@ _SHAPE = {
 
 _SPOTIFY_URI = re.compile(r"^(?:spotify:)?(playlist|album|track):([A-Za-z0-9]+)$")
 _SPOTIFY_URL = re.compile(r"^https?://open\.spotify\.com/(?:intl-\w+/)?"
-                          r"(playlist|album|track)/([A-Za-z0-9]+)")
+                          r"(playlist|album|track)/([A-Za-z0-9]+)/?(?:[?#].*)?$")
 _SN = re.compile(r"[?&]sn=(\d+)")
 _FAVOURITES = ('<ObjectID>FV:2</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag>'
                "<Filter>*</Filter><StartingIndex>0</StartingIndex>"
