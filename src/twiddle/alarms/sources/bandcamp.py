@@ -2,7 +2,7 @@
 `twiddle alarm serve`, never at a Bandcamp URL.
 
 A Bandcamp stream URL is signed and expires in about a day, so an alarm can't
-store one. It stores `http://<this Mac>:<PORT>/bandcamp/<token>.mp3` instead, where
+store one. It stores `http://<this Mac>:<port>/bandcamp/<token>.mp3` instead, where
 the token is the track's page and ID (nothing secret, nothing that expires).
 When the alarm fires, the agent (`alarms/server.py`) asks Bandcamp for a fresh
 URL and passes the audio through. If it can't, it refuses at once, so the room
@@ -164,16 +164,16 @@ class Bandcamp(Source):
                              + ")")
         track = found[0]
         from .. import server           # the agent's port: it imports this module for the token
-        uri = f"http://{self.host(self.anchor)}:{server.PORT}{ROUTE}{encode(track)}.mp3"
+        uri = f"http://{self.host(self.anchor)}:{server.alarm_port()}{ROUTE}{encode(track)}.mp3"
         return uri, play.track_didl(track["title"], track.get("art"), url=uri)
 
     def owns(self, uri: str, metadata: str) -> bool:
-        """Matches the route and port, not the address: it is the Mac's, and DHCP moves it."""
-        from .. import server
+        """Matches the route, not the address (it is the Mac's, and DHCP moves it)
+        nor which port (the agent's, when the alarm was made)."""
         try:
             parts = urlsplit(uri)
             port = parts.port
         except ValueError:                  # an alarm's stored URI can be anything
             return False
-        return (parts.scheme == "http" and port == server.PORT
+        return (parts.scheme == "http" and port is not None
                 and token_of(parts.path) is not None and decode(token_of(parts.path)) is not None)
