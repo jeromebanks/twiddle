@@ -531,7 +531,7 @@ import re  # noqa: E402
 import subprocess  # noqa: E402
 
 from tools import codex_review  # noqa: E402
-from tests.fake_codex import APPROVES, NO_VERDICT, SETTINGS, calls, install, no_real_codex_home  # noqa: E402,F401
+from tests.fake_codex import APPROVES, NO_VERDICT, QUICK, SETTINGS, SLOW, calls, install, no_real_codex_home  # noqa: E402,F401
 
 DOC_URL = "https://github.com/o/r/issues/12#issuecomment-{}"
 
@@ -549,7 +549,7 @@ def git_(*args, cwd):
 class PlanReview:
     """A primary checkout whose origin/main may hold docs/prd/12-*.md, the fake `codex`, and the issue's bundle."""
 
-    def __init__(self, tmp_path, monkeypatch, docs=None, plan=(APPROVES,)):
+    def __init__(self, tmp_path, monkeypatch, docs=None, plan=(APPROVES,), settings=SETTINGS):
         self.tmp, self.root = tmp_path, tmp_path / "primary"
         self.log, _, _ = install(tmp_path, monkeypatch, plan)
         for k in ("AUTHOR", "COMMITTER"):
@@ -568,7 +568,7 @@ class PlanReview:
         monkeypatch.setattr(sdlc, "primary_root", lambda: self.root)
         monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("codex-review --from-file must not call gh"))
         self.config = tmp_path / "config.json"
-        self.config.write_text(json.dumps({**CONFIG, "codex": SETTINGS}))
+        self.config.write_text(json.dumps({**CONFIG, "codex": settings}))
         self.out = tmp_path / "scratch"
 
     def run(self, comments, *extra, labels=("sdlc:approved",)):
@@ -665,3 +665,23 @@ def test_no_verdict_is_retried_once_and_a_plan_not_under_review_is_refused(tmp_p
     # nothing approved: nothing to hold the plan to
     assert r.run([doc(1, 1, 444)] + POSTED, "--dry-run") == 1
     assert "no approved" in capsys.readouterr().err
+
+
+def test_a_plan_round_that_times_out_is_retried_once(tmp_path, monkeypatch):
+    r = PlanReview(tmp_path, monkeypatch, plan=(SLOW, APPROVES), settings=QUICK)
+    assert r.run(APPROVED_555 + POSTED) == 0 and len(calls(r.log)) == 2
+    assert "timed out after 1s" in (r.out / "codex.err").read_text() and (r.out / "codex.md").exists()
+
+
+def test_a_directory_in_the_checkouts_place_is_never_deleted(tmp_path, monkeypatch, capsys):
+    r = PlanReview(tmp_path, monkeypatch)
+    (r.out / "main").mkdir(parents=True)
+    (r.out / "main" / "keep.txt").write_text("someone's")
+    assert r.run(APPROVED_555 + POSTED) == 1 and calls(r.log) == []
+    assert "isn't a checkout this command made" in capsys.readouterr().err
+    assert (r.out / "main" / "keep.txt").read_text() == "someone's"
+    # one a cut-short run left registered is replaced
+    (r.out / "main" / "keep.txt").unlink()
+    (r.out / "main").rmdir()
+    git_("worktree", "add", "-q", "--detach", str(r.out / "main"), r.main, cwd=r.root)
+    assert r.run(APPROVED_555 + POSTED) == 0 and not (r.out / "main").exists()

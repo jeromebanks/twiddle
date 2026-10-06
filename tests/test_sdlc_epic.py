@@ -778,7 +778,7 @@ def test_nothing_ships_while_an_earlier_release_is_unverified():
 
 import re  # noqa: E402
 
-from tests.fake_codex import APPROVES, NO_VERDICT, SETTINGS, calls, install, no_real_codex_home  # noqa: E402,F401
+from tests.fake_codex import APPROVES, NO_VERDICT, QUICK, SETTINGS, SLOW, calls, install, no_real_codex_home  # noqa: E402,F401
 
 
 def brief(key, outcome):
@@ -792,7 +792,7 @@ class MilestoneReview:
 
     SLICES = (("T1.1", 28, 55), ("T1.2", 29, 56), ("T1.3", 30, 57))
 
-    def __init__(self, tmp_path, monkeypatch, plan=(APPROVES,)):
+    def __init__(self, tmp_path, monkeypatch, plan=(APPROVES,), settings=SETTINGS):
         self.tmp, root = tmp_path, tmp_path / "primary"
         self.log, _, _ = install(tmp_path, monkeypatch, plan)
         for k in ("AUTHOR", "COMMITTER"):
@@ -813,7 +813,7 @@ class MilestoneReview:
         monkeypatch.setattr(sdlc, "primary_root", lambda: root)
         monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("codex-review --from-file must not call gh"))
         self.config = tmp_path / "config.json"
-        self.config.write_text(json.dumps({**CONFIG, "codex": SETTINGS}))
+        self.config.write_text(json.dumps({**CONFIG, "codex": settings}))
         self.out = tmp_path / "scratch"
         self.owed = [agent("review-owed", None, 20, milestone="M1", slice="T1.2", number="29", why="routine", sha=OLD),
                      agent("review-owed", None, 21, milestone="M1", slice="T1.3", number="30", why="unavailable", sha=OLD)]
@@ -822,13 +822,13 @@ class MilestoneReview:
         return [{"number": n, "key": key, "title": f"<{key}> the {key} part", "body": brief(key, f"{key} outcome"),
                  "pr": pr_, "merge_commit": self.squash[key]} for key, n, pr_ in self.SLICES]
 
-    def bundle(self, comments=(), head=None, slices=None):
+    def bundle(self, comments=(), head=None, slices=None, steps="1. `alarm list` shows every alarm", key="M1"):
         f = self.tmp / "bundle.json"
         f.write_text(json.dumps({"issue": {"number": 12, "title": "Alarm manager", "state": "open", "author": POSTER,
                                            "labels": ["sdlc:in-progress"]},
                                  "comments": HISTORY + self.owed + list(comments), "trusted": [OWNER],
-                                 "progress": progress(ms("M1", 3, 3)), "epic_head": head or self.head,
-                                 "steps": "1. `alarm list` shows every alarm", "slices": self.slices() if slices is None else slices}))
+                                 "progress": progress(ms(key, 3, 3)), "epic_head": head or self.head,
+                                 "steps": steps, "slices": self.slices() if slices is None else slices}))
         return str(f)
 
     def run(self, *extra, **kw):
@@ -901,3 +901,20 @@ def test_a_milestone_round_two_reads_the_recorded_response_and_retries_once(tmp_
     assert "round 2" in capsys.readouterr().out
     bare = agent("ship-review", None, 25, milestone="M1", sha=OLD, verdict="changes", round="1", response="0")
     assert r.run("--dry-run", comments=[bare]) == 1 and "ship-review --response" in capsys.readouterr().err
+
+
+def test_a_milestone_round_that_times_out_is_retried_once(tmp_path, monkeypatch):
+    r = MilestoneReview(tmp_path, monkeypatch, plan=(SLOW, APPROVES), settings=QUICK)
+    assert r.run() == 0 and len(calls(r.log)) == 2
+    assert "timed out after 1s" in (r.out / "codex.err").read_text() and (r.out / "codex.md").exists()
+
+
+def test_an_epic_without_milestones_takes_its_steps_from_the_slices_demo_sections(tmp_path, monkeypatch):
+    r = MilestoneReview(tmp_path, monkeypatch)
+    for o in r.owed:          # the epic's one demo is `all`
+        o["body"] = o["body"].replace("milestone=M1", "milestone=all")
+    slices = [{**s, "body": s["body"] + f"\n## Demo\n\n`np` shows {s['key']}\n"} for s in r.slices()]
+    assert r.run("--dry-run", slices=slices, steps="", key="all") == 0
+    steps = (r.out / "milestone.md").read_text().split("## Demo steps", 1)[1]
+    assert "- T1.1: `np` shows T1.1" in steps and "- T1.3: `np` shows T1.3" in steps
+    assert "T1.2 (PR #56" in (r.out / "prompt.md").read_text().split("merged without a review of their own")[1]

@@ -280,7 +280,8 @@ def _brief(s: dict[str, Any]) -> str:
     return f"{s.get('title', '')}\n\n{s.get('body', '')}\n"
 
 
-def _section(body: str, name: str) -> str:
+def section(body: str, name: str) -> str:
+    """One `## <name>` section of a slice issue's body."""
     m = re.search(rf"^## {re.escape(name)}\s*\n(.*?)(?=^## |\Z)", body or "", re.MULTILINE | re.DOTALL)
     return m.group(1).strip() if m else ""
 
@@ -302,13 +303,16 @@ def prepare_milestone_round(epic: int, milestone: dict[str, Any], slices: list[d
         raise ReviewError("a review is owed for " + ", ".join(f"{o.get('slice')} (#{o.get('number')})" for o in stray)
                           + f", which isn't a merged slice of {milestone['key']}: nothing to point Codex at")
     files = {"milestone": scratch / "milestone.md", "prompt": scratch / "prompt.md"}
-    lines = [f"# {milestone['title']}", "", "## Demo steps", "", (milestone.get("steps") or "(none given)").strip(), ""]
+    # an epic without milestones (most bugs) has no milestone description: its slices' Demo sections are the steps
+    steps = (milestone.get("steps") or "").strip() or "\n".join(
+        f"- {s['key']}: {d}" for s in slices if (d := section(s.get("body", ""), "Demo"))) or "(none given)"
+    lines = [f"# {milestone['title']}", "", "## Demo steps", "", steps, ""]
     for s in slices:
         brief = files[f"slice-{s['number']}"] = scratch / f"slice-{s['number']}.md"
         brief.write_text(_brief(s))
         lines += [f"## {s['key']} (#{s['number']}, PR #{s.get('pr')}, squash {s['merge_commit']}): {s.get('title', '')}",
-                  "", f"The whole brief: {brief}", "", "### Outcome", "", _section(s.get("body", ""), "Outcome") or "(none)",
-                  "", "### Acceptance criteria", "", _section(s.get("body", ""), "Acceptance criteria") or "(none)", ""]
+                  "", f"The whole brief: {brief}", "", "### Outcome", "", section(s.get("body", ""), "Outcome") or "(none)",
+                  "", "### Acceptance criteria", "", section(s.get("body", ""), "Acceptance criteria") or "(none)", ""]
     files["milestone"].write_text("\n".join(lines))
 
     def one(s: dict[str, Any]) -> str:

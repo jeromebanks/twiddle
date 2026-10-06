@@ -298,9 +298,10 @@ makes it work in the worktree by writing every path out in full (`work-slice` §
 | Worktree | Made by | For | Removed by |
 |---|---|---|---|
 | `.worktrees/slice-S`, on `slice/S` from `origin/epic/N` | `claim S` | building one slice | `cleanup S` |
-| `.worktrees/epic-N`, detached at `origin/epic/N` | `sync N`, `revert-slice S` | merging `main` in, reverting a slice, Codex's milestone review | nobody: reset to `origin/epic/N` before each use |
+| `.worktrees/epic-N`, detached at `origin/epic/N` | `sync N`, `revert-slice S` | merging `main` in, reverting a slice, Codex's milestone review (`codex-review --milestone N` reads it as `sync` left it: it never resets it, and refuses it dirty or behind `epic/N`) | nobody: `sync` and `revert-slice` reset it to `origin/epic/N` before each use |
 | `.worktrees/sdlc-demos`, on `sdlc-demos` | `demo-post` | committing a demo's pictures | nobody: kept |
 | `.worktrees/verify-main-N`, detached at `origin/main` | `verify-main N` | the suite on `main` after an untested release | `verify-main N`, when it's done |
+| `<out>/main`, detached at `origin/main` | `codex-review --plan N` | Codex's plan review reads the repo there | `codex-review --plan N`, when the round ends (a left-over one is replaced on the next run) |
 | `<scratchpad>/before` and `after`, detached | `milestone-demo` | the pictures of `main` and `epic/N` | the skill (`git worktree remove`) |
 | a throwaway worktree on `prd/N`, from `origin/main` | `triage-issue` | the approved PRD's one-file PR | the skill |
 

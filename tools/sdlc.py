@@ -2740,9 +2740,11 @@ def codex_review_plan(args: argparse.Namespace, config: dict[str, Any], settings
     if args.dry_run:
         return run_codex_round(title, prompt, files, checkout, sha, out, settings, True, record)
     git(["worktree", "prune"], cwd=root)
-    if checkout.exists():
-        git(["worktree", "remove", "--force", str(checkout)], cwd=root, check=False)
-        shutil.rmtree(checkout, ignore_errors=True)
+    if checkout.exists():          # a run cut short leaves its checkout registered: only that is removed
+        listed = git(["worktree", "list", "--porcelain"], cwd=root).splitlines()
+        if f"worktree {checkout.resolve()}" not in listed and f"worktree {checkout}" not in listed:
+            raise SdlcError(f"{checkout} exists and isn't a checkout this command made: move it, or pick another --out")
+        git(["worktree", "remove", "--force", str(checkout)], cwd=root)
     git(["worktree", "add", "-q", "--detach", str(checkout), sha], cwd=root)
     try:
         return run_codex_round(title, prompt, files, checkout, sha, out, settings, False, record)
@@ -2751,11 +2753,11 @@ def codex_review_plan(args: argparse.Namespace, config: dict[str, Any], settings
         git(["worktree", "prune"], cwd=root, check=False)
 
 
-def milestone_slices(epic: int, title: str, config: dict[str, Any], trusted: set[str]) -> list[dict[str, Any]]:
-    """A milestone's slices, each with its brief and the squash commit its PR left on epic/N."""
+def milestone_slices(leaves: list[dict[str, Any]], title: str, config: dict[str, Any]) -> list[dict[str, Any]]:
+    """A milestone's slices (of the epic's `leaves`), each with its brief and the squash commit its PR left on epic/N."""
     out = []
-    for l in fetch_plan_issues(epic, config, trusted):
-        if l["kind"] != "slice" or (l.get("milestone") or "(no milestone)") != title:
+    for l in leaves:
+        if (l.get("milestone") or "(no milestone)") != title:
             continue
         pr = find_slice_pr(l["number"], config) if l["state"] == "closed" else None
         out.append({"number": l["number"], "key": l["key"], "title": l["title"], "body": l["body"],
@@ -2768,18 +2770,19 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
     n = args.milestone
     if args.from_file:
         b = json.loads(Path(args.from_file).read_text())
-        bundle, progress, head, slices = b, b["progress"], b["epic_head"], b["slices"]
+        bundle, progress, head = b, b["progress"], b["epic_head"]
+        slices = lambda title: b["slices"]  # noqa: E731
         steps = lambda title: b.get("steps", "")  # noqa: E731
         already = lambda title: bool(b.get("on_main"))  # noqa: E731
     else:
         bundle = fetch_bundle(n, config)
         progress = epic_progress(n, config, set(bundle["trusted"]))
         head = epic_head(n, config)
-        slices = None
         gh_ms = {m["title"]: m for m in gh_pages(f"repos/{repo_of(config)}/milestones?state=all&per_page=100")}
         steps = lambda title: (gh_ms.get(title) or {}).get("description") or ""  # noqa: E731
         leaves = [r for r in fetch_plan_issues(n, config, set(bundle["trusted"])) if r["kind"] == "slice"]
         already = lambda title: milestone_on_main(title, leaves, config)  # noqa: E731
+        slices = lambda title: milestone_slices(leaves, title, config)  # noqa: E731
     wt = primary_root() / config.get("worktree_dir", ".worktrees") / f"epic-{n}"   # as `sync` left it: never reset here
     st = bundle_state(bundle, config)
     trusted = set(bundle["trusted"])
@@ -2794,8 +2797,7 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
     if (spent := sum(1 for r in rounds if r["verdict"] == "changes")) >= limit:
         raise SdlcError(f"Codex rounds on {key} spent ({spent}/{limit}): "
                         f"`transition {n} escalated --kind escalation --reason ...`")
-    if slices is None:
-        slices = milestone_slices(n, title, config, trusted)
+    slices = slices(title)
     out = review_scratch(args, f"milestone-{n}", wt)
     checked = codex_review.check_worktree(wt, head, f"{epic_branch(n)}'s head", f"`sync {n}`")
     main = config.get("default_branch", "main")
@@ -3685,10 +3687,7 @@ def demo_post_errors(body: str, folder: Path) -> list[str]:
     return errs
 
 
-def leaf_section(body: str, name: str) -> str:
-    """One `## <name>` section of a slice issue's body."""
-    m = re.search(rf"^## {re.escape(name)}\s*\n(.*?)(?=^## |\Z)", body or "", re.MULTILINE | re.DOTALL)
-    return m.group(1).strip() if m else ""
+leaf_section = codex_review.section    # one `## <name>` section of a slice issue's body
 
 
 def demo_brief(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str, Any]:
