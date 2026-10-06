@@ -132,6 +132,9 @@ def test_every_fixture_alarm_has_its_sound_source():
     ("x-rincon-cpcontainer:spotify%3aplaylist%3aX?sid=12", "x-rincon-cpcontainer"),  # no hex prefix
     ("x-rincon-cpcontainer:00060000spotify%3aplaylist%3aX?sid=9", "x-rincon-cpcontainer"),
     ("x-file-cifs://nas/alarm.mp3", "x-file-cifs"),
+    ("x-sonos-spotify:spotify%3atrack%3aX?sid=9&flags=8224&sn=1", "x-sonos-spotify"),   # another sid
+    ("x-sonos-spotify:spotify%3aalbum%3aX?sid=12&flags=8224&sn=1", "x-sonos-spotify"),  # not a track
+    ("x-sonos-spotify:spotify%3atrack%3aX", "x-sonos-spotify"),                         # no sid
 ])
 def test_a_near_miss_is_unknown_with_its_scheme(uri, scheme):
     assert soundsource.classify(uri) == soundsource.SoundSource("unknown", f"unknown ({scheme})")
@@ -161,6 +164,14 @@ def test_the_sound_source_is_never_guessed_from_the_title(title):
     r = alarm_cli.row(household(), a, SAT_AFTERNOON)
     assert (r["sound_source"], r["sound_source_text"]) == ("unknown", "unknown (x-sonosapi-stream)")
     assert r["source_title"] == title
+
+
+@pytest.mark.parametrize("kind", ["playlist", "album", "track"])
+def test_every_spotify_alarm_twiddle_builds_is_spotify_through_sonos(kind):
+    from twiddle.alarms.sources import spotify
+    uri, didl = spotify.program(kind, "4uLU6hMCjMI75M1A2tKUQC", "1234", "A title")
+    assert soundsource.classify(uri, didl) == soundsource.SoundSource(
+        "spotify_sonos", "Spotify through the Sonos app's link")
 
 
 def test_the_spotify_container_prefix_is_matched_in_either_case():

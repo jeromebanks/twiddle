@@ -46,6 +46,8 @@ _SHAPES = (
            SoundSource("tunein", "TuneIn")),
     _Shape("x-rincon-cpcontainer", "12", re.compile(r"[0-9a-f]{8}spotify:", re.I),
            SoundSource("spotify_sonos", "Spotify through the Sonos app's link")),
+    _Shape("x-sonos-spotify", "12", re.compile(r"spotify:track:"),
+           SoundSource("spotify_sonos", "Spotify through the Sonos app's link")),
 )
 
 
