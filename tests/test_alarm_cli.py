@@ -137,6 +137,17 @@ def test_a_near_miss_is_unknown_with_its_scheme(uri, scheme):
     assert soundsource.classify(uri) == soundsource.SoundSource("unknown", f"unknown ({scheme})")
 
 
+@pytest.mark.parametrize("uri", ["x-rincon-buzzer:0?sid=999", "x-rincon-buzzer:not-a-chime",
+                                 "x-rincon-buzzer:"])
+def test_only_the_chimes_own_shape_is_the_sonos_chime(uri):
+    assert soundsource.classify(uri) == soundsource.SoundSource("unknown",
+                                                                "unknown (x-rincon-buzzer)")
+    a = extra(ROAM_L, "90")
+    a.program_uri = uri
+    r = alarm_cli.row(household(), a, SAT_AFTERNOON)
+    assert (r["sound_source"], r["source"]) == ("unknown", None)
+
+
 def test_no_uri_is_unknown_without_crashing():
     assert soundsource.classify("", "") == soundsource.SoundSource("unknown", "unknown (no URI)")
 

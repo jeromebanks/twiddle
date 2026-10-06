@@ -36,13 +36,13 @@ class _Shape:
 
 
 _SHAPES = (
-    _Shape("x-rincon-buzzer", None, re.compile(r"\d+$"),
+    _Shape("x-rincon-buzzer", None, re.compile(r"\d+\Z"),
            SoundSource("sonos_chime", "Sonos chime")),
     _Shape("x-sonosapi-radio", "303", re.compile(r"sonos:"),
            SoundSource("sonos_radio", "Sonos Radio")),
     _Shape("x-sonosapi-stream", "303", re.compile(r"ihr:"),
            SoundSource("iheart_sonos_radio", "iHeart through Sonos Radio")),
-    _Shape("x-sonosapi-stream", "333", re.compile(r"s\d+$"),
+    _Shape("x-sonosapi-stream", "333", re.compile(r"s\d+\Z"),
            SoundSource("tunein", "TuneIn")),
     _Shape("x-rincon-cpcontainer", "12", re.compile(r"[0-9a-f]{8}spotify:", re.I),
            SoundSource("spotify_sonos", "Spotify through the Sonos app's link")),
