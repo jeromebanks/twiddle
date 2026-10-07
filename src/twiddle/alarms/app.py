@@ -269,15 +269,23 @@ class SourcePicker(ModalScreen[Picked | None]):
         if self.source is not None:
             self.search(event.value)
 
+    def _back(self, fn, *args) -> None:
+        """From a worker: `fn(*args)` on the UI thread, if this picker is still
+        the screen on top (escape may have closed it while a provider was slow)."""
+        def run():
+            if self.is_attached and self.app.screen is self:
+                fn(*args)
+        self.app.call_from_thread(run)
+
     @work(thread=True, exclusive=True, group="search")
     def search(self, query: str) -> None:
-        self.app.call_from_thread(self.say, f"searching {self.source.title}…" if query else "")
+        self._back(self.say, f"searching {self.source.title}…" if query else "")
         try:
             found = self.source.choices(query)
-        except ValueError as exc:
-            self.app.call_from_thread(self.say, str(exc))
+        except Exception as exc:        # a provider's failure is said, never the app's end
+            self._back(self.say, str(exc) or type(exc).__name__)
             return
-        self.app.call_from_thread(self.listed, query, found)
+        self._back(self.listed, query, found)
 
     def listed(self, query: str, found: list[sources.Choice]) -> None:
         self.found = found
@@ -303,12 +311,12 @@ class SourcePicker(ModalScreen[Picked | None]):
     def build(self, source: sources.Source, choice: sources.Choice) -> None:
         try:
             uri, metadata = source.build(choice.key)
-        except ValueError as exc:
-            self.app.call_from_thread(self.say, str(exc))
+            title = source.title if not source.takes_choice else \
+                f"{source.title} · {source.describe(uri, metadata) or choice.title}"
+        except Exception as exc:
+            self._back(self.say, str(exc) or type(exc).__name__)
             return
-        title = source.title if not source.takes_choice else \
-            f"{source.title} · {source.describe(uri, metadata) or choice.title}"
-        self.app.call_from_thread(self.dismiss, Picked(source, title, uri, metadata))
+        self._back(self.dismiss, Picked(source, title, uri, metadata))
 
     def action_cancel(self) -> None:
         self.dismiss(None)

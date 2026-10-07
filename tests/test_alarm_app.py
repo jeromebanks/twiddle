@@ -595,8 +595,9 @@ async def test_a_bonded_followers_alarm_keeps_its_room_when_only_its_volume_chan
         ed = await open_edit(app, pilot, "66")
         room = ed.query_one("#room")
         assert room.value == tac.ROAM_R
-        assert "Sonos Roam — set on Sonos Roam (R), a bonded follower (as it is)" in str(
-            room._options)
+        # Select has no public list of its options; the label is what it shows.
+        assert str(room.query_one("SelectCurrent Static#label").render()) == \
+            "Sonos Roam — set on Sonos Roam (R), a bonded follower (as it is)"
         ed.query_one("#volume").value = "12"
         await save(app, pilot)
     assert fake.alarms["66"]["RoomUUID"] == tac.ROAM_R and fake.alarms["66"]["Volume"] == "12"
@@ -666,6 +667,75 @@ async def test_a_choice_is_searched_and_a_build_that_fails_stays_in_the_picker(f
         await pilot.press("escape", "escape")
         await settle(app, pilot)
         assert app.status_text == "not saved"
+    assert fake.writes == [] and journal() == []
+
+
+@pytest.mark.parametrize("where", ["choices", "build"])
+@pilot
+async def test_a_provider_that_raises_anything_is_said_and_the_app_lives(
+        fake, providers, monkeypatch, where):
+    def broken(*a):
+        raise RuntimeError("connection reset")
+    monkeypatch.setattr(providers["radio"], where, broken)
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await open_new(app, pilot)
+        picker = await choose(app, pilot, "radio")
+        if where == "build":
+            await pilot.press(*"kalx", "enter")      # search, then pick it by keys
+            await settle(app, pilot)
+            found = picker.query_one("#choices", OptionList)
+            found.focus()
+            await pilot.press("enter")
+            await settle(app, pilot)
+        assert app.is_running and app.screen is picker
+        assert picker.status_text == "connection reset"
+    assert fake.writes == []
+
+
+@pilot
+async def test_escape_while_a_source_is_still_building_keeps_the_editor_as_it_was(
+        fake, providers, monkeypatch):
+    import threading
+    gate = threading.Event()
+    real = providers["radio"].build
+    monkeypatch.setattr(providers["radio"], "build", lambda c="": gate.wait(5) and real(c))
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        ed = await open_new(app, pilot)
+        await pilot.click("#change")
+        await pilot.pause()
+        picker = app.screen
+        providers_list = picker.query_one("#providers", OptionList)
+        providers_list.highlighted = 1                     # radio
+        await pilot.press("enter")
+        await settle(app, pilot)
+        picker.query_one("#choices", OptionList).focus()
+        await pilot.press("enter")                         # kalx: building, slowly
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen is ed
+        gate.set()
+        await settle(app, pilot)
+        assert app.is_running and app.screen is ed and ed.picked is None
+        assert str(ed.query_one("#source").render()) == "Sonos chime"
+    assert fake.writes == []
+
+
+@pilot
+async def test_the_lists_keys_do_nothing_under_the_editor(fake, providers):
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        ed = await open_edit(app, pilot, "2")
+        ed.query_one("#day-1").focus()
+        await pilot.press("n", "d", "r", "space", "j", "k", "q")
+        await settle(app, pilot)
+        assert app.is_running
+        assert app.screen is ed and sum(isinstance(s, EditorScreen) for s in app.screen_stack) == 1
     assert fake.writes == [] and journal() == []
 
 
