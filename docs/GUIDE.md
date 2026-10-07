@@ -221,11 +221,11 @@ snapshot taken before the delete brings it back as well. Every field
 Spotify alarm's `<Content>` child (see above) and any attribute twiddle's
 model doesn't know. `recreate` returns a list of what it couldn't bring back.
 
-The same list, and the same two writes, as a TUI:
+The same list, and the same writes, as a TUI:
 
 ```bash
-uv run twiddle alarm --dry-run      # browse; space and d say what they would do, write nothing
-uv run twiddle alarm                # space and d WRITE
+uv run twiddle alarm --dry-run      # browse; space, d and saving say what they would do, write nothing
+uv run twiddle alarm                # space, d and saving the editor WRITE
 ```
 
 `twiddle alarm` with no verb shows every room in the household, each with its
@@ -245,8 +245,23 @@ alarm refuses the write, and if the list changed since it was shown (the
 Sonos app?) nothing is written and the list is shown again. `--dry-run` (also
 `--anchor IP`) goes before any verb as well: `twiddle alarm --dry-run rm 34`
 is a dry run. With no terminal (a script, `--json`) it opens nothing and
-says so: `alarm list` is the scriptable list. New, edit and try-now in the TUI
-are still to come; until then they are `alarm add`, `alarm edit` and `alarm try`.
+says so: `alarm list` is the scriptable list.
+
+`n` opens the editor on a new alarm and enter on the highlighted one: time,
+days (a box a day, and once/daily/weekdays/weekends to set them all), room,
+include grouped rooms, source, volume, stop after, play mode and on/off.
+`change…` opens the source picker: every source `alarm sources` lists, each
+with ✓ (plays without this Mac) or `⌁ Needs this Mac awake at <time>. If it
+isn't: <fallback>.`, then its choices (a search, for one that searches). The
+editor's last line says the same for the source it has. Saving (`ctrl+s` or
+Save) writes only the fields you changed, through the same journalled
+`CreateAlarm`/`UpdateAlarm` as `alarm add`/`alarm edit`: a field left alone
+goes back as the speaker gave it, so an alarm whose source twiddle doesn't
+recognise (iHeart, say) keeps it byte for byte, and one aimed at a bonded
+follower stays there unless you pick a room. Saving with nothing changed
+writes nothing. If the list changed since the editor opened, nothing is
+written and the list is read again. Try-now in the TUI is still to come;
+until then it is `alarm try`.
 
 ```bash
 uv run twiddle alarm add --room roam --time 07:15 --days weekdays --dry-run   # the alarm it would create
