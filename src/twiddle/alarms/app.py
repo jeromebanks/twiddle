@@ -647,7 +647,7 @@ class AlarmApp(App):
         self.status_text = ""
         self.writing = False        # one write at a time: space and d do nothing meanwhile
         self.ringing: RingingScreen | None = None
-        self.poll_ticket = 0                # the latest poll; an older one's answer is dropped
+        self.polling = False
         # Alarms stopped or snoozed here that the speaker may still report: not
         # shown again until it stops reporting them, or (a snooze) rings again.
         self.hushed: dict[tuple, datetime | None] = {}
@@ -815,44 +815,46 @@ class AlarmApp(App):
     # ---- an alarm going off ------------------------------------------------
 
     def check(self) -> None:
-        """Ask again whether an alarm is going off. A poll still running when
-        the next starts is overtaken: a thread can't be stopped, so its
-        answer is dropped (as the source picker's is)."""
-        self.poll_ticket += 1
-        self._poll(self.poll_ticket)
-
-    def _latest(self, ticket: int, fn, *args) -> None:
-        """From the poll: `fn(*args)` on the UI thread, if no newer poll started."""
-        def run():
-            if ticket == self.poll_ticket:
-                fn(*args)
-        self.call_from_thread(run)
+        """Ask whether an alarm is going off, unless a poll is still asking:
+        one at a time, so a slow speaker delays the answer and never voids it."""
+        if not self.polling:
+            self.polling = True
+            self._poll()
 
     @work(thread=True, group="ring")
-    def _poll(self, ticket: int) -> None:
+    def _poll(self) -> None:
         """Ask every group whether an alarm is going off (read-only). A group
         that can't be asked counts as quiet: the next poll asks again."""
-        shown = self.shown
-        if shown is None:
-            return
-        found = []
-        for g in shown.house.groups:
-            try:
-                running = clock.alarm_now(g.coordinator.ip)
-            except Exception:
-                continue
-            key = (g.coordinator.ip,) + ((running.alarm_id, running.logged_start)
-                                         if running else ())
-            if running is None or running.snoozed:      # a snooze is not ringing
-                self._latest(ticket, self._quiet, g.coordinator.ip)
-            elif not self._hushed(key):
-                found.append((key, g.coordinator.ip,        # named from the list shown
-                              alarm_cli.ringing_row(shown.house, g, running, shown.found)))
-        if found:
-            key, ip, row = found[0]
-            self._latest(ticket, self._ring, key, ip, row)
-        else:
-            self._latest(ticket, self._none_ringing)
+        try:
+            shown = self.shown
+            if shown is None:
+                return
+            found = []
+            for g in shown.house.groups:
+                try:
+                    running = clock.alarm_now(g.coordinator.ip)
+                except Exception:
+                    continue
+                key = (g.coordinator.ip,) + ((running.alarm_id, running.logged_start)
+                                             if running else ())
+                if running is None or running.snoozed:      # a snooze is not ringing
+                    self.call_from_thread(self._quiet, g.coordinator.ip)
+                else:
+                    found.append((key, g.coordinator.ip,        # named from the list shown
+                                  alarm_cli.ringing_row(shown.house, g, running,
+                                                        shown.found)))
+            self.call_from_thread(self._polled, found)
+        finally:
+            self.call_from_thread(setattr, self, "polling", False)
+
+    def _polled(self, found: list) -> None:
+        """The poll's answer, applied on the UI thread: what was stopped or
+        snoozed here while it was reading stays hushed."""
+        for key, ip, row in found:
+            if not self._hushed(key):
+                self._ring(key, ip, row)
+                return
+        self._none_ringing()
 
     def _none_ringing(self) -> None:
         if self.ringing is not None:

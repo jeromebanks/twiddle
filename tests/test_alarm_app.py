@@ -1249,23 +1249,51 @@ async def test_a_stop_finishing_after_the_screen_was_replaced_leaves_the_new_one
 
 
 @pilot
-async def test_an_overtaken_poll_cannot_reopen_the_screen(ring, monkeypatch):
+async def test_a_slow_poll_is_waited_for_not_voided(ring, monkeypatch):
     import threading
-    release, calls = threading.Event(), []
+    release = threading.Event()
+    real = clock.alarm_now
 
-    def slow_first(ip, events=True):
-        calls.append(ip)
-        if len(calls) == 1:                         # the first poll's first read hangs
-            release.wait(5)
-            return clock.Running(alarm_id="34", logged_start="2026-10-04 14:58:15")
-        return None
-    monkeypatch.setattr(clock, "alarm_now", slow_first)
+    def slow(ip, events=True):                      # each read takes longer than the interval
+        release.wait(5)
+        return real(ip, events)
+    monkeypatch.setattr(clock, "alarm_now", slow)
+    ring.running[ROAM_IP] = RUNNING
     app = make()
     async with app.run_test(size=(140, 50)) as pilot:
         await pilot.pause(0.3)
-        app.shown or await pilot.pause(0.3)
-        app.check()                                 # a newer poll: nothing rings
+        app.check()
+        app.check()                                 # ticks while one is still reading: no second
+        await pilot.pause(0.2)
+        assert app.polling and not ringing(app)
+        release.set()
+        await settle(app, pilot)
+        assert ringing(app) and not app.polling
+
+
+@pilot
+async def test_a_poll_reading_while_x_succeeds_cannot_reopen_that_alarm(ring, monkeypatch):
+    import threading
+    ring.running[ROAM_IP] = RUNNING
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        assert ringing(app)
+        gate, real = threading.Event(), clock.alarm_now
+
+        def late(ip, events=True):                  # read ringing, then held up on the next room
+            got = real(ip, events)
+            if ip == "10.0.0.13":
+                gate.wait(5)
+            return got
+        monkeypatch.setattr(clock, "alarm_now", late)
+        app.check()
+        await pilot.pause(0.2)
+        monkeypatch.setattr(clock, "alarm_now", real)
+        await pilot.press("x")                      # stops and hushes while the poll is held
         await pilot.pause(0.3)
-        release.set()                               # the older one answers late
+        assert not ringing(app)
+        gate.set()
         await settle(app, pilot)
         assert not ringing(app)
