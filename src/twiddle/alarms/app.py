@@ -87,12 +87,13 @@ def options(shown: Shown) -> list[Option]:
             out += [Option(Text(room, style="bold"), disabled=True),
                     Option(Text("  (no alarms)", style="dim"), disabled=True)]
             continue
-        for status in ("ok", "bonded_follower", "vanished", "unknown"):
-            group = [r for r in mine if r["status"] == status]
-            for i, r in enumerate(group):
-                if i == 0 or heading(r) != heading(group[i - 1]):
-                    out.append(Option(Text(heading(r), style="bold"), disabled=True))
-                out.append(Option(alarm_line(r), id=f"alarm:{r['id']}"))
+        order = ("ok", "bonded_follower", "vanished", "unknown")
+        for head in sorted({heading(r) for r in mine},
+                           key=lambda h: (min(order.index(r["status"]) for r in mine
+                                              if heading(r) == h), h)):
+            out.append(Option(Text(head, style="bold"), disabled=True))
+            out += [Option(alarm_line(r), id=f"alarm:{r['id']}")
+                    for r in mine if heading(r) == head]
     if shown.bad:
         many = len(shown.bad) != 1
         out.append(Option(Text(f"can't read {len(shown.bad)} alarm{'s' if many else ''} "
@@ -193,6 +194,7 @@ class AlarmApp(App):
         self.dry_run = dry_run
         self.shown: Shown | None = None
         self.status_text = ""
+        self.writing = False        # one write at a time: space and d do nothing meanwhile
 
     def compose(self) -> ComposeResult:
         yield Static("twiddle alarm", id="top")
@@ -256,9 +258,10 @@ class AlarmApp(App):
         return oid.removeprefix("alarm:") if oid.startswith("alarm:") else None
 
     def _selected(self) -> tuple[str, Alarm, Shown] | None:
-        """The highlighted alarm as shown: its ID, the alarm and the read it came from."""
+        """The highlighted alarm as shown: its ID, the alarm and the read it
+        came from; None while a write is still going."""
         aid, shown = self._current_id(), self.shown
-        if aid is None or shown is None or shown.alarm(aid) is None:
+        if self.writing or aid is None or shown is None or shown.alarm(aid) is None:
             return None
         return aid, shown.alarm(aid), shown
 
@@ -304,13 +307,26 @@ class AlarmApp(App):
 
     # ---- writing -----------------------------------------------------------
 
-    @work(thread=True, exclusive=True, group="write")
     def _write(self, verb: str, aid: str, shown: Shown) -> None:
+        if self.writing:
+            return
+        self.writing = True
+        self._writer(verb, aid, shown)
+
+    @work(thread=True, group="write")
+    def _writer(self, verb: str, aid: str, shown: Shown) -> None:
         """`verb` the alarm as `shown`, or nothing if that's no longer what
         the speaker has."""
-        text, severity = self._do(verb, aid, shown)
-        self.call_from_thread(self.say, text, severity)
-        self.call_from_thread(self.load)
+        try:
+            text, severity = self._do(verb, aid, shown)
+        except Exception as exc:
+            text, severity = f"could not {verb} alarm {aid}: {exc}", "error"
+        self.call_from_thread(self._written, text, severity)
+
+    def _written(self, text: str, severity: str) -> None:
+        self.writing = False
+        self.say(text, severity)
+        self.load()
 
     def _do(self, verb: str, aid: str, shown: Shown) -> tuple[str, str]:
         house, ip, version = shown.house, shown.ip, shown.found.version

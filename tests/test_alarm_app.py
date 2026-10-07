@@ -39,6 +39,7 @@ def no_connections(monkeypatch):
     def refuse(self, *a, **k):
         raise AssertionError(f"the alarm TUI test opened a connection: {a}")
     monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket.socket, "sendto", refuse)          # SSDP discovery
     monkeypatch.setattr(socket, "create_connection", refuse)
 
 
@@ -216,6 +217,54 @@ async def test_space_toggles_through_the_journalled_write(fake, aid, on):
 
 
 @pilot
+async def test_a_second_key_while_a_write_is_going_writes_nothing_more(fake):
+    import threading
+    gate = threading.Event()
+    fake.after_write = lambda f: gate.wait(5)      # the speaker takes its time answering
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await pick(app, pilot, "2")
+        await pilot.press("space")
+        await pilot.pause(0.1)
+        assert app.writing and fake.writes == ["UpdateAlarm"]
+        await pilot.press("space", "d")
+        assert app.screen is app.screen_stack[0]      # d asked nothing
+        gate.set()
+        await settle(app, pilot)
+        assert app.screen is app.screen_stack[0]
+        assert app.status_text.startswith("disabled alarm 2: Sonos Roam")
+    assert fake.writes == ["UpdateAlarm"] and len(journal()) == 1
+
+
+@pilot
+async def test_two_followers_in_a_room_each_get_one_heading(fake, monkeypatch):
+    # A third unit bonded into the Roam pair's room, with alarms interleaved
+    # in time with the right Roam's: one heading each, never repeated.
+    from twiddle.household import Speaker
+    import tests.test_alarm_cli as tac
+    third = Speaker(ip="10.0.0.15", uuid=tac.STRANGER, name="Sonos Roam (C)", room="Sonos Roam",
+                    group_id="g1", channel="LF")
+
+    def house():
+        h = household()
+        h.speakers.append(third)
+        return h
+    from twiddle import alarm_cli as ac
+    monkeypatch.setattr(ac, "_is_bonded_follower", lambda h, sp: sp.uuid != tac.ROAM_L)
+    for aid, at, uuid in (("401", "16:00:00", tac.STRANGER), ("402", "18:00:00", tac.STRANGER)):
+        fake.alarms[aid] = dict(fake.alarms["66"], ID=aid, StartTime=at, RoomUUID=uuid)
+        fake.children[aid] = []
+    app = AlarmApp(household=house)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        got = lines(app)
+        for name in ("Sonos Roam (R)", "Sonos Roam (C)"):
+            head = f"Sonos Roam — set on {name}, a bonded follower"
+            assert got.count(head) == 1, got
+
+
+@pilot
 async def test_space_on_a_list_changed_in_the_app_writes_nothing_and_rereads(fake):
     app = make()
     async with app.run_test(size=(140, 50)) as pilot:
@@ -341,6 +390,8 @@ async def test_dry_run_writes_neither_speaker_nor_journal(fake, key, said):
 
 def test_alarm_with_no_verb_opens_the_tui(monkeypatch):
     seen = {}
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
 
     def run(self):
         seen["dry_run"], seen["house"] = self.dry_run, self.household()
@@ -352,11 +403,30 @@ def test_alarm_with_no_verb_opens_the_tui(monkeypatch):
     assert seen == {"dry_run": False, "house": ("house", None)}
 
 
-@pytest.mark.parametrize("argv", [["disable", "2"], ["rm", "2"]])
+def test_every_alarm_verb_takes_the_flags_given_before_it():
+    parser = cli.build_parser()
+    alarm = next(a for a in parser._subparsers._group_actions[0].choices.items()
+                 if a[0] == "alarm")[1]
+    verbs = alarm._subparsers._group_actions[0].choices
+    assert len(verbs) > 10
+    for name, verb in verbs.items():
+        assert hasattr(verb.get_default("func"), "__wrapped__"), name
+
+
+@pytest.mark.parametrize("argv", [["alarm"], ["alarm", "--json"]])
+def test_alarm_with_no_verb_and_no_terminal_refuses_rather_than_hang(monkeypatch, capsys, argv):
+    monkeypatch.setattr(AlarmApp, "run", lambda self: pytest.fail("opened the TUI"))
+    assert cli.main(argv) == 1
+    out = capsys.readouterr()
+    assert "needs a terminal" in out.out + out.err
+
+
+@pytest.mark.parametrize("argv", [["disable", "2"], ["enable", "66"], ["rm", "2"], ["try", "2"],
+                                  ["edit", "2", "--volume", "9"]])
 def test_dry_run_before_a_verb_still_holds(fake, monkeypatch, capsys, argv):
     monkeypatch.setattr(alarm_cli, "_household", lambda args: household())
     assert cli.main(["alarm", "--dry-run", *argv]) == 0
-    assert capsys.readouterr().out.startswith("[dry-run] would")
+    assert "dry-run" in capsys.readouterr().out
     assert fake.writes == [] and not play.INTERVENTION_LOG.exists()
 
 

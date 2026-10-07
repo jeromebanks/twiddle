@@ -244,8 +244,9 @@ with the same checks: the list is read again strictly first, so an unreadable
 alarm refuses the write, and if the list changed since it was shown (the
 Sonos app?) nothing is written and the list is shown again. `--dry-run` (also
 `--anchor IP`) goes before any verb as well: `twiddle alarm --dry-run rm 34`
-is a dry run. New, edit and try-now in the TUI are still to come; until then
-they are `alarm add`, `alarm edit` and `alarm try`.
+is a dry run. With no terminal (a script, `--json`) it opens nothing and
+says so: `alarm list` is the scriptable list. New, edit and try-now in the TUI
+are still to come; until then they are `alarm add`, `alarm edit` and `alarm try`.
 
 ```bash
 uv run twiddle alarm add --room roam --time 07:15 --days weekdays --dry-run   # the alarm it would create

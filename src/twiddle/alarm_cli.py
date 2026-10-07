@@ -1407,6 +1407,10 @@ def _with_alarm_flags(fn):
 def cmd_tui(args):
     """`twiddle alarm` with no verb: the list as a TUI (`alarms/app.py`).
     Browsing is read-only; space and d write, unless `--dry-run`."""
+    if getattr(args, "json", False) or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        # A script that ran bare `twiddle alarm` used to get usage, not a TUI it can't drive.
+        return fail(args, "`twiddle alarm` with no command is a TUI and needs a terminal",
+                    "`twiddle alarm list` prints the list; `twiddle alarm --help` every command")
     # Imported here so no other command pays for loading Textual.
     from .alarms.app import AlarmApp
     args.anchor = args.alarm_anchor
