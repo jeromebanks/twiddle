@@ -758,3 +758,27 @@ def test_a_refresh_cut_short_never_reaches_the_users_file(tmp_path, monkeypatch,
     assert c.run() == codex_review.UNAVAILABLE
     assert c.auth.read_text() == SIGNED_IN and "half-written" in capsys.readouterr().out
     assert not (c.out / "codex-home" / "auth.json").exists()
+
+
+def on_head(c, verdict, ts):
+    return agent("pr-review", None, ts, "**Review**", sha=c.head, verdict=verdict, round=str(ts))
+
+
+def test_a_pr_round_that_could_not_be_recorded_or_would_change_nothing_never_starts_codex(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch)
+    spent = [recorded(i, "changes") for i in range(1, CONFIG["max_pr_rounds"] + 1)]
+    for extra in ((), ("--dry-run",)):
+        assert c.run(*extra, comments=spent) == 1
+        err = capsys.readouterr().err
+        assert "escalate-slice 28" in err and f"{len(spent)}/{CONFIG['max_pr_rounds']}" in err
+    # an approval on the current head stands; on an older head it doesn't
+    for extra in ((), ("--dry-run",)):
+        assert c.run(*extra, comments=[on_head(c, "approve", 5)]) == 1
+        err = capsys.readouterr().err
+        assert "already approved" in err and "stands" in err and "merge 50" in err
+    assert c.calls() == []
+    assert c.run(comments=[recorded(1, "approve", report="VERDICT: approve")]) == 0
+    assert len(c.calls()) == 1
+    # a head whose latest review on it asked for changes is no longer approved: the usual checks apply instead
+    assert c.run(comments=[on_head(c, "approve", 5), on_head(c, "changes", 6)]) == 1
+    assert "already approved" not in capsys.readouterr().err

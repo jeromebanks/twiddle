@@ -277,6 +277,8 @@ tool step; never merge or push by hand.
 
    `<REVIEW>` is a folder of its own in your scratchpad (say `ship-review/`). Don't run Codex
    any other way. The tool:
+   - refuses, before starting Codex, a round that couldn't be recorded (the milestone's change rounds are spent)
+     or would change nothing (Codex already approved `epic/N`'s head: go on to the demo or `ship`);
    - refuses unless `<PRIMARY>/.worktrees/epic-N` is clean and at `epic/N`'s head (`sync N`
      leaves it there), checks that again after the run, and writes the report's `HEAD:` line
      itself;

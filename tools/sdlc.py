@@ -2524,6 +2524,17 @@ def recorded_rounds(comments: list[dict[str, Any]], trusted: set[str], kind: str
             for mk, c in _marked(comments, trusted) if mk.get("kind") == kind and all(mk.get(k) == v for k, v in match.items())]
 
 
+def wasted_round(spent: int, limit: int, approved: bool, what: str, head: str, escalate: str, onward: str) -> None:
+    """Refuse a `codex-review` round that `pr-review` / `ship-review` would refuse, or that changes nothing: the
+    change rounds are spent, or Codex already approved this exact head. Checked before Codex starts, so no run is paid for."""
+    if spent >= limit:
+        raise SdlcError(f"Codex rounds on {what} spent ({spent}/{limit} asked for changes): a round now couldn't be "
+                        f"recorded; {escalate}")
+    if approved:
+        raise SdlcError(f"Codex already approved {what} at {head[:12]}: that approval stands, so a round now would "
+                        f"change nothing; {onward}")
+
+
 def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Record one Codex round on the PR's current head, with Claude's answer to it."""
     if args.from_file:
@@ -2650,6 +2661,11 @@ def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: 
     refs = closes_refs(pr.get("body", ""))
     if len(refs) != 1 or not slice_issue or (epic := slice_epic(slice_issue)) is None:
         raise SdlcError(f"PR #{pr['number']} must close exactly one slice of an epic (it closes {refs or 'none'})")
+    _, reviews = pr_records(comments, trusted)
+    on_head = [r for r in reviews if r["sha"] == pr["headRefOid"]]
+    wasted_round(changes_rounds(reviews), config.get("max_pr_rounds", 5), bool(on_head) and on_head[-1]["verdict"] == "approve",
+                 f"PR #{pr['number']}", pr["headRefOid"], f"`escalate-slice {refs[0]} --reason ...`",
+                 f"go on to `merge {pr['number']}`")
     wt = worktree_path(refs[0], config)
     out = review_scratch(args, str(pr["number"]), wt)
     if not args.from_file and (wt / ".git").exists() and git(["rev-parse", "HEAD"], cwd=wt) != pr["headRefOid"]:
@@ -2786,6 +2802,13 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
     wt = primary_root() / config.get("worktree_dir", ".worktrees") / f"epic-{n}"   # as `sync` left it: never reset here
     st = bundle_state(bundle, config)
     trusted = set(bundle["trusted"])
+    # before review_target: once Codex approved the head the milestone has moved on, and it would only say "not accepted"
+    if (cur := epic_view(st, progress)["current"]) and cur["phase"] in ("review", "complete", "demoed", "accepted"):
+        mine = [r for r in st["ship_reviews"] if r["milestone"] == cur["key"]]
+        on_head = [r for r in mine if r["sha"] == head]
+        wasted_round(sum(1 for r in mine if r["verdict"] == "changes"), config.get("max_pr_rounds", 5),
+                     bool(on_head) and on_head[-1]["verdict"] == "approve", f"{cur['key']} ({epic_branch(n)})", head,
+                     f"`transition {n} escalated --kind escalation --reason ...`", f"go on to the demo or `ship {n}`")
     if not (target := review_target(st, progress, None)):
         raise SdlcError(f"#{n}: every milestone has shipped")
     key, title = target["key"], target["title"]
@@ -2793,10 +2816,6 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
         raise SdlcError(f"{title} was built straight onto {config.get('default_branch', 'main')}: "
                         f"there is nothing of it to review; `ship {n}` records it as shipped")
     rounds = recorded_rounds(bundle["comments"], trusted, "ship-review", milestone=key)
-    limit = config.get("max_pr_rounds", 5)
-    if (spent := sum(1 for r in rounds if r["verdict"] == "changes")) >= limit:
-        raise SdlcError(f"Codex rounds on {key} spent ({spent}/{limit}): "
-                        f"`transition {n} escalated --kind escalation --reason ...`")
     slices = slices(title)
     out = review_scratch(args, f"milestone-{n}", wt)
     checked = codex_review.check_worktree(wt, head, f"{epic_branch(n)}'s head", f"`sync {n}`")
