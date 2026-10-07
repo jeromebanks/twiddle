@@ -58,9 +58,10 @@ its port. Install and uninstall take `--dry-run` and are journalled
 (`alarm_serve_install`/`alarm_serve_uninstall`).
 
 `twiddle alarm` with no verb opens the list as a TUI (`alarms/app.py`):
-browsing and `r` are read-only; space (enable/disable) and `d` (delete, asked
-twice) WRITE through the same journalled `clock` writes as the verbs above.
-`twiddle alarm --dry-run` makes them say what they would do and write nothing.
+browsing and `r` are read-only; space (enable/disable), `d` (delete, asked
+twice) and saving the editor `n` (new) and enter (edit) open WRITE through the
+same journalled `clock` writes as the verbs above. `twiddle alarm --dry-run`
+makes them say what they would do and write nothing.
 
 Follows the rest of the package: the `ok`/`error` envelope, `--json` anywhere.
 """
@@ -1267,7 +1268,7 @@ def register(sub, parents=None):
     kw = {"parents": parents} if parents else {}
     p = sub.add_parser(**kw, name="alarm",
                        help="the household's Sonos alarms; with no command, the list as a "
-                            "TUI (space on/off and d delete WRITE)")
+                            "TUI (space on/off, d delete and saving n/enter's editor WRITE)")
     # Their own dests: a verb's `--dry-run`/`--anchor` defaults would
     # otherwise overwrite these (`_with_alarm_flags` hands them on).
     p.add_argument("--anchor", dest="alarm_anchor", default=None, metavar="IP",
@@ -1406,7 +1407,7 @@ def _with_alarm_flags(fn):
 
 def cmd_tui(args):
     """`twiddle alarm` with no verb: the list as a TUI (`alarms/app.py`).
-    Browsing is read-only; space and d write, unless `--dry-run`."""
+    Browsing is read-only; space, d and saving the editor write, unless `--dry-run`."""
     if getattr(args, "json", False) or not (sys.stdin.isatty() and sys.stdout.isatty()):
         # A script that ran bare `twiddle alarm` used to get usage, not a TUI it can't drive.
         return fail(args, "`twiddle alarm` with no command is a TUI and needs a terminal",
