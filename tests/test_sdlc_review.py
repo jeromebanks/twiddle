@@ -272,3 +272,489 @@ def test_an_epic_without_milestones_owes_and_clears_the_same_way(monkeypatch):
     assert view["current"]["key"] == "all" and view["current"]["phase"] == "review" and view["due"] == "review"
     cleared = agent("ship-review", None, 21, milestone="all", sha=HEAD, verdict="approve", round="1")
     assert sdlc.epic_view(derive([owed, cleared]), p)["current"]["phase"] == "complete"
+
+
+# --- codex-review: the tool runs a PR round (tools/codex_review.py), on settings the repo owns --------
+
+import ast
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+from tools import codex_review
+
+ROOT = Path(__file__).resolve().parent.parent
+from tests.fake_codex import (APPROVES, FAKE_CODEX, NO_VERDICT, QUICK, SETTINGS, SIGNED_IN, SLOW,  # noqa: E402,F401
+                              USER_CODEX, install, no_real_codex_home)
+
+
+class Codex:
+    """A fake `codex` on PATH, a tmp git repo as the slice's worktree, a signed-in user Codex home under the
+    tmp HOME, and a saved PR bundle."""
+
+    def __init__(self, tmp_path, monkeypatch, plan=(APPROVES,), settings=SETTINGS):
+        self.tmp = tmp_path
+        self.user = codex_review.user_codex_home()
+        self.log, self.plan, self.auth = install(tmp_path, monkeypatch, plan)
+        for k in ("AUTHOR", "COMMITTER"):
+            monkeypatch.setenv(f"GIT_{k}_NAME", "t")
+            monkeypatch.setenv(f"GIT_{k}_EMAIL", "t@example.invalid")
+        self.wt = tmp_path / "wt"
+        self.wt.mkdir()
+        for cmd in (["init", "-q"], ["commit", "--allow-empty", "-qm", "base"]):
+            self.git(*cmd)
+        self.git("update-ref", "refs/remotes/origin/epic/12", "HEAD")
+        (self.wt / "x.py").write_text("x = 1\n")
+        self.git("add", "x.py")
+        self.git("commit", "-qm", "the slice")
+        self.head = self.git("rev-parse", "HEAD")
+        cfg = dict(CONFIG)
+        cfg.pop("codex", None)
+        if settings is not None:
+            cfg["codex"] = settings
+        self.config = tmp_path / "config.json"
+        self.config.write_text(json.dumps(cfg))
+        self.out = tmp_path / "scratch"
+        monkeypatch.setattr(sdlc, "worktree_path", lambda n, config: self.wt)
+        monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("codex-review --from-file must not call gh"))
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.wt, capture_output=True, text=True, check=True).stdout.strip()
+
+    def set_plan(self, *steps):
+        self.plan.write_text(json.dumps(list(steps)))
+
+    def bundle(self, comments=(), **pr_kw):
+        f = self.tmp / "bundle.json"
+        f.write_text(json.dumps({"pr": pr(headRefOid=self.head, **pr_kw), "pr_comments": list(comments),
+                                 "trusted": [OWNER], "slice": {**slice_issue(JUDGMENT), "body": "<!-- sdlc:v1 kind=slice "
+                                 "epic=12 key=T1.1 -->\n## Outcome\n\nthe brief\n"}}))
+        return str(f)
+
+    def run(self, *extra, comments=()):
+        return sdlc.main(["--config", str(self.config), "codex-review", "--pr", "50", "--out", str(self.out),
+                          "--from-file", self.bundle(comments), *extra])
+
+    def calls(self):
+        return [json.loads(l) for l in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def report(self):
+        return self.out / "codex.md"
+
+
+def test_the_tool_writes_the_head_line_and_pr_review_accepts_it(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch)
+    assert c.run() == 0
+    saved = c.report().read_text()
+    assert saved.splitlines()[0] == f"HEAD: {c.head}" and saved.rstrip().endswith("VERDICT: approve")
+    (call,) = c.calls()
+    assert call["cwd"] == str(c.wt.resolve()) and not call["stdin_tty"]
+    assert "codex progress noise" in (c.out / "codex.err").read_text()    # stderr kept apart from the report
+    out = capsys.readouterr().out
+    assert str(c.report()) in out and "1. fine" in out
+    bundle = tmp_path / "pr.json"
+    bundle.write_text(json.dumps({"pr": pr(headRefOid=c.head), "pr_comments": [], "trusted": [OWNER]}))
+    assert sdlc.main(["pr-review", "50", "--report", str(c.report()), "--from-file", str(bundle), "--dry-run"]) == 0
+    assert f"sha={c.head} verdict=approve" in capsys.readouterr().out
+
+
+def test_it_refuses_a_dirty_worktree_or_the_wrong_head_and_runs_nothing(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch)
+    (c.wt / "notes.md").write_text("scratch in the worktree")
+    assert c.run() == 1                                   # a refusal, never the review-defer status
+    err = capsys.readouterr().err
+    assert "not clean" in err and "notes.md" in err
+    (c.wt / "notes.md").unlink()
+    c.git("commit", "--allow-empty", "-qm", "local, not pushed")
+    assert c.run() == 1
+    assert "is not the PR's head" in capsys.readouterr().err
+    assert c.calls() == [] and not c.report().exists()
+    # and its scratch never goes in the worktree
+    assert sdlc.main(["--config", str(c.config), "codex-review", "--pr", "50", "--out", str(c.wt / "s"),
+                      "--from-file", c.bundle()]) == 1
+    assert "inside the worktree" in capsys.readouterr().err
+
+
+def test_a_worktree_changed_during_the_run_fails_and_saves_nothing(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch, plan=({"edit": "x.py", **APPROVES},))
+    assert c.run() == 1
+    err = capsys.readouterr().err
+    assert "changed while Codex ran" in err and "x.py" in err
+    assert len(c.calls()) == 1 and not c.report().exists()
+
+
+def test_a_head_that_moves_during_the_run_fails_and_saves_nothing(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch, plan=({"commit": True, **APPROVES},))
+    c.out.mkdir()
+    c.report().write_text(f"HEAD: {c.head}\n\nVERDICT: approve\n")    # a stale report from an earlier run
+    assert c.run() == 1
+    assert "HEAD moved" in capsys.readouterr().err
+    assert len(c.calls()) == 1 and not c.report().exists()
+
+
+def test_no_verdict_is_retried_once_then_it_is_the_defer_status(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch, plan=(NO_VERDICT, APPROVES))
+    assert c.run() == 0 and len(c.calls()) == 2 and c.report().read_text().startswith(f"HEAD: {c.head}")
+    c.log.unlink()
+    c.set_plan(NO_VERDICT)
+    assert c.run() == codex_review.UNAVAILABLE == 3
+    assert len(c.calls()) == 2 and not c.report().exists()
+    assert "codex progress noise" in capsys.readouterr().out          # codex.err's tail, for review-defer's reason
+
+
+def test_the_timeout_from_config_reaches_the_run_once_then_succeeds_twice_defers(tmp_path, monkeypatch):
+    c = Codex(tmp_path, monkeypatch, plan=(SLOW, APPROVES), settings=QUICK)
+    assert c.run() == 0 and len(c.calls()) == 2              # killed after codex.timeout_seconds (1s), not 5s
+    assert c.report().read_text().startswith(f"HEAD: {c.head}") and "timed out after 1s" in (c.out / "codex.err").read_text()
+    c.log.unlink()
+    c.set_plan(SLOW)
+    assert c.run() == codex_review.UNAVAILABLE and len(c.calls()) == 2
+
+
+def test_codex_not_on_the_path_or_not_runnable_is_the_defer_status(tmp_path, monkeypatch):
+    c = Codex(tmp_path, monkeypatch)
+    (tmp_path / "bin" / "codex").chmod(0o644)
+    assert c.run() == codex_review.UNAVAILABLE and c.calls() == []
+    only_git = tmp_path / "only-git"
+    only_git.mkdir()
+    (only_git / "git").symlink_to(shutil.which("git"))
+    monkeypatch.setenv("PATH", str(only_git))
+    assert c.run() == codex_review.UNAVAILABLE and c.calls() == []
+
+
+def test_an_interrupted_run_kills_codex(tmp_path, monkeypatch):
+    killed = []
+
+    class Proc:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise KeyboardInterrupt
+            return 0
+
+        def poll(self):
+            return None if not killed else 0
+
+        def kill(self):
+            killed.append("kill")
+
+    monkeypatch.setattr(codex_review.subprocess, "Popen", lambda *a, **k: Proc())
+    monkeypatch.setattr(codex_review.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    with pytest.raises(KeyboardInterrupt):
+        codex_review.run_once(["codex"], tmp_path, tmp_path / "o", tmp_path / "e", 30)
+    assert killed[0] == (4242, codex_review.signal.SIGKILL)
+    # a group it may not signal (a sandbox helper: EPERM) still kills Codex, and the interrupt isn't
+    # mistaken for "codex can't be started"
+    killed.clear()
+
+    def eperm(pid, sig):
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(codex_review.os, "killpg", eperm)
+    with pytest.raises(KeyboardInterrupt):
+        codex_review.run_once(["codex"], tmp_path, tmp_path / "o", tmp_path / "e", 30)
+    assert killed == ["kill"]
+
+
+def test_codex_gets_the_repos_settings_and_a_config_without_them_is_refused(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch)
+    assert c.run() == 0
+    argv = c.calls()[0]["argv"]
+    assert argv[:9] == ["exec", "-m", "test-model", "-c", 'model_reasoning_effort="low"', "--sandbox", "read-only",
+                        "--skip-git-repo-check", argv[8]] and argv[8].startswith("You are an independent reviewer")
+    capsys.readouterr()
+    (tmp_path / "again").mkdir()
+    c = Codex(tmp_path / "again", monkeypatch, settings=None)
+    assert c.run() == 1 and c.calls() == []
+    assert "no `codex` section" in capsys.readouterr().err
+    assert codex_review.codex_settings(CONFIG)["sandbox"] == "read-only"    # the repo's own section is valid
+    assert codex_review.codex_settings({"codex": {**SETTINGS, "flags": ["--color", "never", "--ephemeral"]}})
+    for bad in ({"sandbox": "workspace-write"}, {"flags": ["-m", "other"]}, {"flags": ["-c", "x=1"]}, {"flags": ["-mo3"]},
+                {"flags": ["--dangerously-bypass-approvals-and-sandbox"]}, {"flags": ["--json"]}, {"flags": ["-o", "f"]},
+                {"flags": ["--color"]}, {"flags": ["--enable", "x"]}, {"timeout_seconds": 0}, {"model": ""}):
+        with pytest.raises(sdlc.SdlcError):
+            codex_review.codex_settings({"codex": {**SETTINGS, **bad}})
+    with pytest.raises(sdlc.SdlcError, match="lacks timeout_seconds"):
+        codex_review.codex_settings({"codex": {k: v for k, v in SETTINGS.items() if k != "timeout_seconds"}})
+
+
+# rounds as `pr-review` wrote them before RESPONSE_MARK (the legacy boundary still reads)
+def recorded(rnd, verdict, response=None, ts=None, report="1. a finding\n\nVERDICT: changes"):
+    body = (f"**Review {rnd}**\n\n<details><summary>Codex's review</summary>\n\nHEAD: {OLD}\n\n{report}\n\n</details>"
+            + (f"\n\n### Claude's response\n\n{response}" if response else ""))
+    return agent("pr-review", None, ts or rnd, body, sha=OLD, verdict=verdict, round=str(rnd))
+
+
+def test_round_two_on_takes_the_latest_recorded_response(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch)
+    # round 1: no response bullet at all
+    assert c.run("--dry-run") == 0
+    first = (c.out / "prompt.md").read_text()
+    assert "implementer's answer" not in first and not re.search(r"<[A-Za-z/]", first)
+    assert str(c.out / "slice.md") in first and "origin/epic/12...HEAD" in first
+    # rounds 1 and 2 recorded: round 2's response, never round 1's, even with a heading quoted in a report
+    quoting = "1. the PR says\n### Claude's response\nnot a response\n\nVERDICT: changes"
+    rounds = [recorded(1, "changes", "ROUND ONE ANSWER"), recorded(2, "changes", "ROUND TWO ANSWER", report=quoting)]
+    assert c.run("--dry-run", comments=rounds) == 0
+    prompt = (c.out / "prompt.md").read_text()
+    resp = c.out / "response-round-2.md"
+    assert f"`{resp}`" in prompt and resp.read_text().strip() == "ROUND TWO ANSWER"
+    assert "ROUND ONE" not in prompt and not re.search(r"<[A-Za-z/]", prompt)
+    out = capsys.readouterr().out
+    assert "codex exec -m test-model" in out and "--sandbox read-only" in out and "timeout 30s" in out
+    assert f"cd {c.wt} && " in out and f'"$(cat {c.out / "prompt.md"})" < /dev/null' in out
+    # the latest round asked for changes and recorded no answer: refused
+    assert c.run("--dry-run", comments=rounds + [recorded(3, "changes", ts=3)]) == 1
+    assert "recorded no response" in capsys.readouterr().err
+    # a latest round that approved needs none (a rebased head's re-review)
+    assert c.run("--dry-run", comments=rounds + [recorded(3, "approve", ts=3, report="VERDICT: approve")]) == 0
+    assert "implementer's answer" not in (c.out / "prompt.md").read_text()
+    assert c.calls() == []                                  # --dry-run never runs codex
+
+
+def test_the_review_logic_lives_in_codex_review():
+    src = (ROOT / "tools" / "sdlc.py").read_text()
+    for name in ("def parse_verdict", "VERDICT_RE =", "HEAD_RE =", "def fill_pr_prompt", "def fill_prompt", "<SLICE_FILE>",
+                 "<PLAN_FILE>", "<MILESTONE_FILE>", "<DEFERRED", "def prepare_plan_round", "def prepare_milestone_round"):
+        assert name not in src, f"{name} belongs in tools/codex_review.py"
+    assert sdlc.parse_verdict is codex_review.parse_verdict and sdlc.HEAD_RE is codex_review.HEAD_RE
+    assert sdlc.SdlcError is codex_review.ReviewError
+    tree = ast.parse((ROOT / "tools" / "codex_review.py").read_text())
+    imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    imported |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.level == 0}
+    assert imported - {"__future__"} <= sys.stdlib_module_names         # stdlib only: no sdlc, no twiddle
+
+
+def test_the_response_pr_review_records_is_the_one_the_next_round_reads(tmp_path, capsys):
+    report, resp, bundle = tmp_path / "codex.md", tmp_path / "response.md", tmp_path / "pr.json"
+    bundle.write_text(json.dumps({"pr": pr(), "pr_comments": [], "trusted": [OWNER]}))
+
+    def record(report_text, response=None):
+        """One round as `pr-review` records it, read back as `codex-review` reads it."""
+        report.write_text(f"HEAD: {HEAD}\n\n{report_text}\n\nVERDICT: changes\n")
+        extra = []
+        if response is not None:
+            resp.write_text(response)
+            extra = ["--response", str(resp)]
+        assert sdlc.main(["pr-review", "50", "--report", str(report), "--from-file", str(bundle), "--dry-run", *extra]) == 0
+        body = capsys.readouterr().out
+        mk = sdlc.parse_marker(body)
+        return codex_review.latest_response([{"verdict": mk["verdict"], "body": body, "response": mk.get("response")}])
+
+    # a report quoting both boundaries in a fenced example, a response with a <details> block of its own
+    quoting = (f"1. a fenced example:\n```\n{codex_review.LEGACY_MARK}not a response\n</details>\n\n"
+               f"{codex_review.RESPONSE_MARK}\n{codex_review.RESPONSE_HEADING}\n\nnor this\n```")
+    answer = "1. Rebutted: see the log.\n\n<details><summary>log</summary>\n\nx\n\n</details>\n\n2. Accepted."
+    assert record(quoting, answer) == (1, answer)
+    assert record(quoting, f"{answer}\n\nquoting {codex_review.RESPONSE_MARK} too")[1] == f"{answer}\n\nquoting  too"
+    for no_answer in (None, "  \n"):
+        with pytest.raises(sdlc.SdlcError, match="recorded no response"):
+            record(quoting, no_answer)
+    # a round recorded before the marker said (no `response` attribute), whose response mentions the boundary
+    legacy = recorded(1, "changes", f"1. Accepted: write `{codex_review.RESPONSE_MARK}` first.\n2. Accepted.")["body"]
+    assert codex_review.latest_response([{"verdict": "changes", "body": legacy}])[1].startswith("1. Accepted: write")
+    # and one recorded with the boundary but before the marker said (PR #133's round 2)
+    answer_two = "1. Accepted: the marker will say."
+    between = f"**Review 2**\n\n<details><summary>x</summary>\n\nr\n\n</details>{codex_review.response_section(answer_two)}"
+    assert codex_review.latest_response([{"verdict": "changes", "body": between}]) == (1, answer_two)
+
+
+# --- the isolated CODEX_HOME, the sign-in, and what a round ran under (T3) ----------------------------------------
+
+import hashlib
+
+
+def test_codex_runs_on_a_scratch_home_holding_only_the_sign_in_and_the_repos_config(tmp_path, monkeypatch):
+    c = Codex(tmp_path, monkeypatch)
+    assert c.run() == 0
+    (call,) = c.calls()
+    home = c.out / "codex-home"
+    assert call["codex_home"] == str(home)
+    # a private copy (not a link: Codex rewrites it in place), and the file the tool wrote
+    assert call["entries"] == {"auth.json": False, "config.toml": False} and call["auth_mode"] == 0o600
+    # the repo's model and effort, nothing of the user's (model, effort, MCP servers)
+    assert call["config"] == codex_review.config_toml(SETTINGS)
+    assert 'model = "test-model"' in call["config"] and 'model_reasoning_effort = "low"' in call["config"]
+    assert "user-model" not in call["config"] and "minimal" not in call["config"] and "mcp" not in call["config"]
+    # afterwards: no sign-in left in scratch (the rest stays, for the session log), and the user's untouched
+    assert not (home / "auth.json").exists() and not (home / "auth.json").is_symlink() and home.is_dir()
+    assert c.auth.read_text() == SIGNED_IN and not c.auth.is_symlink()
+    assert (c.user / "config.toml").read_text() == USER_CODEX["config.toml"]
+
+
+def test_the_config_strings_are_toml_whatever_they_hold(tmp_path):
+    import tomllib
+    odd = {**SETTINGS, "model": 'a "quoted" \\ model', "reasoning_effort": "high"}
+    assert tomllib.loads(codex_review.config_toml(odd)) == {
+        "model": 'a "quoted" \\ model', "model_reasoning_effort": "high", "sandbox_mode": "read-only",
+        "cli_auth_credentials_store": "file"}
+
+
+def test_no_sign_in_is_refused_before_codex_runs(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch)
+    c.auth.unlink()
+    assert c.run() == codex_review.UNAVAILABLE                 # can't run: the cue for `review-defer`
+    out = capsys.readouterr().out
+    assert "no Codex sign-in" in out and "codex login" in out
+    assert c.calls() == [] and not c.report().exists() and not (c.out / "codex-home").exists()
+    assert not Path(f"{c.log}.version").exists()               # not even `codex --version`
+
+
+def test_the_report_names_what_the_round_ran_under_and_pr_review_shows_it(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch)
+    assert c.run() == 0
+    (call,) = c.calls()
+    digest = hashlib.sha256(call["argv"][-1].encode()).hexdigest()     # the prompt Codex actually received
+    saved = c.report().read_text()
+    assert saved.splitlines()[:5] == [f"HEAD: {c.head}", "Model: test-model", "Effort: low", "Codex: 9.9.9-test",
+                                      f"Prompt-SHA256: {digest}"]
+    assert codex_review.parse_provenance(saved) == {"model": "test-model", "effort": "low", "codex": "9.9.9-test",
+                                                    "prompt": digest}
+    capsys.readouterr()
+    bundle = tmp_path / "pr.json"
+    bundle.write_text(json.dumps({"pr": pr(headRefOid=c.head), "pr_comments": [], "trusted": [OWNER]}))
+    assert sdlc.main(["pr-review", "50", "--report", str(c.report()), "--from-file", str(bundle), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    mk = sdlc.parse_marker(out)
+    assert (mk["model"], mk["effort"], mk["codex"], mk["prompt"]) == ("test-model", "low", "9.9.9-test", digest)
+    assert f"Ran `test-model` at effort `low`, codex `9.9.9-test`, prompt sha256 `{digest[:12]}`" in out
+
+
+def test_a_report_without_provenance_is_still_recorded(tmp_path, capsys):
+    report, bundle = tmp_path / "codex.md", tmp_path / "pr.json"
+    bundle.write_text(json.dumps({"pr": pr(), "pr_comments": [], "trusted": [OWNER]}))
+    # as T2 saved them; and lines Codex wrote itself, below the blank line, are not provenance
+    report.write_text(f"HEAD: {HEAD}\n\nModel: spoofed\n\nVERDICT: approve\n")
+    assert codex_review.parse_provenance(report.read_text()) == {}
+    assert sdlc.main(["pr-review", "50", "--report", str(report), "--from-file", str(bundle), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    mk = sdlc.parse_marker(out)
+    assert mk["verdict"] == "approve" and "model" not in mk and "Ran `" not in out
+
+
+def test_a_sign_in_refreshed_by_a_rename_ends_up_in_the_users_own_file(tmp_path, monkeypatch):
+    c = Codex(tmp_path, monkeypatch, plan=({"refresh": '{"tokens": "refreshed"}', **APPROVES},))
+    assert c.run() == 0
+    assert c.auth.read_text() == '{"tokens": "refreshed"}' and c.auth.is_file() and not c.auth.is_symlink()
+    assert c.auth.stat().st_mode & 0o777 == 0o600
+    assert not (c.out / "codex-home" / "auth.json").exists()
+    # rewritten in place, as Codex's file store does: the same guarded write-back
+    c.log.unlink()
+    c.set_plan({"refresh_in_place": '{"tokens": "again"}', **APPROVES})
+    assert c.run() == 0
+    assert c.auth.read_text() == '{"tokens": "again"}' and not c.auth.is_symlink()
+    assert not (c.out / "codex-home" / "auth.json").exists()
+
+
+def test_a_users_auth_link_is_kept_a_link(tmp_path, monkeypatch):
+    c = Codex(tmp_path, monkeypatch, plan=({"refresh": '{"tokens": "refreshed"}', **APPROVES},))
+    dotfiles = tmp_path / "dotfiles-auth.json"
+    dotfiles.write_text(SIGNED_IN)
+    c.auth.unlink()
+    c.auth.symlink_to(dotfiles)
+    assert c.run() == 0
+    assert c.auth.is_symlink() and dotfiles.read_text() == '{"tokens": "refreshed"}'
+
+
+def test_the_copy_back_happens_however_the_run_ends(tmp_path, monkeypatch, capsys):
+    refreshed = '{"tokens": "refreshed"}'
+    # timed out twice, then a non-zero exit with no verdict twice: still copied back
+    c = Codex(tmp_path, monkeypatch, plan=({"refresh": refreshed, **SLOW},), settings=QUICK)
+    assert c.run() == codex_review.UNAVAILABLE
+    assert c.auth.read_text() == refreshed and not (c.out / "codex-home" / "auth.json").exists()
+    c.auth.write_text(SIGNED_IN)
+    c.log.unlink()
+    c.set_plan({"refresh": refreshed, "exit": 1, **NO_VERDICT})
+    assert c.run() == codex_review.UNAVAILABLE
+    assert c.auth.read_text() == refreshed
+    # HEAD moving under the review is a refusal, and still copied back
+    c.auth.write_text(SIGNED_IN)
+    c.log.unlink()
+    c.set_plan({"refresh": refreshed, "commit": True, **APPROVES})
+    assert c.run() == 1 and c.auth.read_text() == refreshed
+    capsys.readouterr()
+
+
+def test_an_interrupted_run_still_copies_the_sign_in_back(tmp_path, monkeypatch):
+    c = Codex(tmp_path, monkeypatch)
+
+    def refresh_then_interrupt(cmd, wt, out, err, timeout, env=None):
+        home = Path(env["CODEX_HOME"])
+        (home / "auth.json.tmp").write_text('{"tokens": "refreshed"}')
+        os.replace(home / "auth.json.tmp", home / "auth.json")
+        raise KeyboardInterrupt
+    monkeypatch.setattr(codex_review, "run_once", refresh_then_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        c.run()
+    assert c.auth.read_text() == '{"tokens": "refreshed"}' and not (c.out / "codex-home" / "auth.json").exists()
+
+
+def test_a_sign_in_changed_elsewhere_during_the_run_is_never_overwritten(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch, plan=({"refresh": '{"tokens": "refreshed"}',
+                                            "user_signs_in": '{"tokens": "a new login"}', **APPROVES},))
+    assert c.run() == 0
+    assert c.auth.read_text() == '{"tokens": "a new login"}'
+    assert "refreshed token was discarded" in capsys.readouterr().out
+    assert not (c.out / "codex-home" / "auth.json").exists()
+
+
+def test_a_sign_in_an_earlier_run_could_not_copy_back_is_never_wiped(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch, plan=({"refresh": '{"tokens": "refreshed"}', **APPROVES},))
+
+    def cannot_write(target, data, unless_changed_from=None):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(codex_review, "_write_atomic", cannot_write)
+    assert c.run() == 0
+    stranded = c.out / "codex-home" / "auth.json"
+    assert "couldn't copy Codex's refreshed sign-in back" in capsys.readouterr().out
+    assert stranded.read_text() == '{"tokens": "refreshed"}' and c.auth.read_text() == SIGNED_IN
+    # the next run refuses rather than wipe it
+    assert c.run() == 1
+    assert "couldn't copy back" in capsys.readouterr().err and stranded.read_text() == '{"tokens": "refreshed"}'
+    assert len(c.calls()) == 1
+    # a copy a killed run left behind, nothing refreshed: cleaned up, and the run goes ahead
+    stranded.write_text(SIGNED_IN)
+    c.set_plan(APPROVES)
+    assert c.run() == 0 and c.calls()[1]["entries"] == {"auth.json": False, "config.toml": False}
+    assert not stranded.exists() and c.auth.read_text() == SIGNED_IN
+
+
+def test_a_sign_in_elsewhere_before_codex_refreshes_in_place_is_kept(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch, plan=({"user_signs_in": '{"tokens": "a new login"}',
+                                            "refresh_in_place": '{"tokens": "refreshed"}', **APPROVES},))
+    assert c.run() == 0
+    assert c.auth.read_text() == '{"tokens": "a new login"}'
+    assert "refreshed token was discarded" in capsys.readouterr().out
+
+
+def test_a_sign_in_elsewhere_while_the_copy_back_is_being_written_is_kept(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch, plan=({"refresh": '{"tokens": "refreshed"}', **APPROVES},))
+    real_fsync = os.fsync
+
+    def sign_in_elsewhere_meanwhile(fd):
+        real_fsync(fd)
+        c.auth.write_text('{"tokens": "a new login"}')
+    # after the early checks, while the temp file is prepared: the check just before the rename still sees it
+    monkeypatch.setattr(codex_review.os, "fsync", sign_in_elsewhere_meanwhile)
+    assert c.run() == 0
+    assert c.auth.read_text() == '{"tokens": "a new login"}' and c.auth.is_file() and not c.auth.is_symlink()
+    assert "refreshed token was discarded" in capsys.readouterr().out
+    assert not (c.out / "codex-home" / "auth.json").exists()
+    assert not [p for p in c.auth.parent.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_a_refresh_cut_short_never_reaches_the_users_file(tmp_path, monkeypatch, capsys):
+    half = '{"tokens": "re'
+    c = Codex(tmp_path, monkeypatch, plan=({"refresh_in_place": half, "exit": 1, **NO_VERDICT},))
+    assert c.run() == codex_review.UNAVAILABLE
+    assert c.auth.read_text() == SIGNED_IN and "half-written" in capsys.readouterr().out
+    c.log.unlink()
+    c.set_plan({"refresh_in_place": half, **SLOW})
+    (tmp_path / "quick.json").write_text(json.dumps({**json.loads(c.config.read_text()), "codex": QUICK}))
+    c.config = tmp_path / "quick.json"
+    assert c.run() == codex_review.UNAVAILABLE
+    assert c.auth.read_text() == SIGNED_IN and "half-written" in capsys.readouterr().out
+    assert not (c.out / "codex-home" / "auth.json").exists()

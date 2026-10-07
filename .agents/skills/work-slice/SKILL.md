@@ -109,7 +109,14 @@ git push -u origin slice/N
 
 ## 6. Self-review
 
-Have the `advisor` review the committed diff (`git diff <BASE>...HEAD`).
+First work through this checklist on your own diff:
+
+- every bound (a timeout, a limit, a retry count) is finite and validated;
+- shutdown and cancel ordering: what is stopped first, and what happens to work in flight;
+- every error path returns a status, never silently drops the request;
+- tests listen on loopback only, and stub anything that opens a socket to a fake address.
+
+Then have the `advisor` review the committed diff (`git diff <BASE>...HEAD`).
 Fix what it finds, rerun the affected tests, then commit and push.
 
 ## 7. Open the PR and record the tests
@@ -141,24 +148,34 @@ judgment, novel and unrated slices on their own PR). **With the milestone**: ski
 section and go to §9. `merge` records that the review is owed, and Codex reviews the slice
 with its milestone, before the demo.
 
-Save the slice brief where Codex can read it, since its sandbox has no network:
-`gh issue view N --json title,body -q '.title + "\n\n" + .body' > <SCRATCH>/slice.md`. Fill
-`references/codex-pr-prompt.md` into `<SCRATCH>/prompt.md` and run Codex **from
-`WORKTREE`**, with `timeout: 600000` on the Bash call:
+Run one round with the tool, **from `WORKTREE`**. Run the Bash call in the background
+(`run_in_background`) and wait for it to finish: with its one retry it can take longer than a
+foreground call is allowed to.
 
 ```bash
-cd <WORKTREE> && codex exec --sandbox read-only --skip-git-repo-check "$(cat <SCRATCH>/prompt.md)" \
-  < /dev/null > <SCRATCH>/codex.md 2> <SCRATCH>/codex.err
+cd <WORKTREE> && uv run python tools/sdlc.py codex-review --pr PR --out <SCRATCH>
 ```
 
-`< /dev/null` stops `codex exec` waiting on stdin forever. stderr is progress
-noise. If `codex.md` is empty, or has no `HEAD:` line or verdict, the run failed:
-read `codex.err` and run it again.
+It does what used to be done by hand, so don't run Codex any other way:
 
-**If Codex can't run, defer its review to the milestone.** "Can't run" means one of these:
-`codex` isn't on the PATH; it fails to sign in or says to log in; it reports a quota, usage or
-rate limit; a network error; it times out twice; or `codex.md` still has no `HEAD:` line after
-one retry. Then, with the failure copied from `codex.err`:
+- it writes the slice brief to `<SCRATCH>`, since Codex's sandbox has no network;
+- it fills `references/codex-pr-prompt.md`; from round 2 on, it adds your response from the
+  latest recorded round. It refuses if that round asked for changes and has no response;
+- it refuses unless the worktree is clean and its HEAD is the PR's head;
+- it runs Codex with the model, reasoning effort, sandbox, flags and timeout from
+  `.sdlc/config.json`'s `codex` section, never your own Codex config;
+- it fails, and saves nothing, if HEAD moved while Codex ran;
+- it writes the report's `HEAD:` line itself, to `<SCRATCH>/codex.md`, and retries once when
+  Codex times out or ends with no verdict.
+
+It prints the report and its path. `--dry-run` prints the filled prompt and the exact command
+and runs nothing. Exit 1 is a refusal: fix what it says and run it again.
+
+**If Codex can't run, defer its review to the milestone.** "Can't run" means `codex-review`
+exits with status 3: `codex` isn't on the PATH, or there was no `VERDICT:` line after the one
+automatic retry (two timeouts count). It also means Codex fails to sign in or says to log in,
+reports a quota, usage or rate limit, or a network error. In those cases the tool prints the
+end of `<SCRATCH>/codex.err`. Copy the failure from there:
 
 ```bash
 uv run python tools/sdlc.py review-defer PR --reason "<the error, verbatim>"
@@ -182,8 +199,8 @@ uv run python tools/sdlc.py pr-review PR --report <SCRATCH>/codex.md --response 
 
 `pr-review` refuses a report whose `HEAD:` line isn't the PR's current head, so a
 round recorded after the fix is pushed is lost. Only then make the fixes you
-accepted: commit, push, `test-record`, and run the next Codex round on the new
-head, giving it this `response.md`.
+accepted: commit, push, `test-record`, and run `codex-review` again on the new head.
+It takes this response from the round you just recorded.
 
 Repeat until Codex says `VERDICT: approve` **on the current head**. Only reviews
 that ask for changes spend the budget; re-approving a rebased head is free. After

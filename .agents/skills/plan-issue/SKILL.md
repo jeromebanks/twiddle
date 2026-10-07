@@ -109,29 +109,36 @@ and the JSON that will be created) and collapses the previous revision. From
 
 ## 5. Codex round
 
-Codex reviews in a separate process, read-only. Fill the placeholders in
-`references/codex-plan-prompt.md` and write the result to `prompt.md`:
-
-- the plan file path;
-- the PRD path;
-- the issue number;
-- the round number;
-- for round 2 on, the path to your previous `response.md`.
-
-`plan.json` must be exactly the revision you posted: `plan-review` refuses if it
-differs, because Codex must review what will be created. Edited it since? Post it
-first (step 4). Then run:
+Codex reviews in a separate process, read-only, and the tool runs it. Run the Bash call in
+the background (`run_in_background`) and wait for it to finish: with its one retry it can take
+longer than a foreground call is allowed to.
 
 ```bash
-codex exec --sandbox read-only --skip-git-repo-check "$(cat prompt.md)" \
-  < /dev/null > codex.md 2> codex.err
+uv run python tools/sdlc.py codex-review --plan N --out <REVIEW>
 ```
 
-All three redirections matter. Without `< /dev/null`, `codex exec` waits on
-stdin forever. stderr is progress noise, so folding it into stdout corrupts the
-report. If `codex.md` is empty, or doesn't end in a verdict line, the run failed:
-read `codex.err` and run it again. `plan-review` refuses a report with no verdict,
-so a review that never ran can't pass.
+`<REVIEW>` is a folder of its own in your scratchpad (say `review/`): the tool writes its own
+`plan.json` there, and your working `plan.json` must not be overwritten.
+
+It does what used to be done by hand, so don't run Codex any other way:
+
+- it writes the **posted** plan revision's JSON to `<REVIEW>/plan.json`, so Codex reviews
+  exactly what will be created. Edited your local `plan.json` since? Post it first (step 4);
+- it holds the plan to the **currently approved** revision (`state` names its comment). That is
+  the merged `docs/prd/N-*.md` only when its header links that comment; otherwise the approved
+  comment's text, written to `<REVIEW>/requirements.md`;
+- it fills `references/codex-plan-prompt.md`; from round 2 on, it adds your response from the
+  latest recorded round. It refuses if that round asked for changes and has no response;
+- it runs Codex in a scratch checkout of `origin/main` that it makes and removes (never the
+  primary checkout, which other sessions share), with the model, effort, sandbox, flags and
+  timeout from `.sdlc/config.json`'s `codex` section, never your own Codex config;
+- it retries once when Codex times out or ends with no verdict, and saves the report, with what
+  the round ran under, to `<REVIEW>/codex.md`.
+
+`--dry-run` prints the filled prompt and the exact command and runs nothing. Exit 1 is a
+refusal: fix what it says and run it again. **Exit 3 means Codex can't run** (not installed, not
+signed in, quota, network, no verdict after the retry; the end of `<REVIEW>/codex.err` says
+which). A plan has no deferral: report it and stop, and the plan waits for its review.
 
 Read every finding and answer each one in `response.md`, numbered like the findings:
 
@@ -142,7 +149,7 @@ Read every finding and answer each one in `response.md`, numbered like the findi
 Record the round:
 
 ```bash
-uv run python tools/sdlc.py plan-review N --plan plan.json --report codex.md --response response.md
+uv run python tools/sdlc.py plan-review N --plan <REVIEW>/plan.json --report <REVIEW>/codex.md --response response.md
 ```
 
 Then:
