@@ -55,6 +55,16 @@ def set_codex(root, **kw):
 
 # --- the fingerprint -------------------------------------------------------------------------
 
+def test_a_linked_input_is_refused_whether_read_from_a_checkout_or_a_commit(repo):
+    (repo / "AGENTS.md").symlink_to("CLAUDE.md")     # reads as CLAUDE.md on disk, as "CLAUDE.md" in a commit
+    with pytest.raises(sdlc.SdlcError, match="symbolic link"):
+        fp(repo)
+    git(repo, "add", "AGENTS.md")
+    git(repo, "commit", "-qm", "link")
+    with pytest.raises(sdlc.SdlcError, match="symbolic link"):
+        codex_eval.fingerprint(codex_eval.Commit(git(repo, "rev-parse", "HEAD"), repo))
+
+
 def test_every_input_changes_the_fingerprint_and_nothing_else_does(repo):
     base = fp(repo)
     assert re.fullmatch(r"[0-9a-f]{64}", base) and codex_eval.short(base) == base[:12]
@@ -236,6 +246,13 @@ def test_the_latest_result_per_pair_and_a_new_version_needs_its_own():
                                   FP, "0.161.0")["outcome"] == "deferred"     # the latest counts, whatever it says
     assert codex_eval.warning(FP, "0.161.0", latest[(FP, "0.161.0")]) is None
     assert "codex-eval" in codex_eval.warning(FP, "0.162.0", None)
+    # `codex --version` that said nothing usable pairs with nothing, and a pass can't be recorded for it
+    unknown = [{"fingerprint": FP, "codex": "unknown", "outcome": "pass"}]
+    assert codex_eval.pair_result(unknown, FP, "unknown") is None and codex_eval.pair_result(unknown, FP, None) is None
+    assert codex_eval.warning(FP, "unknown", codex_eval.pair_result(unknown, FP, "unknown"))
+    with pytest.raises(sdlc.SdlcError, match="unknown version"):
+        sdlc.eval_comment({"fingerprint": FP, "outcome": "pass"}, CONFIG)
+    assert "codex=unknown" in sdlc.eval_comment({"fingerprint": FP, "outcome": "deferred"}, CONFIG)
 
 
 def test_a_result_comment_carries_everything_and_refuses_what_a_marker_cant_hold():
@@ -362,6 +379,7 @@ def test_a_run_offered_skills_or_with_a_log_nobody_knows_saves_nothing(tmp_path,
     c = Codex(tmp_path, monkeypatch, plan=({**APPROVES, "session": session},))
     assert c.run() == codex_review.UNAVAILABLE
     assert not c.report().exists() and says in capsys.readouterr().out
+    assert says in codex_review.tail(c.out / "codex.err", 3)      # where the skill copies `review-defer --reason` from
     assert len(c.calls()) == 1                                     # offered or unknown: not retried for the same answer
 
 

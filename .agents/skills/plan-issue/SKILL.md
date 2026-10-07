@@ -137,8 +137,8 @@ It does what used to be done by hand, so don't run Codex any other way:
 
 `--dry-run` prints the filled prompt and the exact command and runs nothing. Exit 1 is a
 refusal: fix what it says and run it again. **Exit 3 means Codex can't run** (not installed, not
-signed in, quota, network, no verdict after the retry; the end of `<REVIEW>/codex.err` says
-which). A plan has no deferral: report it and stop, and the plan waits for its review.
+signed in, quota, network, no verdict after the retry, or a session log that shows skills offered
+or a shape the tool doesn't know; the end of `<REVIEW>/codex.err` says which). A plan has no deferral: report it and stop, and the plan waits for its review.
 
 Read every finding and answer each one in `response.md`, numbered like the findings:
 

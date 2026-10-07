@@ -48,8 +48,10 @@ EXCLUDED = {
     "CLAUDE.md": "knowledge of the code under review: the plan prompt names it for its Layout table only, and "
                  "the safety rules a reviewer checks are `review-rules.md`'s",
     ".sdlc/config.json": f"only its `codex` section decides a review, and that is an input (`{CONFIG_INPUT}`)",
+    "docs/prd/": "the evidence a plan round is held to (`codex_review.approved_requirements` reads it), not review logic",
 }
 OUTCOMES = ("pass", "fail", "deferred")
+UNKNOWN = "unknown"                    # what `codex_review.codex_version` says when `codex --version` doesn't: no pair
 SHORT = 12                             # a full 64-hex hash looks like an identifier to `demo-post` and `demo_shot`
 
 
@@ -83,6 +85,8 @@ class Worktree(Tree):
         return sorted({n for n in out.decode().split("\0") if n})
 
     def read(self, path: str) -> bytes | None:
+        if (self.root / path).is_symlink():
+            raise _linked(path)
         try:
             return (self.root / path).read_bytes()
         except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
@@ -100,8 +104,21 @@ class Commit(Tree):
         return sorted(n for n in out.decode().split("\0") if n)
 
     def read(self, path: str) -> bytes | None:
+        if self._is_link(path):
+            raise _linked(path)
         proc = subprocess.run(["git", "cat-file", "blob", f"{self.sha}:{path}"], cwd=self.root, capture_output=True)
         return proc.stdout if proc.returncode == 0 else None
+
+    def _is_link(self, path: str) -> bool:
+        proc = subprocess.run(["git", "ls-tree", "-z", self.sha, "--", path], cwd=self.root, capture_output=True)
+        return proc.stdout.startswith(b"120000 ")
+
+
+def _linked(path: str) -> codex_review.ReviewError:
+    # a link reads as its target on disk but as the link's own text in a commit: two fingerprints for one tree,
+    # and a commit's would miss edits to the target Codex loads
+    return codex_review.ReviewError(f"{path} is a symbolic link, and the review logic's inputs must be files: "
+                                    "put the content there itself")
 
 
 # --- the fingerprint ------------------------------------------------------------------
@@ -158,13 +175,16 @@ def latest_results(results: list[dict[str, Any]]) -> dict[tuple[str, str], dict[
     outcome, ...}); a result with no fingerprint, version or known outcome is no result."""
     latest = {}
     for r in results:
-        if r.get("fingerprint") and r.get("codex") and r.get("outcome") in OUTCOMES:
+        if r.get("fingerprint") and r.get("codex") not in (None, "", UNKNOWN) and r.get("outcome") in OUTCOMES:
             latest[(r["fingerprint"], r["codex"])] = r
     return latest
 
 
-def pair_result(results: list[dict[str, Any]], fp: str, version: str) -> dict[str, Any] | None:
-    """The latest result recorded for exactly this fingerprint and this `codex` version, or None."""
+def pair_result(results: list[dict[str, Any]], fp: str, version: str | None) -> dict[str, Any] | None:
+    """The latest result recorded for exactly this fingerprint and this `codex` version, or None. An unknown
+    version pairs with nothing: a result recorded under one would count for every `codex` that won't say."""
+    if not version or version == UNKNOWN:
+        return None
     return latest_results(results).get((fp, version))
 
 

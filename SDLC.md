@@ -321,9 +321,11 @@ and the repo's own `.agents/skills`, and its session log showed `skills.includeI
   `skills.includeInstructions: false`. Without the setting it has both. After every run the tool
   reads the run's session log (`codex_review.check_session`). If skills were offered, or Codex
   loaded an `AGENTS.md` from outside the reviewed checkout, or the log isn't a shape the tool knows
-  (a new `codex` may change it), the round saves no report and exits 3, the `review-defer` cue. A
-  `codex` that ignores the setting can't produce a review that looks like one that ran without
-  skills.
+  (a new `codex` may change it), the round saves no report and exits 3, with the reason at the
+  end of `codex.err`. A `codex` that ignores the setting can't produce a review that looks like
+  one that ran without skills. For the same reason `codex.flags` may not pass `--ephemeral`, which
+  stops the log being written. The first time this exit happens after a `codex` upgrade, look in
+  `<out>/codex-home/sessions/` before deferring: the tool may need to learn the new shape.
 - `fingerprinted`, only if a future `codex` drops the setting: skills are offered, and every
   `.agents/skills/**/SKILL.md` becomes an input. Codex's built-in skills ship with the binary, so
   the version in the pair covers them. The `AGENTS.md` check still runs.
@@ -334,7 +336,8 @@ isolation doesn't already keep out (above).
 
 **Results.** Each result is a marked `codex-eval` comment on the issue `.sdlc/config.json`'s
 `codex_eval_issue` names (#100). It holds the full fingerprint, the `codex` version, the model,
-the effort, the outcome (`pass`, `fail` or `deferred`) and one line per fixture. A closed issue's
+the effort, the outcome (`pass`, `fail` or `deferred`) and one line per fixture. A `codex` whose
+`--version` says nothing usable pairs with nothing, and no pass can be recorded for it. A closed issue's
 comments still read the same, so the results outlive the epic. The latest result per pair is the
 one that counts. A result comment is a record, not part of the conversation: it never counts as
 the agent's last comment, so one posted during a demo never hides the poster's answer.

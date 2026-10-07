@@ -2666,6 +2666,9 @@ def eval_comment(result: dict[str, Any], config: dict[str, Any]) -> str:
     if not re.fullmatch(r"[0-9a-f]{64}", result.get("fingerprint") or ""):
         raise SdlcError("an eval result needs the review logic's full fingerprint (64 hex digits)")
     extra = {k: str(result.get(src) or "unknown") for k, src in (("codex", "codex"), ("model", "model"), ("effort", "effort"))}
+    if result["outcome"] == "pass" and extra["codex"] == codex_eval.UNKNOWN:
+        raise SdlcError("a pass needs the `codex --version` it ran under: one recorded for an unknown version "
+                        "would count for none")
     if bad := [f"{k}={v!r}" for k, v in extra.items() if not MARKER_VALUE_RE.fullmatch(v) or "--" in v]:
         raise SdlcError("can't be kept in a marker: " + ", ".join(bad))
     lines = [f"**Review eval: `{result['outcome']}`** for the review logic `{codex_eval.short(result['fingerprint'])}` "

@@ -59,8 +59,9 @@ CODEX_KEYS = ("model", "reasoning_effort", "sandbox", "timeout_seconds", "flags"
 # are offered, and every `.agents/skills/**/SKILL.md` is an input of the review logic's fingerprint (`codex_eval`)
 SKILL_MODES = ("suppressed", "fingerprinted")
 # the only `codex exec` flags `codex.flags` may add: none overrides a pinned setting, loosens the read-only
-# sandbox the HEAD stamp relies on, or changes what goes to stdout (the report)
-ALLOWED_FLAGS = {"--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--strict-config"}
+# sandbox the HEAD stamp relies on, changes what goes to stdout (the report), or stops the session log being
+# written (`--ephemeral`: the log is how a round is vouched for, `check_run`)
+ALLOWED_FLAGS = {"--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--strict-config"}
 COLORS = {"never", "auto", "always"}
 
 
@@ -692,6 +693,15 @@ def tail(path: Path, n: int = 20) -> str:
         return ""
 
 
+def _unvouched(why: str, err: Path, log) -> tuple[int, None]:
+    """A run whose session log doesn't show what the repo's settings say it was given: no report, and the reason
+    at the end of `codex.err`, where the skills copy a `review-defer --reason` from."""
+    with err.open("a") as fe:
+        fe.write(f"\n[codex-review] {why}. No report was saved.\n")
+    log(f"{why}. No report was saved (exit {UNAVAILABLE}; the end of {err} says the same)")
+    return UNAVAILABLE, None
+
+
 def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dict[str, Any],
                log=print, on_version=None) -> tuple[int, Path | None]:
     """Run Codex on an isolated `CODEX_HOME`, retrying once when it times out or ends with no verdict.
@@ -736,8 +746,7 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
                                   + "): it didn't review the pushed head, so no report was saved. Restore it and run again")
             seen, why = check_run(home, before, wt, settings["skills"], cut_short=output is None)
             if seen == "offered":         # the next attempt would be given the same: not a review the repo describes
-                log(f"{why}. No report was saved (exit {UNAVAILABLE}: `review-defer`)")
-                return UNAVAILABLE, None
+                return _unvouched(why, err, log)
             if output is None:
                 log(f"attempt {attempt}: Codex timed out after {timeout:g}s")
                 continue
@@ -747,8 +756,7 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
                 log(f"attempt {attempt}: {exc}")
                 continue
             if seen != "ok":
-                log(f"{why}. No report was saved (exit {UNAVAILABLE}: `review-defer`)")
-                return UNAVAILABLE, None
+                return _unvouched(why, err, log)
             report.write_text(stamp(output, head, prov))
             return 0, report
     log(f"Codex gave no verdict in {ATTEMPTS} attempts (exit {UNAVAILABLE}: `review-defer`). "
