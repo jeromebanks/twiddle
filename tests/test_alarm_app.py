@@ -1221,3 +1221,51 @@ async def test_a_stop_finishing_after_the_screen_moved_on_hushes_only_what_it_st
         await pilot.press("x")
         await settle(app, pilot)
         assert ringing(app) and other not in app.hushed and stopped in app.hushed
+
+
+@pilot
+async def test_a_stop_finishing_after_the_screen_was_replaced_leaves_the_new_one(
+        ring, monkeypatch):
+    ring.running[ROAM_IP] = RUNNING
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        old = app.ringing
+        other = ("10.0.0.13", "400", "2026-10-04 15:00:00")
+        real = clock.stop_alarm
+
+        def late(ip, alarm_id=None):                # A's screen goes, B's comes, mid-write
+            def swap():
+                app._hush_screen()
+                app._ring(old.key, "10.0.0.13", {"room": "Living Room", "what": "x"})
+                app.ringing.key = old.key           # even the very same key
+            app.call_from_thread(swap)
+            real(ip, alarm_id)
+        monkeypatch.setattr(clock, "stop_alarm", late)
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert app.ringing is not old and ringing(app)
+
+
+@pilot
+async def test_an_overtaken_poll_cannot_reopen_the_screen(ring, monkeypatch):
+    import threading
+    release, calls = threading.Event(), []
+
+    def slow_first(ip, events=True):
+        calls.append(ip)
+        if len(calls) == 1:                         # the first poll's first read hangs
+            release.wait(5)
+            return clock.Running(alarm_id="34", logged_start="2026-10-04 14:58:15")
+        return None
+    monkeypatch.setattr(clock, "alarm_now", slow_first)
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.pause(0.3)
+        app.shown or await pilot.pause(0.3)
+        app.check()                                 # a newer poll: nothing rings
+        await pilot.pause(0.3)
+        release.set()                               # the older one answers late
+        await settle(app, pilot)
+        assert not ringing(app)

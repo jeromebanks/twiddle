@@ -647,6 +647,7 @@ class AlarmApp(App):
         self.status_text = ""
         self.writing = False        # one write at a time: space and d do nothing meanwhile
         self.ringing: RingingScreen | None = None
+        self.poll_ticket = 0                # the latest poll; an older one's answer is dropped
         # Alarms stopped or snoozed here that the speaker may still report: not
         # shown again until it stops reporting them, or (a snooze) rings again.
         self.hushed: dict[tuple, datetime | None] = {}
@@ -813,8 +814,22 @@ class AlarmApp(App):
 
     # ---- an alarm going off ------------------------------------------------
 
-    @work(thread=True, exclusive=True, group="ring")
     def check(self) -> None:
+        """Ask again whether an alarm is going off. A poll still running when
+        the next starts is overtaken: a thread can't be stopped, so its
+        answer is dropped (as the source picker's is)."""
+        self.poll_ticket += 1
+        self._poll(self.poll_ticket)
+
+    def _latest(self, ticket: int, fn, *args) -> None:
+        """From the poll: `fn(*args)` on the UI thread, if no newer poll started."""
+        def run():
+            if ticket == self.poll_ticket:
+                fn(*args)
+        self.call_from_thread(run)
+
+    @work(thread=True, group="ring")
+    def _poll(self, ticket: int) -> None:
         """Ask every group whether an alarm is going off (read-only). A group
         that can't be asked counts as quiet: the next poll asks again."""
         shown = self.shown
@@ -829,15 +844,19 @@ class AlarmApp(App):
             key = (g.coordinator.ip,) + ((running.alarm_id, running.logged_start)
                                          if running else ())
             if running is None or running.snoozed:      # a snooze is not ringing
-                self.call_from_thread(self._quiet, g.coordinator.ip)
+                self._latest(ticket, self._quiet, g.coordinator.ip)
             elif not self._hushed(key):
                 found.append((key, g.coordinator.ip,        # named from the list shown
                               alarm_cli.ringing_row(shown.house, g, running, shown.found)))
         if found:
             key, ip, row = found[0]
-            self.call_from_thread(self._ring, key, ip, row)
-        elif self.ringing is not None:
-            self.call_from_thread(self._hush_screen)
+            self._latest(ticket, self._ring, key, ip, row)
+        else:
+            self._latest(ticket, self._none_ringing)
+
+    def _none_ringing(self) -> None:
+        if self.ringing is not None:
+            self._hush_screen()
 
     def _hushed(self, key: tuple) -> bool:
         """Was this stopped or snoozed here (and a snooze not yet over)?"""
@@ -911,7 +930,7 @@ class AlarmApp(App):
                 screen.say(text)
             return
         self.hushed[key] = until
-        if screen.key == key:           # the screen may have moved on to another room meanwhile
+        if self.ringing is screen and screen.key == key:    # not replaced or moved on meanwhile
             self._hush_screen()
 
     # ---- writing -----------------------------------------------------------
