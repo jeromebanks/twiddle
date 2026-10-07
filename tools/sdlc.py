@@ -601,7 +601,7 @@ def milestone_phases(st: dict[str, Any], progress: dict[str, Any]) -> list[dict[
             phase = "uncreated"
         elif not (m["total"] and m["done"] == m["total"]):
             phase = "building"           # even if accepted: a reopened slice (a revert) is being built again
-        elif (st.get("review_owed") or {}).get(k):
+        elif codex_review.owed_slices(st.get("review_owed"), k):
             phase = "review"
         elif d.get("accepted"):
             phase = "accepted"
@@ -673,7 +673,7 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
                   if debt and progress.get("cleanup_budget") else ""))
     elif cur["phase"] == "review":
         due = "review"
-        owed = (st.get("review_owed") or {}).get(cur["key"]) or []
+        owed = codex_review.owed_slices(st.get("review_owed"), cur["key"])
         nxt = (f"/milestone-demo {n}: {done_phrase(cur)}, but Codex hasn't reviewed "
                + ", ".join(f"{o['slice']} ({o['why']})" for o in owed)
                + ": the milestone's review comes before its demo, and new slices wait")
@@ -963,7 +963,7 @@ def print_state(st: dict[str, Any]) -> None:
     print(f"#{st['number']} {st['title']}")
     print(f"  state: {st['state']}   turn: {st['turn']}   action: {st['action']}   type: {st['type'] or '?'}")
     print(f"  latest revision: {('%s rev %s' % (doc['kind'], doc['rev'])) if doc else 'none'}"
-          f"   approved: {st['approved_rev'] or 'no'}" + (f" (comment {approved_comment(st)})" if st.get("doc_approved") else "")
+          f"   approved: {st['approved_rev'] or 'no'}" + (f" (comment {codex_review.approved_comment(st['latest_doc'])})" if st.get("doc_approved") else "")
           + f"   rounds: {st['rounds']}/{st['max_rounds']}")
     if st["replies"]:
         print("  replies since the last agent comment: " + ", ".join(f"{r['by']} ({r['url']})" for r in st["replies"]))
@@ -2681,28 +2681,6 @@ def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: 
                            settings, args.dry_run, f"pr-review {pr['number']} --report {out / 'codex.md'} --response <your answers>")
 
 
-def approved_comment(st: dict[str, Any]) -> str:
-    """The approved PRD or diagnosis comment's id, as its `#issuecomment-` anchor (and `merge-prd`'s doc) gives it."""
-    doc = st["latest_doc"]
-    m = re.search(r"#issuecomment-(\d+)$", doc.get("url") or "")
-    return m.group(1) if m else str(doc["id"])
-
-
-def approved_requirements(n: int, comment_id: str, comment_body: str, ref: str, root: Path) -> tuple[str, str | Path]:
-    """(what was used, the requirements for the plan prompt): the merged `docs/prd/N-*.md` at `ref` whose header
-    links the approved comment, as a path relative to a checkout of `ref`; else the approved comment's text.
-    A doc of an older revision, or none merged yet, is never what the plan is held to."""
-    listed = git(["ls-tree", "--name-only", ref, "docs/prd/"], cwd=root, check=False).splitlines()
-    anchor = re.compile(rf"#issuecomment-{comment_id}(?!\d)")
-    for path in sorted(p for p in listed if re.fullmatch(rf"docs/prd/{n}-[^/]*\.md", p)):
-        text = git(["show", f"{ref}:{path}"], cwd=root, check=False)
-        header = text.split("\n## ", 1)[0]
-        if anchor.search(header):
-            return f"{path} (its header links comment {comment_id})", Path(path)
-    body = "\n".join(l for l in comment_body.splitlines() if not MARKER_RE.match(l.strip())).strip()
-    return f"the approved comment {comment_id} (no docs/prd/{n}-*.md on {ref} links it)", body
-
-
 def plan_round_errors(st: dict[str, Any]) -> list[str]:
     """Why a Codex round on the latest plan revision couldn't be recorded now (`plan-review`'s checks)."""
     if st["action"] not in ("continue_plan", "create_plan_issues", "ask_poster", "escalate_plan") or not st["latest_plan"]:
@@ -2739,14 +2717,12 @@ def codex_review_plan(args: argparse.Namespace, config: dict[str, Any], settings
         git(["fetch", "-q", "origin", main], cwd=root)
     sha = git(["rev-parse", "--verify", f"origin/{main}^{{commit}}"], cwd=root)
     out = review_scratch(args, f"plan-{n}", root)
-    used, requirements = approved_requirements(n, approved_comment(st), doc.get("body", ""), sha, root)
-    rounds = []
-    if last := st.get("plan_review"):
-        c = next(c for c in bundle["comments"] if c["id"] == last["id"])
-        rounds = [{"verdict": last["verdict"], "body": c.get("body", ""), "response": last.get("response")}]
+    used, requirements = codex_review.approved_requirements(n, codex_review.approved_comment(st["latest_doc"]),
+                                                                doc.get("body", ""), sha, root)
+    last = st.get("plan_review")
+    body = next(c for c in bundle["comments"] if c["id"] == last["id"]).get("body", "") if last else ""
     k = st["plan_rounds"]
-    # `latest_response` numbers rounds by the list it's given: pad it to the rounds counted so far
-    prompt, files = codex_review.prepare_plan_round(n, plan, requirements, [{}] * (k - len(rounds)) + rounds, out)
+    prompt, files = codex_review.prepare_plan_round(n, plan, requirements, codex_review.plan_rounds(k, last, body), out)
     checkout = out / "main"
     if isinstance(requirements, Path):          # read by Codex from its checkout of main
         files["requirements"] = checkout / requirements
@@ -2769,18 +2745,6 @@ def codex_review_plan(args: argparse.Namespace, config: dict[str, Any], settings
         git(["worktree", "prune"], cwd=root, check=False)
 
 
-def milestone_slices(leaves: list[dict[str, Any]], title: str, config: dict[str, Any]) -> list[dict[str, Any]]:
-    """A milestone's slices (of the epic's `leaves`), each with its brief and the squash commit its PR left on epic/N."""
-    out = []
-    for l in leaves:
-        if (l.get("milestone") or "(no milestone)") != title:
-            continue
-        pr = find_slice_pr(l["number"], config) if l["state"] == "closed" else None
-        out.append({"number": l["number"], "key": l["key"], "title": l["title"], "body": l["body"],
-                    "pr": (pr or {}).get("number"), "merge_commit": ((pr or {}).get("mergeCommit") or {}).get("oid")})
-    return sorted(out, key=lambda s: natural_key(s["key"]))
-
-
 def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], settings: dict[str, Any]) -> int:
     """Codex on the milestone's whole diff (main...epic/N), from `.worktrees/epic-N` as `sync` left it."""
     n = args.milestone
@@ -2798,7 +2762,8 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
         steps = lambda title: (gh_ms.get(title) or {}).get("description") or ""  # noqa: E731
         leaves = [r for r in fetch_plan_issues(n, config, set(bundle["trusted"])) if r["kind"] == "slice"]
         already = lambda title: milestone_on_main(title, leaves, config)  # noqa: E731
-        slices = lambda title: milestone_slices(leaves, title, config)  # noqa: E731
+        prs = {l["number"]: find_slice_pr(l["number"], config) for l in leaves if l["state"] == "closed"}
+        slices = lambda title: codex_review.milestone_slices(leaves, title, prs)  # noqa: E731
     wt = primary_root() / config.get("worktree_dir", ".worktrees") / f"epic-{n}"   # as `sync` left it: never reset here
     st = bundle_state(bundle, config)
     trusted = set(bundle["trusted"])
@@ -2826,7 +2791,7 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
     if gone := [s["key"] for s in slices if s.get("merge_commit") and not is_ancestor(s["merge_commit"], checked, wt)]:
         raise SdlcError(f"{', '.join(gone)}'s squash commit isn't on {epic_branch(n)} at {checked[:12]}: "
                         "Codex would be pointed at a commit that isn't there (was it reverted?)")
-    owed = (st.get("review_owed") or {}).get(key) or []
+    owed = codex_review.owed_slices(st.get("review_owed"), key)
     prompt, files = codex_review.prepare_milestone_round(n, {"key": key, "title": title, "steps": steps(title)},
                                                          slices, owed, rounds, out)
     return run_codex_round(f"#{n} {key} round {len(rounds) + 1} on {epic_branch(n)} {checked[:12]}"
@@ -3175,7 +3140,7 @@ def ship_gate_errors(st: dict[str, Any], key: str, head: str, synced: bool, carr
         errs.append(f"Codex's latest review of {key} on {head[:12]} asks for changes")
     if carried:
         errs.append("epic branch carries slices of milestones that aren't accepted: " + ", ".join(carried))
-    if owed := (st.get("review_owed") or {}).get(key):
+    if owed := codex_review.owed_slices(st.get("review_owed"), key):
         errs.append(f"Codex hasn't reviewed {', '.join(o['slice'] for o in owed)} of {key}: `ship-review` first")
     return errs
 
@@ -3739,7 +3704,7 @@ def demo_brief(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str
                     "steps": ghm.get("description") or "\n".join(f"- {x['key']}: {x['demo']}" for x in slices if x["demo"]),
                     "slices": slices, "before": before, "after": after, "on_main": legacy,
                     "demo": (st.get("demos") or {}).get(m["key"]), "shipped": (st.get("shipped") or {}).get(m["key"]),
-                    "review_owed": (st.get("review_owed") or {}).get(m["key"]) or []})
+                    "review_owed": codex_review.owed_slices(st.get("review_owed"), m["key"])})
     due = due_milestone(st.get("demos") or {}, progress, st.get("shipped"), st.get("review_owed"))
     return {"epic": epic, "title": st["title"], "state": st["state"], "action": st["action"],
             "due": due["key"] if due else None, "milestones": out, "progress": progress,
@@ -3820,7 +3785,7 @@ def command_demo_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
         errs.append(f"#{n} has no milestone {key} (it has {', '.join(ms) or 'none'})")
     elif m["done"] != m["total"]:
         errs.append(f"{m['title']} is not complete ({m['done']}/{m['total']} merged)")
-    if owed := (st.get("review_owed") or {}).get(key):
+    if owed := codex_review.owed_slices(st.get("review_owed"), key):
         errs.append(f"Codex hasn't reviewed {', '.join(o['slice'] for o in owed)} of {key} yet: the milestone's "
                     "review (`ship-review`) comes before its demo")
     folder, body = Path(args.dir), Path(args.body_file).read_text()

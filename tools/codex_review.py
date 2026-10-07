@@ -286,6 +286,67 @@ def section(body: str, name: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+# --- what a round is handed: the evidence each review is held to -----------------------------
+#
+# `sdlc.py` fetches the issue, the comments and the PRs; these choose, from that bundle, what Codex reads.
+# They live here so the review logic's fingerprint (`codex_eval`) covers them.
+
+MARKER_LINE_RE = re.compile(r"\A\s*<!--\s*sdlc:v1\s+[^>]*?\s*-->")   # `sdlc.MARKER_RE`: a line that starts with a marker
+
+
+def approved_comment(doc: dict[str, Any]) -> str:
+    """The approved PRD or diagnosis comment's id (`doc` is the state's `latest_doc`), as its `#issuecomment-`
+    anchor (and `merge-prd`'s doc) gives it."""
+    m = re.search(r"#issuecomment-(\d+)$", doc.get("url") or "")
+    return m.group(1) if m else str(doc["id"])
+
+
+def _git_out(args: list[str], cwd: Path) -> str:
+    """git's stdout, or "" when it fails (a path or ref that isn't there)."""
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def approved_requirements(n: int, comment_id: str, comment_body: str, ref: str, root: Path) -> tuple[str, str | Path]:
+    """(what was used, the requirements for the plan prompt): the merged `docs/prd/N-*.md` at `ref` whose header
+    links the approved comment, as a path relative to a checkout of `ref`; else the approved comment's text.
+    A doc of an older revision, or none merged yet, is never what the plan is held to."""
+    listed = _git_out(["ls-tree", "--name-only", ref, "docs/prd/"], root).splitlines()
+    anchor = re.compile(rf"#issuecomment-{comment_id}(?!\d)")
+    for path in sorted(p for p in listed if re.fullmatch(rf"docs/prd/{n}-[^/]*\.md", p)):
+        header = _git_out(["show", f"{ref}:{path}"], root).split("\n## ", 1)[0]
+        if anchor.search(header):
+            return f"{path} (its header links comment {comment_id})", Path(path)
+    body = "\n".join(l for l in comment_body.splitlines() if not MARKER_LINE_RE.match(l.strip())).strip()
+    return f"the approved comment {comment_id} (no docs/prd/{n}-*.md on {ref} links it)", body
+
+
+def plan_rounds(counted: int, last: dict[str, Any] | None, body: str = "") -> list[dict[str, Any]]:
+    """The rounds `prepare_plan_round` reads, from the state's count of rounds and its latest (`plan_review`, with
+    its comment's `body`): `latest_response` numbers rounds by the list it's given, so it is padded to the count."""
+    rounds = [{"verdict": last.get("verdict"), "body": body, "response": last.get("response")}] if last else []
+    return [{}] * (counted - len(rounds)) + rounds
+
+
+def milestone_slices(leaves: list[dict[str, Any]], title: str, prs: dict[int, dict[str, Any] | None]) -> list[dict[str, Any]]:
+    """A milestone's slices (of the epic's `leaves`), each with its brief and the squash commit its PR (from `prs`,
+    by slice number: a closed slice's PR) left on epic/N."""
+    out = []
+    for l in leaves:
+        if (l.get("milestone") or "(no milestone)") != title:
+            continue
+        pr = prs.get(l["number"]) if l["state"] == "closed" else None
+        out.append({"number": l["number"], "key": l["key"], "title": l["title"], "body": l["body"],
+                    "pr": (pr or {}).get("number"), "merge_commit": ((pr or {}).get("mergeCommit") or {}).get("oid")})
+    return sorted(out, key=lambda s: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s["key"])])
+
+
+def owed_slices(review_owed: dict[str, list[dict[str, str]]] | None, key: str) -> list[dict[str, str]]:
+    """The slices of milestone `key` that merged without a review of their own (the ledger's `review_owed`):
+    the milestone round reads each as closely as a pull request, and the milestone's phase waits on them."""
+    return list((review_owed or {}).get(key) or [])
+
+
 def prepare_milestone_round(epic: int, milestone: dict[str, Any], slices: list[dict[str, Any]],
                             owed: list[dict[str, Any]], rounds: list[dict[str, Any]], scratch: Path,
                             template: str | None = None) -> tuple[str, dict[str, Path]]:
