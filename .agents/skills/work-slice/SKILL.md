@@ -162,6 +162,8 @@ It does what used to be done by hand, so don't run Codex any other way:
 - it fills `references/codex-pr-prompt.md`; from round 2 on, it adds your response from the
   latest recorded round. It refuses if that round asked for changes and has no response;
 - it refuses unless the worktree is clean and its HEAD is the PR's head;
+- it refuses, before starting Codex, a round that couldn't be recorded (the change rounds are spent: `escalate-slice`)
+  or would change nothing (Codex already approved this head: go on to `merge`); `--dry-run` refuses the same way;
 - it runs Codex with the model, reasoning effort, sandbox, flags and timeout from
   `.sdlc/config.json`'s `codex` section, never your own Codex config;
 - it fails, and saves nothing, if HEAD moved while Codex ran;

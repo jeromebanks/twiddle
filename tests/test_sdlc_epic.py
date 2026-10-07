@@ -918,3 +918,25 @@ def test_an_epic_without_milestones_takes_its_steps_from_the_slices_demo_section
     steps = (r.out / "milestone.md").read_text().split("## Demo steps", 1)[1]
     assert "- T1.1: `np` shows T1.1" in steps and "- T1.3: `np` shows T1.3" in steps
     assert "T1.2 (PR #56" in (r.out / "prompt.md").read_text().split("merged without a review of their own")[1]
+
+
+def test_a_milestone_round_that_could_not_be_recorded_or_would_change_nothing_never_starts_codex(tmp_path, monkeypatch, capsys):
+    r = MilestoneReview(tmp_path, monkeypatch)
+
+    def ship(verdict, sha, ts):
+        return agent("ship-review", None, ts, "**M1 review**", milestone="M1", sha=sha, verdict=verdict, round=str(ts))
+
+    spent = [ship("changes", OLD, 30 + i) for i in range(CONFIG["max_pr_rounds"])]
+    for extra in ((), ("--dry-run",)):
+        assert r.run(*extra, comments=spent) == 1
+        err = capsys.readouterr().err
+        assert "transition 12 escalated" in err and f"{CONFIG['max_pr_rounds']}/{CONFIG['max_pr_rounds']}" in err
+        assert r.run(*extra, comments=[ship("approve", r.head, 40)]) == 1
+        err = capsys.readouterr().err
+        assert "already approved" in err and "stands" in err and "ship 12" in err
+    assert calls(r.log) == [] and not (r.out / "codex.md").exists()
+    # an approval of an older epic head doesn't serve this one; a later round that asked for changes reopens it
+    accepted = [agent("demo", 1, 35, milestone="M1", sha=r.head), agent("demo-approval", 1, 36, milestone="M1", by=POSTER)]
+    assert r.run(comments=accepted + [ship("approve", OLD, 40)]) == 0 and len(calls(r.log)) == 1
+    assert r.run(comments=accepted + [ship("approve", r.head, 40), ship("changes", r.head, 41)]) == 1
+    assert "already approved" not in capsys.readouterr().err      # the usual checks apply: it wants a response
