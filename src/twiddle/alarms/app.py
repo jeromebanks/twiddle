@@ -6,7 +6,14 @@ alarms twiddle can't read are listed apart, with why) plus the household's
 clock. What writes goes through the same journalled `clock` writes as the CLI:
 space (`UpdateAlarm`, only `Enabled` changed), `d` (`DestroyAlarm`, after
 asking twice: a y, then the ID typed out), and saving the editor that `n` (a
-new alarm, `CreateAlarm`) and enter (this one, `UpdateAlarm`) open.
+new alarm, `CreateAlarm`) and enter (this one, `UpdateAlarm`) open. `t` fires
+the highlighted alarm now (`RunAlarm`, as `alarm try`).
+
+While it is open it also asks each group (`GetRunningAlarmProperties` and its
+LastChange event, as `alarm status`: read-only, every few seconds) whether an alarm is going off. One that is takes the whole
+screen: a ringing alarm clock, the room and what plays, `x` to turn it off
+(`Stop`) and `z` to snooze (`SnoozeAlarm`; `m` picks 5/10/15/30 minutes), the
+CLI's own journalled `alarm stop`/`alarm snooze`.
 
 The editor changes only the fields you change: one left alone goes back as
 the speaker gave it, so an alarm whose source twiddle doesn't recognise keeps
@@ -18,12 +25,13 @@ source happen in a thread: a provider may ask the network or the household.
 What you saw is what you write: each write reads the list again strictly, so
 an unreadable alarm refuses it, and if the list moved since it was shown (the
 Sonos app?) nothing is written and the list is read again. `--dry-run` does
-that read and says what it would do, and writes neither speaker nor journal.
+that read and says what it would do, and writes neither speaker nor journal
+(`t`, `x` and `z` included).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import time
+from datetime import datetime, time, timezone
 from typing import Callable
 
 from rich.text import Text
@@ -31,7 +39,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Input, OptionList, Select, Static
 from textual.widgets.option_list import Option
 
@@ -41,7 +49,9 @@ from . import baseline, clock, sources
 from .model import Alarm, Recurrence, UnreadableAlarm
 
 ON, OFF = "●", "○"
-KEYS = "n new  enter edit  space on/off  d delete  r refresh  q quit"
+KEYS = "n new  enter edit  space on/off  d delete  t try now  r refresh  q quit"
+POLL_S = 5.0            # how often it asks whether an alarm is going off
+RING_KEYS = "x off    z snooze    m snooze length    (the speaker keeps ringing until you do)"
 TITLE_WIDTH = 30
 
 
@@ -192,6 +202,35 @@ def duration_seed(duration: str) -> str:
         return text if alarm_cli.parse_duration(text) == duration else duration
     except ValueError:
         return duration
+
+
+_CLOCK = r"""
+   {a}  _______  {b}
+ {w} (  .-""-.  ) {w}
+   {b} /  /  12   \  \ {a}
+        |    |    |
+        | 9  o──3 |
+        |         |
+         \   6   /
+          '-...-'
+          /     \
+     ~~~~~~~~~~~~~~~~~
+""".strip("\n")
+
+
+def clock_art(frame: int) -> str:
+    """The ringing alarm clock; `frame` swings its bells and its sound."""
+    a, b, w = ("\\", "/", "──") if frame % 2 else ("/", "\\", "  ")
+    return _CLOCK.replace("{a}", a).replace("{b}", b).replace("{w}", w)
+
+
+def ringing_text(row: dict, minutes: int) -> str:
+    """What the ringing screen says beside the clock."""
+    what = row.get("what") or "an alarm"
+    since = f" · since {row['logged_start'][11:16]}" if row.get("logged_start") else ""
+    snooze = "snoozed" if row.get("snoozed") else "is ringing"
+    return (f"⏰  {row['room']} {snooze}\n{what}{since}\n\n"
+            f"[ x  off ]   [ z  snooze {minutes}m ▾ ]")
 
 
 @dataclass
@@ -507,6 +546,58 @@ class TypeIdScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class RingingScreen(Screen):
+    """An alarm is going off: the whole screen, until it is stopped, snoozed
+    or stops by itself. It only asks the app to write (`ring_stop`/`ring_snooze`)."""
+
+    BINDINGS = [Binding("x", "stop", "Off"), Binding("z", "snooze", "Snooze"),
+                Binding("m", "length", "Snooze length")]
+
+    def __init__(self, row: dict, ip: str):
+        super().__init__()
+        self.row, self.ip = row, ip
+        self.minutes = clock.DEFAULT_SNOOZE
+        self.frame = 0
+        self.key: tuple = ()
+        self.busy = False
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="ring"):
+            yield Static(clock_art(0), id="ring-art")
+            yield Static(ringing_text(self.row, self.minutes), id="ring-text", markup=False)
+        yield Static(RING_KEYS, id="ring-keys")
+        yield Static("", id="ring-status")
+
+    def on_mount(self) -> None:
+        self.set_interval(0.6, self.swing)
+
+    def swing(self) -> None:
+        self.frame += 1
+        self.query_one("#ring-art", Static).update(clock_art(self.frame))
+
+    def update(self, row: dict, ip: str) -> None:
+        self.row, self.ip = row, ip         # what is shown and what x/z write to move together
+        self.query_one("#ring-text", Static).update(ringing_text(row, self.minutes))
+
+    def say(self, text: str) -> None:
+        self.query_one("#ring-status", Static).update(text)
+
+    def action_length(self) -> None:
+        options = clock.SNOOZE_MINUTES
+        self.minutes = options[(options.index(self.minutes) + 1) % len(options)]
+        self.query_one("#ring-text", Static).update(ringing_text(self.row, self.minutes))
+
+    def action_stop(self) -> None:
+        if not self.busy:
+            self.busy = True
+            self.app.ring_stop(self)
+
+    def action_snooze(self) -> None:
+        if not self.busy:
+            self.busy = True
+            self.app.ring_snooze(self, self.minutes)
+
+
 class AlarmApp(App):
     TITLE = "twiddle alarm"
     CSS = """
@@ -529,24 +620,37 @@ class AlarmApp(App):
     #source { width: 50; }
     #mac, #problem { height: auto; }
     #buttons { height: auto; align: right middle; }
+    RingingScreen { align: center middle; }
+    #ring { height: auto; width: auto; }
+    #ring-art { width: 40; color: $warning; }
+    #ring-text { width: 50; padding: 4 2; text-style: bold; }
+    #ring-keys, #ring-status { width: 100%; content-align: center middle; }
     """
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("n", "new", "New"),
         Binding("space", "toggle", "On/off"),
         Binding("d", "delete", "Delete"),
+        Binding("t", "try", "Try now"),
         Binding("r", "reload", "Refresh"),
         Binding("j", "cursor('down')", show=False),
         Binding("k", "cursor('up')", show=False),
     ]
 
-    def __init__(self, *, household: Callable[[], Household], dry_run: bool = False):
+    def __init__(self, *, household: Callable[[], Household], dry_run: bool = False,
+                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         super().__init__()
+        self.now = now
         self.household = household
         self.dry_run = dry_run
         self.shown: Shown | None = None
         self.status_text = ""
         self.writing = False        # one write at a time: space and d do nothing meanwhile
+        self.ringing: RingingScreen | None = None
+        self.polling = False
+        # Alarms stopped or snoozed here that the speaker may still report: not
+        # shown again until it stops reporting them, or (a snooze) rings again.
+        self.hushed: dict[tuple, datetime | None] = {}
 
     def compose(self) -> ComposeResult:
         yield Static("twiddle alarm", id="top")
@@ -558,6 +662,14 @@ class AlarmApp(App):
     def on_mount(self) -> None:
         self.query_one("#alarms", OptionList).focus()
         self.load()
+        self.set_interval(POLL_S, self.check)
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        """While an alarm rings, the list's keys are not the screen's: a stray
+        `t` must not fire whatever alarm is highlighted behind it."""
+        if isinstance(self.screen, RingingScreen):
+            return action == "quit"
+        return True
 
     # ---- reading -----------------------------------------------------------
 
@@ -583,6 +695,7 @@ class AlarmApp(App):
         self.call_from_thread(self.show, shown)
 
     def show(self, shown: Shown) -> None:
+        first = self.shown is None
         self.shown = shown
         alarms = self.query_one("#alarms", OptionList)
         was = self._current_id()
@@ -596,6 +709,8 @@ class AlarmApp(App):
                                        if not o.disabled), None)
         self.query_one("#top", Static).update(top(shown, self.dry_run))
         self.query_one("#legend", Static).update(legend(shown))
+        if first:
+            self.check()            # one may be ringing already
 
     def say(self, text: str, severity: str = "information") -> None:
         self.status_text = text
@@ -690,6 +805,136 @@ class AlarmApp(App):
 
         self.push_screen(AskScreen(f"delete alarm {aid}: {what}?"), first)
 
+    def action_try(self) -> None:
+        """t: fire the highlighted alarm now, as `alarm try`."""
+        picked = self._selected()
+        if picked is not None:
+            aid, _, shown = picked
+            self._write("try", aid, shown)
+
+    # ---- an alarm going off ------------------------------------------------
+
+    def check(self) -> None:
+        """Ask whether an alarm is going off, unless a poll is still asking:
+        one at a time, so a slow speaker delays the answer and never voids it."""
+        if not self.polling:
+            self.polling = True
+            self._poll()
+
+    @work(thread=True, group="ring")
+    def _poll(self) -> None:
+        """Ask every group whether an alarm is going off (read-only). A group
+        that can't be asked counts as quiet: the next poll asks again."""
+        try:
+            shown = self.shown
+            if shown is None:
+                return
+            found = []
+            for g in shown.house.groups:
+                try:
+                    running = clock.alarm_now(g.coordinator.ip)
+                except Exception:
+                    continue
+                key = (g.coordinator.ip,) + ((running.alarm_id, running.logged_start)
+                                             if running else ())
+                if running is None or running.snoozed:      # a snooze is not ringing
+                    self.call_from_thread(self._quiet, g.coordinator.ip)
+                else:
+                    found.append((key, g.coordinator.ip,        # named from the list shown
+                                  alarm_cli.ringing_row(shown.house, g, running,
+                                                        shown.found)))
+            self.call_from_thread(self._polled, found)
+        finally:
+            self.call_from_thread(setattr, self, "polling", False)
+
+    def _polled(self, found: list) -> None:
+        """The poll's answer, applied on the UI thread: what was stopped or
+        snoozed here while it was reading stays hushed."""
+        for key, ip, row in found:
+            if not self._hushed(key):
+                self._ring(key, ip, row)
+                return
+        self._none_ringing()
+
+    def _none_ringing(self) -> None:
+        if self.ringing is not None:
+            self._hush_screen()
+
+    def _hushed(self, key: tuple) -> bool:
+        """Was this stopped or snoozed here (and a snooze not yet over)?"""
+        if key not in self.hushed:
+            return False
+        until = self.hushed[key]
+        if until is not None and self.now() >= until:
+            del self.hushed[key]
+            return False
+        return True
+
+    def _quiet(self, ip: str) -> None:
+        self.hushed = {k: v for k, v in self.hushed.items() if k[0] != ip}
+        if self.ringing is not None and self.ringing.ip == ip:
+            self._hush_screen()
+
+    def _hush_screen(self) -> None:
+        screen, self.ringing = self.ringing, None
+        if screen is not None and screen.is_attached:
+            screen.dismiss()
+
+    def _ring(self, key: tuple, ip: str, row: dict) -> None:
+        if self.ringing is not None and self.ringing.is_attached:
+            self.ringing.key = key
+            self.ringing.update(row, ip)
+            return
+        screen = RingingScreen(row, ip)
+        screen.key = key
+        self.ringing = screen
+        self.push_screen(screen)
+        if not row.get("what"):         # not in the list shown: made since
+            self.load()
+
+    def ring_stop(self, screen: RingingScreen) -> None:
+        self._ring_write(screen, "stop", 0)
+
+    def ring_snooze(self, screen: RingingScreen, minutes: int) -> None:
+        self._ring_write(screen, "snooze", minutes)
+
+    @work(thread=True, group="ring-write")
+    def _ring_write(self, screen: RingingScreen, verb: str, minutes: int) -> None:
+        """`alarm stop`/`alarm snooze` on the group that is ringing, refused
+        (as the CLI does) when nothing is going off any more."""
+        ip, name, key = screen.ip, screen.row["room"], screen.key     # what was asked of
+        until = None
+        try:
+            running = clock.alarm_now(ip)       # as the CLI: events too, before any Stop
+            if running is None:
+                text, done = f"no alarm is going off in {name} any more", True
+            elif self.dry_run:
+                text, done = (f"[dry-run] would {verb} the alarm in {name}"
+                              + (f" for {minutes} minutes" if minutes else ""), False)
+            elif verb == "stop":
+                clock.stop_alarm(ip, running.alarm_id or None)
+                text, done = f"stopped the alarm in {name}", True
+            else:
+                rings = clock.snooze_alarm(ip, minutes, running.alarm_id or None)
+                until = rings
+                text = f"snoozed the alarm in {name}: it rings again at {rings.astimezone():%H:%M}"
+                done = True
+        except Exception as exc:
+            text, done = f"could not {verb} the alarm in {name}: {exc}", False
+        self.call_from_thread(self._ring_written, screen, key, text, done, until)
+
+    def _ring_written(self, screen: RingingScreen, key: tuple, text: str, done: bool,
+                      until: datetime | None) -> None:
+        screen.busy = False
+        self.say(text)
+        if not done:
+            if screen.is_attached:
+                screen.say(text)
+            return
+        self.hushed[key] = until
+        if self.ringing is screen and screen.key == key:    # not replaced or moved on meanwhile
+            self._hush_screen()
+
     # ---- writing -----------------------------------------------------------
 
     def _write(self, verb: str, aid: str | None, shown: Shown,
@@ -713,6 +958,7 @@ class AlarmApp(App):
         self.writing = False
         self.say(text, severity)
         self.load()
+        self.check()
 
     def _do(self, verb: str, aid: str | None, shown: Shown,
             edited: Edited | None = None) -> tuple[str, str]:
@@ -743,6 +989,8 @@ class AlarmApp(App):
                 return _failed(verb, getattr(exc, "alarm_id", None), exc), "error"
             return f"created alarm {after.id}: {alarm_cli.brief(house, after)}", "information"
         what = alarm_cli.brief(house, alarm)
+        if verb == "try":
+            return self._try(house, ip, alarm, what)
         if verb == "update":
             want = replace(alarm, **edited.changes)
             fields = baseline.differences(want, alarm)
@@ -762,6 +1010,26 @@ class AlarmApp(App):
             return f"{verb}d alarm {aid}: {alarm_cli.brief(house, after)}{said}", "information"
         except Exception as exc:
             return _failed(verb, aid, exc), "error"
+
+    def _try(self, house: Household, ip: str, alarm: Alarm, what: str) -> tuple[str, str]:
+        """`alarm try`: RunAlarm on the coordinator of the alarm's room."""
+        aim = alarm_cli.aimed_at(house, alarm.room_uuid)
+        if aim["status"] in ("vanished", "unknown"):
+            return (f"alarm {alarm.id} is aimed at a speaker that isn't here ({aim['room']}): "
+                    "move it with the editor first", "error")
+        sp = next(s for s in house.speakers if s.uuid == alarm.room_uuid)
+        coordinator = house.group_of(sp).coordinator
+        if self.dry_run:
+            return f"[dry-run] would fire alarm {alarm.id} on {coordinator.label}: {what}", \
+                "information"
+        try:
+            logged = clock.household_time(ip).local.strftime("%Y-%m-%d %H:%M:%S")
+            stops = clock.run_alarm(coordinator.ip, alarm, logged)
+        except Exception as exc:
+            return f"could not fire alarm {alarm.id}: {exc}; `twiddle alarm status` shows " \
+                   "whether it went off", "error"
+        after = f"; it stops itself at {stops.astimezone():%H:%M}" if stops else ""
+        return f"fired alarm {alarm.id} on {coordinator.label}: {what}{after}", "information"
 
 
 def _name(aid: str | None) -> str:
