@@ -25,7 +25,8 @@
   "models": {"routine": "sonnet", "judgment": "opus", "novel": "opus"},
   "slice_review": {"routine": "milestone", "judgment": "slice", "novel": "slice"},
   "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high", "sandbox": "read-only", "timeout_seconds": 900,
-            "flags": ["--skip-git-repo-check", "--color", "never"]},
+            "flags": ["--skip-git-repo-check", "--color", "never"], "skills": "suppressed"},
+  "codex_eval_issue": 100,
   "extra_labels": [
     {"name": "complexity:routine", "color": "C2E0C6", "description": "SDLC plan: a clear pattern to follow, little design"},
     {"name": "complexity:judgment", "color": "FEF2C0", "description": "SDLC plan: real design choices, safety or the evidence path"},

@@ -268,7 +268,7 @@ warning, and the next run refuses until it's dealt with. The rest of `codex-home
 run's session log under `sessions/`.
 
 What isolation can't cover: anything Codex reads from outside `CODEX_HOME`. That includes the
-repo itself (its `AGENTS.md`, `.agents/skills/`), the environment (`OPENAI_API_KEY` and the
+repo itself (its `AGENTS.md`, and its `.agents/skills/` unless they are suppressed, below), the environment (`OPENAI_API_KEY` and the
 like), and anything it finds through `HOME`, which is left alone because git and the keychain
 need it. Nor a sign-in made elsewhere in the instant between the last check of your file and the
 rename over it: the check is made with the new file ready, just before the rename, but `rename`
@@ -280,6 +280,69 @@ The saved report's header (`HEAD:`, `Model:`, `Effort:`, `Codex:`, `Prompt-SHA25
 by the tool. `pr-review`, `plan-review` and `ship-review` copy it into the round's comment and its marker. Only the lines
 directly under `HEAD:` count, so a report can't claim a model of its own. A report saved before
 the header existed is still recorded, without it.
+
+### The review logic's fingerprint, and its eval
+
+How a review behaves is decided by its prompts, its rules, its settings, the code that fills and
+runs it, and the `codex` binary. The repo owns all of these except the binary. `tools/codex_eval.py`
+hashes the parts it owns into one **fingerprint**, and an eval result (`codex-eval`, run in a later
+slice) is recorded against the pair (fingerprint, `codex --version`). A pass for one pair never
+counts for another, so a new `codex` needs a new eval even when nothing in the repo changed.
+
+The fingerprint's inputs, by name (`codex-eval --status --inputs` lists them):
+
+- the three prompts (`codex-pr-prompt.md`, `codex-milestone-prompt.md`, `codex-plan-prompt.md`),
+  `.agents/skills/review-rules.md`, and `plan-schema.md` (the plan prompt has Codex read it);
+- `.sdlc/config.json`'s `codex` section, as canonical JSON (not the rest of the file);
+- `tools/codex_review.py`, which fills and runs every round and also **chooses what a round is
+  handed**: which requirements a plan round is held to, which slices and briefs a milestone round
+  lists, which of them are owed a review, and which response a round reads. `sdlc.py` only
+  fetches the bundle and passes it in, and a test fails if it defines a function that fills a
+  prompt or picks its inputs;
+- `tools/codex_eval.py`, and everything under `tests/codex_eval/` (the eval's fixtures and scorer);
+- every `AGENTS.md` and `AGENTS.override.md` anywhere in the repo (none exists today), because Codex
+  loads them on its own.
+
+Not `sdlc.py` and not `CLAUDE.md`, so ordinary edits there cost no eval. The prompts point Codex at
+`review-rules.md` for the safety rules. The plan prompt names `CLAUDE.md` only for its Layout
+table, as knowledge of the code under review, and `codex_eval.EXCLUDED` says why each such file is
+left out. A test fails if a prompt names a file, or `codex_review.py` holds a path, that is neither
+an input nor excluded. The fingerprint reads the same from a commit (`git ls-tree`) as from a
+checkout of it (`git ls-files`, untracked files included), and prints as its first 12 hex digits:
+a full hash looks like an identifier to `demo-post`.
+
+**Skills are suppressed.** M1's demo showed that a real review was offered Codex's built-in skills
+and the repo's own `.agents/skills`, and its session log showed `skills.includeInstructions: true`.
+`codex.skills` in the config picks one of two modes, so the choice is part of the fingerprint:
+
+- `suppressed` (in force): the generated `config.toml` sets `[skills] include_instructions = false`.
+  This was confirmed against codex-cli 0.161.0 without spending tokens: a run with no sign-in still
+  writes its session log, and with the setting that log has no `<skills_instructions>` message and
+  `skills.includeInstructions: false`. Without the setting it has both. After every run the tool
+  reads the run's session log (`codex_review.check_session`). If skills were offered, or Codex
+  loaded an `AGENTS.md` from outside the reviewed checkout, or the log isn't a shape the tool knows
+  (a new `codex` may change it), the round saves no report and exits 3, the `review-defer` cue. A
+  `codex` that ignores the setting can't produce a review that looks like one that ran without
+  skills.
+- `fingerprinted`, only if a future `codex` drops the setting: skills are offered, and every
+  `.agents/skills/**/SKILL.md` becomes an input. Codex's built-in skills ship with the binary, so
+  the version in the pair covers them. The `AGENTS.md` check still runs.
+
+What the fingerprint can't cover: what the binary does with the same inputs (that is the
+version's half of the pair), the model behind the API, and anything outside the repo that
+isolation doesn't already keep out (above).
+
+**Results.** Each result is a marked `codex-eval` comment on the issue `.sdlc/config.json`'s
+`codex_eval_issue` names (#100). It holds the full fingerprint, the `codex` version, the model,
+the effort, the outcome (`pass`, `fail` or `deferred`) and one line per fixture. A closed issue's
+comments still read the same, so the results outlive the epic. The latest result per pair is the
+one that counts. A result comment is a record, not part of the conversation: it never counts as
+the agent's last comment, so one posted during a demo never hides the poster's answer.
+
+`codex-eval --status` prints the fingerprint, `codex --version` and that pair's result. It is
+read-only and never runs `codex exec`. Before each round, `codex-review` fingerprints the review
+logic that is running it (the checkout the command runs from, which in a slice is the reviewed
+worktree). It warns when that pair has no passing result, and the round still runs.
 
 **Round limits** (`.sdlc/config.json`): `max_pr_rounds` (default 5) is how many Codex rounds
 that ask for changes a slice PR, or a milestone, may take before it escalates.

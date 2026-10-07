@@ -22,7 +22,7 @@ Read:
   Outcome and Acceptance criteria);
 - the slices it is made of, each with its squash commit on `epic/<N>` and its issue's brief: <SLICES>;
 - the change: `git diff origin/main...HEAD` and `git log --oneline origin/main..HEAD`;
-- `CLAUDE.md`, especially the read-only vs writing table;
+- the safety rules every change is held to: `.agents/skills/review-rules.md`;
 - <DEFERRED>these slices merged without a review of their own: <DEFERRED_SLICES>. This is
   their first review. For each, read `git show` of its squash commit and its brief's
   Acceptance criteria and Non-goals, and review it as closely as a pull request:
@@ -39,9 +39,8 @@ Check:
    listed, or is a merge of `main`. Name anything else.
 2. **Together.** The slices fit each other: no duplicated helpers, conflicting
    assumptions, dead code left by one slice for another, or docs that disagree.
-3. **Safety.** Anything that can write to a speaker or Spotify takes `--dry-run`,
-   journals to `logs/interventions.jsonl`, and resolves rooms by name. No test
-   touches the network, a speaker or Spotify. No secret or real device identifier.
+3. **Safety.** Every rule in `review-rules.md` holds: `--dry-run`, journalling,
+   rooms by name, read-only staying read-only, offline tests, nothing private committed.
 4. **Merging with main.** Merges of `main` into the branch kept both sides' intent.
 
 Reply with numbered findings, each marked **blocking** or **non-blocking**, with

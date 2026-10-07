@@ -590,7 +590,7 @@ def test_the_config_strings_are_toml_whatever_they_hold(tmp_path):
     odd = {**SETTINGS, "model": 'a "quoted" \\ model', "reasoning_effort": "high"}
     assert tomllib.loads(codex_review.config_toml(odd)) == {
         "model": 'a "quoted" \\ model', "model_reasoning_effort": "high", "sandbox_mode": "read-only",
-        "cli_auth_credentials_store": "file"}
+        "cli_auth_credentials_store": "file", "skills": {"include_instructions": False}}
 
 
 def test_no_sign_in_is_refused_before_codex_runs(tmp_path, monkeypatch, capsys):

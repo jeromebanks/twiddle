@@ -29,6 +29,22 @@ with log.open("a") as f:
     f.write(json.dumps(seen) + "\\n")
 plan = json.loads(pathlib.Path(os.environ["FAKE_CODEX_PLAN"]).read_text())
 step = plan[min(n, len(plan) - 1)]
+# the session log, in the shape codex-cli 0.161.0 writes (`codex_review.check_session` reads it): skills offered
+# unless the config turns them off; a plan step's `session` overrides it: "skills" (offered whatever the config
+# says), "unknown" (a shape nobody knows), "none" (no log); `agents_md` names a directory an AGENTS.md came from
+kind = step.get("session", "ok" if "include_instructions = false" in (seen["config"] or "") else "skills")
+if kind != "none" and home.is_dir():
+    state = {{"skills": {{"includeInstructions": kind == "skills"}}, "host_skills": {{"includeInstructions": kind == "skills"}},
+             "agents_md": {{"directory": step["agents_md"], "text": "x"}} if step.get("agents_md") else {{}}}}
+    records = [{{"type": "session_meta", "payload": {{"cwd": os.getcwd()}}}}]
+    if kind == "skills":
+        records.append({{"type": "response_item", "payload": {{"type": "message", "role": "developer",
+                        "content": [{{"type": "input_text", "text": "<skills_instructions> ## Skills"}}]}}}})
+    records.append({{"type": "world_state", "payload": {{"full": True, "state": state}}}} if kind != "unknown"
+                   else {{"type": "world_state_v9", "payload": {{"everything": "different"}}}})
+    day = home / "sessions" / "2026" / "10" / "07"
+    day.mkdir(parents=True, exist_ok=True)
+    (day / f"rollout-{{n}}-{{os.getpid()}}.jsonl").write_text("".join(json.dumps(r) + "\\n" for r in records))
 if step.get("user_signs_in"):             # a sign-in elsewhere while the review runs
     pathlib.Path(os.environ["HOME"], ".codex", "auth.json").write_text(step["user_signs_in"])
 if step.get("refresh"):                   # Codex's sign-in refreshed: a temp file renamed over auth.json
@@ -50,7 +66,7 @@ APPROVES = {"out": "1. fine (non-blocking)\n\nVERDICT: approve\n"}
 NO_VERDICT = {"out": "I looked around and ran out of time.\n"}
 SLOW = {"sleep": 5, "out": "VERDICT: approve\n"}
 SETTINGS = {"model": "test-model", "reasoning_effort": "low", "sandbox": "read-only", "timeout_seconds": 30,
-            "flags": ["--skip-git-repo-check"]}
+            "flags": ["--skip-git-repo-check"], "skills": "suppressed"}
 QUICK = {**SETTINGS, "timeout_seconds": 1}
 
 

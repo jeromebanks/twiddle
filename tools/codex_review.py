@@ -53,7 +53,11 @@ LEGACY_MARK = f"</details>\n\n{RESPONSE_HEADING}\n\n"
 
 UNAVAILABLE = 3   # Codex can't run: not on PATH, no sign-in, or no verdict twice (timeouts included)
 ATTEMPTS = 2      # the first run, and one retry
-CODEX_KEYS = ("model", "reasoning_effort", "sandbox", "timeout_seconds", "flags")
+CODEX_KEYS = ("model", "reasoning_effort", "sandbox", "timeout_seconds", "flags", "skills")
+# how the skills Codex would offer a review are kept from changing it unseen: `suppressed`, none are offered (the
+# generated config turns their instructions off, and each run's session log must show that); `fingerprinted`, they
+# are offered, and every `.agents/skills/**/SKILL.md` is an input of the review logic's fingerprint (`codex_eval`)
+SKILL_MODES = ("suppressed", "fingerprinted")
 # the only `codex exec` flags `codex.flags` may add: none overrides a pinned setting, loosens the read-only
 # sandbox the HEAD stamp relies on, or changes what goes to stdout (the report)
 ALLOWED_FLAGS = {"--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--strict-config"}
@@ -144,6 +148,8 @@ def codex_settings(config: dict[str, Any]) -> dict[str, Any]:
     if bad:
         raise ReviewError(f"`codex.flags` may not pass {', '.join(bad)}: only {', '.join(sorted(ALLOWED_FLAGS))} and "
                           "`--color`; the model, effort and sandbox have keys of their own")
+    if s["skills"] not in SKILL_MODES:
+        raise ReviewError(f"`codex.skills` is {s['skills']!r}: one of {', '.join(SKILL_MODES)}")
     return s
 
 
@@ -159,7 +165,8 @@ def config_toml(settings: dict[str, Any]) -> str:
     is read from the copy `isolated_home` writes (`file` is Codex's default store; pinned, so no keyring applies)."""
     q = json.dumps                      # a JSON string is a TOML basic string
     return (f"model = {q(settings['model'])}\nmodel_reasoning_effort = {q(settings['reasoning_effort'])}\n"
-            f"sandbox_mode = {q(settings['sandbox'])}\ncli_auth_credentials_store = \"file\"\n")
+            f"sandbox_mode = {q(settings['sandbox'])}\ncli_auth_credentials_store = \"file\"\n"
+            + ("\n[skills]\ninclude_instructions = false\n" if settings.get("skills") == "suppressed" else ""))
 
 
 def show_command(cmd: list[str], wt: Path, prompt_file: Path) -> str:
@@ -524,6 +531,85 @@ def codex_version(env: dict[str, str]) -> str:
     return words[-1] if proc.returncode == 0 and words else "unknown"
 
 
+# --- what the run was given: its session log -----------------------------------------------
+#
+# Codex writes each run's log to `<CODEX_HOME>/sessions/**/rollout-*.jsonl`, one JSON record a line. Its
+# `world_state` records (`payload.state`) say what the session was given: `skills.includeInstructions` (and
+# `host_skills`'s), and `agents_md`, the repository instruction file it loaded ({} for none, else its
+# `directory` and `text`). Skills offered also show as a developer message holding `<skills_instructions>`.
+# That is the shape of codex-cli 0.161.0's logs; anything else is "unknown", and a round doesn't trust it.
+
+SKILLS_MESSAGE = "<skills_instructions>"
+
+
+def session_logs(home: Path) -> set[Path]:
+    return set((home / "sessions").rglob("*.jsonl")) if (home / "sessions").is_dir() else set()
+
+
+def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tuple[str, str]:
+    """("ok" | "offered" | "unknown", why) for one run's session log, against the skills `mode`.
+
+    "offered": skills were offered in `suppressed` mode, or Codex loaded an instruction file from outside the
+    reviewed checkout (both modes): a review the repo's settings don't describe. "unknown": the log isn't the
+    shape this reads. A run `cut_short` (killed on its timeout) may leave a half-written last line; it is skipped."""
+    try:
+        lines = log.read_text().splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        return "unknown", f"its session log {log} can't be read ({exc})"
+    records = []
+    for i, line in enumerate(lines):
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            if not (cut_short and i == len(lines) - 1):
+                return "unknown", f"line {i + 1} of its session log {log} isn't JSON"
+    states = [r["payload"]["state"] for r in records if isinstance(r, dict) and r.get("type") == "world_state"
+              and isinstance(r.get("payload"), dict) and isinstance(r["payload"].get("state"), dict)]
+    if not any(isinstance(r, dict) and r.get("type") == "world_state" and (r.get("payload") or {}).get("full")
+               for r in records):
+        return "unknown", f"its session log {log} has no full `world_state` record: not a shape this tool knows"
+    offered = [r for r in records if isinstance(r, dict) and r.get("type") == "response_item"
+               and isinstance(r.get("payload"), dict) and r["payload"].get("role") == "developer"
+               and SKILLS_MESSAGE in json.dumps(r["payload"].get("content"))]
+    flags = []
+    for st in states:
+        for key in ("skills", "host_skills"):
+            if key in st:
+                v = st[key].get("includeInstructions") if isinstance(st[key], dict) else None
+                if not isinstance(v, bool):
+                    return "unknown", f"its session log {log} has a `{key}` without a true/false `includeInstructions`"
+                flags.append(v)
+    for st in states:
+        if "agents_md" not in st:
+            continue
+        a = st["agents_md"]
+        if a == {}:
+            continue
+        if not (isinstance(a, dict) and isinstance(a.get("directory"), str)):
+            return "unknown", f"its session log {log} has an `agents_md` of a shape this tool doesn't know"
+        if not Path(a["directory"]).resolve().is_relative_to(wt.resolve()):
+            return "offered", (f"Codex loaded the instructions in {a['directory']}, outside the reviewed checkout "
+                               f"{wt} (session log {log})")
+    if mode == "fingerprinted":
+        return "ok", ""
+    if offered or any(flags):
+        return "offered", (f"Codex offered skills although `codex.skills` is `suppressed` (session log {log}): "
+                           "the generated config's `[skills] include_instructions = false` didn't hold for this "
+                           "`codex` version")
+    if not flags:
+        return "unknown", f"its session log {log} doesn't say whether skills were offered (no `skills` state)"
+    return "ok", ""
+
+
+def check_run(home: Path, before: set[Path], wt: Path, mode: str, cut_short: bool = False) -> tuple[str, str]:
+    """`check_session` on the one log this run added under `home`."""
+    new = sorted(session_logs(home) - before)
+    if len(new) != 1:
+        return "unknown", (f"the run left {len(new)} session logs under {home / 'sessions'}, not one: "
+                           "what it was given can't be checked")
+    return check_session(new[0], wt, mode, cut_short)
+
+
 # --- the run ------------------------------------------------------------------
 
 def _git(args: list[str], cwd: Path) -> str:
@@ -607,13 +693,14 @@ def tail(path: Path, n: int = 20) -> str:
 
 
 def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dict[str, Any],
-               log=print) -> tuple[int, Path | None]:
+               log=print, on_version=None) -> tuple[int, Path | None]:
     """Run Codex on an isolated `CODEX_HOME`, retrying once when it times out or ends with no verdict.
-    (status, the stamped report).
+    (status, the stamped report). `on_version(version)` is called with `codex --version` before Codex runs.
 
-    The report is saved only when HEAD is where it was: a review of a commit that moved under it is no
-    review. `UNAVAILABLE` is the status for "Codex can't run" (the skill then defers the review): no `codex`,
-    or no sign-in, both found before Codex is started."""
+    The report is saved only when HEAD is where it was, and when the run's session log shows what the repo's
+    settings say it was given (`check_run`): a review of a commit that moved under it, or one offered skills
+    `codex.skills` suppresses, is no review. `UNAVAILABLE` is the status for "Codex can't run" (the skill then
+    defers the review): no `codex`, no sign-in, both found before Codex is started, or a run that can't be vouched for."""
     report, err = scratch / "codex.md", scratch / "codex.err"
     report.unlink(missing_ok=True)
     err.write_text("")
@@ -630,8 +717,12 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
         except CannotStart as exc:
             log(f"codex can't be started ({exc}): Codex can't run (exit {UNAVAILABLE}: `review-defer`)")
             return UNAVAILABLE, None
+        if on_version:
+            on_version(prov["codex"])
+        home = Path(env["CODEX_HOME"])
         for attempt in range(1, ATTEMPTS + 1):
             raw = scratch / f"codex-{attempt}.out"
+            before = session_logs(home)
             try:
                 output = run_once(cmd, wt, raw, err, timeout, env)
             except CannotStart as exc:
@@ -643,6 +734,10 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
             if dirty := dirty_files(wt):
                 raise ReviewError("the worktree changed while Codex ran (" + ", ".join(dirty[:8])
                                   + "): it didn't review the pushed head, so no report was saved. Restore it and run again")
+            seen, why = check_run(home, before, wt, settings["skills"], cut_short=output is None)
+            if seen == "offered":         # the next attempt would be given the same: not a review the repo describes
+                log(f"{why}. No report was saved (exit {UNAVAILABLE}: `review-defer`)")
+                return UNAVAILABLE, None
             if output is None:
                 log(f"attempt {attempt}: Codex timed out after {timeout:g}s")
                 continue
@@ -651,6 +746,9 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
             except ReviewError as exc:
                 log(f"attempt {attempt}: {exc}")
                 continue
+            if seen != "ok":
+                log(f"{why}. No report was saved (exit {UNAVAILABLE}: `review-defer`)")
+                return UNAVAILABLE, None
             report.write_text(stamp(output, head, prov))
             return 0, report
     log(f"Codex gave no verdict in {ATTEMPTS} attempts (exit {UNAVAILABLE}: `review-defer`). "

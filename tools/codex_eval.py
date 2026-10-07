@@ -1,0 +1,194 @@
+"""The review logic's fingerprint, and the eval results recorded against it: stdlib only, beside `codex_review`.
+
+A Codex review behaves as its prompts, its rules, its settings, the code that fills and runs it, and the `codex`
+binary decide. The repo owns all but the last, and `fingerprint` hashes what it owns: a sorted, named list of
+inputs (`inputs`), read from a worktree or from a commit (`Worktree`, `Commit`), so a change to any of them is a
+new fingerprint, and an edit anywhere else (`sdlc.py`, `CLAUDE.md`) is not. `codex --version` is the other half
+of the pair an eval result is recorded for.
+
+A result is a marked `codex-eval` comment on the issue `.sdlc/config.json`'s `codex_eval_issue` names. `sdlc.py`
+reads and posts them; `latest_results` picks the latest per (fingerprint, version) pair, so a pass for an older
+`codex` never counts for a newer one.
+
+    uv run python tools/sdlc.py codex-eval --status     # the fingerprint, `codex --version`, and that pair's result
+
+Nothing here runs `codex exec`.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Any
+
+try:
+    from tools import codex_review          # imported as tools.codex_eval (the tests)
+except ModuleNotFoundError:
+    import codex_review                     # run beside tools/sdlc.py
+
+ROOT = codex_review.ROOT
+RULES = ROOT / ".agents" / "skills" / "review-rules.md"
+PLAN_SCHEMA = ROOT / ".agents" / "skills" / "plan-issue" / "references" / "plan-schema.md"
+CONFIG = ROOT / ".sdlc" / "config.json"
+FIXTURES = ROOT / "tests" / "codex_eval"
+SKILLS = ROOT / ".agents" / "skills"
+
+# every file whose text decides how a review behaves, fixed by name: present or not, each is an input
+FILES = tuple(p.relative_to(ROOT).as_posix() for p in (
+    codex_review.PR_PROMPT, codex_review.PLAN_PROMPT, codex_review.MILESTONE_PROMPT, RULES, PLAN_SCHEMA,
+    Path(codex_review.__file__).resolve(), Path(__file__).resolve()))
+CONFIG_INPUT = "config:codex"          # `.sdlc/config.json`'s `codex` section, as canonical JSON
+# repository instruction files Codex loads on its own, wherever they are: inputs whether or not one exists
+INSTRUCTION_FILES = ("AGENTS.md", "AGENTS.override.md")
+# what a prompt names, or the runner reads, that is deliberately not an input, and why
+EXCLUDED = {
+    "CLAUDE.md": "knowledge of the code under review: the plan prompt names it for its Layout table only, and "
+                 "the safety rules a reviewer checks are `review-rules.md`'s",
+    ".sdlc/config.json": f"only its `codex` section decides a review, and that is an input (`{CONFIG_INPUT}`)",
+}
+OUTCOMES = ("pass", "fail", "deferred")
+SHORT = 12                             # a full 64-hex hash looks like an identifier to `demo-post` and `demo_shot`
+
+
+# --- where the inputs are read from --------------------------------------------------
+
+class Tree:
+    """A repo's files as one revision has them: `names` (every path) and `read(path)` (its bytes, or None)."""
+
+    def names(self) -> list[str]:
+        raise NotImplementedError
+
+    def read(self, path: str) -> bytes | None:
+        raise NotImplementedError
+
+
+def _git_bytes(args: list[str], cwd: Path) -> bytes:
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True)
+    if proc.returncode != 0:
+        raise codex_review.ReviewError(f"git {' '.join(args[:3])} failed in {cwd}: {proc.stderr.decode().strip()}")
+    return proc.stdout
+
+
+class Worktree(Tree):
+    """A checkout as it is on disk: what git tracks there, and what it would (untracked, not ignored)."""
+
+    def __init__(self, root: Path = ROOT):
+        self.root = Path(root)
+
+    def names(self) -> list[str]:
+        out = _git_bytes(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], self.root)
+        return sorted({n for n in out.decode().split("\0") if n})
+
+    def read(self, path: str) -> bytes | None:
+        try:
+            return (self.root / path).read_bytes()
+        except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+            return None
+
+
+class Commit(Tree):
+    """One commit's tree, read from the repo at `root` (`git ls-tree`, `git cat-file`): for a gate on a PR head."""
+
+    def __init__(self, sha: str, root: Path = ROOT):
+        self.sha, self.root = sha, Path(root)
+
+    def names(self) -> list[str]:
+        out = _git_bytes(["ls-tree", "-r", "-z", "--name-only", self.sha], self.root)
+        return sorted(n for n in out.decode().split("\0") if n)
+
+    def read(self, path: str) -> bytes | None:
+        proc = subprocess.run(["git", "cat-file", "blob", f"{self.sha}:{path}"], cwd=self.root, capture_output=True)
+        return proc.stdout if proc.returncode == 0 else None
+
+
+# --- the fingerprint ------------------------------------------------------------------
+
+def codex_section(tree: Tree) -> Any:
+    """`.sdlc/config.json`'s `codex` section as the tree has it; None when there's none to read."""
+    raw = tree.read(CONFIG.relative_to(ROOT).as_posix())
+    try:
+        return json.loads(raw).get("codex") if raw is not None else None
+    except (ValueError, AttributeError):
+        return None
+
+
+def is_input(name: str, mode: Any) -> bool:
+    """Whether a repo path is one of the fingerprint's inputs, in this skills mode."""
+    return (name in FILES or name.startswith(FIXTURES.relative_to(ROOT).as_posix() + "/")
+            or name.rsplit("/", 1)[-1] in INSTRUCTION_FILES
+            or (mode == "fingerprinted" and name.startswith(SKILLS.relative_to(ROOT).as_posix() + "/")
+                and name.endswith("/SKILL.md")))
+
+
+def inputs(tree: Tree) -> list[tuple[str, bytes | None]]:
+    """(name, content) for every input, sorted by name: the fixed files (None when absent), the `codex` section,
+    and whatever the globs find (every file under `tests/codex_eval/`, every `AGENTS.md`/`AGENTS.override.md`,
+    and in `fingerprinted` mode every `.agents/skills/**/SKILL.md`)."""
+    section = codex_section(tree)
+    mode = section.get("skills") if isinstance(section, dict) else None
+    found = {n: tree.read(n) for n in tree.names() if n not in FILES and is_input(n, mode)}
+    found = {n: data for n, data in found.items() if data is not None}
+    found.update({n: tree.read(n) for n in FILES})
+    canonical = json.dumps(section, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    found[CONFIG_INPUT] = canonical.encode() if section is not None else None
+    return sorted(found.items())
+
+
+def fingerprint(tree: Tree) -> str:
+    """sha256 over the inputs, each name and content length-prefixed, an absent one marked as such."""
+    h = hashlib.sha256()
+    for name, data in inputs(tree):
+        n = name.encode()
+        h.update(b"%d:%s" % (len(n), n))
+        h.update(b"-" if data is None else b"%d:%s" % (len(data), data))
+    return h.hexdigest()
+
+
+def short(fp: str) -> str:
+    return fp[:SHORT]
+
+
+# --- the results ---------------------------------------------------------------------
+
+def latest_results(results: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    """The latest result per (fingerprint, codex version), from results oldest first (each {fingerprint, codex,
+    outcome, ...}); a result with no fingerprint, version or known outcome is no result."""
+    latest = {}
+    for r in results:
+        if r.get("fingerprint") and r.get("codex") and r.get("outcome") in OUTCOMES:
+            latest[(r["fingerprint"], r["codex"])] = r
+    return latest
+
+
+def pair_result(results: list[dict[str, Any]], fp: str, version: str) -> dict[str, Any] | None:
+    """The latest result recorded for exactly this fingerprint and this `codex` version, or None."""
+    return latest_results(results).get((fp, version))
+
+
+def current_version() -> str | None:
+    """`codex --version`, asked on an empty scratch `CODEX_HOME` (nothing of the user's is read); None when
+    there is no `codex` to ask. It never runs `codex exec`."""
+    with tempfile.TemporaryDirectory(prefix="codex-eval-") as home:
+        try:
+            return codex_review.codex_version({**os.environ, "CODEX_HOME": home})
+        except codex_review.CannotStart:
+            return None
+
+
+def describe(result: dict[str, Any] | None) -> str:
+    """One line for a pair's state."""
+    if result is None:
+        return "no result recorded for this pair: the review logic or `codex` changed since the last eval"
+    when = f" ({result['url']})" if result.get("url") else ""
+    return {"pass": "passed", "fail": "FAILED", "deferred": "deferred (Codex couldn't run it)"}[result["outcome"]] + when
+
+
+def warning(fp: str, version: str, result: dict[str, Any] | None) -> str | None:
+    """What `codex-review` says before a round when this pair has no passing eval; None when it has one."""
+    if result and result.get("outcome") == "pass":
+        return None
+    return (f"warning: the review logic {short(fp)} on codex {version} has no passing eval ({describe(result)}). "
+            "The review still runs; `uv run python tools/sdlc.py codex-eval --status` says more")
