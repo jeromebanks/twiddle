@@ -31,7 +31,7 @@ that read and says what it would do, and writes neither speaker nor journal
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import time
+from datetime import datetime, time, timezone
 from typing import Callable
 
 from rich.text import Text
@@ -564,7 +564,7 @@ class RingingScreen(Screen):
     def compose(self) -> ComposeResult:
         with Horizontal(id="ring"):
             yield Static(clock_art(0), id="ring-art")
-            yield Static(ringing_text(self.row, self.minutes), id="ring-text")
+            yield Static(ringing_text(self.row, self.minutes), id="ring-text", markup=False)
         yield Static(RING_KEYS, id="ring-keys")
         yield Static("", id="ring-status")
 
@@ -637,15 +637,19 @@ class AlarmApp(App):
         Binding("k", "cursor('up')", show=False),
     ]
 
-    def __init__(self, *, household: Callable[[], Household], dry_run: bool = False):
+    def __init__(self, *, household: Callable[[], Household], dry_run: bool = False,
+                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         super().__init__()
+        self.now = now
         self.household = household
         self.dry_run = dry_run
         self.shown: Shown | None = None
         self.status_text = ""
         self.writing = False        # one write at a time: space and d do nothing meanwhile
         self.ringing: RingingScreen | None = None
-        self.hushed: set[tuple] = set()     # alarms stopped or snoozed here, still answering
+        # Alarms stopped or snoozed here that the speaker may still report: not
+        # shown again until it stops reporting them, or (a snooze) rings again.
+        self.hushed: dict[tuple, datetime | None] = {}
 
     def compose(self) -> ComposeResult:
         yield Static("twiddle alarm", id="top")
@@ -658,6 +662,13 @@ class AlarmApp(App):
         self.query_one("#alarms", OptionList).focus()
         self.load()
         self.set_interval(POLL_S, self.check)
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        """While an alarm rings, the list's keys are not the screen's: a stray
+        `t` must not fire whatever alarm is highlighted behind it."""
+        if isinstance(self.screen, RingingScreen):
+            return action == "quit"
+        return True
 
     # ---- reading -----------------------------------------------------------
 
@@ -683,6 +694,7 @@ class AlarmApp(App):
         self.call_from_thread(self.show, shown)
 
     def show(self, shown: Shown) -> None:
+        first = self.shown is None
         self.shown = shown
         alarms = self.query_one("#alarms", OptionList)
         was = self._current_id()
@@ -696,6 +708,8 @@ class AlarmApp(App):
                                        if not o.disabled), None)
         self.query_one("#top", Static).update(top(shown, self.dry_run))
         self.query_one("#legend", Static).update(legend(shown))
+        if first:
+            self.check()            # one may be ringing already
 
     def say(self, text: str, severity: str = "information") -> None:
         self.status_text = text
@@ -816,17 +830,27 @@ class AlarmApp(App):
                                          if running else ())
             if running is None:
                 self.call_from_thread(self._quiet, g.coordinator.ip)
-            elif key not in self.hushed:
+            elif not self._hushed(key):
                 found.append((key, g.coordinator.ip,        # named from the list shown
                               alarm_cli.ringing_row(shown.house, g, running, shown.found)))
         if found:
             key, ip, row = found[0]
             self.call_from_thread(self._ring, key, ip, row)
-        elif not self.hushed and self.ringing is not None:
+        elif self.ringing is not None:
             self.call_from_thread(self._hush_screen)
 
+    def _hushed(self, key: tuple) -> bool:
+        """Was this stopped or snoozed here (and a snooze not yet over)?"""
+        if key not in self.hushed:
+            return False
+        until = self.hushed[key]
+        if until is not None and self.now() >= until:
+            del self.hushed[key]
+            return False
+        return True
+
     def _quiet(self, ip: str) -> None:
-        self.hushed = {k for k in self.hushed if k[0] != ip}
+        self.hushed = {k: v for k, v in self.hushed.items() if k[0] != ip}
         if self.ringing is not None and self.ringing.ip == ip:
             self._hush_screen()
 
@@ -844,6 +868,8 @@ class AlarmApp(App):
         screen.key = key
         self.ringing = screen
         self.push_screen(screen)
+        if not row.get("what"):         # not in the list shown: made since
+            self.load()
 
     def ring_stop(self, screen: RingingScreen) -> None:
         self._ring_write(screen, "stop", 0)
@@ -857,7 +883,8 @@ class AlarmApp(App):
         (as the CLI does) when nothing is going off any more."""
         ip, name = screen.ip, screen.row["room"]
         try:
-            running = clock.alarm_now(ip, events=False)
+            running = clock.alarm_now(ip)       # as the CLI: events too, before any Stop
+            until = None
             if running is None:
                 text, done = f"no alarm is going off in {name} any more", True
             elif self.dry_run:
@@ -868,20 +895,22 @@ class AlarmApp(App):
                 text, done = f"stopped the alarm in {name}", True
             else:
                 rings = clock.snooze_alarm(ip, minutes, running.alarm_id or None)
+                until = rings
                 text = f"snoozed the alarm in {name}: it rings again at {rings.astimezone():%H:%M}"
                 done = True
         except Exception as exc:
             text, done = f"could not {verb} the alarm in {name}: {exc}", False
-        self.call_from_thread(self._ring_written, screen, text, done)
+        self.call_from_thread(self._ring_written, screen, text, done, until)
 
-    def _ring_written(self, screen: RingingScreen, text: str, done: bool) -> None:
+    def _ring_written(self, screen: RingingScreen, text: str, done: bool,
+                      until: datetime | None) -> None:
         screen.busy = False
         self.say(text)
         if not done:
             if screen.is_attached:
                 screen.say(text)
             return
-        self.hushed.add(screen.key)
+        self.hushed[screen.key] = until
         self._hush_screen()
 
     # ---- writing -----------------------------------------------------------
