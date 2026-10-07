@@ -14,11 +14,11 @@ import pytest
 from textual.widgets import Input, OptionList
 
 from tests.test_alarm_cli import GONE, household
-from tests.test_alarm_clock import FakeClock
+from tests.test_alarm_clock import RUNNING, ROAM_IP, FakeClock, FakeTransport
 from twiddle import alarm_cli, cli, devices, play
 from twiddle.alarms import clock
-from twiddle.alarms.app import (AlarmApp, AskScreen, EditorScreen, SourcePicker, TypeIdScreen,
-                                alarm_line)
+from twiddle.alarms.app import (AlarmApp, AskScreen, EditorScreen, RingingScreen, SourcePicker,
+                                TypeIdScreen, alarm_line, clock_art)
 from twiddle.alarms.model import parse_alarms
 from twiddle.alarms import sources
 from twiddle.alarms.sources import sound
@@ -138,7 +138,7 @@ async def test_the_list_is_every_room_and_its_alarms(fake):
         assert "⌁ = needs this Mac at fire time" in legend
         assert "next: today " not in legend           # 06:00 has passed today
         assert "next: tomorrow 06:00" in legend
-        assert text(app, "#keys") == "n new  enter edit  space on/off  d delete  r refresh  q quit"
+        assert text(app, "#keys") == "n new  enter edit  space on/off  d delete  t try now  r refresh  q quit"
     assert fake.writes == [] and journal() == []
 
 
@@ -916,3 +916,157 @@ def test_anchor_before_a_verb_still_holds(fake, monkeypatch, capsys):
     cli.main(["alarm", "--anchor", "10.0.0.13", "list"])
     cli.main(["alarm", "--anchor", "10.0.0.13", "list", "--anchor", "10.0.0.11"])
     assert seen == ["10.0.0.13", "10.0.0.11"]
+
+
+# ---- t: try now, and the ringing screen --------------------------------------------
+
+@pytest.fixture
+def ring(monkeypatch):
+    """The speakers' AlarmClock and AVTransport; nothing is ringing yet."""
+    f = FakeTransport()
+    monkeypatch.setattr(devices.requests, "post", f.post)
+    monkeypatch.setattr(clock, "last_change", lambda ip, wait=3.0: f.state.get(ip))
+    return f
+
+
+def av_writes(ring):
+    return [(a, args) for _, a, args in ring.av_writes]
+
+
+def ringing(app):
+    return isinstance(app.screen, RingingScreen)
+
+
+async def poll(app, pilot):
+    app.check()
+    await settle(app, pilot)
+
+
+@pilot
+async def test_the_ringing_screen_comes_with_the_alarm_and_leaves_with_it(ring):
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        assert not ringing(app)
+        ring.running[ROAM_IP] = RUNNING             # alarm 34 goes off on the Roam
+        await poll(app, pilot)
+        assert ringing(app)
+        shown = text(app.screen, "#ring-text")
+        assert "Sonos Roam is ringing" in shown and "since 14:58" in shown
+        assert "snooze 10m" in shown
+        assert "_______" in text(app.screen, "#ring-art")
+        del ring.running[ROAM_IP]                   # it stops by itself
+        await poll(app, pilot)
+        assert not ringing(app)
+        assert ring.av_writes == [] and ring.writes == []
+
+
+@pilot
+async def test_it_is_up_at_once_when_the_alarm_is_already_ringing(ring):
+    ring.running[ROAM_IP] = RUNNING
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        assert ringing(app)
+
+
+def test_the_clock_swings():
+    assert clock_art(0) != clock_art(1)
+
+
+@pilot
+async def test_x_stops_it_through_the_journalled_stop(ring):
+    ring.running[ROAM_IP] = RUNNING
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert av_writes(ring) == [("Stop", {"InstanceID": "0"})]
+        assert app.status_text == "stopped the alarm in Sonos Roam"
+        assert not ringing(app)
+        await poll(app, pilot)                      # the fake still says ringing: not again
+        assert not ringing(app)
+    assert [j["action"] for j in journal()] == ["alarm_stop"]
+    assert journal()[0]["alarm_id"] == "34"
+
+
+@pilot
+async def test_z_snoozes_ten_minutes_and_m_picks_the_length(ring):
+    ring.running[ROAM_IP] = RUNNING
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        await pilot.press("m")
+        assert "snooze 15m" in text(app.screen, "#ring-text")
+        await pilot.press("m", "m", "m")            # 30, 5, 10
+        assert "snooze 10m" in text(app.screen, "#ring-text")
+        await pilot.press("z")
+        await settle(app, pilot)
+        assert av_writes(ring) == [("SnoozeAlarm", {"InstanceID": "0", "Duration": "00:10:00"})]
+        assert not ringing(app)
+    assert [j["action"] for j in journal()][:1] == ["alarm_snooze"]
+    assert journal()[0]["minutes"] == 10
+
+
+@pilot
+async def test_x_does_nothing_once_the_alarm_has_stopped(ring):
+    ring.running[ROAM_IP] = RUNNING
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        del ring.running[ROAM_IP]                   # stopped between the poll and the key
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert ring.av_writes == [] and "any more" in app.status_text
+        assert not ringing(app)
+
+
+@pilot
+async def test_a_refused_stop_is_said_and_the_screen_stays(ring):
+    ring.running[ROAM_IP] = RUNNING
+    ring.refuse_av.add("Stop")
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert ringing(app)
+        assert "could not stop the alarm in Sonos Roam" in text(app.screen, "#ring-status")
+
+
+@pilot
+async def test_t_fires_the_alarm_through_run_alarm_journalled(ring):
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await pick(app, pilot, "2")
+        await pilot.press("t")
+        await settle(app, pilot)
+        assert [a for a, _ in av_writes(ring)] == ["RunAlarm"]
+        assert av_writes(ring)[0][1]["AlarmID"] == "2"
+        assert app.status_text.startswith("fired alarm 2 on ")
+    assert "alarm_run" in [j["action"] for j in journal()]
+
+
+@pytest.mark.parametrize("key", ["t", "x", "z"])
+@pilot
+async def test_dry_run_t_x_and_z_write_neither_speaker_nor_journal(ring, key):
+    ring.running[ROAM_IP] = RUNNING
+    app = make(dry_run=True)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        if key == "t":
+            await pick(app, pilot, "2")
+        else:
+            await poll(app, pilot)
+            assert ringing(app)
+        await pilot.press(key)
+        await settle(app, pilot)
+        assert app.status_text.startswith("[dry-run] would ")
+    assert ring.av_writes == [] and ring.writes == [] and not play.INTERVENTION_LOG.exists()

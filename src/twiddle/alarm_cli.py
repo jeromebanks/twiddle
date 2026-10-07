@@ -1268,7 +1268,7 @@ def register(sub, parents=None):
     kw = {"parents": parents} if parents else {}
     p = sub.add_parser(**kw, name="alarm",
                        help="the household's Sonos alarms; with no command, the list as a "
-                            "TUI (space on/off, d delete and saving n/enter's editor WRITE)")
+                            "TUI (space on/off, d delete, t try now, x/z on the ringing screen and saving n/enter's editor WRITE)")
     # Their own dests: a verb's `--dry-run`/`--anchor` defaults would
     # otherwise overwrite these (`_with_alarm_flags` hands them on).
     p.add_argument("--anchor", dest="alarm_anchor", default=None, metavar="IP",
