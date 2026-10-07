@@ -314,6 +314,10 @@ def test_status_prints_the_pair_and_its_result_and_never_runs_codex_exec(tmp_pat
     monkeypatch.setenv("PATH", str(only_git))
     assert sdlc.main(["codex-eval", "--status", "--from-file", str(ledger)]) == 0
     assert "not found on PATH" in capsys.readouterr().out
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}:{only_git}")
+    ledger.write_text("not json")
+    assert sdlc.main(["codex-eval", "--status", "--from-file", str(ledger)]) == 0
+    assert "couldn't read the recorded results" in capsys.readouterr().out
 
 
 # --- codex-review's warning ----------------------------------------------------------------------

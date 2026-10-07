@@ -2697,11 +2697,14 @@ def command_codex_eval(args: argparse.Namespace, config: dict[str, Any]) -> int:
     fp = codex_eval.fingerprint(tree)
     mode = (codex_eval.codex_section(tree) or {}).get("skills", "?")
     version = codex_eval.current_version()
-    results = eval_ledger(args, config)
-    result = codex_eval.pair_result(results, fp, version) if version else None
+    try:
+        state = codex_eval.describe(codex_eval.pair_result(eval_ledger(args, config), fp, version)) if version \
+            else "no `codex` to pair it with"
+    except (SdlcError, OSError, ValueError) as exc:     # the pair is still worth printing
+        state = f"couldn't read the recorded results ({exc})"
     print(f"review logic: {codex_eval.short(fp)}  ({len(codex_eval.inputs(tree))} inputs; skills {mode})\n"
           f"codex:        {version or 'not found on PATH'}\n"
-          f"eval:         {codex_eval.describe(result) if version else 'no `codex` to pair it with'}")
+          f"eval:         {state}")
     if args.inputs:
         for name, data in codex_eval.inputs(tree):
             print(f"  {name}" + ("  (absent)" if data is None else ""))
