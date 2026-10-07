@@ -2661,15 +2661,15 @@ def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: 
     refs = closes_refs(pr.get("body", ""))
     if len(refs) != 1 or not slice_issue or (epic := slice_epic(slice_issue)) is None:
         raise SdlcError(f"PR #{pr['number']} must close exactly one slice of an epic (it closes {refs or 'none'})")
+    wt = worktree_path(refs[0], config)
+    out = review_scratch(args, str(pr["number"]), wt)
+    if not args.from_file and (wt / ".git").exists() and git(["rev-parse", "HEAD"], cwd=wt) != pr["headRefOid"]:
+        pr = wait_for_pr_head(pr["number"], git(["rev-parse", "HEAD"], cwd=wt), config)   # a push GitHub hasn't shown yet
     _, reviews = pr_records(comments, trusted)
     on_head = [r for r in reviews if r["sha"] == pr["headRefOid"]]
     wasted_round(changes_rounds(reviews), config.get("max_pr_rounds", 5), bool(on_head) and on_head[-1]["verdict"] == "approve",
                  f"PR #{pr['number']}", pr["headRefOid"], f"`escalate-slice {refs[0]} --reason ...`",
                  f"go on to `merge {pr['number']}`")
-    wt = worktree_path(refs[0], config)
-    out = review_scratch(args, str(pr["number"]), wt)
-    if not args.from_file and (wt / ".git").exists() and git(["rev-parse", "HEAD"], cwd=wt) != pr["headRefOid"]:
-        pr = wait_for_pr_head(pr["number"], git(["rev-parse", "HEAD"], cwd=wt), config)   # a push GitHub hasn't shown yet
     head = codex_review.check_worktree(wt, pr["headRefOid"])
     base = f"origin/{epic_branch(epic)}"
     git(["fetch", "origin", epic_branch(epic)], cwd=wt, check=False)
