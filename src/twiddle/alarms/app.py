@@ -9,8 +9,8 @@ asking twice: a y, then the ID typed out), and saving the editor that `n` (a
 new alarm, `CreateAlarm`) and enter (this one, `UpdateAlarm`) open. `t` fires
 the highlighted alarm now (`RunAlarm`, as `alarm try`).
 
-While it is open it also asks each group (`GetRunningAlarmProperties`, read-only,
-every few seconds) whether an alarm is going off. One that is takes the whole
+While it is open it also asks each group (`GetRunningAlarmProperties` and its
+LastChange event, as `alarm status`: read-only, every few seconds) whether an alarm is going off. One that is takes the whole
 screen: a ringing alarm clock, the room and what plays, `x` to turn it off
 (`Stop`) and `z` to snooze (`SnoozeAlarm`; `m` picks 5/10/15/30 minutes), the
 CLI's own journalled `alarm stop`/`alarm snooze`.
@@ -823,12 +823,12 @@ class AlarmApp(App):
         found = []
         for g in shown.house.groups:
             try:
-                running = clock.alarm_now(g.coordinator.ip, events=False)
+                running = clock.alarm_now(g.coordinator.ip)
             except Exception:
                 continue
             key = (g.coordinator.ip,) + ((running.alarm_id, running.logged_start)
                                          if running else ())
-            if running is None:
+            if running is None or running.snoozed:      # a snooze is not ringing
                 self.call_from_thread(self._quiet, g.coordinator.ip)
             elif not self._hushed(key):
                 found.append((key, g.coordinator.ip,        # named from the list shown
@@ -881,7 +881,7 @@ class AlarmApp(App):
     def _ring_write(self, screen: RingingScreen, verb: str, minutes: int) -> None:
         """`alarm stop`/`alarm snooze` on the group that is ringing, refused
         (as the CLI does) when nothing is going off any more."""
-        ip, name = screen.ip, screen.row["room"]
+        ip, name, key = screen.ip, screen.row["room"], screen.key     # what was asked of
         until = None
         try:
             running = clock.alarm_now(ip)       # as the CLI: events too, before any Stop
@@ -900,9 +900,9 @@ class AlarmApp(App):
                 done = True
         except Exception as exc:
             text, done = f"could not {verb} the alarm in {name}: {exc}", False
-        self.call_from_thread(self._ring_written, screen, text, done, until)
+        self.call_from_thread(self._ring_written, screen, key, text, done, until)
 
-    def _ring_written(self, screen: RingingScreen, text: str, done: bool,
+    def _ring_written(self, screen: RingingScreen, key: tuple, text: str, done: bool,
                       until: datetime | None) -> None:
         screen.busy = False
         self.say(text)
@@ -910,8 +910,9 @@ class AlarmApp(App):
             if screen.is_attached:
                 screen.say(text)
             return
-        self.hushed[screen.key] = until
-        self._hush_screen()
+        self.hushed[key] = until
+        if screen.key == key:           # the screen may have moved on to another room meanwhile
+            self._hush_screen()
 
     # ---- writing -----------------------------------------------------------
 

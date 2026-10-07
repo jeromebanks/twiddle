@@ -1177,3 +1177,47 @@ async def test_a_failed_read_before_x_or_z_is_said_not_a_crash(ring, monkeypatch
         assert ringing(app)
         assert "read timed out" in text(app.screen, "#ring-status")
     assert ring.av_writes == []
+
+
+@pilot
+async def test_the_events_decide_as_they_do_for_alarm_status(ring):
+    ring.running[ROAM_IP] = RUNNING
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        assert ringing(app)
+        # The properties still name the alarm, but the event says plainly: nothing rings.
+        ring.state[ROAM_IP] = {"AlarmRunning": "0", "SnoozeRunning": "0"}
+        await poll(app, pilot)
+        assert not ringing(app)
+        # A snooze is not a ringing alarm.
+        ring.state[ROAM_IP] = {"AlarmRunning": "0", "SnoozeRunning": "1"}
+        await poll(app, pilot)
+        assert not ringing(app)
+        # The event alone, with no properties answer.
+        del ring.running[ROAM_IP]
+        ring.state[ROAM_IP] = {"AlarmRunning": "1", "SnoozeRunning": "0"}
+        await poll(app, pilot)
+        assert ringing(app) and "Sonos Roam is ringing" in text(app.screen, "#ring-text")
+
+
+@pilot
+async def test_a_stop_finishing_after_the_screen_moved_on_hushes_only_what_it_stopped(
+        ring, monkeypatch):
+    ring.running[ROAM_IP] = RUNNING
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        stopped = app.ringing.key
+        other = ("10.0.0.13", "400", "2026-10-04 15:00:00")
+        real = clock.stop_alarm
+
+        def late(ip, alarm_id=None):                # polling moves the screen mid-write
+            app.call_from_thread(setattr, app.ringing, "key", other)
+            real(ip, alarm_id)
+        monkeypatch.setattr(clock, "stop_alarm", late)
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert ringing(app) and other not in app.hushed and stopped in app.hushed
