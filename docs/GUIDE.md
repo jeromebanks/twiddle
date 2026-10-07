@@ -260,8 +260,16 @@ goes back as the speaker gave it, so an alarm whose source twiddle doesn't
 recognise (iHeart, say) keeps it byte for byte, and one aimed at a bonded
 follower stays there unless you pick a room. Saving with nothing changed
 writes nothing. If the list changed since the editor opened, nothing is
-written and the list is read again. Try-now in the TUI is still to come;
-until then it is `alarm try`.
+written and the list is read again.
+
+`t` fires the highlighted alarm now, as `alarm try` (`RunAlarm`, journalled).
+While the TUI is open it asks each group every few seconds whether an alarm is
+going off (`GetRunningAlarmProperties`, a read); one that is takes the whole
+screen as a ringing alarm clock with the room and what plays. `x` turns it off
+(`Stop`) and `z` snoozes it (`SnoozeAlarm`, 10 minutes; `m` steps 5/10/15/30),
+both journalled like `alarm stop`/`alarm snooze` and refused if nothing is
+ringing any more. With `--dry-run`, `t`, `x` and `z` say what they would do
+and write neither speaker nor journal.
 
 ```bash
 uv run twiddle alarm add --room roam --time 07:15 --days weekdays --dry-run   # the alarm it would create

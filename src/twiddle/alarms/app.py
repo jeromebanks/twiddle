@@ -575,8 +575,8 @@ class RingingScreen(Screen):
         self.frame += 1
         self.query_one("#ring-art", Static).update(clock_art(self.frame))
 
-    def update(self, row: dict) -> None:
-        self.row = row
+    def update(self, row: dict, ip: str) -> None:
+        self.row, self.ip = row, ip         # what is shown and what x/z write to move together
         self.query_one("#ring-text", Static).update(ringing_text(row, self.minutes))
 
     def say(self, text: str) -> None:
@@ -862,7 +862,7 @@ class AlarmApp(App):
     def _ring(self, key: tuple, ip: str, row: dict) -> None:
         if self.ringing is not None and self.ringing.is_attached:
             self.ringing.key = key
-            self.ringing.update(row)
+            self.ringing.update(row, ip)
             return
         screen = RingingScreen(row, ip)
         screen.key = key
@@ -882,9 +882,9 @@ class AlarmApp(App):
         """`alarm stop`/`alarm snooze` on the group that is ringing, refused
         (as the CLI does) when nothing is going off any more."""
         ip, name = screen.ip, screen.row["room"]
+        until = None
         try:
             running = clock.alarm_now(ip)       # as the CLI: events too, before any Stop
-            until = None
             if running is None:
                 text, done = f"no alarm is going off in {name} any more", True
             elif self.dry_run:

@@ -1135,3 +1135,45 @@ async def test_an_alarm_made_since_the_list_was_read_is_named_once_it_is_read_ag
         await poll(app, pilot)
         assert alarm_cli.brief(app.shown.house, app.shown.alarm("34")) \
             in text(app.screen, "#ring-text")
+
+
+LIVING_IP = "10.0.0.13"
+
+
+@pytest.mark.parametrize("key, action", [("x", "Stop"), ("z", "SnoozeAlarm")])
+@pilot
+async def test_x_and_z_write_to_the_room_the_screen_shows(ring, key, action):
+    from tests.test_alarm_cli import LIVING
+    ring.alarms["400"] = dict(ring.alarms["2"], ID="400", RoomUUID=LIVING)
+    ring.children["400"] = []
+    ring.running[LIVING_IP] = dict(RUNNING, AlarmID="400")
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        assert "Living Room" in text(app.screen, "#ring-text")
+        ring.running[ROAM_IP] = RUNNING             # a second room rings; the display moves
+        del ring.running[LIVING_IP]
+        await poll(app, pilot)
+        assert "Sonos Roam" in text(app.screen, "#ring-text")
+        await pilot.press(key)
+        await settle(app, pilot)
+    assert [(ip, a) for ip, a, _ in ring.av_writes] == [(ROAM_IP, action)]
+
+
+@pytest.mark.parametrize("key", ["x", "z"])
+@pilot
+async def test_a_failed_read_before_x_or_z_is_said_not_a_crash(ring, monkeypatch, key):
+    ring.running[ROAM_IP] = RUNNING
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        def boom(ip, events=True):
+            raise TimeoutError("read timed out")
+        monkeypatch.setattr(clock, "alarm_now", boom)
+        await pilot.press(key)
+        await settle(app, pilot)
+        assert ringing(app)
+        assert "read timed out" in text(app.screen, "#ring-status")
+    assert ring.av_writes == []
