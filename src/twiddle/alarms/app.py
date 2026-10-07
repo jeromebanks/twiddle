@@ -228,6 +228,7 @@ class SourcePicker(ModalScreen[Picked | None]):
         self.source: sources.Source | None = None
         self.found: list[sources.Choice] = []
         self.status_text = ""
+        self.ticket = 0         # the latest search or build; an older one's answer is dropped
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
@@ -253,7 +254,7 @@ class SourcePicker(ModalScreen[Picked | None]):
         self.source = source
         if not source.takes_choice:
             self.say(f"building {source.title}…")
-            self.build(source, sources.Choice("", source.title))
+            self.build(source, sources.Choice("", source.title), self._next())
             return
         self.query_one("#picker-title", Static).update(
             f"{source.title}{' ' + alarm_cli.NEEDS_MAC if source.needs_mac else ''}: "
@@ -262,30 +263,36 @@ class SourcePicker(ModalScreen[Picked | None]):
         self.query_one("#query").display = True
         self.query_one("#choices").display = True
         self.query_one("#query", Input).focus()
-        self.search("")
+        self.search("", self._next())
 
     @on(Input.Submitted, "#query")
     def submitted(self, event: Input.Submitted) -> None:
         if self.source is not None:
-            self.search(event.value)
+            self.search(event.value, self._next())
 
-    def _back(self, fn, *args) -> None:
+    def _next(self) -> int:
+        self.ticket += 1
+        return self.ticket
+
+    def _back(self, ticket: int, fn, *args) -> None:
         """From a worker: `fn(*args)` on the UI thread, if this picker is still
-        the screen on top (escape may have closed it while a provider was slow)."""
+        the screen on top (escape may have closed it while a provider was slow)
+        and `ticket` is still the latest: a thread can't be stopped, so a
+        search or build that was overtaken finishes, and its answer is dropped."""
         def run():
-            if self.is_attached and self.app.screen is self:
+            if ticket == self.ticket and self.is_attached and self.app.screen is self:
                 fn(*args)
         self.app.call_from_thread(run)
 
-    @work(thread=True, exclusive=True, group="search")
-    def search(self, query: str) -> None:
-        self._back(self.say, f"searching {self.source.title}…" if query else "")
+    @work(thread=True, group="search")
+    def search(self, query: str, ticket: int) -> None:
+        self._back(ticket, self.say, f"searching {self.source.title}…" if query else "")
         try:
             found = self.source.choices(query)
         except Exception as exc:        # a provider's failure is said, never the app's end
-            self._back(self.say, str(exc) or type(exc).__name__)
+            self._back(ticket, self.say, str(exc) or type(exc).__name__)
             return
-        self._back(self.listed, query, found)
+        self._back(ticket, self.listed, query, found)
 
     def listed(self, query: str, found: list[sources.Choice]) -> None:
         self.found = found
@@ -305,18 +312,18 @@ class SourcePicker(ModalScreen[Picked | None]):
     def chosen(self, event: OptionList.OptionSelected) -> None:
         choice = self.found[int(event.option.id)]
         self.say(f"building {choice.title}…")
-        self.build(self.source, choice)
+        self.build(self.source, choice, self._next())
 
-    @work(thread=True, exclusive=True, group="build")
-    def build(self, source: sources.Source, choice: sources.Choice) -> None:
+    @work(thread=True, group="build")
+    def build(self, source: sources.Source, choice: sources.Choice, ticket: int) -> None:
         try:
             uri, metadata = source.build(choice.key)
             title = source.title if not source.takes_choice else \
                 f"{source.title} · {source.describe(uri, metadata) or choice.title}"
         except Exception as exc:
-            self._back(self.say, str(exc) or type(exc).__name__)
+            self._back(ticket, self.say, str(exc) or type(exc).__name__)
             return
-        self._back(self.dismiss, Picked(source, title, uri, metadata))
+        self._back(ticket, self.dismiss, Picked(source, title, uri, metadata))
 
     def action_cancel(self) -> None:
         self.dismiss(None)

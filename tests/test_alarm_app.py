@@ -11,7 +11,7 @@ import json
 import socket
 
 import pytest
-from textual.widgets import OptionList
+from textual.widgets import Input, OptionList
 
 from tests.test_alarm_cli import GONE, household
 from tests.test_alarm_clock import FakeClock
@@ -723,6 +723,72 @@ async def test_escape_while_a_source_is_still_building_keeps_the_editor_as_it_wa
         assert app.is_running and app.screen is ed and ed.picked is None
         assert str(ed.query_one("#source").render()) == "Sonos chime"
     assert fake.writes == []
+
+
+@pilot
+async def test_a_search_overtaken_by_a_newer_one_never_replaces_its_results(
+        fake, providers, monkeypatch):
+    import threading
+    slow = threading.Event()
+    real = providers["radio"].choices
+
+    def choices(query=""):
+        if query == "berkeley":
+            slow.wait(5)                     # the older search answers last
+        return real(query)
+    monkeypatch.setattr(providers["radio"], "choices", choices)
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await open_new(app, pilot)
+        picker = await choose(app, pilot, "radio")
+        query = picker.query_one("#query", Input)
+        query.focus()
+        await pilot.press(*"berkeley", "enter")
+        await pilot.pause()
+        query.value = ""
+        query.focus()
+        await pilot.press(*"seattle", "enter")
+        await pilot.pause(0.2)
+        assert [c.key for c in picker.found] == ["kexp"]
+        slow.set()
+        await settle(app, pilot)
+        assert [c.key for c in picker.found] == ["kexp"]
+        assert [str(o.prompt) for o in picker.query_one("#choices", OptionList).options] == \
+            ["KEXP 90.3 Seattle"]
+
+
+@pilot
+async def test_a_build_overtaken_by_a_newer_choice_never_wins(fake, providers, monkeypatch):
+    import threading
+    gates = {"kalx": threading.Event(), "kexp": threading.Event()}
+    real = providers["radio"].build
+
+    def build(choice=""):
+        gates[choice].wait(5)
+        return real(choice)
+    monkeypatch.setattr(providers["radio"], "build", build)
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        ed = await open_new(app, pilot)
+        picker = await choose(app, pilot, "radio")
+        found = picker.query_one("#choices", OptionList)
+        found.focus()
+        found.highlighted = 0
+        await pilot.press("enter")              # kalx, slowly
+        await pilot.pause()
+        found.highlighted = 1
+        await pilot.press("enter")              # then kexp, more slowly still
+        await pilot.pause()
+        gates["kalx"].set()                     # the overtaken one answers first
+        await pilot.pause(0.3)
+        assert app.screen is picker             # and is dropped
+        gates["kexp"].set()
+        await settle(app, pilot)
+        assert app.screen is ed
+        assert ed.picked.uri == "x-fake-radio:kexp"
+        assert str(ed.query_one("#source").render()) == "dial station · KEXP 90.3 Seattle"
 
 
 @pilot
