@@ -39,6 +39,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.markup import escape
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, Input, OptionList, Select, Static
 from textual.widgets.option_list import Option
@@ -205,32 +206,35 @@ def duration_seed(duration: str) -> str:
 
 
 _CLOCK = r"""
-   {a}  _______  {b}
- {w} (  .-""-.  ) {w}
-   {b} /  /  12   \  \ {a}
-        |    |    |
-        | 9  o──3 |
-        |         |
-         \   6   /
-          '-...-'
-          /     \
-     ~~~~~~~~~~~~~~~~~
+   {l}  __  {h}  __  {r}
+      (__)___(__)
+       /  12   \
+      |    |    |
+      | 9  o──3 |
+      |         |
+       \   6   /
+        '-...-'
+        /     \
 """.strip("\n")
 
 
 def clock_art(frame: int) -> str:
-    """The ringing alarm clock; `frame` swings its bells and its sound."""
-    a, b, w = ("\\", "/", "──") if frame % 2 else ("/", "\\", "  ")
-    return _CLOCK.replace("{a}", a).replace("{b}", b).replace("{w}", w)
+    """The ringing alarm clock, every line centred on one column; `frame`
+    swings its hammer and its sound, never moving a line's ends."""
+    l, h, r = ("((", "\\", "))") if frame % 2 else ("( ", "/", " )")
+    return _CLOCK.replace("{l}", l).replace("{h}", h).replace("{r}", r)
 
 
 def ringing_text(row: dict, minutes: int) -> str:
-    """What the ringing screen says beside the clock."""
-    what = row.get("what") or "an alarm"
+    """What the ringing screen says beside the clock, as markup: off, snooze
+    and its length are links to the screen's own actions (the keys' guards)."""
+    what = escape(row.get("what") or "an alarm")
     since = f" · since {row['logged_start'][11:16]}" if row.get("logged_start") else ""
     snooze = "snoozed" if row.get("snoozed") else "is ringing"
-    return (f"⏰  {row['room']} {snooze}\n{what}{since}\n\n"
-            f"[ x  off ]   [ z  snooze {minutes}m ▾ ]")
+    return (f"⏰  {escape(row['room'])} {snooze}\n{what}{escape(since)}\n\n"
+            r"[@click=screen.stop]\[ x  off ][/]   "
+            r"[@click=screen.snooze]\[ z  snooze[/] "
+            f"[@click=screen.length]{minutes}m ▾[/] ]")
 
 
 @dataclass
@@ -563,8 +567,8 @@ class RingingScreen(Screen):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="ring"):
-            yield Static(clock_art(0), id="ring-art")
-            yield Static(ringing_text(self.row, self.minutes), id="ring-text", markup=False)
+            yield Static(clock_art(0), id="ring-art", markup=False)
+            yield Static(ringing_text(self.row, self.minutes), id="ring-text")
         yield Static(RING_KEYS, id="ring-keys")
         yield Static("", id="ring-status")
 
@@ -622,8 +626,8 @@ class AlarmApp(App):
     #buttons { height: auto; align: right middle; }
     RingingScreen { align: center middle; }
     #ring { height: auto; width: auto; }
-    #ring-art { width: 40; color: $warning; }
-    #ring-text { width: 50; padding: 4 2; text-style: bold; }
+    #ring-art { width: auto; padding: 0 2; color: $warning; }
+    #ring-text { width: 50; padding: 2 2; text-style: bold; }
     #ring-keys, #ring-status { width: 100%; content-align: center middle; }
     """
     BINDINGS = [

@@ -268,8 +268,11 @@ going off (`GetRunningAlarmProperties`, a read); one that is takes the whole
 screen as a ringing alarm clock with the room and what plays. `x` turns it off
 (`Stop`) and `z` snoozes it (`SnoozeAlarm`, 10 minutes; `m` steps 5/10/15/30),
 both journalled like `alarm stop`/`alarm snooze` and refused if nothing is
-ringing any more. With `--dry-run`, `t`, `x` and `z` say what they would do
-and write neither speaker nor journal.
+ringing any more. A click on `[ x  off ]`, on `snooze` or on its length does
+the same as `x`, `z` or `m`, through the same checks (a second click while one
+is being written writes nothing), and takes no focus. With `--dry-run`, `t`,
+`x` and `z` (and those clicks) say what they would do and write neither
+speaker nor journal.
 
 ```bash
 uv run twiddle alarm add --room roam --time 07:15 --days weekdays --dry-run   # the alarm it would create
