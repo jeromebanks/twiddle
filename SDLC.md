@@ -344,8 +344,12 @@ the agent's last comment, so one posted during a demo never hides the poster's a
 
 `codex-eval --status` prints the fingerprint, `codex --version` and that pair's result. It is
 read-only and never runs `codex exec`. Before each round, `codex-review` fingerprints the review
-logic that is running it (the checkout the command runs from, which in a slice is the reviewed
-worktree). It warns when that pair has no passing result, and the round still runs.
+logic that round actually runs under. The files the tool reads (the prompts, its code, the
+fixtures) come from the checkout the command runs from. The files Codex reads (`review-rules.md`,
+`plan-schema.md`, any `AGENTS.md`, and the skills in fingerprinted mode) come from the checkout
+Codex runs in: the slice's worktree, the scratch checkout of `main` for a plan, or the epic's
+worktree. The settings are the ones the round runs with, a `--config` of its own included. It
+warns when that pair has no passing result, and the round still runs.
 
 **Round limits** (`.sdlc/config.json`): `max_pr_rounds` (default 5) is how many Codex rounds
 that ask for changes a slice PR, or a milestone, may take before it escalates.

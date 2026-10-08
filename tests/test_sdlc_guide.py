@@ -122,3 +122,37 @@ def test_sdlc_py_neither_fills_a_prompt_nor_chooses_what_goes_in_it():
     used = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)} | {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
     assert not used & {"fill_prompt", "fill_pr_prompt", "PR_PROMPT", "PLAN_PROMPT", "MILESTONE_PROMPT"}, \
         "sdlc.py reads or fills a prompt template itself"
+
+
+def test_what_a_round_is_handed_comes_from_codex_review():
+    """Each `codex_review.prepare_*_round` call in sdlc.py is handed its rounds (and a milestone's owed slices)
+    straight from a codex_review function: no filter or selection of sdlc.py's own sits in between."""
+    import ast
+    import inspect
+    from tools import codex_review
+    tree = ast.parse(SOURCE)
+    checked = 0
+    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+        assigned = {}
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    for name in (t.elts if isinstance(t, ast.Tuple) else [t]):
+                        if isinstance(name, ast.Name):
+                            assigned.setdefault(name.id, []).append(node.value)
+        for call in [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                     and n.func.attr.startswith("prepare_") and getattr(n.func.value, "id", "") == "codex_review"]:
+            params = list(inspect.signature(getattr(codex_review, call.func.attr)).parameters)
+            given = dict(zip(params, call.args)) | {k.arg: k.value for k in call.keywords}
+            for param in ("rounds", "owed"):
+                if param not in given:
+                    continue
+                arg = given[param]
+                values = assigned.get(arg.id, []) if isinstance(arg, ast.Name) else [arg]
+                assert values, f"{fn.name}: `{param}` handed to {call.func.attr} isn't assigned in it"
+                for v in values:
+                    assert isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute) and \
+                        getattr(v.func.value, "id", "") == "codex_review", \
+                        f"{fn.name}: `{param}` for {call.func.attr} is chosen in sdlc.py ({ast.unparse(v)})"
+                checked += 1
+    assert checked >= 4          # the PR's, the plan's and the milestone's rounds, and the milestone's owed slices

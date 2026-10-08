@@ -167,6 +167,28 @@ def test_fingerprinted_mode_covers_the_repos_skills_and_switching_modes_changes_
     assert fp(repo) == suppressed                  # suppressed: the skills aren't offered, so they aren't inputs
 
 
+def test_what_codex_reads_comes_from_the_checkout_it_reviews(repo, tmp_path):
+    """A plan round runs in a scratch checkout of main, a milestone's in the epic's worktree: the rules, the
+    plan schema and any AGENTS.md Codex reads there are that checkout's, whatever the tool runs from."""
+    other = tmp_path / "other"
+    git(repo, "worktree", "add", "-q", "--detach", str(other), "HEAD")
+    tool = codex_eval.Worktree(repo)
+    same = codex_eval.fingerprint(tool, codex_eval.Worktree(other))
+    assert same == codex_eval.fingerprint(tool)
+    for name in ("AGENTS.md", ".agents/skills/review-rules.md", ".agents/skills/plan-issue/references/plan-schema.md"):
+        f = other / name
+        old = f.read_bytes() if f.exists() else None
+        f.write_text("different\n")
+        assert codex_eval.fingerprint(tool, codex_eval.Worktree(other)) != same, f"{name} in Codex's checkout"
+        f.unlink() if old is None else f.write_bytes(old)
+    # what the tool reads (a prompt, its code) comes from where it runs, not from Codex's checkout
+    prompt = other / ".agents/skills/work-slice/references/codex-pr-prompt.md"
+    prompt.write_text("not the prompt the tool filled\n")
+    assert codex_eval.fingerprint(tool, codex_eval.Worktree(other)) == same
+    (repo / ".agents/skills/work-slice/references/codex-pr-prompt.md").write_text("the tool's own prompt changed\n")
+    assert codex_eval.fingerprint(tool, codex_eval.Worktree(other)) != same
+
+
 def test_a_change_to_the_evidence_selection_voids_a_pass(repo):
     """What a round is handed is chosen in codex_review.py, so a change there is a change of review logic."""
     version = "0.161.0"
@@ -352,7 +374,8 @@ def test_codex_review_warns_when_the_pair_has_no_pass_and_still_runs(tmp_path, m
     assert c.run() == 0 and c.report().is_file()                # a bundle with no `eval`: no results
     err = capsys.readouterr().err
     assert "no passing eval" in err and "codex-eval --status" in err and "9.9.9-test" in err
-    here = codex_eval.fingerprint(codex_eval.Worktree(ROOT))
+    # the tool's files from the checkout running it, Codex's from the one it reviews, and the round's own settings
+    here = codex_eval.fingerprint(codex_eval.Worktree(ROOT), codex_eval.Worktree(c.wt), SETTINGS)
     for outcome in ("fail", "deferred"):
         assert run_with_ledger(c, [result_comment(1, outcome, fingerprint=here, version="9.9.9-test")]) == 0
         assert "no passing eval" in capsys.readouterr().err and c.report().is_file()
@@ -361,6 +384,26 @@ def test_codex_review_warns_when_the_pair_has_no_pass_and_still_runs(tmp_path, m
     assert run_with_ledger(c, [result_comment(1, "pass", fingerprint=here, version="9.9.9-test")]) == 0
     assert "no passing eval" not in capsys.readouterr().err
     assert c.run("--dry-run") == 0 and "no passing eval" not in capsys.readouterr().err   # nothing runs, no warning
+    # the same pass doesn't count for a round run with other settings (`--config`): a model, or the skills mode
+    for other in ({**SETTINGS, "model": "another-model"}, {**SETTINGS, "skills": "fingerprinted"}):
+        cfg = json.loads(c.config.read_text())
+        cfg["codex"] = other
+        c.config.write_text(json.dumps(cfg))
+        assert run_with_ledger(c, [result_comment(1, "pass", fingerprint=here, version="9.9.9-test")]) == 0
+        assert "no passing eval" in capsys.readouterr().err
+
+
+def test_status_fingerprints_the_settings_it_was_given(tmp_path, monkeypatch, capsys):
+    install(tmp_path, monkeypatch)
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"eval": [], "trusted": [OWNER]}))
+    printed = []
+    for settings in (CONFIG["codex"], {**CONFIG["codex"], "model": "another-model"}):
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({**CONFIG, "codex": settings}))
+        assert sdlc.main(["--config", str(cfg), "codex-eval", "--status", "--from-file", str(ledger)]) == 0
+        printed.append(re.search(r"review logic: (\w+)", capsys.readouterr().out).group(1))
+    assert printed[0] == codex_eval.short(codex_eval.fingerprint(codex_eval.Worktree(ROOT))) != printed[1]
 
 
 # --- skills: suppressed, and checked in the session log --------------------------------------------
@@ -427,6 +470,13 @@ def test_check_session_reads_the_shapes_it_knows(tmp_path):
     odd = {**STATE, "skills": {"includeInstructions": "no"}}
     assert codex_review.check_session(write_log(log, [{"type": "world_state", "payload": {"full": True, "state": odd}}]),
                                       wt, "suppressed")[0] == "unknown"
+    # a full state names every field the check reads; a record of another shape is unknown, never an exception
+    for state in ({k: v for k, v in STATE.items() if k != "host_skills"}, {k: v for k, v in STATE.items() if k != "agents_md"}):
+        assert codex_review.check_session(write_log(log, [{"type": "world_state", "payload": {"full": True, "state": state}}]),
+                                          wt, "suppressed")[0] == "unknown"
+    for record in ({"type": "world_state", "payload": [1, 2]}, {"type": "world_state", "payload": {"full": True, "state": []}},
+                   {"type": "world_state"}):
+        assert codex_review.check_session(write_log(log, ok + [record]), wt, "suppressed")[0] == "unknown"
     # a run killed on its timeout may leave half a line: only then is it skipped
     assert codex_review.check_session(write_log(log, ok, tail='{"type": "resp'), wt, "suppressed", cut_short=True)[0] == "ok"
     assert codex_review.check_session(log, wt, "suppressed")[0] == "unknown"

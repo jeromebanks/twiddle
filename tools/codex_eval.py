@@ -40,6 +40,8 @@ SKILLS = ROOT / ".agents" / "skills"
 FILES = tuple(p.relative_to(ROOT).as_posix() for p in (
     codex_review.PR_PROMPT, codex_review.PLAN_PROMPT, codex_review.MILESTONE_PROMPT, RULES, PLAN_SCHEMA,
     Path(codex_review.__file__).resolve(), Path(__file__).resolve()))
+# of those, what Codex reads from the checkout it reviews in, by the path a prompt gives it
+CHECKOUT_FILES = tuple(p.relative_to(ROOT).as_posix() for p in (RULES, PLAN_SCHEMA))
 CONFIG_INPUT = "config:codex"          # `.sdlc/config.json`'s `codex` section, as canonical JSON
 # repository instruction files Codex loads on its own, wherever they are: inputs whether or not one exists
 INSTRUCTION_FILES = ("AGENTS.md", "AGENTS.override.md")
@@ -140,24 +142,39 @@ def is_input(name: str, mode: Any) -> bool:
                 and name.endswith("/SKILL.md")))
 
 
-def inputs(tree: Tree) -> list[tuple[str, bytes | None]]:
+def read_by_codex(name: str) -> bool:
+    """Whether Codex itself reads this input from the checkout it reviews in (the rules, the plan schema, the
+    instruction files and skills it loads), rather than the tool reading it from the checkout it runs from."""
+    return name in CHECKOUT_FILES or not (name in FILES or name.startswith(FIXTURES.relative_to(ROOT).as_posix() + "/"))
+
+
+def inputs(tree: Tree, checkout: Tree | None = None, section: Any = ...) -> list[tuple[str, bytes | None]]:
     """(name, content) for every input, sorted by name: the fixed files (None when absent), the `codex` section,
     and whatever the globs find (every file under `tests/codex_eval/`, every `AGENTS.md`/`AGENTS.override.md`,
-    and in `fingerprinted` mode every `.agents/skills/**/SKILL.md`)."""
-    section = codex_section(tree)
+    and in `fingerprinted` mode every `.agents/skills/**/SKILL.md`).
+
+    What the tool reads (the prompts, its code, the fixtures) comes from `tree`, the code running the round;
+    what Codex reads (`read_by_codex`) from `checkout`, where it runs (a slice's worktree, a scratch checkout of
+    main, the epic's worktree), `tree` itself by default. `section` is the `codex` settings the round runs with
+    (a `--config` of its own), by default `tree`'s."""
+    checkout = checkout or tree
+    section = codex_section(tree) if section is ... else section
     mode = section.get("skills") if isinstance(section, dict) else None
-    found = {n: tree.read(n) for n in tree.names() if n not in FILES and is_input(n, mode)}
-    found = {n: data for n, data in found.items() if data is not None}
-    found.update({n: tree.read(n) for n in FILES})
+    found = {}
+    for src, mine in ((tree, False), (checkout, True)):
+        for n in src.names():
+            if n not in FILES and is_input(n, mode) and read_by_codex(n) == mine and (data := src.read(n)) is not None:
+                found[n] = data
+    found.update({n: (checkout if read_by_codex(n) else tree).read(n) for n in FILES})
     canonical = json.dumps(section, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     found[CONFIG_INPUT] = canonical.encode() if section is not None else None
     return sorted(found.items())
 
 
-def fingerprint(tree: Tree) -> str:
-    """sha256 over the inputs, each name and content length-prefixed, an absent one marked as such."""
+def fingerprint(tree: Tree, checkout: Tree | None = None, section: Any = ...) -> str:
+    """sha256 over the inputs (`inputs`), each name and content length-prefixed, an absent one marked as such."""
     h = hashlib.sha256()
-    for name, data in inputs(tree):
+    for name, data in inputs(tree, checkout, section):
         n = name.encode()
         h.update(b"%d:%s" % (len(n), n))
         h.update(b"-" if data is None else b"%d:%s" % (len(data), data))

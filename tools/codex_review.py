@@ -178,6 +178,13 @@ def show_command(cmd: list[str], wt: Path, prompt_file: Path) -> str:
 
 # --- the prompt ---------------------------------------------------------------
 
+def recorded_rounds(marked: list[tuple[dict[str, str], dict[str, Any]]], kind: str, **match: str) -> list[dict[str, Any]]:
+    """The recorded rounds of one kind (`pr-review`, `ship-review`; and milestone, by `match`), oldest first, as
+    `latest_response` reads them, from the (marker, comment) pairs `sdlc.py` read from trusted authors."""
+    return [{"verdict": mk.get("verdict"), "body": c.get("body", ""), "response": mk.get("response")}
+            for mk, c in marked if mk.get("kind") == kind and all(mk.get(k) == v for k, v in match.items())]
+
+
 def latest_response(rounds: list[dict[str, Any]], record: str = "pr-review") -> tuple[int, str | None]:
     """(the latest recorded round's number, its "Claude's response") for the next round's prompt.
 
@@ -564,10 +571,20 @@ def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tu
         except ValueError:
             if not (cut_short and i == len(lines) - 1):
                 return "unknown", f"line {i + 1} of its session log {log} isn't JSON"
-    states = [r["payload"]["state"] for r in records if isinstance(r, dict) and r.get("type") == "world_state"
-              and isinstance(r.get("payload"), dict) and isinstance(r["payload"].get("state"), dict)]
-    if not any(isinstance(r, dict) and r.get("type") == "world_state" and (r.get("payload") or {}).get("full")
-               for r in records):
+    states, full = [], 0
+    for r in records:
+        if not (isinstance(r, dict) and r.get("type") == "world_state"):
+            continue
+        payload = r.get("payload")
+        if not (isinstance(payload, dict) and isinstance(payload.get("state"), dict)):
+            return "unknown", f"its session log {log} has a `world_state` record of a shape this tool doesn't know"
+        st = payload["state"]
+        if payload.get("full"):          # a full state names all of these; a partial one only what changed
+            full += 1
+            if missing := [k for k in ("skills", "host_skills", "agents_md") if k not in st]:
+                return "unknown", f"its session log {log} has a full `world_state` without {', '.join(missing)}"
+        states.append(st)
+    if not full:
         return "unknown", f"its session log {log} has no full `world_state` record: not a shape this tool knows"
     offered = [r for r in records if isinstance(r, dict) and r.get("type") == "response_item"
                and isinstance(r.get("payload"), dict) and r["payload"].get("role") == "developer"
@@ -597,8 +614,6 @@ def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tu
         return "offered", (f"Codex offered skills although `codex.skills` is `suppressed` (session log {log}): "
                            "the generated config's `[skills] include_instructions = false` didn't hold for this "
                            "`codex` version")
-    if not flags:
-        return "unknown", f"its session log {log} doesn't say whether skills were offered (no `skills` state)"
     return "ok", ""
 
 

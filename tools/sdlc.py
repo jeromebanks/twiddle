@@ -2525,12 +2525,6 @@ def review_body(head: str, summary: str, report: str, response: str) -> tuple[st
     return body, {"response": "1" if response else "0", **prov}
 
 
-def recorded_rounds(comments: list[dict[str, Any]], trusted: set[str], kind: str, **match: str) -> list[dict[str, Any]]:
-    """The recorded rounds of one kind (and milestone), oldest first, as `codex_review.latest_response` reads them."""
-    return [{"verdict": mk.get("verdict"), "body": c.get("body", ""), "response": mk.get("response")}
-            for mk, c in _marked(comments, trusted) if mk.get("kind") == kind and all(mk.get(k) == v for k, v in match.items())]
-
-
 def wasted_round(spent: int, limit: int, approved: bool, what: str, head: str, escalate: str, onward: str) -> None:
     """Refuse a `codex-review` round that `pr-review` / `ship-review` would refuse, or that changes nothing: the
     change rounds are spent, or Codex already approved this exact head. Checked before Codex starts, so no run is paid for."""
@@ -2696,20 +2690,21 @@ def record_eval(result: dict[str, Any], config: dict[str, Any], dry_run: bool = 
 def command_codex_eval(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """The review logic's fingerprint, `codex --version`, and the eval result recorded for that pair (if any).
     Read-only: it runs `codex --version` at most, never `codex exec`."""
-    tree = codex_eval.Worktree(ROOT)
-    fp = codex_eval.fingerprint(tree)
-    mode = (codex_eval.codex_section(tree) or {}).get("skills", "?")
+    tree, section = codex_eval.Worktree(ROOT), config.get("codex")     # the settings a round here would run with
+    fp = codex_eval.fingerprint(tree, section=section)
+    mode = (section if isinstance(section, dict) else {}).get("skills", "?")
     version = codex_eval.current_version()
     try:
         state = codex_eval.describe(codex_eval.pair_result(eval_ledger(args, config), fp, version)) if version \
             else "no `codex` to pair it with"
     except (SdlcError, OSError, ValueError) as exc:     # the pair is still worth printing
         state = f"couldn't read the recorded results ({exc})"
-    print(f"review logic: {codex_eval.short(fp)}  ({len(codex_eval.inputs(tree))} inputs; skills {mode})\n"
+    listed = codex_eval.inputs(tree, section=section)
+    print(f"review logic: {codex_eval.short(fp)}  ({len(listed)} inputs; skills {mode})\n"
           f"codex:        {version or 'not found on PATH'}\n"
           f"eval:         {state}")
     if args.inputs:
-        for name, data in codex_eval.inputs(tree):
+        for name, data in listed:
             print(f"  {name}" + ("  (absent)" if data is None else ""))
     return 0
 
@@ -2718,7 +2713,8 @@ def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, h
                     settings: dict[str, Any], dry_run: bool, record: str, ledger=None) -> int:
     """Print what the round runs, then run it (or, with --dry-run, print the prompt). `ledger()` gives the eval
     results: before Codex runs, a warning says when the review logic running this round (`ROOT`'s) has no
-    passing eval with this `codex` version. The round runs either way."""
+    passing eval with this `codex` version: the files the tool reads from `ROOT`, those Codex reads from `wt`, and
+    the `settings` the round runs with. The round runs either way."""
     cmd = codex_review.codex_command(settings, prompt)
     print(f"{title}\n"
           + "".join(f"  {k}: {v}\n" for k, v in files.items())
@@ -2730,7 +2726,7 @@ def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, h
         return 0
     def check_eval(version: str) -> None:
         try:
-            fp = codex_eval.fingerprint(codex_eval.Worktree(ROOT))
+            fp = codex_eval.fingerprint(codex_eval.Worktree(ROOT), codex_eval.Worktree(wt), settings)
             result = codex_eval.pair_result(ledger() if ledger else [], fp, version)
         except (SdlcError, OSError, ValueError) as exc:
             print(f"warning: couldn't check the review eval ({exc}); the review still runs", file=sys.stderr)
@@ -2770,7 +2766,7 @@ def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: 
     git(["fetch", "origin", epic_branch(epic)], cwd=wt, check=False)
     if not git(["rev-parse", "--verify", "--quiet", base], cwd=wt, check=False):
         raise SdlcError(f"the worktree has no {base} to diff against: `git fetch origin {epic_branch(epic)}`")
-    rounds = recorded_rounds(comments, trusted, "pr-review")
+    rounds = codex_review.recorded_rounds(_marked(comments, trusted), "pr-review")
     prompt, files = codex_review.prepare_pr_round(pr, slice_issue, epic, rounds, out)
     return run_codex_round(f"PR #{pr['number']} round {len(rounds) + 1} on {head[:12]}", prompt, files, wt, head, out,
                            settings, args.dry_run, f"pr-review {pr['number']} --report {out / 'codex.md'} --response <your answers>",
@@ -2877,7 +2873,7 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
     if already(title):
         raise SdlcError(f"{title} was built straight onto {config.get('default_branch', 'main')}: "
                         f"there is nothing of it to review; `ship {n}` records it as shipped")
-    rounds = recorded_rounds(bundle["comments"], trusted, "ship-review", milestone=key)
+    rounds = codex_review.recorded_rounds(_marked(bundle["comments"], trusted), "ship-review", milestone=key)
     slices = slices(title)
     out = review_scratch(args, f"milestone-{n}", wt)
     checked = codex_review.check_worktree(wt, head, f"{epic_branch(n)}'s head", f"`sync {n}`")
