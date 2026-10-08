@@ -548,6 +548,13 @@ def codex_version(env: dict[str, str]) -> str:
 # That is the shape of codex-cli 0.161.0's logs; anything else is "unknown", and a round doesn't trust it.
 
 SKILLS_MESSAGE = "<skills_instructions>"
+INSTRUCTION_FILES = ("AGENTS.md", "AGENTS.override.md")    # what Codex loads from a directory as `agents_md`
+
+
+def _ignored(path: Path, wt: Path) -> bool:
+    """An existing file git ignores in the checkout `wt` (`.gitignore`, `.git/info/exclude`, a global ignore)."""
+    return path.is_file() and subprocess.run(["git", "check-ignore", "-q", str(path)], cwd=wt,
+                                             capture_output=True).returncode == 0
 
 
 def session_logs(home: Path) -> set[Path]:
@@ -555,11 +562,12 @@ def session_logs(home: Path) -> set[Path]:
 
 
 def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tuple[str, str]:
-    """("ok" | "offered" | "unknown", why) for one run's session log, against the skills `mode`.
+    """("ok" | "offered" | "unknown" | "incomplete", why) for one run's session log, against the skills `mode`.
 
     "offered": skills were offered in `suppressed` mode, or Codex loaded an instruction file from outside the
     reviewed checkout (both modes): a review the repo's settings don't describe. "unknown": the log isn't the
-    shape this reads. A run `cut_short` (killed on its timeout) may leave a half-written last line; it is skipped."""
+    shape this reads. A run `cut_short` (killed on its timeout) may leave a half-written last line, which is
+    skipped, or no full `world_state` yet: "incomplete", the only result a retry may follow."""
     try:
         lines = log.read_text().splitlines()
     except (OSError, UnicodeDecodeError) as exc:
@@ -585,7 +593,8 @@ def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tu
                 return "unknown", f"its session log {log} has a full `world_state` without {', '.join(missing)}"
         states.append(st)
     if not full:
-        return "unknown", f"its session log {log} has no full `world_state` record: not a shape this tool knows"
+        # a run killed on its timeout can stop before Codex writes it: incomplete, not a shape of its own
+        return ("incomplete" if cut_short else "unknown"), f"its session log {log} has no full `world_state` record"
     offered = [r for r in records if isinstance(r, dict) and r.get("type") == "response_item"
                and isinstance(r.get("payload"), dict) and r["payload"].get("role") == "developer"
                and SKILLS_MESSAGE in json.dumps(r["payload"].get("content"))]
@@ -608,6 +617,10 @@ def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tu
         if not Path(a["directory"]).resolve().is_relative_to(wt.resolve()):
             return "offered", (f"Codex loaded the instructions in {a['directory']}, outside the reviewed checkout "
                                f"{wt} (session log {log})")
+        if ignored := [n for n in INSTRUCTION_FILES if _ignored(Path(a["directory"]) / n, wt)]:
+            return "offered", (f"Codex loaded the instructions in {a['directory']}, where git ignores "
+                               f"{', '.join(ignored)}: an ignored file isn't in the review logic's fingerprint "
+                               f"(session log {log})")
     if mode == "fingerprinted":
         return "ok", ""
     if offered or any(flags):
@@ -620,6 +633,8 @@ def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tu
 def check_run(home: Path, before: set[Path], wt: Path, mode: str, cut_short: bool = False) -> tuple[str, str]:
     """`check_session` on the one log this run added under `home`."""
     new = sorted(session_logs(home) - before)
+    if not new and cut_short:
+        return "incomplete", f"the run was killed before it wrote a session log under {home / 'sessions'}"
     if len(new) != 1:
         return "unknown", (f"the run left {len(new)} session logs under {home / 'sessions'}, not one: "
                            "what it was given can't be checked")
@@ -760,7 +775,7 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
                 raise ReviewError("the worktree changed while Codex ran (" + ", ".join(dirty[:8])
                                   + "): it didn't review the pushed head, so no report was saved. Restore it and run again")
             seen, why = check_run(home, before, wt, settings["skills"], cut_short=output is None)
-            if seen == "offered":         # the next attempt would be given the same: not a review the repo describes
+            if seen not in ("ok", "incomplete"):    # the next attempt would be given (or log) the same
                 return _unvouched(why, err, log)
             if output is None:
                 log(f"attempt {attempt}: Codex timed out after {timeout:g}s")
@@ -770,8 +785,6 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
             except ReviewError as exc:
                 log(f"attempt {attempt}: {exc}")
                 continue
-            if seen != "ok":
-                return _unvouched(why, err, log)
             report.write_text(stamp(output, head, prov))
             return 0, report
     log(f"Codex gave no verdict in {ATTEMPTS} attempts (exit {UNAVAILABLE}: `review-defer`). "

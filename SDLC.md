@@ -320,9 +320,10 @@ and the repo's own `.agents/skills`, and its session log showed `skills.includeI
   writes its session log, and with the setting that log has no `<skills_instructions>` message and
   `skills.includeInstructions: false`. Without the setting it has both. After every run the tool
   reads the run's session log (`codex_review.check_session`). If skills were offered, or Codex
-  loaded an `AGENTS.md` from outside the reviewed checkout, or the log isn't a shape the tool knows
+  loaded an `AGENTS.md` from outside the reviewed checkout or one git ignores there (an ignored
+  file is never in a commit, so it can't be an input), or the log isn't a shape the tool knows
   (a new `codex` may change it), the round saves no report and exits 3, with the reason at the
-  end of `codex.err`. A `codex` that ignores the setting can't produce a review that looks like
+  end of `codex.err`. Only a run killed on its timeout before it wrote its state is retried. A `codex` that ignores the setting can't produce a review that looks like
   one that ran without skills. For the same reason `codex.flags` may not pass `--ephemeral`, which
   stops the log being written. The first time this exit happens after a `codex` upgrade, look in
   `<out>/codex-home/sessions/` before deferring: the tool may need to learn the new shape.

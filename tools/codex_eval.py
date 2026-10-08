@@ -44,7 +44,7 @@ FILES = tuple(p.relative_to(ROOT).as_posix() for p in (
 CHECKOUT_FILES = tuple(p.relative_to(ROOT).as_posix() for p in (RULES, PLAN_SCHEMA))
 CONFIG_INPUT = "config:codex"          # `.sdlc/config.json`'s `codex` section, as canonical JSON
 # repository instruction files Codex loads on its own, wherever they are: inputs whether or not one exists
-INSTRUCTION_FILES = ("AGENTS.md", "AGENTS.override.md")
+INSTRUCTION_FILES = codex_review.INSTRUCTION_FILES
 # what a prompt names, or the runner reads, that is deliberately not an input, and why
 EXCLUDED = {
     "CLAUDE.md": "knowledge of the code under review: the plan prompt names it for its Layout table only, and "

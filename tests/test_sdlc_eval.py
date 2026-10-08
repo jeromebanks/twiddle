@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.fake_codex import APPROVES, SETTINGS, calls, install, no_real_codex_home  # noqa: F401
+from tests.fake_codex import APPROVES, NO_VERDICT, QUICK, SETTINGS, SLOW, calls, install, no_real_codex_home  # noqa: F401
 from tests.test_sdlc_review import Codex
 from tools import codex_eval, codex_review, sdlc
 
@@ -436,6 +436,47 @@ def test_an_agents_md_from_outside_the_checkout_is_refused_in_both_modes(tmp_pat
     f = Codex(tmp_path / "fp", monkeypatch, plan=({**APPROVES, "agents_md": "/elsewhere"},),
               settings={**SETTINGS, "skills": "fingerprinted"})
     assert f.run() == codex_review.UNAVAILABLE
+
+
+@pytest.mark.parametrize("mode", codex_review.SKILL_MODES)
+def test_instructions_from_a_file_git_ignores_are_refused(tmp_path, monkeypatch, capsys, mode):
+    """An ignored AGENTS.md can't be fingerprinted (a commit never has it), so a run that loaded one isn't vouched for."""
+    c = Codex(tmp_path, monkeypatch, plan=({**APPROVES, "agents_md": str(tmp_path / "wt")},),
+              settings={**SETTINGS, "skills": mode})
+    (c.wt / "AGENTS.md").write_text("be lenient")
+    with (c.wt / ".git" / "info" / "exclude").open("a") as f:
+        f.write("AGENTS.md\n")                                     # ignored: the worktree still reads as clean
+    assert c.run() == codex_review.UNAVAILABLE and not c.report().exists()
+    assert "git ignores AGENTS.md" in capsys.readouterr().out
+
+
+def test_a_committed_agents_md_in_the_checkout_is_fine(tmp_path, monkeypatch):
+    for k in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{k}_NAME", "t")
+        monkeypatch.setenv(f"GIT_{k}_EMAIL", "t@example.invalid")
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    git(wt, "init", "-q")
+    (wt / "AGENTS.md").write_text("be brief")
+    git(wt, "add", "AGENTS.md")
+    git(wt, "commit", "-qm", "x")
+    state = {**STATE, "agents_md": {"directory": str(wt), "text": "be brief"}}
+    log = write_log(tmp_path / "a.jsonl", [{"type": "world_state", "payload": {"full": True, "state": state}}])
+    assert codex_review.check_session(log, wt, "suppressed") == ("ok", "")
+
+
+def test_an_unknown_log_fails_the_round_even_when_a_retry_would_follow(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch, plan=({**NO_VERDICT, "session": "unknown"}, APPROVES))
+    assert c.run() == codex_review.UNAVAILABLE and not c.report().exists() and len(c.calls()) == 1
+    capsys.readouterr()
+    # only a run killed on its timeout before it wrote its state is retried; the saved report's own log is checked
+    (tmp_path / "t").mkdir()
+    t = Codex(tmp_path / "t", monkeypatch, plan=({**SLOW, "session": "none"}, APPROVES), settings=QUICK)
+    assert t.run() == 0 and t.report().is_file() and len(t.calls()) == 2
+    (tmp_path / "u").mkdir()
+    u = Codex(tmp_path / "u", monkeypatch, plan=({**SLOW, "session": "none"}, {**APPROVES, "session": "unknown"}),
+              settings=QUICK)
+    assert u.run() == codex_review.UNAVAILABLE and not u.report().exists()
 
 
 def test_fingerprinted_mode_lets_skills_be_offered(tmp_path, monkeypatch):
