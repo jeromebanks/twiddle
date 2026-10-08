@@ -65,6 +65,24 @@ def test_a_linked_input_is_refused_whether_read_from_a_checkout_or_a_commit(repo
         codex_eval.fingerprint(codex_eval.Commit(git(repo, "rev-parse", "HEAD"), repo))
 
 
+@pytest.mark.parametrize("link,target", [(".agents", "elsewhere-agents"), ("tests/codex_eval", "elsewhere-fixtures")])
+def test_a_linked_directory_on_the_way_to_an_input_is_refused(repo, link, target):
+    src = repo / link
+    if src.exists():
+        shutil.move(str(src), str(repo / target))
+    else:
+        (repo / target).mkdir()
+        (repo / target / "case.json").write_text("{}")
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.symlink_to(Path(target) if "/" not in link else Path("..") / target)
+    with pytest.raises(sdlc.SdlcError, match="symbolic link"):
+        fp(repo)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "linked")
+    with pytest.raises(sdlc.SdlcError, match="symbolic link"):
+        codex_eval.fingerprint(codex_eval.Commit(git(repo, "rev-parse", "HEAD"), repo))
+
+
 def test_every_input_changes_the_fingerprint_and_nothing_else_does(repo):
     base = fp(repo)
     assert re.fullmatch(r"[0-9a-f]{64}", base) and codex_eval.short(base) == base[:12]
@@ -487,6 +505,16 @@ def test_an_unknown_log_fails_the_round_even_when_a_retry_would_follow(tmp_path,
         assert codex_review.check_session(log, wt, "suppressed", cut_short=True)[0] == says
 
 
+@pytest.mark.parametrize("bad", [{"directory": "WT"}, {"directory": "WT", "text": ["x"]}, {"directory": 7, "text": "x"}])
+def test_a_malformed_agents_md_saves_no_report(tmp_path, monkeypatch, bad):
+    c = Codex(tmp_path, monkeypatch)
+    bad = {k: (str(c.wt) if v == "WT" else v) for k, v in bad.items()}
+    session = [{"type": "world_state", "payload": {"full": True, "state": {**STATE, "agents_md": bad}}}]
+    monkeypatch.setattr(codex_review, "check_run", lambda home, before, wt, mode, cut_short=False:
+                        codex_review.check_session(write_log(tmp_path / "s.jsonl", session), wt, mode, cut_short))
+    assert c.run() == codex_review.UNAVAILABLE and not c.report().exists()
+
+
 def test_an_ignored_skill_is_refused_in_fingerprinted_mode(tmp_path, monkeypatch, capsys):
     c = Codex(tmp_path, monkeypatch, settings={**SETTINGS, "skills": "fingerprinted"})
     assert c.run() == 0                                             # no ignored skill: offered skills are fingerprinted
@@ -539,6 +567,12 @@ def test_check_session_reads_the_shapes_it_knows(tmp_path):
     for record in ({"type": "world_state", "payload": [1, 2]}, {"type": "world_state", "payload": {"full": True, "state": []}},
                    {"type": "world_state"}):
         assert codex_review.check_session(write_log(log, ok + [record]), wt, "suppressed")[0] == "unknown"
+    for state in ({**STATE, "agents_md": {"directory": str(wt)}}, {**STATE, "agents_md": {"directory": str(wt), "text": ["x"]}},
+                  {**STATE, "agents_md": {"directory": 7, "text": "x"}}, {**STATE, "agents_md": []}):
+        assert codex_review.check_session(write_log(log, [{"type": "world_state", "payload": {"full": True, "state": state}}]),
+                                          wt, "suppressed")[0] == "unknown", state
+    assert codex_review.check_session(write_log(log, [{"type": "world_state", "payload": {"full": "false", "state": STATE}}]),
+                                      wt, "suppressed")[0] == "unknown"
     # a run killed on its timeout may leave half a line: only then is it skipped
     assert codex_review.check_session(write_log(log, ok, tail='{"type": "resp'), wt, "suppressed", cut_short=True)[0] == "ok"
     assert codex_review.check_session(log, wt, "suppressed")[0] == "unknown"

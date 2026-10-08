@@ -87,8 +87,8 @@ class Worktree(Tree):
         return sorted({n for n in out.decode().split("\0") if n})
 
     def read(self, path: str) -> bytes | None:
-        if (self.root / path).is_symlink():
-            raise _linked(path)
+        if linked := [a for a in _ancestors(path) if (self.root / a).is_symlink()]:
+            raise _linked(linked[0])
         try:
             return (self.root / path).read_bytes()
         except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
@@ -112,8 +112,16 @@ class Commit(Tree):
         return proc.stdout if proc.returncode == 0 else None
 
     def _is_link(self, path: str) -> bool:
-        proc = subprocess.run(["git", "ls-tree", "-z", self.sha, "--", path], cwd=self.root, capture_output=True)
-        return proc.stdout.startswith(b"120000 ")
+        """The path, or a directory on the way to it, is a symbolic link in this commit."""
+        proc = subprocess.run(["git", "ls-tree", "-z", self.sha, "--", *_ancestors(path)], cwd=self.root,
+                              capture_output=True)
+        return any(e.startswith(b"120000 ") for e in proc.stdout.split(b"\0"))
+
+
+def _ancestors(path: str) -> list[str]:
+    """`a/b/c` -> `a`, `a/b`, `a/b/c`: every link on the way to a file counts as one."""
+    parts = path.split("/")
+    return ["/".join(parts[:i]) for i in range(1, len(parts) + 1)]
 
 
 def _linked(path: str) -> codex_review.ReviewError:
@@ -161,8 +169,14 @@ def inputs(tree: Tree, checkout: Tree | None = None, section: Any = ...) -> list
     section = codex_section(tree) if section is ... else section
     mode = section.get("skills") if isinstance(section, dict) else None
     found = {}
+    roots = [FIXTURES] + ([SKILLS] if mode == "fingerprinted" else [])
     for src, mine in ((tree, False), (checkout, True)):
-        for n in src.names():
+        names = src.names()
+        # git lists a link (or a file) where a directory of inputs should be as one name: its contents would vanish
+        if stand_in := sorted({a for r in roots for a in _ancestors(r.relative_to(ROOT).as_posix())} & set(names)):
+            raise codex_review.ReviewError(f"{stand_in[0]} isn't a directory (a symbolic link?), and the review "
+                                           "logic's inputs under it must be files in the repo")
+        for n in names:
             if n not in FILES and is_input(n, mode) and read_by_codex(n) == mine and (data := src.read(n)) is not None:
                 found[n] = data
     found.update({n: (checkout if read_by_codex(n) else tree).read(n) for n in FILES})

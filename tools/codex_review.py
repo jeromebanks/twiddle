@@ -571,6 +571,18 @@ def session_logs(home: Path) -> set[Path]:
     return set((home / "sessions").rglob("*.jsonl")) if (home / "sessions").is_dir() else set()
 
 
+def _state_shape(st: dict[str, Any]) -> str | None:
+    """What's wrong with a `world_state`'s fields this reads, or None: `skills`/`host_skills` objects with a
+    true/false `includeInstructions`; `agents_md` {} or an object whose `directory` and `text` are strings."""
+    for key in ("skills", "host_skills"):
+        if key in st and not (isinstance(st[key], dict) and isinstance(st[key].get("includeInstructions"), bool)):
+            return f"a `{key}` without a true/false `includeInstructions`"
+    a = st.get("agents_md", {})
+    if a != {} and not (isinstance(a, dict) and isinstance(a.get("directory"), str) and isinstance(a.get("text"), str)):
+        return "an `agents_md` of a shape this tool doesn't know"
+    return None
+
+
 def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tuple[str, str]:
     """("ok" | "offered" | "unknown" | "incomplete", why) for one run's session log, against the skills `mode`.
 
@@ -594,33 +606,25 @@ def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tu
         if not (isinstance(r, dict) and r.get("type") == "world_state"):
             continue
         payload = r.get("payload")
-        if not (isinstance(payload, dict) and isinstance(payload.get("state"), dict)):
+        if not (isinstance(payload, dict) and isinstance(payload.get("state"), dict)
+                and isinstance(payload.get("full", False), bool)):
             return "unknown", f"its session log {log} has a `world_state` record of a shape this tool doesn't know"
         st = payload["state"]
-        if payload.get("full"):          # a full state names all of these; a partial one only what changed
+        if payload.get("full") is True:  # a full state names all of these; a partial one only what changed
             full += 1
             if missing := [k for k in ("skills", "host_skills", "agents_md") if k not in st]:
                 return "unknown", f"its session log {log} has a full `world_state` without {', '.join(missing)}"
+        if why := _state_shape(st):
+            return "unknown", f"its session log {log} has {why}"
         states.append(st)
     offered = [r for r in records if isinstance(r, dict) and r.get("type") == "response_item"
                and isinstance(r.get("payload"), dict) and r["payload"].get("role") == "developer"
                and SKILLS_MESSAGE in json.dumps(r["payload"].get("content"))]
-    flags = []
+    flags = [st[k]["includeInstructions"] for st in states for k in ("skills", "host_skills") if k in st]
     for st in states:
-        for key in ("skills", "host_skills"):
-            if key in st:
-                v = st[key].get("includeInstructions") if isinstance(st[key], dict) else None
-                if not isinstance(v, bool):
-                    return "unknown", f"its session log {log} has a `{key}` without a true/false `includeInstructions`"
-                flags.append(v)
-    for st in states:
-        if "agents_md" not in st:
+        a = st.get("agents_md") or {}
+        if not a:
             continue
-        a = st["agents_md"]
-        if a == {}:
-            continue
-        if not (isinstance(a, dict) and isinstance(a.get("directory"), str)):
-            return "unknown", f"its session log {log} has an `agents_md` of a shape this tool doesn't know"
         if not Path(a["directory"]).resolve().is_relative_to(wt.resolve()):
             return "offered", (f"Codex loaded the instructions in {a['directory']}, outside the reviewed checkout "
                                f"{wt} (session log {log})")
