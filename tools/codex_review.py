@@ -549,6 +549,13 @@ def codex_version(env: dict[str, str]) -> str:
 
 SKILLS_MESSAGE = "<skills_instructions>"
 INSTRUCTION_FILES = ("AGENTS.md", "AGENTS.override.md")    # what Codex loads from a directory as `agents_md`
+# a skills message's table of where its skills come from: "- `r0` = `<path>`"
+SKILL_ROOT_RE = re.compile(r"^- `r\d+` = `([^`]+)`", re.MULTILINE)
+
+
+def instruction_file(name: str) -> bool:
+    """An `AGENTS.md` or `AGENTS.override.md`, in any case: on a case-insensitive disk Codex loads `agents.md` too."""
+    return name.lower() in {f.lower() for f in INSTRUCTION_FILES}
 
 
 def _ignored_skills(wt: Path) -> list[str]:
@@ -577,19 +584,25 @@ def _state_shape(st: dict[str, Any]) -> str | None:
     for key in ("skills", "host_skills"):
         if key in st and not (isinstance(st[key], dict) and isinstance(st[key].get("includeInstructions"), bool)):
             return f"a `{key}` without a true/false `includeInstructions`"
+    if "body" in st.get("host_skills", {}) and not isinstance(st["host_skills"]["body"], str):
+        return "a `host_skills` whose `body` isn't text"
     a = st.get("agents_md", {})
     if a != {} and not (isinstance(a, dict) and isinstance(a.get("directory"), str) and isinstance(a.get("text"), str)):
         return "an `agents_md` of a shape this tool doesn't know"
     return None
 
 
-def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tuple[str, str]:
+def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False, home: Path | None = None) -> tuple[str, str]:
     """("ok" | "offered" | "unknown" | "incomplete", why) for one run's session log, against the skills `mode`.
 
     "offered": skills were offered in `suppressed` mode, or Codex loaded an instruction file from outside the
     reviewed checkout (both modes): a review the repo's settings don't describe. "unknown": the log isn't the
     shape this reads. A run `cut_short` (killed on its timeout) may leave a half-written last line, which is
-    skipped, or no full `world_state` yet: "incomplete", the only result a retry may follow."""
+    skipped, or no full `world_state` yet: "incomplete", the only result a retry may follow.
+
+    Whatever instructions Codex loaded (`agents_md.text`) must be the content of an instruction file in the
+    checkout that git doesn't ignore, so a fingerprint input; in `fingerprinted` mode, every skill root it lists
+    must be its own built-ins (`<home>/skills/.system`) or the checkout's `.agents/skills`."""
     try:
         lines = log.read_text().splitlines()
     except (OSError, UnicodeDecodeError) as exc:
@@ -617,8 +630,11 @@ def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tu
         if why := _state_shape(st):
             return "unknown", f"its session log {log} has {why}"
         states.append(st)
-    offered = [r for r in records if isinstance(r, dict) and r.get("type") == "response_item"
-               and isinstance(r.get("payload"), dict) and r["payload"].get("role") == "developer"
+    # what Codex was given: an input message in any role (never its own replies, or a tool's output, which may
+    # quote the marker while reading code like this)
+    offered = [json.dumps(r["payload"].get("content")) for r in records if isinstance(r, dict)
+               and r.get("type") == "response_item" and isinstance(r.get("payload"), dict)
+               and r["payload"].get("type") == "message" and r["payload"].get("role") != "assistant"
                and SKILLS_MESSAGE in json.dumps(r["payload"].get("content"))]
     flags = [st[k]["includeInstructions"] for st in states for k in ("skills", "host_skills") if k in st]
     for st in states:
@@ -628,10 +644,25 @@ def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tu
         if not Path(a["directory"]).resolve().is_relative_to(wt.resolve()):
             return "offered", (f"Codex loaded the instructions in {a['directory']}, outside the reviewed checkout "
                                f"{wt} (session log {log})")
-        if ignored := [n for n in INSTRUCTION_FILES if _ignored(Path(a["directory"]) / n, wt)]:
-            return "offered", (f"Codex loaded the instructions in {a['directory']}, where git ignores "
-                               f"{', '.join(ignored)}: an ignored file isn't in the review logic's fingerprint "
-                               f"(session log {log})")
+        d = Path(a["directory"])
+        files = sorted(f for f in d.iterdir() if f.is_file() and instruction_file(f.name)) if d.is_dir() else []
+        if ignored := [f.name for f in files if _ignored(f, wt)]:
+            return "offered", (f"Codex loaded the instructions in {d}, where git ignores {', '.join(ignored)}: an "
+                               f"ignored file isn't in the review logic's fingerprint (session log {log})")
+        texts = [f.read_bytes().decode("utf-8", "replace") for f in files]
+        # Codex caps what it loads (`project_doc_max_bytes`): a long file's text is its beginning
+        if not any(t == a["text"] or (a["text"] and t.startswith(a["text"])) for t in texts):
+            return "offered", (f"the instructions Codex loaded from {d} aren't the content of any instruction file "
+                               f"there ({', '.join(f.name for f in files) or 'none'}) (session log {log})")
+    if mode == "fingerprinted" and (offered or any(flags)):
+        bodies = offered + [st["host_skills"]["body"] for st in states if "body" in st.get("host_skills", {})]
+        roots = {r for b in bodies for r in SKILL_ROOT_RE.findall(b.replace("\\n", "\n"))}
+        if not roots:
+            return "unknown", f"its session log {log} offers skills without the table of where they come from"
+        allowed = {(wt / ".agents" / "skills").resolve()} | ({(home / "skills" / ".system").resolve()} if home else set())
+        if stray := sorted(r for r in roots if Path(r).resolve() not in allowed):
+            return "offered", (f"Codex offered skills from {', '.join(stray)}: neither its own built-ins nor the "
+                               f"checkout's .agents/skills (session log {log})")
     if mode == "fingerprinted" and (hidden := _ignored_skills(wt)):
         return "offered", (f"git ignores {', '.join(hidden[:3])}, a skill Codex can offer in `fingerprinted` mode: an "
                            f"ignored file isn't in the review logic's fingerprint (session log {log})")
@@ -652,7 +683,7 @@ def check_run(home: Path, before: set[Path], wt: Path, mode: str, cut_short: boo
     if len(new) != 1:
         return "unknown", (f"the run left {len(new)} session logs under {home / 'sessions'}, not one: "
                            "what it was given can't be checked")
-    return check_session(new[0], wt, mode, cut_short)
+    return check_session(new[0], wt, mode, cut_short, home)
 
 
 # --- the run ------------------------------------------------------------------

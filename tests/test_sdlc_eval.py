@@ -151,7 +151,8 @@ def test_a_commit_and_a_checkout_of_it_have_one_fingerprint(repo, tmp_path):
 def test_an_agents_md_anywhere_changes_it_in_both_modes(repo, mode):
     set_codex(repo, skills=mode)
     base = fp(repo)
-    for where in ("AGENTS.md", "AGENTS.override.md", "src/twiddle/AGENTS.md", ".agents/AGENTS.override.md"):
+    # any case: on a case-insensitive disk Codex loads a lowercase `agents.md` too
+    for where in ("AGENTS.md", "AGENTS.override.md", "src/twiddle/AGENTS.md", ".agents/AGENTS.override.md", "agents.md"):
         f = repo / where
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("be brief")
@@ -448,8 +449,17 @@ def test_an_agents_md_from_outside_the_checkout_is_refused_in_both_modes(tmp_pat
     c = Codex(tmp_path, monkeypatch, plan=({**APPROVES, "agents_md": str(tmp_path / "home")},))
     assert c.run() == codex_review.UNAVAILABLE and not c.report().exists()
     assert "outside the reviewed checkout" in capsys.readouterr().out
-    c.set_plan({**APPROVES, "agents_md": str(c.wt / "src")})      # the repo's own: fingerprinted, so fine
+    (c.wt / "AGENTS.md").write_text("x")                           # the repo's own, committed: an input, so fine
+    c.git("add", "AGENTS.md")
+    c.git("commit", "-qm", "instructions")
+    c.head = c.git("rev-parse", "HEAD")
+    c.set_plan({**APPROVES, "agents_md": str(c.wt)})
     assert c.run() == 0 and c.report().is_file()
+    capsys.readouterr()
+    c.set_plan({**APPROVES, "agents_md": str(c.wt), "agents_text": "not what the file says"})
+    assert c.run() == codex_review.UNAVAILABLE and "aren't the content of any instruction file" in capsys.readouterr().out
+    c.set_plan({**APPROVES, "agents_md": str(c.wt / "src")})     # a directory with no instruction file in it
+    assert c.run() == codex_review.UNAVAILABLE
     (tmp_path / "fp").mkdir()
     f = Codex(tmp_path / "fp", monkeypatch, plan=({**APPROVES, "agents_md": "/elsewhere"},),
               settings={**SETTINGS, "skills": "fingerprinted"})
@@ -505,11 +515,15 @@ def test_an_unknown_log_fails_the_round_even_when_a_retry_would_follow(tmp_path,
         assert codex_review.check_session(log, wt, "suppressed", cut_short=True)[0] == says
 
 
-@pytest.mark.parametrize("bad", [{"directory": "WT"}, {"directory": "WT", "text": ["x"]}, {"directory": 7, "text": "x"}])
-def test_a_malformed_agents_md_saves_no_report(tmp_path, monkeypatch, bad):
+@pytest.mark.parametrize("bad", [{"directory": "WT"}, {"directory": "WT", "text": ["x"]}, {"directory": 7, "text": "x"},
+                                 "full is a string"])
+def test_a_malformed_log_saves_no_report(tmp_path, monkeypatch, bad):
     c = Codex(tmp_path, monkeypatch)
-    bad = {k: (str(c.wt) if v == "WT" else v) for k, v in bad.items()}
-    session = [{"type": "world_state", "payload": {"full": True, "state": {**STATE, "agents_md": bad}}}]
+    if bad == "full is a string":
+        session = [{"type": "world_state", "payload": {"full": "false", "state": STATE}}]
+    else:
+        bad = {k: (str(c.wt) if v == "WT" else v) for k, v in bad.items()}
+        session = [{"type": "world_state", "payload": {"full": True, "state": {**STATE, "agents_md": bad}}}]
     monkeypatch.setattr(codex_review, "check_run", lambda home, before, wt, mode, cut_short=False:
                         codex_review.check_session(write_log(tmp_path / "s.jsonl", session), wt, mode, cut_short))
     assert c.run() == codex_review.UNAVAILABLE and not c.report().exists()
@@ -547,10 +561,31 @@ def test_check_session_reads_the_shapes_it_knows(tmp_path):
     ok = [{"type": "session_meta", "payload": {}}, {"type": "world_state", "payload": {"full": True, "state": STATE}}]
     log = write_log(tmp_path / "a.jsonl", ok)
     assert codex_review.check_session(log, wt, "suppressed") == ("ok", "")
-    on = {**STATE, "host_skills": {"includeInstructions": True}}
+    home = tmp_path / "home"
+    table = f"## Skills\n### Skill roots\n- `r0` = `{home}/skills/.system`\n- `r1` = `{wt}/.agents/skills`\n"
+    on = {**STATE, "host_skills": {"includeInstructions": True, "body": table}}
     assert codex_review.check_session(write_log(log, [{"type": "world_state", "payload": {"full": True, "state": on}}]),
                                       wt, "suppressed")[0] == "offered"
-    assert codex_review.check_session(log, wt, "fingerprinted")[0] == "ok"
+    assert codex_review.check_session(log, wt, "fingerprinted", home=home)[0] == "ok"
+    # fingerprinted: skills from anywhere but Codex's built-ins and the checkout's own are not the fingerprint's
+    stray = {**on, "host_skills": {"includeInstructions": True, "body": table + f"- `r2` = `{tmp_path}/user/skills`\n"}}
+    assert codex_review.check_session(write_log(log, [{"type": "world_state", "payload": {"full": True, "state": stray}}]),
+                                      wt, "fingerprinted", home=home)[0] == "offered"
+    untold = {**on, "host_skills": {"includeInstructions": True}}
+    assert codex_review.check_session(write_log(log, [{"type": "world_state", "payload": {"full": True, "state": untold}}]),
+                                      wt, "fingerprinted", home=home)[0] == "unknown"
+    # reading code that names the marker (a tool's output) or Codex saying it (its own reply) isn't being offered skills
+    quoted = [{"type": "response_item", "payload": {"type": "function_call_output", "output": "SKILLS_MESSAGE = \"<skills_instructions>\"",
+                                                    "content": "<skills_instructions>"}},
+              {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                                                    "content": [{"type": "output_text", "text": "`<skills_instructions>` is checked"}]}}]
+    assert codex_review.check_session(write_log(log, [{"type": "world_state", "payload": {"full": True, "state": STATE}}] + quoted),
+                                      wt, "suppressed")[0] == "ok"
+    # a skills message in any role counts
+    user = {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                                 "content": [{"type": "input_text", "text": "<skills_instructions>"}]}}
+    assert codex_review.check_session(write_log(log, [{"type": "world_state", "payload": {"full": True, "state": STATE}}, user]),
+                                      wt, "suppressed")[0] == "offered"
     message = {"type": "response_item", "payload": {"type": "message", "role": "developer",
                                                     "content": [{"type": "input_text", "text": "<skills_instructions>"}]}}
     assert codex_review.check_session(write_log(log, ok + [message]), wt, "suppressed")[0] == "offered"

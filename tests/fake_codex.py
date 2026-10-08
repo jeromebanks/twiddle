@@ -34,12 +34,15 @@ step = plan[min(n, len(plan) - 1)]
 # says), "unknown" (a shape nobody knows), "none" (no log); `agents_md` names a directory an AGENTS.md came from
 kind = step.get("session", "ok" if "include_instructions = false" in (seen["config"] or "") else "skills")
 if kind != "none" and home.is_dir():
-    state = {{"skills": {{"includeInstructions": kind == "skills"}}, "host_skills": {{"includeInstructions": kind == "skills"}},
-             "agents_md": {{"directory": step["agents_md"], "text": "x"}} if step.get("agents_md") else {{}}}}
+    roots = step.get("skill_roots", [str(home / "skills" / ".system"), os.path.join(os.getcwd(), ".agents", "skills")])
+    table = "## Skills\\n### Skill roots\\n" + "".join(f"- `r{{i}}` = `{{r}}`\\n" for i, r in enumerate(roots))
+    host = {{"includeInstructions": kind == "skills", **({{"body": table}} if kind == "skills" else {{}})}}
+    state = {{"skills": {{"includeInstructions": kind == "skills"}}, "host_skills": host,
+             "agents_md": {{"directory": step["agents_md"], "text": step.get("agents_text", "x")}} if step.get("agents_md") else {{}}}}
     records = [{{"type": "session_meta", "payload": {{"cwd": os.getcwd()}}}}]
     if kind == "skills":
         records.append({{"type": "response_item", "payload": {{"type": "message", "role": "developer",
-                        "content": [{{"type": "input_text", "text": "<skills_instructions> ## Skills"}}]}}}})
+                        "content": [{{"type": "input_text", "text": "<skills_instructions>\\n" + table}}]}}}})
     records.append({{"type": "world_state", "payload": {{"full": True, "state": state}}}} if kind != "unknown"
                    else {{"type": "world_state_v9", "payload": {{"everything": "different"}}}})
     day = home / "sessions" / "2026" / "10" / "07"

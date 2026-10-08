@@ -145,7 +145,7 @@ def codex_section(tree: Tree) -> Any:
 def is_input(name: str, mode: Any) -> bool:
     """Whether a repo path is one of the fingerprint's inputs, in this skills mode."""
     return (name in FILES or name.startswith(FIXTURES.relative_to(ROOT).as_posix() + "/")
-            or name.rsplit("/", 1)[-1] in INSTRUCTION_FILES
+            or codex_review.instruction_file(name.rsplit("/", 1)[-1])
             or (mode == "fingerprinted" and name.startswith(SKILLS.relative_to(ROOT).as_posix() + "/")
                 and name.endswith("/SKILL.md")))
 

@@ -300,8 +300,9 @@ The fingerprint's inputs, by name (`codex-eval --status --inputs` lists them):
   fetches the bundle and passes it in, and a test fails if it defines a function that fills a
   prompt or picks its inputs;
 - `tools/codex_eval.py`, and everything under `tests/codex_eval/` (the eval's fixtures and scorer);
-- every `AGENTS.md` and `AGENTS.override.md` anywhere in the repo (none exists today), because Codex
-  loads them on its own.
+- every `AGENTS.md` and `AGENTS.override.md` anywhere in the repo, in any case (none exists today),
+  because Codex loads them on its own: the override wins when both are there, and on macOS a
+  lowercase `agents.md` loads too (checked, like the skills setting, with runs that have no sign-in).
 
 Not `sdlc.py` and not `CLAUDE.md`, so ordinary edits there cost no eval. The prompts point Codex at
 `review-rules.md` for the safety rules. The plan prompt names `CLAUDE.md` only for its Layout
@@ -320,8 +321,9 @@ and the repo's own `.agents/skills`, and its session log showed `skills.includeI
   writes its session log, and with the setting that log has no `<skills_instructions>` message and
   `skills.includeInstructions: false`. Without the setting it has both. After every run the tool
   reads the run's session log (`codex_review.check_session`). If skills were offered, or Codex
-  loaded an `AGENTS.md` from outside the reviewed checkout or one git ignores there (an ignored
-  file is never in a commit, so it can't be an input), or the log isn't a shape the tool knows
+  loaded instructions that aren't the content of an instruction file in the reviewed checkout that
+  git doesn't ignore (an ignored file is never in a commit, so it can't be an input), or the log
+  isn't a shape the tool knows
   (a new `codex` may change it), the round saves no report and exits 3, with the reason at the
   end of `codex.err`. Only a run killed on its timeout before it wrote its state is retried. A `codex` that ignores the setting can't produce a review that looks like
   one that ran without skills. For the same reason `codex.flags` may not pass `--ephemeral`, which
@@ -329,7 +331,8 @@ and the repo's own `.agents/skills`, and its session log showed `skills.includeI
   `<out>/codex-home/sessions/` before deferring: the tool may need to learn the new shape.
 - `fingerprinted`, only if a future `codex` drops the setting: skills are offered, and every
   `.agents/skills/**/SKILL.md` becomes an input. Codex's built-in skills ship with the binary, so
-  the version in the pair covers them. The `AGENTS.md` check still runs, and a run is refused when
+  the version in the pair covers them. The `AGENTS.md` check still runs; every skill root the log
+  lists must be Codex's built-ins or the checkout's `.agents/skills`; and a run is refused when
   git ignores a `SKILL.md` under the checkout's `.agents/skills/` (offered, but never in a commit).
 
 What the fingerprint can't cover: what the binary does with the same inputs (that is the
