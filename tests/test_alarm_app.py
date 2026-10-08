@@ -957,7 +957,7 @@ async def test_the_ringing_screen_comes_with_the_alarm_and_leaves_with_it(ring):
         assert "Sonos Roam" in shown.splitlines()[1] and "11 mid" not in shown
         assert alarm_cli.brief(app.shown.house, app.shown.alarm("34")) in shown
         assert "snooze 10m" in shown
-        assert "_______" in text(app.screen, "#ring-art")
+        assert "(__)___(__)" in text(app.screen, "#ring-art")
         del ring.running[ROAM_IP]                   # it stops by itself
         await poll(app, pilot)
         assert not ringing(app)
@@ -975,6 +975,127 @@ async def test_it_is_up_at_once_when_the_alarm_is_already_ringing(ring):
 
 def test_the_clock_swings():
     assert clock_art(0) != clock_art(1)
+
+
+def centre(line: str) -> int:
+    """Twice the column a line is centred on (so a half column counts)."""
+    return (len(line) - len(line.lstrip())) + (len(line.rstrip()) - 1)
+
+
+def test_the_clock_is_drawn_straight_in_both_frames():
+    # The poster's screenshot: bells and head off to one side of the face.
+    frames = [clock_art(f).splitlines() for f in (0, 1)]
+    for lines in frames:
+        assert len({centre(line) for line in lines}) == 1, lines
+    assert [len(l) for l in frames[0]] == [len(l) for l in frames[1]]
+    assert centre(frames[0][0]) == centre(frames[1][0])
+
+
+async def click_on(app, pilot, action: str) -> None:
+    """Click the ringing screen's control for `action` (stop, snooze, length)
+    where it is drawn: the first cell of #ring-text whose link names it."""
+    w = app.screen.query_one("#ring-text")
+    for y in range(w.region.y, w.region.bottom):
+        for x in range(w.region.x, w.region.right):
+            if app.screen.get_style_at(x, y).meta.get("@click") == f"screen.{action}":
+                await pilot.click(offset=(x, y))
+                return
+    raise AssertionError(f"no {action} control on the ringing screen")
+
+
+@pilot
+async def test_the_clock_sits_level_with_its_text_in_a_box_its_own_size(ring):
+    ring.running[ROAM_IP] = RUNNING
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        screen = app.screen
+        art, words = screen.query_one("#ring-art"), screen.query_one("#ring-text")
+        drawn = clock_art(screen.frame).splitlines()
+        assert [l.rstrip() for l in str(art.render()).splitlines()] == [l.rstrip() for l in drawn]
+        assert art.region.width <= max(len(l) for l in drawn) + 4
+        first = words.region.y + words.styles.padding.top
+        assert art.region.y <= first < art.region.y + len(drawn) // 2
+
+
+@pilot
+async def test_a_click_on_off_stops_it_through_the_journalled_stop(ring):
+    ring.running[ROAM_IP] = RUNNING
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        await click_on(app, pilot, "stop")
+        await settle(app, pilot)
+        assert av_writes(ring) == [("Stop", {"InstanceID": "0"})]
+        assert app.status_text == "stopped the alarm in Sonos Roam"
+        assert not ringing(app)
+    assert [j["action"] for j in journal()] == ["alarm_stop"]
+
+
+@pilot
+async def test_a_click_on_the_length_cycles_it_and_on_snooze_snoozes_for_it(ring):
+    ring.running[ROAM_IP] = RUNNING
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        await click_on(app, pilot, "length")
+        await pilot.pause()
+        assert "[ z  snooze 15m ▾ ]" in text(app.screen, "#ring-text")
+        await click_on(app, pilot, "length")
+        await pilot.pause()
+        assert "[ z  snooze 30m ▾ ]" in text(app.screen, "#ring-text")
+        await click_on(app, pilot, "snooze")
+        await settle(app, pilot)
+        assert av_writes(ring) == [("SnoozeAlarm", {"InstanceID": "0", "Duration": "00:30:00"})]
+        assert not ringing(app)
+    assert [j["action"] for j in journal()][:1] == ["alarm_snooze"]
+    assert journal()[0]["minutes"] == 30
+
+
+@pilot
+async def test_a_second_click_while_the_stop_is_going_writes_nothing_more(ring, monkeypatch):
+    import threading
+    gate = threading.Event()
+    stop = clock.stop_alarm
+    def slow_stop(*a, **k):
+        gate.wait(5)                                # the speaker takes its time answering
+        return stop(*a, **k)
+    monkeypatch.setattr(clock, "stop_alarm", slow_stop)
+    ring.running[ROAM_IP] = RUNNING
+    app = make()
+    try:
+        async with app.run_test(size=(140, 50)) as pilot:
+            await settle(app, pilot)
+            await poll(app, pilot)
+            await click_on(app, pilot, "stop")
+            await pilot.pause(0.1)
+            assert app.screen.busy
+            await click_on(app, pilot, "stop")
+            await click_on(app, pilot, "snooze")
+            await pilot.press("x", "z")
+            gate.set()
+            await settle(app, pilot)
+            assert not ringing(app)
+    finally:
+        gate.set()
+    assert av_writes(ring) == [("Stop", {"InstanceID": "0"})]
+    assert [j["action"] for j in journal()] == ["alarm_stop"]
+
+
+@pilot
+async def test_a_bracket_in_what_rings_is_shown_as_it_is(ring):
+    ring.running[ROAM_IP] = RUNNING
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await poll(app, pilot)
+        app.screen.update(dict(app.screen.row, room="[b]Den[/b]", what="KALX [live]"), ROAM_IP)
+        await pilot.pause()
+        shown = text(app.screen, "#ring-text")
+        assert "[b]Den[/b] is ringing" in shown and "KALX [live]" in shown
 
 
 @pilot
@@ -1056,7 +1177,7 @@ async def test_t_fires_the_alarm_through_run_alarm_journalled(ring):
     assert "alarm_run" in [j["action"] for j in journal()]
 
 
-@pytest.mark.parametrize("key", ["t", "x", "z"])
+@pytest.mark.parametrize("key", ["t", "x", "z", "click:stop", "click:snooze"])
 @pilot
 async def test_dry_run_t_x_and_z_write_neither_speaker_nor_journal(ring, key):
     if key != "t":
@@ -1069,7 +1190,10 @@ async def test_dry_run_t_x_and_z_write_neither_speaker_nor_journal(ring, key):
         else:
             await poll(app, pilot)
             assert ringing(app)
-        await pilot.press(key)
+        if key.startswith("click:"):                # a click on the control, not its key
+            await click_on(app, pilot, key.split(":")[1])
+        else:
+            await pilot.press(key)
         await settle(app, pilot)
         assert app.status_text.startswith("[dry-run] would ")
     assert ring.av_writes == [] and ring.writes == [] and not play.INTERVENTION_LOG.exists()
@@ -1096,9 +1220,10 @@ async def test_the_lists_keys_do_nothing_behind_the_ringing_screen(ring):
         await settle(app, pilot)
         await pick(app, pilot, "2")
         await poll(app, pilot)
-        await pilot.press("t", "space", "d", "n", "r")
+        await pilot.press("t", "space", "enter", "d", "n", "r")
         await settle(app, pilot)
         assert ringing(app)
+        assert app.focused is None or app.focused.screen is not app.screen
     assert ring.av_writes == [] and ring.writes == [] and not play.INTERVENTION_LOG.exists()
 
 
