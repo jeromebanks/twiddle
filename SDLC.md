@@ -329,7 +329,8 @@ and the repo's own `.agents/skills`, and its session log showed `skills.includeI
   `<out>/codex-home/sessions/` before deferring: the tool may need to learn the new shape.
 - `fingerprinted`, only if a future `codex` drops the setting: skills are offered, and every
   `.agents/skills/**/SKILL.md` becomes an input. Codex's built-in skills ship with the binary, so
-  the version in the pair covers them. The `AGENTS.md` check still runs.
+  the version in the pair covers them. The `AGENTS.md` check still runs, and a run is refused when
+  git ignores a `SKILL.md` under the checkout's `.agents/skills/` (offered, but never in a commit).
 
 What the fingerprint can't cover: what the binary does with the same inputs (that is the
 version's half of the pair), the model behind the API, and anything outside the repo that

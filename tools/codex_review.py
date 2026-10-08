@@ -551,6 +551,16 @@ SKILLS_MESSAGE = "<skills_instructions>"
 INSTRUCTION_FILES = ("AGENTS.md", "AGENTS.override.md")    # what Codex loads from a directory as `agents_md`
 
 
+def _ignored_skills(wt: Path) -> list[str]:
+    """The `SKILL.md` files under the checkout's `.agents/skills/` that git ignores: Codex can offer them, and no
+    commit holds them."""
+    if not (wt / ".agents" / "skills").is_dir():
+        return []
+    proc = subprocess.run(["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ".agents/skills"],
+                          cwd=wt, capture_output=True, text=True)
+    return [n for n in proc.stdout.split("\0") if n.endswith("SKILL.md")]
+
+
 def _ignored(path: Path, wt: Path) -> bool:
     """An existing file git ignores in the checkout `wt` (`.gitignore`, `.git/info/exclude`, a global ignore)."""
     return path.is_file() and subprocess.run(["git", "check-ignore", "-q", str(path)], cwd=wt,
@@ -592,9 +602,6 @@ def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tu
             if missing := [k for k in ("skills", "host_skills", "agents_md") if k not in st]:
                 return "unknown", f"its session log {log} has a full `world_state` without {', '.join(missing)}"
         states.append(st)
-    if not full:
-        # a run killed on its timeout can stop before Codex writes it: incomplete, not a shape of its own
-        return ("incomplete" if cut_short else "unknown"), f"its session log {log} has no full `world_state` record"
     offered = [r for r in records if isinstance(r, dict) and r.get("type") == "response_item"
                and isinstance(r.get("payload"), dict) and r["payload"].get("role") == "developer"
                and SKILLS_MESSAGE in json.dumps(r["payload"].get("content"))]
@@ -621,12 +628,15 @@ def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tu
             return "offered", (f"Codex loaded the instructions in {a['directory']}, where git ignores "
                                f"{', '.join(ignored)}: an ignored file isn't in the review logic's fingerprint "
                                f"(session log {log})")
-    if mode == "fingerprinted":
-        return "ok", ""
-    if offered or any(flags):
+    if mode == "fingerprinted" and (hidden := _ignored_skills(wt)):
+        return "offered", (f"git ignores {', '.join(hidden[:3])}, a skill Codex can offer in `fingerprinted` mode: an "
+                           f"ignored file isn't in the review logic's fingerprint (session log {log})")
+    if mode != "fingerprinted" and (offered or any(flags)):
         return "offered", (f"Codex offered skills although `codex.skills` is `suppressed` (session log {log}): "
                            "the generated config's `[skills] include_instructions = false` didn't hold for this "
                            "`codex` version")
+    if not full:     # everything it holds checked: a run killed on its timeout can stop before Codex writes it
+        return ("incomplete" if cut_short else "unknown"), f"its session log {log} has no full `world_state` record"
     return "ok", ""
 
 
