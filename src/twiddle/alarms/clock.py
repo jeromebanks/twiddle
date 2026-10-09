@@ -85,6 +85,15 @@ class HouseholdTime:
     time_format: str = ""   # "INV" (unset) observed; "12H"/"24H" assumed
     date_format: str = ""
 
+    @property
+    def offset(self) -> timedelta:
+        """How far the household's clock is ahead of UTC, to the minute."""
+        return timedelta(minutes=round((self.local - self.utc).total_seconds() / 60))
+
+    def local_of(self, utc: datetime) -> datetime:
+        """A naive UTC time on the household's wall clock."""
+        return utc + self.offset
+
     def to_dict(self) -> dict:
         return {"local": self.local.isoformat(), "utc": self.utc.isoformat(),
                 "time_format": self.time_format, "date_format": self.date_format}
@@ -113,11 +122,21 @@ def parse_list_alarms(xml: str, *, tolerant: bool = False) -> AlarmList:
     return AlarmList(version, parse_alarms(doc), doc)
 
 
+STAMP = "%Y-%m-%d %H:%M:%S"     # GetTimeNow's times, and LoggedStartTime's
+
+
 def parse_time_now(xml: str) -> tuple[datetime, datetime]:
     r = _response(xml, "GetTimeNow")
-    fmt = "%Y-%m-%d %H:%M:%S"
-    return (datetime.strptime(r["CurrentLocalTime"], fmt),
-            datetime.strptime(r["CurrentUTCTime"], fmt))
+    return (datetime.strptime(r["CurrentLocalTime"], STAMP),
+            datetime.strptime(r["CurrentUTCTime"], STAMP))
+
+
+def parse_stamp(text: str) -> datetime | None:
+    """A `YYYY-MM-DD HH:MM:SS` time (naive), or None if it isn't one."""
+    try:
+        return datetime.strptime((text or "").strip(), STAMP)
+    except ValueError:
+        return None
 
 
 def parse_format(xml: str) -> tuple[str, str]:
@@ -576,18 +595,24 @@ def run_args(alarm: Alarm, logged_start: str) -> list[tuple[str, str]]:
 
 def run_alarm(ip: str, alarm: Alarm, logged_start: str) -> datetime | None:
     """Fire `alarm` now on the group `ip` coordinates (**writes** transport
-    and volume). `logged_start` is the household's local time, as GetTimeNow
-    writes it; the Roam took that and reported it back the same way from
-    GetRunningAlarmProperties (2026-10-04). Returns when its duration will
-    stop it, or None if it has none."""
+    and volume). `logged_start` is the household's UTC time now, as GetTimeNow
+    writes it, and is journalled as sent.
+
+    LoggedStartTime is UTC: an alarm going off by itself reported it in UTC
+    (alarm 119 on the Roam, 2026-10-08: made 22:33Z for 15:36 in a household
+    7 hours behind, it said 22:36). RunAlarm's is echoed back from
+    GetRunningAlarmProperties exactly as sent (2026-10-04, when it was sent
+    local time), so sending UTC keeps one reading for both. Returns when its
+    duration will stop it, or None if it has none."""
     seconds = play.parse_hms(alarm.duration)
     if not seconds:
         _av_write(ip, "RunAlarm", run_args(alarm, logged_start), "alarm_run",
-                  alarm_id=alarm.id, alarm=_record(alarm))
+                  alarm_id=alarm.id, logged_start=logged_start, alarm=_record(alarm))
         return None
     stops = datetime.now(timezone.utc) + timedelta(seconds=seconds)
     _write_then_span(ip, "RunAlarm", run_args(alarm, logged_start), "alarm_run",
-                     "alarm_run_stop", stops, alarm_id=alarm.id, alarm=_record(alarm))
+                     "alarm_run_stop", stops, alarm_id=alarm.id, logged_start=logged_start,
+                     alarm=_record(alarm))
     return stops
 
 

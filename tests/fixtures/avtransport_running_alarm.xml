@@ -2,8 +2,10 @@
 <!--
   AVTransport.GetRunningAlarmProperties, read (read-only) from the left Roam,
   its group's coordinator, on 2026-10-04 while alarm 34 rang after `alarm try 34`.
-  LoggedStartTime is the household's local time at the fire, in the form
-  RunAlarm was sent it. Its LastChange at the same moment had
+  LoggedStartTime is RunAlarm's own, echoed back exactly as it was sent:
+  then the household's local time (twiddle now sends UTC, the form an alarm
+  going off by itself reports; see clock.run_alarm). Its LastChange at the
+  same moment had
   r:AlarmRunning=1, r:SnoozeRunning=0.
   Anonymised: GroupID's UUID is the right Roam's test UUID (as in
   alarms_listalarms.xml) and its group number is made up.

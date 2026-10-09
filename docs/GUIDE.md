@@ -366,11 +366,15 @@ writes nothing and journals nothing.
 `try` is the speaker's `RunAlarm` with every field of the alarm (time aside),
 on the coordinator of the alarm's room, so a bonded follower's alarm fires on
 its pair's coordinator. It is refused for an alarm aimed at a speaker that
-isn't here. `LoggedStartTime` is sent as the household's local time
+isn't here. `LoggedStartTime` is sent as the household's UTC time
 `YYYY-MM-DD HH:MM:SS`, from `GetTimeNow`. Tried on the Roam (2026-10-04,
-alarm 34): it rang, `GetRunningAlarmProperties` named alarm 34 with that
-`LoggedStartTime` and the group's ID, LastChange had `AlarmRunning=1`, and
-`alarm stop` ended it (`status` then read nothing ringing).
+alarm 34): it rang, `GetRunningAlarmProperties` named alarm 34 with the
+`LoggedStartTime` it was sent (then local time) and the group's ID, LastChange
+had `AlarmRunning=1`, and `alarm stop` ended it (`status` then read nothing
+ringing). An alarm going off by itself reports its `LoggedStartTime` in UTC
+(the Roam, 2026-10-08: an alarm at 15:36 in a household 7 hours behind said
+22:36), so `try` sends UTC too, and `status` and the ringing screen show
+"since" on the household's own clock, in its format.
 
 `stop` and `snooze` resolve the room the way transport commands do (a bonded
 follower goes to its coordinator, and the output says so) and send the
