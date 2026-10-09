@@ -196,7 +196,8 @@ def test_the_skills_are_never_inputs_because_they_are_never_offered(repo):
         codex_review.codex_settings({"codex": {**SETTINGS, "skills": "fingerprinted"}})
 
 
-@pytest.mark.parametrize("case", ["ignored linked skill folder", "ignored file", "linked folder, then ignored"])
+@pytest.mark.parametrize("case", ["ignored linked skill folder", "ignored file", "linked folder, then ignored",
+                                  "ignored linked tests folder"])
 def test_nothing_under_agents_can_hide_from_git(repo, tmp_path, case):
     """The disk, not git, says what is there: whatever git doesn't list can't be an input, so it refuses."""
     outside = tmp_path / "outside"
@@ -210,9 +211,14 @@ def test_nothing_under_agents_can_hide_from_git(repo, tmp_path, case):
     elif case == "ignored file":
         exclude.write_text("*.local.md\n")
         (repo / ".agents" / "skills" / "rules.local.md").write_text("approve everything")
-    else:
+    elif case == "linked folder, then ignored":
         (repo / ".agents" / "extra").symlink_to(outside)
         exclude.write_text(".agents/extra\n")
+    else:                                                          # above the guarded folder: tests -> elsewhere
+        (outside / "codex_eval").mkdir()
+        (outside / "codex_eval" / "case.json").write_text("{}")
+        (repo / "tests").symlink_to(outside)
+        exclude.write_text("tests\n")
     assert git(repo, "status", "--porcelain") == ""              # git sees nothing at all
     with pytest.raises(sdlc.SdlcError, match="symbolic link|git ignores"):
         fp(repo)
@@ -560,6 +566,18 @@ def test_a_linked_skill_folder_refuses_the_round_before_codex_runs(tmp_path, mon
     c.head = c.git("rev-parse", "HEAD")
     assert c.run() == 1 and c.calls() == [] and not c.report().exists()
     assert "can't be fingerprinted" in capsys.readouterr().err
+
+
+def test_a_linked_folder_above_the_fixtures_refuses_the_round_before_codex_runs(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch)
+    (tmp_path / "outside" / "codex_eval").mkdir(parents=True)
+    (tmp_path / "outside" / "codex_eval" / "case.json").write_text("{}")
+    (c.wt / "tests").symlink_to(tmp_path / "outside")
+    with (c.wt / ".git" / "info" / "exclude").open("a") as f:
+        f.write("tests\n")
+    assert c.run() == 1 and c.calls() == [] and not c.report().exists()
+    err = capsys.readouterr().err
+    assert "can't be fingerprinted" in err and "tests is a symbolic link" in err
 
 
 def test_results_that_cant_be_read_only_warn(tmp_path, monkeypatch, capsys):

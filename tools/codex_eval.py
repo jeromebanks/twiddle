@@ -103,8 +103,9 @@ class Worktree(Tree):
         ignored, file or folder) or a file git ignores there would reach Codex without being an input."""
         for d in GUARDED_DIRS:
             top = self.root / d.relative_to(ROOT)
-            if top.is_symlink():
-                return _linked(d.relative_to(ROOT).as_posix())
+            # every directory from the root down to it first: a link above it would move the whole folder elsewhere
+            if linked := [a for a in _ancestors(d.relative_to(ROOT).as_posix()) if (self.root / a).is_symlink()]:
+                return _linked(linked[0])
             for here, dirs, files in os.walk(top):          # never follows a link: it is listed, and refused
                 for name in dirs + files:
                     if (Path(here) / name).is_symlink():
