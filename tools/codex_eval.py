@@ -34,7 +34,7 @@ RULES = ROOT / ".agents" / "skills" / "review-rules.md"
 PLAN_SCHEMA = ROOT / ".agents" / "skills" / "plan-issue" / "references" / "plan-schema.md"
 CONFIG = ROOT / ".sdlc" / "config.json"
 FIXTURES = ROOT / "tests" / "codex_eval"
-SKILLS = ROOT / ".agents" / "skills"
+AGENTS_DIR = ROOT / ".agents"         # the skills' rules, prompts and schema: what Codex is pointed at
 
 # every file whose text decides how a review behaves, fixed by name: present or not, each is an input
 FILES = tuple(p.relative_to(ROOT).as_posix() for p in (
@@ -72,6 +72,11 @@ class Tree:
         """Which of these listed names are symbolic links."""
         raise NotImplementedError
 
+    def hidden(self) -> codex_review.ReviewError | None:
+        """Why something under `GUARDED_DIRS` would reach Codex without git listing it, or None. A commit holds
+        nothing git doesn't list."""
+        return None
+
 
 def _git_bytes(args: list[str], cwd: Path) -> bytes:
     proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True)
@@ -92,6 +97,25 @@ class Worktree(Tree):
 
     def links(self, names: list[str]) -> list[str]:
         return [n for n in names if (self.root / n).is_symlink()]
+
+    def hidden(self) -> codex_review.ReviewError | None:
+        """The disk, not git, says what is under `GUARDED_DIRS`: a symbolic link there (tracked, untracked or
+        ignored, file or folder) or a file git ignores there would reach Codex without being an input."""
+        for d in GUARDED_DIRS:
+            top = self.root / d.relative_to(ROOT)
+            if top.is_symlink():
+                return _linked(d.relative_to(ROOT).as_posix())
+            for here, dirs, files in os.walk(top):          # never follows a link: it is listed, and refused
+                for name in dirs + files:
+                    if (Path(here) / name).is_symlink():
+                        return _linked((Path(here) / name).relative_to(self.root).as_posix())
+        ignored = _git_bytes(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--",
+                              *(d.relative_to(ROOT).as_posix() for d in GUARDED_DIRS)], self.root)
+        if names := [n for n in ignored.decode().split("\0") if n]:
+            return codex_review.ReviewError(f"git ignores {names[0]}, and nothing under "
+                                            + " or ".join(f"{d.relative_to(ROOT).as_posix()}/" for d in GUARDED_DIRS)
+                                            + " may be ignored: Codex would read it, and no commit holds it")
+        return None
 
     def read(self, path: str) -> bytes | None:
         if linked := [a for a in _ancestors(path) if (self.root / a).is_symlink()]:
@@ -153,18 +177,19 @@ def codex_section(tree: Tree) -> Any:
         return None
 
 
-def is_input(name: str, mode: Any) -> bool:
-    """Whether a repo path is one of the fingerprint's inputs, in this skills mode."""
+def is_input(name: str) -> bool:
+    """Whether a repo path is one of the fingerprint's inputs."""
     return (name in FILES or name.startswith(FIXTURES.relative_to(ROOT).as_posix() + "/")
-            or codex_review.instruction_file(name.rsplit("/", 1)[-1])
-            or (mode == "fingerprinted" and name.startswith(SKILLS.relative_to(ROOT).as_posix() + "/")
-                and name.endswith("/SKILL.md")))
+            or codex_review.instruction_file(name.rsplit("/", 1)[-1]))
+
+
+GUARDED_DIRS = (AGENTS_DIR, FIXTURES)     # where every file is a real one in the repo: no link, nothing ignored
 
 
 def guarded(name: str) -> bool:
     """A path that may never be a symbolic link: anything under `.agents/` or `tests/codex_eval/`, or a file named
     like an instruction file anywhere."""
-    return (name.startswith((SKILLS.parent.relative_to(ROOT).as_posix() + "/", FIXTURES.relative_to(ROOT).as_posix() + "/"))
+    return (name.startswith(tuple(d.relative_to(ROOT).as_posix() + "/" for d in GUARDED_DIRS))
             or codex_review.instruction_file(name.rsplit("/", 1)[-1]))
 
 
@@ -177,7 +202,7 @@ def read_by_codex(name: str) -> bool:
 def inputs(tree: Tree, checkout: Tree | None = None, section: Any = ...) -> list[tuple[str, bytes | None]]:
     """(name, content) for every input, sorted by name: the fixed files (None when absent), the `codex` section,
     and whatever the globs find (every file under `tests/codex_eval/`, every `AGENTS.md`/`AGENTS.override.md`,
-    and in `fingerprinted` mode every `.agents/skills/**/SKILL.md`).
+    and nothing else: the repo's skills are never offered to a review, `codex.skills`).
 
     What the tool reads (the prompts, its code, the fixtures) comes from `tree`, the code running the round;
     what Codex reads (`read_by_codex`) from `checkout`, where it runs (a slice's worktree, a scratch checkout of
@@ -185,9 +210,8 @@ def inputs(tree: Tree, checkout: Tree | None = None, section: Any = ...) -> list
     (a `--config` of its own), by default `tree`'s."""
     checkout = checkout or tree
     section = codex_section(tree) if section is ... else section
-    mode = section.get("skills") if isinstance(section, dict) else None
     found = {}
-    roots = [FIXTURES] + ([SKILLS] if mode == "fingerprinted" else [])
+    roots = [FIXTURES]
     for src, mine in ((tree, False), (checkout, True)):
         names = src.names()
         # git lists a link (or a file) where a directory of inputs should be as one name: its contents would vanish
@@ -198,8 +222,10 @@ def inputs(tree: Tree, checkout: Tree | None = None, section: Any = ...) -> list
         # contents would reach Codex without ever being read here
         if linked := sorted(n for n in src.links(names) if guarded(n)):
             raise _linked(linked[0])
+        if hidden := src.hidden():
+            raise hidden
         for n in names:
-            if n not in FILES and is_input(n, mode) and read_by_codex(n) == mine and (data := src.read(n)) is not None:
+            if n not in FILES and is_input(n) and read_by_codex(n) == mine and (data := src.read(n)) is not None:
                 found[n] = data
     found.update({n: (checkout if read_by_codex(n) else tree).read(n) for n in FILES})
     canonical = json.dumps(section, sort_keys=True, separators=(",", ":"), ensure_ascii=False)

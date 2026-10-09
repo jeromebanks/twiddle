@@ -314,26 +314,36 @@ a full hash looks like an identifier to `demo-post`.
 
 **Skills are suppressed.** M1's demo showed that a real review was offered Codex's built-in skills
 and the repo's own `.agents/skills`, and its session log showed `skills.includeInstructions: true`.
-`codex.skills` in the config picks one of two modes, so the choice is part of the fingerprint:
+`codex.skills` is `suppressed`, its only value, so the choice is part of the fingerprint: the
+generated `config.toml` sets `[skills] include_instructions = false`. This was confirmed against
+codex-cli 0.161.0 (and holds on 0.162.0) without spending tokens: a run with no sign-in still writes
+its session log, and with the setting that log has no `<skills_instructions>` message and
+`skills.includeInstructions: false`. Without the setting it has both. So the repo's skills are
+never inputs: they are never offered.
 
-- `suppressed` (in force): the generated `config.toml` sets `[skills] include_instructions = false`.
-  This was confirmed against codex-cli 0.161.0 without spending tokens: a run with no sign-in still
-  writes its session log, and with the setting that log has no `<skills_instructions>` message and
-  `skills.includeInstructions: false`. Without the setting it has both. After every run the tool
-  reads the run's session log (`codex_review.check_session`). If skills were offered, or Codex
-  loaded instructions that aren't the content of an instruction file in the reviewed checkout that
-  git doesn't ignore, or reached them through a symbolic link (an `AGENTS.md` must be a real file) (an ignored file is never in a commit, so it can't be an input), or the log
-  isn't a shape the tool knows
-  (a new `codex` may change it), the round saves no report and exits 3, with the reason at the
-  end of `codex.err`. Only a run killed on its timeout before it wrote its state is retried. A `codex` that ignores the setting can't produce a review that looks like
-  one that ran without skills. For the same reason `codex.flags` may not pass `--ephemeral`, which
-  stops the log being written. The first time this exit happens after a `codex` upgrade, look in
-  `<out>/codex-home/sessions/` before deferring: the tool may need to learn the new shape.
-- `fingerprinted`, only if a future `codex` drops the setting: skills are offered, and every
-  `.agents/skills/**/SKILL.md` becomes an input. Codex's built-in skills ship with the binary, so
-  the version in the pair covers them. The `AGENTS.md` check still runs; every skill root the log
-  lists must be Codex's built-ins or the checkout's `.agents/skills`; and a run is refused when
-  git ignores a `SKILL.md` under the checkout's `.agents/skills/` (offered, but never in a commit).
+After every run the tool reads the run's session log (`codex_review.check_session`). The round
+saves no report and exits 3, with the reason at the end of `codex.err`, if:
+
+- skills were offered (a `codex` that ignores the setting can't pass for one that ran without them);
+- Codex loaded instructions that aren't the content of an instruction file in the reviewed checkout,
+  or that git ignores there (an ignored file is never in a commit, so it can't be an input), or that
+  it reached through a symbolic link (an `AGENTS.md` must be a real file);
+- or the log isn't a shape the tool knows (a new `codex` may change it).
+
+Only a run killed on its timeout before it wrote its state is retried. `codex.flags` may not pass
+`--ephemeral`, which stops the log being written. The first time this exit happens after a `codex`
+upgrade, look in `<out>/codex-home/sessions/` before deferring: the tool may need to learn the new
+shape.
+
+A second mode, offering skills and fingerprinting every `SKILL.md`, was planned in case the setting
+didn't work. It did, so that mode was dropped (#158). If a future `codex` ignores the setting, every
+review is refused and says why, and a new mode would be a new value of `codex.skills`.
+
+**Nothing under `.agents/` or `tests/codex_eval/` may hide from git.** That's where the rules,
+prompts and fixtures live, and what Codex is pointed at. The fingerprint walks those folders on
+disk, not as git lists them. A symbolic link there (file or folder, tracked, untracked or ignored),
+or a file git ignores there, refuses the round before Codex starts. Anything git doesn't list could
+reach Codex without being an input.
 
 What the fingerprint can't cover: what the binary does with the same inputs (that is the
 version's half of the pair), the model behind the API, and anything outside the repo that
@@ -351,11 +361,11 @@ the agent's last comment, so one posted during a demo never hides the poster's a
 read-only and never runs `codex exec`. Before each round, `codex-review` fingerprints the review
 logic that round actually runs under. The files the tool reads (the prompts, its code, the
 fixtures) come from the checkout the command runs from. The files Codex reads (`review-rules.md`,
-`plan-schema.md`, any `AGENTS.md`, and the skills in fingerprinted mode) come from the checkout
+`plan-schema.md`, any `AGENTS.md`) come from the checkout
 Codex runs in: the slice's worktree, the scratch checkout of `main` for a plan, or the epic's
 worktree. The settings are the ones the round runs with, a `--config` of its own included. If an
-input can't be fingerprinted (a file where a directory of inputs belongs, or a symbolic link: none
-may live under `.agents/` or `tests/codex_eval/`, nor be named like an `AGENTS.md`, in either mode), the
+input can't be fingerprinted (a file where a directory of inputs belongs, anything under `.agents/`
+or `tests/codex_eval/` that git doesn't list, or a link named like an `AGENTS.md` anywhere), the
 round is refused before Codex starts (exit 1: fix it and run again, never a `review-defer`): a
 review that can't say what it ran under isn't one. It only warns when that pair has no passing
 result, or the results can't be read, and the round still runs.

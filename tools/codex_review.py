@@ -55,9 +55,10 @@ UNAVAILABLE = 3   # Codex can't run: not on PATH, no sign-in, or no verdict twic
 ATTEMPTS = 2      # the first run, and one retry
 CODEX_KEYS = ("model", "reasoning_effort", "sandbox", "timeout_seconds", "flags", "skills")
 # how the skills Codex would offer a review are kept from changing it unseen: `suppressed`, none are offered (the
-# generated config turns their instructions off, and each run's session log must show that); `fingerprinted`, they
-# are offered, and every `.agents/skills/**/SKILL.md` is an input of the review logic's fingerprint (`codex_eval`)
-SKILL_MODES = ("suppressed", "fingerprinted")
+# generated config turns their instructions off, and each run's session log must show that). The only mode: one
+# that offered skills and fingerprinted them was dropped (#158), since the setting works; a `codex` that ignores it
+# has every round refused, and a new mode would be a new value here (and so a new fingerprint)
+SKILL_MODES = ("suppressed",)
 # the only `codex exec` flags `codex.flags` may add: none overrides a pinned setting, loosens the read-only
 # sandbox the HEAD stamp relies on, changes what goes to stdout (the report), or stops the session log being
 # written (`--ephemeral`: the log is how a round is vouched for, `check_run`)
@@ -150,7 +151,8 @@ def codex_settings(config: dict[str, Any]) -> dict[str, Any]:
         raise ReviewError(f"`codex.flags` may not pass {', '.join(bad)}: only {', '.join(sorted(ALLOWED_FLAGS))} and "
                           "`--color`; the model, effort and sandbox have keys of their own")
     if s["skills"] not in SKILL_MODES:
-        raise ReviewError(f"`codex.skills` is {s['skills']!r}: one of {', '.join(SKILL_MODES)}")
+        raise ReviewError(f"`codex.skills` is {s['skills']!r}: it can only be {', '.join(SKILL_MODES)} (Codex is never "
+                          "offered skills during a review)")
     return s
 
 
@@ -549,23 +551,11 @@ def codex_version(env: dict[str, str]) -> str:
 
 SKILLS_MESSAGE = "<skills_instructions>"
 INSTRUCTION_FILES = ("AGENTS.md", "AGENTS.override.md")    # what Codex loads from a directory as `agents_md`
-# a skills message's table of where its skills come from: "- `r0` = `<path>`"
-SKILL_ROOT_RE = re.compile(r"^- `r\d+` = `([^`]+)`", re.MULTILINE)
 
 
 def instruction_file(name: str) -> bool:
     """An `AGENTS.md` or `AGENTS.override.md`, in any case: on a case-insensitive disk Codex loads `agents.md` too."""
     return name.lower() in {f.lower() for f in INSTRUCTION_FILES}
-
-
-def _ignored_skills(wt: Path) -> list[str]:
-    """The `SKILL.md` files under the checkout's `.agents/skills/` that git ignores: Codex can offer them, and no
-    commit holds them."""
-    if not (wt / ".agents" / "skills").is_dir():
-        return []
-    proc = subprocess.run(["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ".agents/skills"],
-                          cwd=wt, capture_output=True, text=True)
-    return [n for n in proc.stdout.split("\0") if n.endswith("SKILL.md")]
 
 
 def _linked_instructions(d: Path, wt: Path) -> str | None:
@@ -601,17 +591,16 @@ def _state_shape(st: dict[str, Any]) -> str | None:
     return None
 
 
-def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False, home: Path | None = None) -> tuple[str, str]:
+def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tuple[str, str]:
     """("ok" | "offered" | "unknown" | "incomplete", why) for one run's session log, against the skills `mode`.
 
-    "offered": skills were offered in `suppressed` mode, or Codex loaded an instruction file from outside the
-    reviewed checkout (both modes): a review the repo's settings don't describe. "unknown": the log isn't the
+    "offered": skills were offered (`mode` is `suppressed`, the only one), or Codex loaded instructions the
+    fingerprint doesn't hold: a review the repo's settings don't describe. "unknown": the log isn't the
     shape this reads. A run `cut_short` (killed on its timeout) may leave a half-written last line, which is
     skipped, or no full `world_state` yet: "incomplete", the only result a retry may follow.
 
     Whatever instructions Codex loaded (`agents_md.text`) must be the content of an instruction file in the
-    checkout that git doesn't ignore, so a fingerprint input; in `fingerprinted` mode, every skill root it lists
-    must be its own built-ins (`<home>/skills/.system`) or the checkout's `.agents/skills`."""
+    checkout that git doesn't ignore, reached through no symbolic link: a fingerprint input."""
     try:
         lines = log.read_text().splitlines()
     except (OSError, UnicodeDecodeError) as exc:
@@ -666,20 +655,8 @@ def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False, home:
         if not any(t == a["text"] or (a["text"] and t.startswith(a["text"])) for t in texts):
             return "offered", (f"the instructions Codex loaded from {d} aren't the content of any instruction file "
                                f"there ({', '.join(f.name for f in files) or 'none'}) (session log {log})")
-    if mode == "fingerprinted" and (offered or any(flags)):
-        bodies = offered + [st["host_skills"]["body"] for st in states if "body" in st.get("host_skills", {})]
-        roots = {r for b in bodies for r in SKILL_ROOT_RE.findall(b.replace("\\n", "\n"))}
-        if not roots:
-            return "unknown", f"its session log {log} offers skills without the table of where they come from"
-        allowed = {(wt / ".agents" / "skills").resolve()} | ({(home / "skills" / ".system").resolve()} if home else set())
-        if stray := sorted(r for r in roots if Path(r).resolve() not in allowed):
-            return "offered", (f"Codex offered skills from {', '.join(stray)}: neither its own built-ins nor the "
-                               f"checkout's .agents/skills (session log {log})")
-    if mode == "fingerprinted" and (hidden := _ignored_skills(wt)):
-        return "offered", (f"git ignores {', '.join(hidden[:3])}, a skill Codex can offer in `fingerprinted` mode: an "
-                           f"ignored file isn't in the review logic's fingerprint (session log {log})")
-    if mode != "fingerprinted" and (offered or any(flags)):
-        return "offered", (f"Codex offered skills although `codex.skills` is `suppressed` (session log {log}): "
+    if offered or any(flags):
+        return "offered", (f"Codex offered skills although `codex.skills` is `{mode}` (session log {log}): "
                            "the generated config's `[skills] include_instructions = false` didn't hold for this "
                            "`codex` version")
     if not full:     # everything it holds checked: a run killed on its timeout can stop before Codex writes it
@@ -695,7 +672,7 @@ def check_run(home: Path, before: set[Path], wt: Path, mode: str, cut_short: boo
     if len(new) != 1:
         return "unknown", (f"the run left {len(new)} session logs under {home / 'sessions'}, not one: "
                            "what it was given can't be checked")
-    return check_session(new[0], wt, mode, cut_short, home)
+    return check_session(new[0], wt, mode, cut_short)
 
 
 # --- the run ------------------------------------------------------------------
