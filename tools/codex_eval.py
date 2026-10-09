@@ -382,7 +382,7 @@ def findings(report: str) -> list[str]:
 
 
 # a file name as written, whole: `journal_log.py`, not a prefix of `journal_log.py.orig` or `journal_log.pyc`
-FILE_RE = re.compile(r"(?<![\w.-])[\w./-]+\.(?:py|md|toml|json|txt|sh|html)\w*(?:\.\w+)*")
+FILE_RE = re.compile(r"(?<![\w.-])[\w./-]+\.(?:py|md|toml|json|txt|sh|html)\w*(?:[.-]\w+)*")
 
 
 def _is(token: str, path: str) -> bool:
