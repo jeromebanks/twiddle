@@ -573,6 +573,25 @@ async def test_each_field_edits_alone_and_an_unrecognised_source_stays_untouched
 
 
 @pilot
+async def test_the_editor_says_what_the_chosen_play_mode_does(fake, providers):
+    fake.alarms["301"] = dict(fake.alarms["1"], ID="301", PlayMode="SOMETHING_NEW")
+    fake.children["301"] = []
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        ed = await open_new(app, pilot)
+        for name, line in alarm_cli.PLAY_MODE_LINES.items():
+            ed.query_one("#mode").value = alarm_cli.PLAY_MODES[name]
+            await pilot.pause()
+            assert str(ed.query_one("#mode-line").render()) == line, name
+        await pilot.press("escape")
+        await pilot.pause()
+        ed = await open_edit(app, pilot, "301")
+        assert str(ed.query_one("#mode-line").render()) == "the speaker's own value"
+    assert fake.writes == []
+
+
+@pilot
 async def test_saving_any_alarm_unchanged_writes_nothing(fake, providers):
     fake.alarms["301"] = dict(fake.alarms["1"], ID="301", RoomUUID=GONE, Duration="00:15:30",
                               PlayMode="SOMETHING_NEW")
