@@ -411,6 +411,15 @@ _MODE_NAME = {(False, "off"): "normal", (False, "all"): "repeat",
               (False, "one"): "repeat-one", (True, "off"): "shuffle",
               (True, "all"): "shuffle-repeat", (True, "one"): "shuffle-repeat-one"}
 PLAY_MODES = {name: play.encode_play_mode(*k) for k, name in _MODE_NAME.items()}
+# One line each for the editor and `--mode`'s help; a test fails if a mode lacks one.
+PLAY_MODE_LINES = {
+    "normal": "in order, once through",
+    "repeat": "in order, starts over at the end",
+    "repeat-one": "the same track over and over",
+    "shuffle": "random order, once through",
+    "shuffle-repeat": "random order, starts over at the end",
+    "shuffle-repeat-one": "the same track over and over, picked at random"}
+UNKNOWN_MODE_LINE = "the speaker's own value"
 _DAY_NAMES = ("sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday")
 DAYS_HELP = ("once, daily, weekdays, weekends, days like mon,wed,fri or mon-fri, "
              "or the speaker's own ON_<days> (Sunday 0)")
@@ -1461,7 +1470,8 @@ def _field_args(p, adding: bool):
                         + default(duration_text(d.duration)))
     p.add_argument("--volume", default=None, help="0-100" + default(str(d.volume)))
     p.add_argument("--mode", default=None,
-                   help=", ".join(PLAY_MODES) + ", or the speaker's own value"
+                   help="; ".join(f"{n}: {l}" for n, l in PLAY_MODE_LINES.items())
+                        + "; or the speaker's own value"
                         + default(_mode_name(d.play_mode)))
     p.add_argument("--include-grouped-rooms", action=argparse.BooleanOptionalAction,
                    default=None,

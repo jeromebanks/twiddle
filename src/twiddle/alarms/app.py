@@ -189,6 +189,13 @@ def mode_choices(alarm: Alarm) -> list[tuple[str, str]]:
     return out
 
 
+def mode_line(play_mode: str) -> str:
+    """What the chosen play mode does, in a line; a value the CLI has no name for
+    is the speaker's own."""
+    name = next((n for n, v in alarm_cli.PLAY_MODES.items() if v == play_mode), None)
+    return alarm_cli.PLAY_MODE_LINES[name] if name else alarm_cli.UNKNOWN_MODE_LINE
+
+
 def time_seed(start_time: str) -> str:
     return start_time[:5] if start_time.endswith(":00") and len(start_time) == 8 else start_time
 
@@ -418,6 +425,9 @@ class EditorScreen(ModalScreen[Edited | None]):
                 yield Static("Mode", classes="label")
                 yield Select(mode_choices(a), value=a.play_mode, allow_blank=False, id="mode")
                 yield Checkbox("on", a.enabled, id="enabled", compact=True)
+            with Horizontal(classes="row"):
+                yield Static("", classes="label")
+                yield Static(mode_line(a.play_mode), id="mode-line")
             yield Static("", id="mac")
             yield Static("", id="problem")
             with Horizontal(id="buttons"):
@@ -448,6 +458,10 @@ class EditorScreen(ModalScreen[Edited | None]):
     @on(Input.Changed, "#time")
     def time_changed(self) -> None:
         self.update_mac()
+
+    @on(Select.Changed, "#mode")
+    def mode_changed(self, event: Select.Changed) -> None:
+        self.query_one("#mode-line", Static).update(mode_line(str(event.value)))
 
     @on(Button.Pressed)
     def pressed(self, event: Button.Pressed) -> None:
@@ -622,6 +636,7 @@ class AlarmApp(App):
     #editor Select { width: 30; }
     #editor Checkbox, #editor Button { margin-right: 1; }
     #source { width: 50; }
+    #mode-line { color: $text-muted; }
     #mac, #problem { height: auto; }
     #buttons { height: auto; align: right middle; }
     RingingScreen { align: center middle; }

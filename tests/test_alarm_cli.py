@@ -1163,6 +1163,21 @@ def test_play_mode_names_follow_the_speakers_meaning():
         "shuffle-repeat-one": "SHUFFLE_REPEAT_ONE"}
 
 
+def test_every_play_mode_has_a_line():
+    assert set(alarm_cli.PLAY_MODE_LINES) == set(alarm_cli.PLAY_MODES)
+    assert all(alarm_cli.PLAY_MODE_LINES.values())
+
+
+@pytest.mark.parametrize("verb", [["add", "--room", "x", "--time", "7:00"], ["edit", "66"]])
+def test_mode_help_lists_each_mode_with_its_line(verb, capsys, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")          # argparse wraps (and splits hyphens) by width
+    with pytest.raises(SystemExit):
+        cli.main(["alarm", *verb, "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    for name, line in alarm_cli.PLAY_MODE_LINES.items():
+        assert f"{name}: {line}" in out
+
+
 def test_edit_json_room_is_where_the_alarm_was_and_to_room_where_it_goes(clockfake, capsys):
     for dry in (["--dry-run"], []):
         code, out, _ = run(["alarm", "edit", "66", "--room", "Living Room", "--json", *dry],
