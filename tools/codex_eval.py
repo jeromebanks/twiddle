@@ -441,7 +441,8 @@ def score(fx: Fixture, report: str) -> Score:
         if not (close or in_function):
             continue
         stage = max(stage, 2)
-        if any(k.lower() in text.lower() for k in fx.keywords):
+        plain = re.sub(r"[`*_]", "", text).lower()          # `is not `None`` and **is not None** read alike
+        if any(re.sub(r"[`*_]", "", k).lower() in plain for k in fx.keywords):
             return Score(True, f"found at {fx.file}")
         near = re.sub(r"\s+", " ", text)[:120]
     if stage == 0:

@@ -800,6 +800,7 @@ def test_a_report_that_finds_the_planted_bug_is_a_hit(fx):
         s = codex_eval.score(fx, found(fx, where=where))
         assert s.hit, (where, s.reason)
     assert codex_eval.score(fx, found(fx, text=fx.keywords[0].upper())).hit              # case-insensitive
+    assert codex_eval.score(fx, found(fx, text="`" + fx.keywords[0].replace(" ", "` **") + "`")).hit   # markup is ignored
 
 
 def test_a_miss_a_wrong_file_a_far_line_the_wrong_defect_and_a_flagged_clean_change_each_fail_with_a_reason():
