@@ -953,7 +953,9 @@ async def test_the_ringing_screen_comes_with_the_alarm_and_leaves_with_it(ring):
         await poll(app, pilot)
         assert ringing(app)
         shown = text(app.screen, "#ring-text")
-        assert "Sonos Roam is ringing" in shown and "since 07:58" in shown    # 14:58Z
+        # the recording's stamp was an older build's local time; read as UTC
+        # it is off by the offset (the slice's non-goal), as such a fire would be
+        assert "Sonos Roam is ringing" in shown and "since 07:58" in shown
         assert "[ x  off ]" in shown and "[ z  snooze 10m ▾ ]" in shown
         assert "Sonos Roam" in shown.splitlines()[1] and "11 mid" not in shown
         assert alarm_cli.brief(app.shown.house, app.shown.alarm("34")) in shown
