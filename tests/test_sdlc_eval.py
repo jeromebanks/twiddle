@@ -792,6 +792,8 @@ def test_a_fixture_is_applied_only_in_a_scratch_repo_never_the_one_it_comes_from
 
 @pytest.mark.parametrize("fx", BUGS, ids=lambda f: f.name)
 def test_a_report_that_finds_the_planted_bug_is_a_hit(fx):
+    for n in fx.also_lines:
+        assert codex_eval.score(fx, found(fx, where=f"`{fx.file}:{n}`")).hit
     for where in (f"`{fx.file}:{fx.line}`", f"{fx.file.rsplit('/', 1)[-1]}:{fx.line + 3}", f"{fx.file} lines {fx.line - 2}-{fx.line + 1}",
                   f"{fx.file}#L{fx.line - 3}", f"in `{fx.functions[0]}` ({fx.file})"):
         s = codex_eval.score(fx, found(fx, where=where))

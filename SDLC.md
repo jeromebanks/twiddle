@@ -378,7 +378,7 @@ worktree of it). The repo holds the real `review-rules.md` and any repo `AGENTS.
 paths, with the base as `origin/epic/1` and the change as `slice/1`. Codex then reviews it with the PR prompt through the same
 `run_review` as a real round, one fixture at a time, each under its own scratch `CODEX_HOME`. No skills are copied in: `codex.skills`
 is `suppressed`, so a review is never offered any. A planted bug counts as found when the verdict is `changes` and **one
-numbered finding** names the file, a line within ±3 of the planted one or the enclosing function, and one of the
+numbered finding** names the file, a line within ±3 of the planted one (or of another place `expect.toml` allows) or the enclosing function, and one of the
 fixture's keywords (case-insensitive); the clean change must come back `approve`.
 
 - Every fixture runs, and a full eval takes 10-15 minutes. It prints a line per fixture as it goes, so run it in the background.

@@ -324,6 +324,7 @@ class Fixture:
     file: str = ""
     line: int = 0
     anchor: str = ""
+    also_lines: list[int] = field(default_factory=list)    # other places a finding may rightly cite (each ±LINE_TOLERANCE)
     functions: list[str] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
 
@@ -345,6 +346,10 @@ def load_fixtures(root: Path = FIXTURES) -> list[Fixture]:
             fx.file, fx.anchor = exp.get("file", ""), exp.get("anchor", "")
             fx.line = exp.get("line") if isinstance(exp.get("line"), int) and not isinstance(exp.get("line"), bool) else 0
             fx.functions, fx.keywords = exp.get("functions", []), exp.get("keywords", [])
+            fx.also_lines = exp.get("also_lines", [])
+            if not (isinstance(fx.also_lines, list) and all(isinstance(n, int) and not isinstance(n, bool) and n > 0
+                                                            for n in fx.also_lines)):
+                raise codex_review.ReviewError(f"fixture {d.name}: `also_lines` must be a list of line numbers")
             ok = (isinstance(fx.file, str) and fx.file and fx.line > 0 and isinstance(fx.anchor, str) and fx.anchor
                   and isinstance(fx.functions, list) and isinstance(fx.keywords, list) and fx.keywords
                   and all(isinstance(x, str) and x for x in fx.functions + fx.keywords))
@@ -421,7 +426,8 @@ def score(fx: Fixture, report: str) -> Score:
         if not names_file(text, fx.file):
             continue
         stage = max(stage, 1)
-        close = any(a - LINE_TOLERANCE <= fx.line <= b + LINE_TOLERANCE for a, b in lines_named(text, fx.file))
+        close = any(a - LINE_TOLERANCE <= n <= b + LINE_TOLERANCE for a, b in lines_named(text, fx.file)
+                    for n in [fx.line, *fx.also_lines])
         in_function = any(re.search(rf"\b{re.escape(f)}\b", text) for f in fx.functions)
         if not (close or in_function):
             continue
