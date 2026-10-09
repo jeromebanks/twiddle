@@ -354,7 +354,8 @@ fixtures) come from the checkout the command runs from. The files Codex reads (`
 `plan-schema.md`, any `AGENTS.md`, and the skills in fingerprinted mode) come from the checkout
 Codex runs in: the slice's worktree, the scratch checkout of `main` for a plan, or the epic's
 worktree. The settings are the ones the round runs with, a `--config` of its own included. If an
-input can't be fingerprinted (a symbolic link, or a file where a directory of inputs belongs), the
+input can't be fingerprinted (a file where a directory of inputs belongs, or a symbolic link: none
+may live under `.agents/` or `tests/codex_eval/`, nor be named like an `AGENTS.md`, in either mode), the
 round is refused before Codex starts (exit 1: fix it and run again, never a `review-defer`): a
 review that can't say what it ran under isn't one. It only warns when that pair has no passing
 result, or the results can't be read, and the round still runs.

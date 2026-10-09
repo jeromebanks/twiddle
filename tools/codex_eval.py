@@ -68,6 +68,10 @@ class Tree:
     def read(self, path: str) -> bytes | None:
         raise NotImplementedError
 
+    def links(self, names: list[str]) -> list[str]:
+        """Which of these listed names are symbolic links."""
+        raise NotImplementedError
+
 
 def _git_bytes(args: list[str], cwd: Path) -> bytes:
     proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True)
@@ -85,6 +89,9 @@ class Worktree(Tree):
     def names(self) -> list[str]:
         out = _git_bytes(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], self.root)
         return sorted({n for n in out.decode().split("\0") if n})
+
+    def links(self, names: list[str]) -> list[str]:
+        return [n for n in names if (self.root / n).is_symlink()]
 
     def read(self, path: str) -> bytes | None:
         if linked := [a for a in _ancestors(path) if (self.root / a).is_symlink()]:
@@ -104,6 +111,10 @@ class Commit(Tree):
     def names(self) -> list[str]:
         out = _git_bytes(["ls-tree", "-r", "-z", "--name-only", self.sha], self.root)
         return sorted(n for n in out.decode().split("\0") if n)
+
+    def links(self, names: list[str]) -> list[str]:
+        out = _git_bytes(["ls-tree", "-r", "-z", self.sha], self.root)
+        return [e.split("\t", 1)[1] for e in out.decode().split("\0") if e.startswith("120000 ")]
 
     def read(self, path: str) -> bytes | None:
         if self._is_link(path):
@@ -150,6 +161,13 @@ def is_input(name: str, mode: Any) -> bool:
                 and name.endswith("/SKILL.md")))
 
 
+def guarded(name: str) -> bool:
+    """A path that may never be a symbolic link: anything under `.agents/` or `tests/codex_eval/`, or a file named
+    like an instruction file anywhere."""
+    return (name.startswith((SKILLS.parent.relative_to(ROOT).as_posix() + "/", FIXTURES.relative_to(ROOT).as_posix() + "/"))
+            or codex_review.instruction_file(name.rsplit("/", 1)[-1]))
+
+
 def read_by_codex(name: str) -> bool:
     """Whether Codex itself reads this input from the checkout it reviews in (the rules, the plan schema, the
     instruction files and skills it loads), rather than the tool reading it from the checkout it runs from."""
@@ -176,6 +194,10 @@ def inputs(tree: Tree, checkout: Tree | None = None, section: Any = ...) -> list
         if stand_in := sorted({a for r in roots for a in _ancestors(r.relative_to(ROOT).as_posix())} & set(names)):
             raise codex_review.ReviewError(f"{stand_in[0]} isn't a directory (a symbolic link?), and the review "
                                            "logic's inputs under it must be files in the repo")
+        # no link where review logic lives, whatever the mode: a linked folder is one name to git, so its
+        # contents would reach Codex without ever being read here
+        if linked := sorted(n for n in src.links(names) if guarded(n)):
+            raise _linked(linked[0])
         for n in names:
             if n not in FILES and is_input(n, mode) and read_by_codex(n) == mine and (data := src.read(n)) is not None:
                 found[n] = data
