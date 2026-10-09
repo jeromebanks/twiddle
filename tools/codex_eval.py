@@ -381,7 +381,8 @@ def findings(report: str) -> list[str]:
     return [re.sub(r"\n[ \t]*[*_`]*VERDICT:.*\Z", "", t, flags=re.IGNORECASE).strip() for t in out]
 
 
-FILE_RE = re.compile(r"[\w./-]+\.(?:py|md|toml|json|txt|sh|html)\b")
+END = r"(?![\w-]|\.\w)"              # a complete file name: not `journal_log.py.orig` or `journal_log.pyc`
+FILE_RE = re.compile(r"[\w./-]+\.(?:py|md|toml|json|txt|sh|html)" + END)
 
 
 def lines_named(text: str, path: str) -> list[tuple[int, int]]:
@@ -389,7 +390,7 @@ def lines_named(text: str, path: str) -> list[tuple[int, int]]:
     a bare `line 12`, `lines 12-14` or `L12` only when the text names no other file (else it may be that file's)."""
     name = path.rsplit("/", 1)[-1]
     base = re.escape(name)
-    pats = [rf"(?<![\w.-]){base}[:#(]\s*{RANGE}"]
+    pats = [rf"(?<![\w.-]){base}(?=[:#(])[:#(]\s*{RANGE}"]
     if all(f.rsplit("/", 1)[-1] == name for f in FILE_RE.findall(text)):
         pats += [rf"\blines?\s+{RANGE}", rf"\bL(\d+)(?:\s*(?:-|\u2013|\u2014)\s*L?(\d+))?\b"]
     found = []
@@ -402,7 +403,7 @@ def lines_named(text: str, path: str) -> list[tuple[int, int]]:
 
 def names_file(text: str, path: str) -> bool:
     """The text names the file by its repo path or its name (every fixture's file names are unique)."""
-    return bool(re.search(rf"(?<![\w.-]){re.escape(path.rsplit('/', 1)[-1])}(?![\w])", text))
+    return bool(re.search(rf"(?<![\w.-]){re.escape(path.rsplit('/', 1)[-1])}{END}", text))
 
 
 @dataclass
