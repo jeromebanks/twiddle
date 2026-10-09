@@ -389,7 +389,7 @@ def lines_named(text: str, path: str) -> list[tuple[int, int]]:
     a bare `line 12`, `lines 12-14` or `L12` only when the text names no other file (else it may be that file's)."""
     name = path.rsplit("/", 1)[-1]
     base = re.escape(name)
-    pats = [rf"{base}[:#(]\s*{RANGE}"]
+    pats = [rf"(?<![\w.-]){base}[:#(]\s*{RANGE}"]
     if all(f.rsplit("/", 1)[-1] == name for f in FILE_RE.findall(text)):
         pats += [rf"\blines?\s+{RANGE}", rf"\bL(\d+)(?:\s*(?:-|\u2013|\u2014)\s*L?(\d+))?\b"]
     found = []

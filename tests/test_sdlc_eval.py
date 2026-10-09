@@ -833,6 +833,8 @@ def test_a_line_belongs_to_the_file_it_is_given_for_and_a_bare_one_only_when_no_
     s = codex_eval.score(fx, other)
     assert not s.hit and "names line" in s.reason
     assert not codex_eval.score(fx, other.replace("#L19", ":19")).hit
+    suffix = "1. **blocking** tests/test_journal_log.py:19 has an off-by-one test; journal_log.py is otherwise fine.\n\nVERDICT: changes\n"
+    assert not codex_eval.score(fx, suffix).hit                      # `journal_log.py` inside another file's name
     assert codex_eval.score(fx, f"1. `{fx.file}` line {fx.line}: off-by-one\n\nVERDICT: changes\n").hit
     assert codex_eval.score(fx, f"1. `{fx.file}:{fx.line}` off-by-one, see tests/test_journal_newest.py:99\n\nVERDICT: changes\n").hit
 
@@ -981,7 +983,9 @@ def test_dry_run_lists_the_fixtures_and_the_fingerprint_and_prints_no_codex_comm
     assert "codex exec" not in out and "codex " + "exec" not in out and "-m test-model" not in out
     assert calls(e.log) == [] and e.posted == [] and not (tmp_path / "scratch").exists()
     e.ledger = [{"fingerprint": e.fp, "codex": "9.9.9-test", "outcome": "pass", "url": "u"}]
-    assert e.run("--dry-run") == 0 and "nothing to run" in capsys.readouterr().out
+    assert e.run("--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "nothing to run" in out and all(fx.name in out for fx in FIXTURES) and calls(e.log) == []
 
 
 def test_the_scratch_may_not_be_inside_the_checkout_and_a_saved_ledger_cant_post(tmp_path, monkeypatch, capsys):

@@ -2737,15 +2737,15 @@ def run_codex_eval(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if args.inputs:
         for name, data in codex_eval.inputs(tree, section=settings):
             print(f"  {name}" + ("  (absent)" if data is None else ""))
-    if passed and not args.force:
-        print("this pair already passed: nothing to run (--force runs it again)")
-        return 0
     if args.dry_run:
-        print(f"would run {len(fixtures)} fixtures one at a time, each in a scratch git repo under its own CODEX_HOME "
-              "(about 2-3 minutes each), then post one result"
-              + (" (--force: the pair passed already)" if passed else "") + ":")
+        print("this pair already passed: nothing to run (--force runs it again). The fixtures are:" if passed and not args.force
+              else f"would run {len(fixtures)} fixtures one at a time, each in a scratch git repo under its own CODEX_HOME "
+                   "(about 2-3 minutes each), then post one result" + (" (--force: the pair passed already)" if passed else "") + ":")
         for fx in fixtures:
             print(f"  {fx.name}: " + (f"must be found at {fx.file}:{fx.line}" if fx.kind == "bug" else "must be approved"))
+        return 0
+    if passed and not args.force:
+        print("this pair already passed: nothing to run (--force runs it again)")
         return 0
     if getattr(args, "from_file", None):
         raise SdlcError("--from-file reads a saved ledger and can't post a result: use --dry-run with it")
