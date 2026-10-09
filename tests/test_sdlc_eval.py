@@ -838,6 +838,8 @@ def test_a_line_belongs_to_the_file_it_is_given_for_and_a_bare_one_only_when_no_
     orig = "1. **blocking** journal_log.py.orig line 19: an off-by-one error returns too many entries.\n\nVERDICT: changes\n"
     assert not codex_eval.score(fx, orig).hit and not codex_eval.score(fx, orig.replace(".orig", "c")).hit
     assert not codex_eval.score(fx, orig.replace("journal_log.py.orig", "journal_log.py.orig:19")).hit
+    both = "1. **blocking** `journal_log.py.orig#L19` has an off-by-one error; `journal_log.py` is otherwise fine.\n\nVERDICT: changes\n"
+    assert not codex_eval.score(fx, both).hit and not codex_eval.score(fx, both.replace(".orig", "c")).hit
     assert codex_eval.score(fx, orig.replace(".orig", "")).hit          # the complete name, even before a full stop
     assert not codex_eval.score(fx, suffix).hit                      # `journal_log.py` inside another file's name
     assert codex_eval.score(fx, f"1. `{fx.file}` line {fx.line}: off-by-one\n\nVERDICT: changes\n").hit

@@ -381,29 +381,34 @@ def findings(report: str) -> list[str]:
     return [re.sub(r"\n[ \t]*[*_`]*VERDICT:.*\Z", "", t, flags=re.IGNORECASE).strip() for t in out]
 
 
-END = r"(?![\w-]|\.\w)"              # a complete file name: not `journal_log.py.orig` or `journal_log.pyc`
-FILE_RE = re.compile(r"[\w./-]+\.(?:py|md|toml|json|txt|sh|html)" + END)
+# a file name as written, whole: `journal_log.py`, not a prefix of `journal_log.py.orig` or `journal_log.pyc`
+FILE_RE = re.compile(r"(?<![\w.-])[\w./-]+\.(?:py|md|toml|json|txt|sh|html)\w*(?:\.\w+)*")
+
+
+def _is(token: str, path: str) -> bool:
+    return token.rsplit("/", 1)[-1] == path.rsplit("/", 1)[-1]
 
 
 def lines_named(text: str, path: str) -> list[tuple[int, int]]:
     """(first, last) for every line or line range the text gives for `path`: `base.py:12`, `base.py#L12-L14`; and
-    a bare `line 12`, `lines 12-14` or `L12` only when the text names no other file (else it may be that file's)."""
-    name = path.rsplit("/", 1)[-1]
-    base = re.escape(name)
-    pats = [rf"(?<![\w.-]){base}(?=[:#(])[:#(]\s*{RANGE}"]
-    if all(f.rsplit("/", 1)[-1] == name for f in FILE_RE.findall(text)):
+    a bare `line 12`, `lines 12-14` or `L12` only when every file the text names is `path` (else it may be another's)."""
+    pats = [rf"({FILE_RE.pattern})[:#(]\s*{RANGE}"]
+    if all(_is(t, path) for t in FILE_RE.findall(text)):
         pats += [rf"\blines?\s+{RANGE}", rf"\bL(\d+)(?:\s*(?:-|\u2013|\u2014)\s*L?(\d+))?\b"]
     found = []
-    for pat in pats:
+    for k, pat in enumerate(pats):
         for m in re.finditer(pat, text, re.IGNORECASE):
-            a = int(m.group(1))
-            found.append((a, int(m.group(2)) if m.group(2) else a))
+            if k == 0 and not _is(m.group(1), path):
+                continue
+            g = m.groups()[1:] if k == 0 else m.groups()
+            a = int(g[0])
+            found.append((a, int(g[1]) if g[1] else a))
     return found
 
 
 def names_file(text: str, path: str) -> bool:
-    """The text names the file by its repo path or its name (every fixture's file names are unique)."""
-    return bool(re.search(rf"(?<![\w.-]){re.escape(path.rsplit('/', 1)[-1])}{END}", text))
+    """The text names the file, whole, by its repo path or its name (every fixture's file names are unique)."""
+    return any(_is(t, path) for t in FILE_RE.findall(text))
 
 
 @dataclass
