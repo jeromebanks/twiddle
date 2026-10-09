@@ -308,7 +308,8 @@ EVAL_EPIC = 1                          # the epic the scratch repo's `origin/epi
 LINE_TOLERANCE = 3                     # a finding's line may be this far from the planted one
 BASE_FILES = ("base", "change.patch", "brief.md", "expect.toml")     # what a fixture directory holds
 KINDS = ("bug", "clean")
-SCRATCH_GIT = ("-c", "user.name=codex-eval", "-c", "user.email=codex-eval@example.invalid",
+# a neutral identity: Codex reads `git log`, so nothing in the repo may say what is being measured
+SCRATCH_GIT = ("-c", "user.name=dev", "-c", "user.email=dev@example.invalid",
                "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-c", "core.autocrlf=false")
 
 
@@ -344,12 +345,17 @@ def load_fixtures(root: Path = FIXTURES) -> list[Fixture]:
             fx.file, fx.anchor = exp.get("file", ""), exp.get("anchor", "")
             fx.line = exp.get("line") if isinstance(exp.get("line"), int) and not isinstance(exp.get("line"), bool) else 0
             fx.functions, fx.keywords = exp.get("functions", []), exp.get("keywords", [])
-            ok = (fx.file and fx.line > 0 and fx.anchor and fx.keywords
-                  and all(isinstance(x, str) and x for x in fx.functions + fx.keywords)
-                  and isinstance(fx.functions, list) and isinstance(fx.keywords, list))
+            ok = (isinstance(fx.file, str) and fx.file and fx.line > 0 and isinstance(fx.anchor, str) and fx.anchor
+                  and isinstance(fx.functions, list) and isinstance(fx.keywords, list) and fx.keywords
+                  and all(isinstance(x, str) and x for x in fx.functions + fx.keywords))
             if not ok:
                 raise codex_review.ReviewError(f"fixture {d.name}: a bug needs `file`, `line`, `anchor`, `keywords` "
                                                "(non-empty strings) and `functions` (a list of strings)")
+            # a keyword the location contains would match any finding that names the place, whatever its defect
+            place = " ".join([fx.file, *fx.functions]).lower()
+            if inside := [k for k in fx.keywords if k.lower() in place]:
+                raise codex_review.ReviewError(f"fixture {d.name}: keyword {inside[0]!r} is part of the file or function "
+                                               "names, so it would match any finding there: pick words for the defect")
         found.append(fx)
     if not any(f.kind == "bug" for f in found) or not any(f.kind == "clean" for f in found):
         raise codex_review.ReviewError(f"{root} must hold at least one fixture with a planted bug and one clean change")
@@ -488,15 +494,17 @@ def run_fixtures(fixtures: list[Fixture], settings: dict[str, Any], out: Path, l
                  root: Path = ROOT) -> EvalRun:
     """Review each fixture, one at a time (the sign-in copy-back assumes one run per `CODEX_HOME`), each in its own
     `<out>/<name>/` with its own scratch repo and `codex-home`, through `codex_review.run_review` with the PR
-    prompt. A fixture Codex can't run is `unavailable` and the rest still run; a refusal (`ReviewError`) stops the lot."""
+    prompt. Nothing Codex is shown names the fixture or the eval (`<out>/f1/` ... , the brief alone, a neutral git
+    identity): the name only reaches the log lines this prints. A fixture Codex can't run is `unavailable` and the rest still run; a refusal (`ReviewError`) stops the lot."""
     run = EvalRun()
     template = codex_review.PR_PROMPT.read_text()
     for i, fx in enumerate(fixtures, 1):
-        began, scratch = time.monotonic(), Path(out) / fx.name
+        # the folder, its path in the prompt and Codex's working directory carry no fixture name: Codex would read it
+        began, scratch = time.monotonic(), Path(out) / f"f{i}"
         scratch.mkdir(parents=True, exist_ok=True)
         head = build_repo(fx, scratch / "repo", root)
         brief = scratch / "slice.md"
-        brief.write_text(f"{fx.name}\n\n{fx.brief}")
+        brief.write_text(fx.brief)
         prompt = codex_review.fill_pr_prompt(template, brief, f"origin/epic/{EVAL_EPIC}", EVAL_EPIC, None)
         (scratch / "prompt.md").write_text(prompt)
 

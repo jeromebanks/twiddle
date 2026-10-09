@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -738,7 +739,7 @@ def test_the_fixtures_are_a_bug_each_and_a_clean_change_and_pytest_collects_none
         == {f.name for f in BUGS}
     # the planted tests live inside change.patch, so no file here is one pytest would pick up
     assert not [p for p in codex_eval.FIXTURES.rglob("*.py") if p.name.startswith("test_") or p.name.endswith("_test.py")]
-    out = subprocess.run(["uv", "run", "pytest", "--collect-only", "-q", "tests/codex_eval"], cwd=ROOT,
+    out = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q", "tests/codex_eval"], cwd=ROOT,
                          capture_output=True, text=True)
     assert out.returncode == 5 and "no tests collected" in out.stdout + out.stderr
 
@@ -801,6 +802,9 @@ def test_a_report_that_finds_the_planted_bug_is_a_hit(fx):
 def test_a_miss_a_wrong_file_a_far_line_the_wrong_defect_and_a_flagged_clean_change_each_fail_with_a_reason():
     fx = BY_NAME["off-by-one-bound"]
     other = BY_NAME["unchecked-error-path"]
+    for bug in BUGS:        # the right place, named by its function, with a finding about something else
+        s = codex_eval.score(bug, found(bug, where=f"`{bug.file}` in `{bug.functions[0]}`", text="the docstring is too long"))
+        assert not s.hit and "doesn't name the defect" in s.reason, (bug.name, s)
     cases = {
         "approved the change": ("1. fine\n\nVERDICT: approve\n", "approved the change with the planted bug"),
         "no finding at all": ("VERDICT: changes\n", "no numbered finding"),
@@ -881,7 +885,16 @@ def test_a_codex_that_finds_every_bug_posts_a_pass_and_never_touches_the_checkou
     assert len(runs) == len(FIXTURES) and root_state() == before
     homes = [Path(c["codex_home"]) for c in runs]
     assert len(set(homes)) == len(homes) and all(h.parent.parent == tmp_path / "scratch" for h in homes)
-    assert [Path(c["cwd"]).resolve() for c in runs] == [(tmp_path / "scratch" / fx.name / "repo").resolve() for fx in FIXTURES]
+    assert [Path(c["cwd"]).resolve() for c in runs] == [(tmp_path / "scratch" / f"f{i}" / "repo").resolve()
+                                                        for i, _ in enumerate(FIXTURES, 1)]
+    # nothing Codex is shown says which fixture it is, or that this is an eval: the prompt, its working directory,
+    # the brief it is pointed at, and the repo's own history
+    for i, (c, fx) in enumerate(zip(runs, FIXTURES), 1):
+        shown = "\n".join([c["argv"][-1], c["cwd"], (tmp_path / "scratch" / f"f{i}" / "slice.md").read_text(),
+                           git(Path(c["cwd"]), "log", "--format=%an %ae %s", "--all"),
+                           git(Path(c["cwd"]), "branch", "-a")]).lower()
+        assert fx.name.lower() not in shown and "eval" not in shown and "fixture" not in shown, fx.name
+        assert "bug" not in git(Path(c["cwd"]), "log", "--format=%s", "--all").lower()
     assert all(not Path(c["cwd"]).resolve().is_relative_to(ROOT.resolve()) for c in runs)
     assert all(c["argv"][:3] == ["exec", "-m", "test-model"] and "origin/epic/1" in c["argv"][-1] for c in runs)
     assert not any(h.is_dir() and (h / "auth.json").exists() for h in homes)           # every sign-in reconciled
@@ -965,3 +978,33 @@ def test_the_scratch_may_not_be_inside_the_checkout_and_a_saved_ledger_cant_post
     assert e.run("--from-file", str(tmp_path / "ledger.json")) == 1
     assert "--from-file" in capsys.readouterr().err
     assert calls(e.log) == [] and e.posted == []
+
+
+def test_a_fixture_that_cant_say_what_it_expects_is_refused_by_name(tmp_path):
+    def fixtures(**changes):
+        root = tmp_path / "fx"
+        shutil.rmtree(root, ignore_errors=True)
+        for name in ("off-by-one-bound", "clean-change"):
+            shutil.copytree(codex_eval.FIXTURES / name, root / name)
+        if changes:
+            exp = (root / "off-by-one-bound" / "expect.toml").read_text()
+            (root / "off-by-one-bound" / "expect.toml").write_text(exp + "\n".join(f"{k} = {v}" for k, v in changes.items()) + "\n")
+        return root
+    assert len(codex_eval.load_fixtures(fixtures())) == 2
+    for bad, why in (({"keywords": '["newest"]'}, "part of the file or function names"),     # a function's own name
+                     ({"keywords": '["Journal_Log"]'}, "part of the file or function names"),
+                     ({"functions": '"newest"'}, "needs `file`"), ({"keywords": "[]"}, "needs `file`"),
+                     ({"kind": '"maybe"'}, "`kind` must be")):
+        with pytest.raises(codex_review.ReviewError, match=re.escape(why)):
+            # a repeated key is a TOML error, so the bad value replaces the file's own
+            root = fixtures()
+            path = root / "off-by-one-bound" / "expect.toml"
+            text = "\n".join(l for l in path.read_text().splitlines() if not l.startswith(tuple(f"{k} =" for k in bad)))
+            path.write_text(text + "\n" + "\n".join(f"{k} = {v}" for k, v in bad.items()) + "\n")
+            codex_eval.load_fixtures(root)
+    shutil.rmtree(fixtures() / "clean-change")
+    with pytest.raises(codex_review.ReviewError, match="one clean change"):
+        codex_eval.load_fixtures(tmp_path / "fx")
+    (tmp_path / "fx" / "clean-change").mkdir()
+    with pytest.raises(codex_review.ReviewError, match="clean-change lacks"):
+        codex_eval.load_fixtures(tmp_path / "fx")

@@ -2752,7 +2752,7 @@ def run_codex_eval(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if not version:
         print(f"codex can't be started (not on the PATH): nothing was run or posted (exit {codex_review.UNAVAILABLE})")
         return codex_review.UNAVAILABLE
-    out = review_scratch(args, "eval", ROOT, primary_root())
+    out = review_scratch(args, "run", ROOT, primary_root())      # a label that says nothing of the eval: Codex sees the path
     print(f"scratch: {out}\n", flush=True)
     run = codex_eval.run_fixtures(fixtures, settings, out, log=lambda m: print(m, flush=True))
     outcome, reason = codex_eval.overall(run.outcomes)

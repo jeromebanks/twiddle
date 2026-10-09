@@ -107,19 +107,6 @@ Commit with the repo's trailers and push:
 git push -u origin slice/N
 ```
 
-If this slice changed the review logic (a prompt, `review-rules.md`, the `codex` settings, `tools/codex_review.py`,
-`tools/codex_eval.py` or anything under `tests/codex_eval/`; `SDLC.md` lists the fingerprint's inputs), run the
-eval once the code is final, before `test-record` and `codex-review`: a later commit to those inputs voids its result.
-Run the Bash call in the background (`run_in_background`); a full eval takes 10-15 minutes.
-
-```bash
-uv run python tools/sdlc.py codex-eval
-```
-
-It posts its result, and runs nothing when this fingerprint and `codex` version already passed. A `fail`
-means Codex missed a planted bug or flagged the clean change: fix the review logic, not the fixture, unless the
-fixture is what is wrong. Exit 3 means Codex can't run: carry on, and `review-defer` applies as in §8.
-
 ## 6. Self-review
 
 First work through this checklist on your own diff:
@@ -143,6 +130,25 @@ The PR body must contain **exactly one** `Closes #N`. Include:
 
 ```bash
 gh pr create --base epic/E --head slice/N --title "<key>: <slice title>" --body-file <SCRATCH>/pr.md
+```
+
+If this slice changed the review logic (a prompt, `review-rules.md`, the `codex` settings, `tools/codex_review.py`,
+`tools/codex_eval.py` or anything under `tests/codex_eval/`; `SDLC.md` lists the fingerprint's inputs), run the
+eval once the code is final, before `test-record` and `codex-review`: a later commit to those inputs voids its result, so
+run it again whenever self-review or a Codex round makes you change one.
+Run the Bash call in the background (`run_in_background`); a full eval takes 10-15 minutes.
+
+```bash
+uv run python tools/sdlc.py codex-eval
+```
+
+It posts its result, and runs nothing when this fingerprint and `codex` version already passed. A `fail`
+means Codex missed a planted bug or flagged the clean change: fix the review logic, not the fixture, unless the
+fixture is what is wrong. Exit 3 means Codex can't run: carry on, and `review-defer` applies as in §8.
+
+Then record the tests:
+
+```bash
 cd <WORKTREE> && uv run python tools/sdlc.py test-record PR    # runs the full suite itself
 ```
 

@@ -4,4 +4,4 @@ file = "src/twiddle/journal_log.py"
 line = 19
 anchor = "return entries[-(limit + 1):]"
 functions = ["newest"]
-keywords = ["off-by-one", "off by one", "limit + 1", "limit+1", "one more", "one too many", "extra entry", "one extra", "limit entries", "exactly"]
+keywords = ["off-by-one", "off by one", "limit + 1", "limit+1", "one more", "one too many", "extra entry", "one extra", "too many"]
