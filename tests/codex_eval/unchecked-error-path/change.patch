@@ -1,0 +1,40 @@
+diff --git a/src/twiddle/probe_codec.py b/src/twiddle/probe_codec.py
+new file mode 100644
+index 0000000..723472d
+--- /dev/null
++++ b/src/twiddle/probe_codec.py
+@@ -0,0 +1,15 @@
++"""What codec a radio stream carries, asked of `ffprobe`."""
++from __future__ import annotations
++
++import json
++import subprocess
++
++from twiddle.errors import ProbeError
++
++
++def stream_codec(url: str, run=subprocess.run) -> str:
++    """The audio codec of `url` (`mp3`, `aac`, ...). Raises `ProbeError` when `ffprobe` fails or finds no audio."""
++    proc = run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
++                "-of", "json", url], capture_output=True, text=True, timeout=20)
++    streams = json.loads(proc.stdout)["streams"]
++    return streams[0]["codec_name"]
+diff --git a/tests/test_probe_codec.py b/tests/test_probe_codec.py
+new file mode 100644
+index 0000000..9f56ab5
+--- /dev/null
++++ b/tests/test_probe_codec.py
+@@ -0,0 +1,13 @@
++import json
++from types import SimpleNamespace
++
++from twiddle.probe_codec import stream_codec
++
++
++def fake_run(stdout, returncode=0):
++    return lambda cmd, **kw: SimpleNamespace(stdout=stdout, stderr="", returncode=returncode)
++
++
++def test_the_codec_is_read_from_ffprobes_json():
++    out = json.dumps({"streams": [{"codec_name": "aac"}]})
++    assert stream_codec("http://stream.example.invalid/live", run=fake_run(out)) == "aac"

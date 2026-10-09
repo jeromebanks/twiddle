@@ -2688,8 +2688,10 @@ def record_eval(result: dict[str, Any], config: dict[str, Any], dry_run: bool = 
 
 
 def command_codex_eval(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """The review logic's fingerprint, `codex --version`, and the eval result recorded for that pair (if any).
-    Read-only: it runs `codex --version` at most, never `codex exec`."""
+    """`--status`: the review logic's fingerprint, `codex --version`, and the eval result recorded for that pair (if
+    any), read-only (it runs `codex --version` at most). Otherwise run the eval (`run_codex_eval`)."""
+    if not args.status:
+        return run_codex_eval(args, config)
     tree, section = codex_eval.Worktree(ROOT), config.get("codex")     # the settings a round here would run with
     fp = codex_eval.fingerprint(tree, section=section)
     mode = (section if isinstance(section, dict) else {}).get("skills", "?")
@@ -2707,6 +2709,67 @@ def command_codex_eval(args: argparse.Namespace, config: dict[str, Any]) -> int:
         for name, data in listed:
             print(f"  {name}" + ("  (absent)" if data is None else ""))
     return 0
+
+
+def run_codex_eval(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Run each fixture under `tests/codex_eval/` through the review runner, score them, and post one result for
+    the (fingerprint, `codex --version`) pair. A pair that already passed runs nothing (`--force` runs it).
+
+    Exit status: 0 a pass (posted, or already recorded), 1 a `fail` (posted) or a refusal, `UNAVAILABLE` Codex
+    couldn't run and no fixture was missed (nothing posted: the review is deferred, as `codex-review`'s is)."""
+    settings = codex_review.codex_settings(config)
+    tree = codex_eval.Worktree(ROOT)
+    fp = codex_eval.fingerprint(tree, section=settings)
+    fixtures = codex_eval.load_fixtures()
+    version = codex_eval.current_version()
+    try:
+        prior = codex_eval.pair_result(eval_ledger(args, config), fp, version)
+    except (SdlcError, OSError, ValueError) as exc:
+        if not args.dry_run:
+            raise SdlcError(f"couldn't read the recorded results ({exc}): an eval that couldn't be told apart "
+                            "from a repeat isn't run") from exc
+        prior = None
+        print(f"note: couldn't read the recorded results ({exc})")
+    passed = bool(prior and prior.get("outcome") == "pass")
+    print(f"review logic: {codex_eval.short(fp)}  (skills {settings['skills']})\n"
+          f"codex:        {version or 'not found on PATH'}  (model {settings['model']}, effort {settings['reasoning_effort']})\n"
+          f"eval:         {codex_eval.describe(prior) if version else 'no `codex` to pair it with'}")
+    if args.inputs:
+        for name, data in codex_eval.inputs(tree, section=settings):
+            print(f"  {name}" + ("  (absent)" if data is None else ""))
+    if passed and not args.force:
+        print("this pair already passed: nothing to run (--force runs it again)")
+        return 0
+    if args.dry_run:
+        print(f"would run {len(fixtures)} fixtures one at a time, each in a scratch git repo under its own CODEX_HOME "
+              "(about 2-3 minutes each), then post one result"
+              + (" (--force: the pair passed already)" if passed else "") + ":")
+        for fx in fixtures:
+            print(f"  {fx.name}: " + (f"must be found at {fx.file}:{fx.line}" if fx.kind == "bug" else "must be approved"))
+        return 0
+    if getattr(args, "from_file", None):
+        raise SdlcError("--from-file reads a saved ledger and can't post a result: use --dry-run with it")
+    if not version:
+        print(f"codex can't be started (not on the PATH): nothing was run or posted (exit {codex_review.UNAVAILABLE})")
+        return codex_review.UNAVAILABLE
+    out = review_scratch(args, "eval", ROOT, primary_root())
+    print(f"scratch: {out}\n", flush=True)
+    run = codex_eval.run_fixtures(fixtures, settings, out, log=lambda m: print(m, flush=True))
+    outcome, reason = codex_eval.overall(run.outcomes)
+    if outcome is None:
+        print(f"\n{reason}: nothing was posted (exit {codex_review.UNAVAILABLE}); the end of each codex.err under {out} "
+              "says why. The review logic stays unevaluated for this pair")
+        return codex_review.UNAVAILABLE
+    if codex_eval.fingerprint(tree, section=settings) != fp:
+        raise SdlcError("the review logic changed while the eval ran: its result would be recorded against the wrong "
+                        "fingerprint, so nothing was posted. Run it again")
+    result = {"fingerprint": fp, "codex": run.version or version, "outcome": outcome, "model": settings["model"],
+              "effort": settings["reasoning_effort"], "reason": reason,
+              "fixtures": [{"name": o.name, "outcome": o.outcome, "detail": o.detail} for o in run.outcomes]}
+    posted = record_eval(result, config)
+    print(f"\neval {outcome.upper()} for {codex_eval.short(fp)} on codex {result['codex']}"
+          + (f"\n{reason}" if reason else "") + (f"\nposted: {posted['html_url']}" if posted.get("html_url") else ""))
+    return 0 if outcome == "pass" else 1
 
 
 def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, head: str, out: Path,
@@ -4210,9 +4273,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--from-file")
     p.set_defaults(fn=command_codex_review)
 
-    p = sub.add_parser("codex-eval", help="the review logic's fingerprint, `codex --version`, and that pair's eval result")
-    p.add_argument("--status", action="store_true", required=True,
-                   help="print them (read-only: runs `codex --version` at most, never `codex exec`)")
+    p = sub.add_parser("codex-eval", help="run the review eval (planted bugs, scored) and post its result; "
+                                          "--status only prints the fingerprint and that pair's result")
+    p.add_argument("--status", action="store_true",
+                   help="print the fingerprint, `codex --version` and that pair's result (read-only: runs `codex --version` "
+                        "at most, never `codex exec`)")
+    p.add_argument("--force", action="store_true", help="run it although this pair already passed")
+    p.add_argument("--dry-run", action="store_true", help="list the fixtures, the fingerprint and what would run; run nothing")
+    p.add_argument("--out", help="where the fixtures' scratch repos, CODEX_HOMEs and reports go (outside any checkout); "
+                                 "default a temp dir")
     p.add_argument("--inputs", action="store_true", help="also list every file the fingerprint covers")
     p.add_argument("--from-file", help='a saved ledger instead of GitHub: {"eval": [comments], "trusted": [logins]}')
     p.set_defaults(fn=command_codex_eval)

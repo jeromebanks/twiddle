@@ -1,0 +1,7 @@
+# the planted bug: `ffprobe`'s exit status and an empty result are never checked, so a failure surfaces as a JSON or index error
+kind = "bug"
+file = "src/twiddle/probe_codec.py"
+line = 14
+anchor = "streams = json.loads(proc.stdout)"
+functions = ["stream_codec"]
+keywords = ["returncode", "return code", "exit code", "exit status", "non-zero", "nonzero", "ProbeError", "stderr", "empty", "IndexError", "JSONDecodeError", "unchecked", "never checks", "not checked"]

@@ -715,3 +715,253 @@ def test_check_session_reads_the_shapes_it_knows(tmp_path):
     # a run killed on its timeout may leave half a line: only then is it skipped
     assert codex_review.check_session(write_log(log, ok, tail='{"type": "resp'), wt, "suppressed", cut_short=True)[0] == "ok"
     assert codex_review.check_session(log, wt, "suppressed")[0] == "unknown"
+
+
+# --- codex-eval: the fixtures, the scorer and the run ------------------------------------------------
+
+EVAL_SETTINGS = {**SETTINGS, "timeout_seconds": 30}
+FIXTURES = codex_eval.load_fixtures()
+BY_NAME = {f.name: f for f in FIXTURES}
+BUGS = [f for f in FIXTURES if f.kind == "bug"]
+
+
+def found(fx, **kw):
+    """Canned Codex text that finds fx's planted bug the way a review would write it."""
+    where = kw.get("where", f"`{fx.file}:{fx.line}`")
+    text = kw.get("text", f"{fx.keywords[0]}: this is wrong")
+    return f"1. **blocking** {where} {text}\n2. non-blocking: a nit about nothing\n\nVERDICT: changes\n"
+
+
+def test_the_fixtures_are_a_bug_each_and_a_clean_change_and_pytest_collects_none_of_them():
+    assert 3 <= len(BUGS) <= 4 and [f.name for f in FIXTURES if f.kind == "clean"] == ["clean-change"]
+    assert {"off-by-one-bound", "unchecked-error-path", "speaker-write-without-dry-run", "test-proves-nothing"} \
+        == {f.name for f in BUGS}
+    # the planted tests live inside change.patch, so no file here is one pytest would pick up
+    assert not [p for p in codex_eval.FIXTURES.rglob("*.py") if p.name.startswith("test_") or p.name.endswith("_test.py")]
+    out = subprocess.run(["uv", "run", "pytest", "--collect-only", "-q", "tests/codex_eval"], cwd=ROOT,
+                         capture_output=True, text=True)
+    assert out.returncode == 5 and "no tests collected" in out.stdout + out.stderr
+
+
+@pytest.mark.parametrize("fx", FIXTURES, ids=lambda f: f.name)
+def test_every_fixture_patch_applies_and_names_what_is_really_there(fx, tmp_path):
+    head = codex_eval.build_repo(fx, tmp_path / "r", root=ROOT)
+    repo = tmp_path / "r"
+    assert git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "slice/1" and git(repo, "status", "--porcelain") == ""
+    assert git(repo, "rev-parse", "origin/epic/1") != head          # the base, one commit behind
+    assert (repo / ".agents/skills/review-rules.md").read_bytes() == codex_eval.RULES.read_bytes()
+    assert git(repo, "diff", "--name-only", "origin/epic/1...HEAD")
+    assert not [p for p in repo.rglob("*") if p.is_symlink()]
+    if fx.kind == "bug":
+        lines = (repo / fx.file).read_text().splitlines()
+        assert fx.anchor in lines[fx.line - 1], f"line {fx.line} of {fx.file} is {lines[fx.line - 1]!r}"
+        enclosing = [f for f in fx.functions if re.search(rf"^\s*(async )?def {f}\b", "\n".join(lines), re.MULTILINE)]
+        assert enclosing, f"{fx.file} defines none of {fx.functions}"
+        assert fx.file in git(repo, "diff", "--name-only", "origin/epic/1...HEAD").splitlines()
+
+
+def test_fixtures_are_committed_files_with_unique_names_and_nothing_private():
+    names = codex_eval.Worktree(ROOT).names()
+    for p in codex_eval.FIXTURES.rglob("*"):
+        if p.is_file():
+            assert p.relative_to(ROOT).as_posix() in names, f"{p} is not in git (ignored?)"
+    assert not list(codex_eval.FIXTURES.rglob("__pycache__")) and not list(codex_eval.FIXTURES.rglob("*.pyc"))
+    sources = [p.name for p in codex_eval.FIXTURES.rglob("*.py") if p.name != "__init__.py"]
+    assert len(sources) == len(set(sources)), "two fixtures share a file name, so a bare name is ambiguous"
+    text = "\n".join(p.read_text() for p in codex_eval.FIXTURES.rglob("*") if p.is_file())
+    assert not re.search(r"RINCON|\b\d{1,3}(\.\d{1,3}){3}\b|([0-9a-f]{2}:){5}[0-9a-f]{2}", text)
+    assert any(n.startswith("tests/codex_eval/") for n, _ in codex_eval.inputs(codex_eval.Worktree(ROOT)))
+
+
+def test_a_fixture_is_applied_only_in_a_scratch_repo_never_the_one_it_comes_from(repo, tmp_path):
+    (repo / "AGENTS.md").write_text("repo rules\n")
+    (repo / "tools" / "AGENTS.override.md").write_text("tool rules\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "instructions")
+    fx = BY_NAME["clean-change"]
+    codex_eval.build_repo(fx, tmp_path / "scratch", root=repo)
+    assert (tmp_path / "scratch" / "AGENTS.md").read_text() == "repo rules\n"
+    assert (tmp_path / "scratch" / "tools" / "AGENTS.override.md").read_text() == "tool rules\n"
+    assert (tmp_path / "scratch" / ".agents/skills/review-rules.md").read_bytes() == (repo / ".agents/skills/review-rules.md").read_bytes()
+    assert not (tmp_path / "scratch" / ".agents/skills/work-slice").exists()          # no skills are offered
+    with pytest.raises(codex_review.ReviewError, match="inside"):
+        codex_eval.build_repo(fx, repo / "scratch", root=repo)
+    assert not (repo / "scratch").exists()
+
+
+@pytest.mark.parametrize("fx", BUGS, ids=lambda f: f.name)
+def test_a_report_that_finds_the_planted_bug_is_a_hit(fx):
+    for where in (f"`{fx.file}:{fx.line}`", f"{fx.file.rsplit('/', 1)[-1]}:{fx.line + 3}", f"{fx.file} lines {fx.line - 2}-{fx.line + 1}",
+                  f"{fx.file}#L{fx.line - 3}", f"in `{fx.functions[0]}` ({fx.file})"):
+        s = codex_eval.score(fx, found(fx, where=where))
+        assert s.hit, (where, s.reason)
+    assert codex_eval.score(fx, found(fx, text=fx.keywords[0].upper())).hit              # case-insensitive
+
+
+def test_a_miss_a_wrong_file_a_far_line_the_wrong_defect_and_a_flagged_clean_change_each_fail_with_a_reason():
+    fx = BY_NAME["off-by-one-bound"]
+    other = BY_NAME["unchecked-error-path"]
+    cases = {
+        "approved the change": ("1. fine\n\nVERDICT: approve\n", "approved the change with the planted bug"),
+        "no finding at all": ("VERDICT: changes\n", "no numbered finding"),
+        "wrong file": (found(other, text=fx.keywords[0]), f"no finding names {fx.file}"),
+        "line outside the tolerance": (found(fx, where=f"{fx.file}:{fx.line + codex_eval.LINE_TOLERANCE + 1}"), "names line"),
+        "right place, wrong defect": (found(fx, text="the docstring is too long"), "doesn't name the defect"),
+        "keyword in another finding": (f"1. {fx.file}:{fx.line} tidy this up\n2. unrelated: {fx.keywords[0]}\n\nVERDICT: changes\n",
+                                       "doesn't name the defect"),
+        "no verdict": ("1. something\n", "no verdict"),
+    }
+    for what, (report, reason) in cases.items():
+        s = codex_eval.score(fx, report)
+        assert not s.hit and reason in s.reason, (what, s)
+    clean = BY_NAME["clean-change"]
+    assert codex_eval.score(clean, "1. fine (non-blocking)\n\nVERDICT: approve\n").hit
+    s = codex_eval.score(clean, "1. **blocking** the error path is wrong\n\nVERDICT: changes\n")
+    assert not s.hit and "flagged the clean change" in s.reason and "error path" in s.reason
+
+
+def test_a_stamped_report_and_other_numbered_shapes_are_read():
+    fx = BY_NAME["off-by-one-bound"]
+    stamped = codex_review.stamp(found(fx), "a" * 40, {"model": "m", "effort": "high", "codex": "1.2.3", "prompt": "0" * 64})
+    assert codex_eval.score(fx, stamped).hit
+    assert [len(codex_eval.findings(t)) for t in ("1) a\n2) b\n\nVERDICT: changes", "### 1. a\n- 2. b\n\nVERDICT: changes",
+                                                   "**1.** a\n   more\n**2.** b\n**VERDICT: changes**")] == [2, 2, 2]
+
+
+# --- the run, with a fake codex ---------------------------------------------------------------------
+
+class Eval:
+    """The fake `codex` on PATH, a config pinning the test settings, and a ledger and `post_comment` captured."""
+
+    def __init__(self, tmp_path, monkeypatch, plan, ledger=()):
+        self.tmp = tmp_path
+        self.log, self.plan, self.auth = install(tmp_path, monkeypatch, plan)
+        self.config = tmp_path / "config.json"
+        self.config.write_text(json.dumps({**CONFIG, "codex": EVAL_SETTINGS}))
+        self.posted = []
+        self.ledger = list(ledger)
+        monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("the eval must not call gh"))
+        monkeypatch.setattr(sdlc, "eval_ledger", lambda args, config, bundle=None: self.ledger)
+        monkeypatch.setattr(sdlc, "post_comment", lambda n, body, config: self.posted.append((n, body)) or {"html_url": "u"})
+        self.fp = codex_eval.fingerprint(codex_eval.Worktree(ROOT), section=EVAL_SETTINGS)
+
+    def again(self, *argv):
+        """Run it again from the fake codex's first step, with nothing posted yet."""
+        self.log.unlink(missing_ok=True)
+        self.posted.clear()
+        return self.run(*argv)
+
+    def run(self, *argv):
+        return sdlc.main(["--config", str(self.config), "codex-eval", "--out", str(self.tmp / "scratch"), *argv])
+
+    def posted_marker(self):
+        assert len(self.posted) == 1 and self.posted[0][0] == 100
+        return sdlc.parse_marker(self.posted[0][1]), self.posted[0][1]
+
+
+def finds_everything():
+    return [{"out": found(fx)} if fx.kind == "bug" else APPROVES for fx in FIXTURES]
+
+
+def root_state():
+    return git(ROOT, "rev-parse", "HEAD"), git(ROOT, "status", "--porcelain", "--ignored")
+
+
+def test_a_codex_that_finds_every_bug_posts_a_pass_and_never_touches_the_checkout(tmp_path, monkeypatch, capsys):
+    e = Eval(tmp_path, monkeypatch, finds_everything())
+    before = root_state()
+    assert e.run() == 0
+    mk, body = e.posted_marker()
+    assert (mk["kind"], mk["outcome"], mk["fp"], mk["codex"], mk["model"], mk["effort"]) == \
+        ("codex-eval", "pass", e.fp, "9.9.9-test", "test-model", "low")
+    assert all(f"`{fx.name}`: hit" in body for fx in FIXTURES)
+    out = capsys.readouterr().out
+    assert [f"[{i}/{len(FIXTURES)}] {fx.name}: " in out for i, fx in enumerate(FIXTURES, 1)] == [True] * len(FIXTURES)
+    runs = calls(e.log)
+    assert len(runs) == len(FIXTURES) and root_state() == before
+    homes = [Path(c["codex_home"]) for c in runs]
+    assert len(set(homes)) == len(homes) and all(h.parent.parent == tmp_path / "scratch" for h in homes)
+    assert [Path(c["cwd"]).resolve() for c in runs] == [(tmp_path / "scratch" / fx.name / "repo").resolve() for fx in FIXTURES]
+    assert all(not Path(c["cwd"]).resolve().is_relative_to(ROOT.resolve()) for c in runs)
+    assert all(c["argv"][:3] == ["exec", "-m", "test-model"] and "origin/epic/1" in c["argv"][-1] for c in runs)
+    assert not any(h.is_dir() and (h / "auth.json").exists() for h in homes)           # every sign-in reconciled
+
+
+def test_one_missed_bug_posts_a_fail_naming_it(tmp_path, monkeypatch, capsys):
+    plan = finds_everything()
+    plan[1] = {"out": "1. looks fine\n\nVERDICT: approve\n"}                 # off-by-one-bound
+    e = Eval(tmp_path, monkeypatch, plan)
+    assert e.run() == 1
+    mk, body = e.posted_marker()
+    assert mk["outcome"] == "fail" and "`off-by-one-bound`: miss: approved the change" in body
+    assert body.count(": hit") == len(FIXTURES) - 1 and "missed: off-by-one-bound" in body
+    assert "FAIL" in capsys.readouterr().out
+
+
+def test_a_pair_that_passed_runs_nothing_and_force_runs_it(tmp_path, monkeypatch, capsys):
+    e = Eval(tmp_path, monkeypatch, finds_everything())
+    e.ledger = [{"fingerprint": e.fp, "codex": "9.9.9-test", "outcome": "pass", "model": "m", "effort": "e", "url": "u"}]
+    assert e.run() == 0 and calls(e.log) == [] and e.posted == []
+    assert "already passed" in capsys.readouterr().out
+    assert e.again("--force") == 0 and len(calls(e.log)) == len(FIXTURES) and len(e.posted) == 1
+    for other in ({"fingerprint": "f" * 64},          # a pass for other review logic is no pass
+                  {"codex": "0.0.1"},                  # nor is a pass for another codex
+                  {"outcome": "fail"}, {"outcome": "deferred"}):
+        e.ledger = [{**e.ledger[0], "fingerprint": e.fp, "codex": "9.9.9-test", "outcome": "pass", **other}]
+        assert e.again() == 0 and len(e.posted) == 1 and len(calls(e.log)) == len(FIXTURES), other
+
+
+def test_a_codex_that_cant_run_posts_nothing_and_exits_unavailable(tmp_path, monkeypatch, capsys):
+    e = Eval(tmp_path, monkeypatch, [NO_VERDICT])
+    assert e.run() == codex_review.UNAVAILABLE and e.posted == []
+    assert len(calls(e.log)) == len(FIXTURES) * codex_review.ATTEMPTS
+    out = capsys.readouterr().out
+    assert all(f"{fx.name}: unavailable" in out for fx in FIXTURES) and "nothing was posted" in out
+    only_git = tmp_path / "only-git"                                       # no codex at all
+    only_git.mkdir()
+    (only_git / "git").symlink_to(shutil.which("git"))
+    monkeypatch.setenv("PATH", str(only_git))
+    assert e.run() == codex_review.UNAVAILABLE and e.posted == []
+    assert "not on the PATH" in capsys.readouterr().out
+
+
+def test_a_miss_then_an_outage_posts_a_fail_listing_the_fixtures_not_run(tmp_path, monkeypatch):
+    e = Eval(tmp_path, monkeypatch, [{"out": "1. a bug in `x.py:1`\n\nVERDICT: changes\n"}, NO_VERDICT])    # clean-change first
+    assert e.run() == 1
+    mk, body = e.posted_marker()
+    assert mk["outcome"] == "fail" and "`clean-change`: miss: flagged the clean change" in body
+    assert "Not run (Codex couldn't): " + ", ".join(f.name for f in FIXTURES[1:]) in body
+    assert body.count(": unavailable") == len(FIXTURES) - 1
+
+
+def test_a_fingerprint_that_moved_during_the_run_posts_nothing(tmp_path, monkeypatch, capsys):
+    e = Eval(tmp_path, monkeypatch, finds_everything())
+    real, seen = codex_eval.fingerprint, []
+
+    def moving(*a, **k):
+        seen.append(1)
+        return real(*a, **k) if len(seen) == 1 else "0" * 64
+    monkeypatch.setattr(codex_eval, "fingerprint", moving)
+    assert e.run() == 1 and e.posted == []
+    assert "changed while the eval ran" in capsys.readouterr().err
+
+
+def test_dry_run_lists_the_fixtures_and_the_fingerprint_and_prints_no_codex_command(tmp_path, monkeypatch, capsys):
+    e = Eval(tmp_path, monkeypatch, finds_everything())
+    assert e.run("--dry-run") == 0
+    out = capsys.readouterr().out
+    assert e.fp[:12] in out and e.fp not in out and f"would run {len(FIXTURES)} fixtures" in out
+    assert all(fx.name in out for fx in FIXTURES) and "must be approved" in out
+    assert "codex exec" not in out and "codex " + "exec" not in out and "-m test-model" not in out
+    assert calls(e.log) == [] and e.posted == [] and not (tmp_path / "scratch").exists()
+    e.ledger = [{"fingerprint": e.fp, "codex": "9.9.9-test", "outcome": "pass", "url": "u"}]
+    assert e.run("--dry-run") == 0 and "nothing to run" in capsys.readouterr().out
+
+
+def test_the_scratch_may_not_be_inside_the_checkout_and_a_saved_ledger_cant_post(tmp_path, monkeypatch, capsys):
+    e = Eval(tmp_path, monkeypatch, finds_everything())
+    assert sdlc.main(["--config", str(e.config), "codex-eval", "--out", str(ROOT / "scratch")]) == 1
+    assert "inside" in capsys.readouterr().err
+    assert e.run("--from-file", str(tmp_path / "ledger.json")) == 1
+    assert "--from-file" in capsys.readouterr().err
+    assert calls(e.log) == [] and e.posted == []

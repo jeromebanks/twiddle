@@ -1,0 +1,7 @@
+# the planted bug: the range test only asserts the level isn't None, so it passes however the clamp is written
+kind = "bug"
+file = "tests/test_volume_step.py"
+line = 12
+anchor = "assert level is not None"
+functions = ["test_volume_never_leaves_the_range"]
+keywords = ["not none", "proves nothing", "prove nothing", "vacuous", "tautolog", "never checks", "doesn't check", "does not check", "doesn't verify", "does not verify", "doesn't assert", "does not assert", "meaningless", "always true", "always passes", "no meaningful", "range"]
