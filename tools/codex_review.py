@@ -53,10 +53,16 @@ LEGACY_MARK = f"</details>\n\n{RESPONSE_HEADING}\n\n"
 
 UNAVAILABLE = 3   # Codex can't run: not on PATH, no sign-in, or no verdict twice (timeouts included)
 ATTEMPTS = 2      # the first run, and one retry
-CODEX_KEYS = ("model", "reasoning_effort", "sandbox", "timeout_seconds", "flags")
+CODEX_KEYS = ("model", "reasoning_effort", "sandbox", "timeout_seconds", "flags", "skills")
+# how the skills Codex would offer a review are kept from changing it unseen: `suppressed`, none are offered (the
+# generated config turns their instructions off, and each run's session log must show that). The only mode: one
+# that offered skills and fingerprinted them was dropped (#158), since the setting works; a `codex` that ignores it
+# has every round refused, and a new mode would be a new value here (and so a new fingerprint)
+SKILL_MODES = ("suppressed",)
 # the only `codex exec` flags `codex.flags` may add: none overrides a pinned setting, loosens the read-only
-# sandbox the HEAD stamp relies on, or changes what goes to stdout (the report)
-ALLOWED_FLAGS = {"--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--strict-config"}
+# sandbox the HEAD stamp relies on, changes what goes to stdout (the report), or stops the session log being
+# written (`--ephemeral`: the log is how a round is vouched for, `check_run`)
+ALLOWED_FLAGS = {"--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--strict-config"}
 COLORS = {"never", "auto", "always"}
 
 
@@ -144,6 +150,9 @@ def codex_settings(config: dict[str, Any]) -> dict[str, Any]:
     if bad:
         raise ReviewError(f"`codex.flags` may not pass {', '.join(bad)}: only {', '.join(sorted(ALLOWED_FLAGS))} and "
                           "`--color`; the model, effort and sandbox have keys of their own")
+    if s["skills"] not in SKILL_MODES:
+        raise ReviewError(f"`codex.skills` is {s['skills']!r}: it can only be {', '.join(SKILL_MODES)} (Codex is never "
+                          "offered skills during a review)")
     return s
 
 
@@ -159,7 +168,8 @@ def config_toml(settings: dict[str, Any]) -> str:
     is read from the copy `isolated_home` writes (`file` is Codex's default store; pinned, so no keyring applies)."""
     q = json.dumps                      # a JSON string is a TOML basic string
     return (f"model = {q(settings['model'])}\nmodel_reasoning_effort = {q(settings['reasoning_effort'])}\n"
-            f"sandbox_mode = {q(settings['sandbox'])}\ncli_auth_credentials_store = \"file\"\n")
+            f"sandbox_mode = {q(settings['sandbox'])}\ncli_auth_credentials_store = \"file\"\n"
+            + ("\n[skills]\ninclude_instructions = false\n" if settings.get("skills") == "suppressed" else ""))
 
 
 def show_command(cmd: list[str], wt: Path, prompt_file: Path) -> str:
@@ -169,6 +179,13 @@ def show_command(cmd: list[str], wt: Path, prompt_file: Path) -> str:
 
 
 # --- the prompt ---------------------------------------------------------------
+
+def recorded_rounds(marked: list[tuple[dict[str, str], dict[str, Any]]], kind: str, **match: str) -> list[dict[str, Any]]:
+    """The recorded rounds of one kind (`pr-review`, `ship-review`; and milestone, by `match`), oldest first, as
+    `latest_response` reads them, from the (marker, comment) pairs `sdlc.py` read from trusted authors."""
+    return [{"verdict": mk.get("verdict"), "body": c.get("body", ""), "response": mk.get("response")}
+            for mk, c in marked if mk.get("kind") == kind and all(mk.get(k) == v for k, v in match.items())]
+
 
 def latest_response(rounds: list[dict[str, Any]], record: str = "pr-review") -> tuple[int, str | None]:
     """(the latest recorded round's number, its "Claude's response") for the next round's prompt.
@@ -284,6 +301,67 @@ def section(body: str, name: str) -> str:
     """One `## <name>` section of a slice issue's body."""
     m = re.search(rf"^## {re.escape(name)}\s*\n(.*?)(?=^## |\Z)", body or "", re.MULTILINE | re.DOTALL)
     return m.group(1).strip() if m else ""
+
+
+# --- what a round is handed: the evidence each review is held to -----------------------------
+#
+# `sdlc.py` fetches the issue, the comments and the PRs; these choose, from that bundle, what Codex reads.
+# They live here so the review logic's fingerprint (`codex_eval`) covers them.
+
+MARKER_LINE_RE = re.compile(r"\A\s*<!--\s*sdlc:v1\s+[^>]*?\s*-->")   # `sdlc.MARKER_RE`: a line that starts with a marker
+
+
+def approved_comment(doc: dict[str, Any]) -> str:
+    """The approved PRD or diagnosis comment's id (`doc` is the state's `latest_doc`), as its `#issuecomment-`
+    anchor (and `merge-prd`'s doc) gives it."""
+    m = re.search(r"#issuecomment-(\d+)$", doc.get("url") or "")
+    return m.group(1) if m else str(doc["id"])
+
+
+def _git_out(args: list[str], cwd: Path) -> str:
+    """git's stdout, or "" when it fails (a path or ref that isn't there)."""
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def approved_requirements(n: int, comment_id: str, comment_body: str, ref: str, root: Path) -> tuple[str, str | Path]:
+    """(what was used, the requirements for the plan prompt): the merged `docs/prd/N-*.md` at `ref` whose header
+    links the approved comment, as a path relative to a checkout of `ref`; else the approved comment's text.
+    A doc of an older revision, or none merged yet, is never what the plan is held to."""
+    listed = _git_out(["ls-tree", "--name-only", ref, "docs/prd/"], root).splitlines()
+    anchor = re.compile(rf"#issuecomment-{comment_id}(?!\d)")
+    for path in sorted(p for p in listed if re.fullmatch(rf"docs/prd/{n}-[^/]*\.md", p)):
+        header = _git_out(["show", f"{ref}:{path}"], root).split("\n## ", 1)[0]
+        if anchor.search(header):
+            return f"{path} (its header links comment {comment_id})", Path(path)
+    body = "\n".join(l for l in comment_body.splitlines() if not MARKER_LINE_RE.match(l.strip())).strip()
+    return f"the approved comment {comment_id} (no docs/prd/{n}-*.md on {ref} links it)", body
+
+
+def plan_rounds(counted: int, last: dict[str, Any] | None, body: str = "") -> list[dict[str, Any]]:
+    """The rounds `prepare_plan_round` reads, from the state's count of rounds and its latest (`plan_review`, with
+    its comment's `body`): `latest_response` numbers rounds by the list it's given, so it is padded to the count."""
+    rounds = [{"verdict": last.get("verdict"), "body": body, "response": last.get("response")}] if last else []
+    return [{}] * (counted - len(rounds)) + rounds
+
+
+def milestone_slices(leaves: list[dict[str, Any]], title: str, prs: dict[int, dict[str, Any] | None]) -> list[dict[str, Any]]:
+    """A milestone's slices (of the epic's `leaves`), each with its brief and the squash commit its PR (from `prs`,
+    by slice number: a closed slice's PR) left on epic/N."""
+    out = []
+    for l in leaves:
+        if (l.get("milestone") or "(no milestone)") != title:
+            continue
+        pr = prs.get(l["number"]) if l["state"] == "closed" else None
+        out.append({"number": l["number"], "key": l["key"], "title": l["title"], "body": l["body"],
+                    "pr": (pr or {}).get("number"), "merge_commit": ((pr or {}).get("mergeCommit") or {}).get("oid")})
+    return sorted(out, key=lambda s: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s["key"])])
+
+
+def owed_slices(review_owed: dict[str, list[dict[str, str]]] | None, key: str) -> list[dict[str, str]]:
+    """The slices of milestone `key` that merged without a review of their own (the ledger's `review_owed`):
+    the milestone round reads each as closely as a pull request, and the milestone's phase waits on them."""
+    return list((review_owed or {}).get(key) or [])
 
 
 def prepare_milestone_round(epic: int, milestone: dict[str, Any], slices: list[dict[str, Any]],
@@ -463,6 +541,140 @@ def codex_version(env: dict[str, str]) -> str:
     return words[-1] if proc.returncode == 0 and words else "unknown"
 
 
+# --- what the run was given: its session log -----------------------------------------------
+#
+# Codex writes each run's log to `<CODEX_HOME>/sessions/**/rollout-*.jsonl`, one JSON record a line. Its
+# `world_state` records (`payload.state`) say what the session was given: `skills.includeInstructions` (and
+# `host_skills`'s), and `agents_md`, the repository instruction file it loaded ({} for none, else its
+# `directory` and `text`). Skills offered also show as a developer message holding `<skills_instructions>`.
+# That is the shape of codex-cli 0.161.0's logs; anything else is "unknown", and a round doesn't trust it.
+
+SKILLS_MESSAGE = "<skills_instructions>"
+INSTRUCTION_FILES = ("AGENTS.md", "AGENTS.override.md")    # what Codex loads from a directory as `agents_md`
+
+
+def instruction_file(name: str) -> bool:
+    """An `AGENTS.md` or `AGENTS.override.md`, in any case: on a case-insensitive disk Codex loads `agents.md` too."""
+    return name.lower() in {f.lower() for f in INSTRUCTION_FILES}
+
+
+def _linked_instructions(d: Path, wt: Path) -> str | None:
+    """An instruction file in `d`, or a directory between the checkout `wt` and `d`, that is a symbolic link: its
+    content would come from somewhere the fingerprint never reads."""
+    rel = Path(os.path.relpath(d, wt))
+    steps = [wt / Path(*rel.parts[:i]) for i in range(1, len(rel.parts) + 1)] if ".." not in rel.parts else []
+    files = [f for f in d.iterdir() if instruction_file(f.name)] if d.is_dir() else []
+    return next((str(p) for p in steps + files if p.is_symlink()), None)
+
+
+def _ignored(path: Path, wt: Path) -> bool:
+    """An existing file git ignores in the checkout `wt` (`.gitignore`, `.git/info/exclude`, a global ignore)."""
+    return path.is_file() and subprocess.run(["git", "check-ignore", "-q", str(path)], cwd=wt,
+                                             capture_output=True).returncode == 0
+
+
+def session_logs(home: Path) -> set[Path]:
+    return set((home / "sessions").rglob("*.jsonl")) if (home / "sessions").is_dir() else set()
+
+
+def _state_shape(st: dict[str, Any]) -> str | None:
+    """What's wrong with a `world_state`'s fields this reads, or None: `skills`/`host_skills` objects with a
+    true/false `includeInstructions`; `agents_md` {} or an object whose `directory` and `text` are strings."""
+    for key in ("skills", "host_skills"):
+        if key in st and not (isinstance(st[key], dict) and isinstance(st[key].get("includeInstructions"), bool)):
+            return f"a `{key}` without a true/false `includeInstructions`"
+    if "body" in st.get("host_skills", {}) and not isinstance(st["host_skills"]["body"], str):
+        return "a `host_skills` whose `body` isn't text"
+    a = st.get("agents_md", {})
+    if a != {} and not (isinstance(a, dict) and isinstance(a.get("directory"), str) and isinstance(a.get("text"), str)):
+        return "an `agents_md` of a shape this tool doesn't know"
+    return None
+
+
+def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False) -> tuple[str, str]:
+    """("ok" | "offered" | "unknown" | "incomplete", why) for one run's session log, against the skills `mode`.
+
+    "offered": skills were offered (`mode` is `suppressed`, the only one), or Codex loaded instructions the
+    fingerprint doesn't hold: a review the repo's settings don't describe. "unknown": the log isn't the
+    shape this reads. A run `cut_short` (killed on its timeout) may leave a half-written last line, which is
+    skipped, or no full `world_state` yet: "incomplete", the only result a retry may follow.
+
+    Whatever instructions Codex loaded (`agents_md.text`) must be the content of an instruction file in the
+    checkout that git doesn't ignore, reached through no symbolic link: a fingerprint input."""
+    try:
+        lines = log.read_text().splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        return "unknown", f"its session log {log} can't be read ({exc})"
+    records = []
+    for i, line in enumerate(lines):
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            if not (cut_short and i == len(lines) - 1):
+                return "unknown", f"line {i + 1} of its session log {log} isn't JSON"
+    states, full = [], 0
+    for r in records:
+        if not (isinstance(r, dict) and r.get("type") == "world_state"):
+            continue
+        payload = r.get("payload")
+        if not (isinstance(payload, dict) and isinstance(payload.get("state"), dict)
+                and isinstance(payload.get("full", False), bool)):
+            return "unknown", f"its session log {log} has a `world_state` record of a shape this tool doesn't know"
+        st = payload["state"]
+        if payload.get("full") is True:  # a full state names all of these; a partial one only what changed
+            full += 1
+            if missing := [k for k in ("skills", "host_skills", "agents_md") if k not in st]:
+                return "unknown", f"its session log {log} has a full `world_state` without {', '.join(missing)}"
+        if why := _state_shape(st):
+            return "unknown", f"its session log {log} has {why}"
+        states.append(st)
+    # what Codex was given: an input message in any role (never its own replies, or a tool's output, which may
+    # quote the marker while reading code like this)
+    offered = [json.dumps(r["payload"].get("content")) for r in records if isinstance(r, dict)
+               and r.get("type") == "response_item" and isinstance(r.get("payload"), dict)
+               and r["payload"].get("type") == "message" and r["payload"].get("role") != "assistant"
+               and SKILLS_MESSAGE in json.dumps(r["payload"].get("content"))]
+    flags = [st[k]["includeInstructions"] for st in states for k in ("skills", "host_skills") if k in st]
+    for st in states:
+        a = st.get("agents_md") or {}
+        if not a:
+            continue
+        if linked := _linked_instructions(Path(a["directory"]), wt):
+            return "offered", (f"Codex loaded the instructions in {a['directory']} through a symbolic link ({linked}): "
+                               f"what it points at isn't in the review logic's fingerprint (session log {log})")
+        if not Path(a["directory"]).resolve().is_relative_to(wt.resolve()):
+            return "offered", (f"Codex loaded the instructions in {a['directory']}, outside the reviewed checkout "
+                               f"{wt} (session log {log})")
+        d = Path(a["directory"])
+        files = sorted(f for f in d.iterdir() if f.is_file() and instruction_file(f.name)) if d.is_dir() else []
+        if ignored := [f.name for f in files if _ignored(f, wt)]:
+            return "offered", (f"Codex loaded the instructions in {d}, where git ignores {', '.join(ignored)}: an "
+                               f"ignored file isn't in the review logic's fingerprint (session log {log})")
+        texts = [f.read_bytes().decode("utf-8", "replace") for f in files]
+        # Codex caps what it loads (`project_doc_max_bytes`): a long file's text is its beginning
+        if not any(t == a["text"] or (a["text"] and t.startswith(a["text"])) for t in texts):
+            return "offered", (f"the instructions Codex loaded from {d} aren't the content of any instruction file "
+                               f"there ({', '.join(f.name for f in files) or 'none'}) (session log {log})")
+    if offered or any(flags):
+        return "offered", (f"Codex offered skills although `codex.skills` is `{mode}` (session log {log}): "
+                           "the generated config's `[skills] include_instructions = false` didn't hold for this "
+                           "`codex` version")
+    if not full:     # everything it holds checked: a run killed on its timeout can stop before Codex writes it
+        return ("incomplete" if cut_short else "unknown"), f"its session log {log} has no full `world_state` record"
+    return "ok", ""
+
+
+def check_run(home: Path, before: set[Path], wt: Path, mode: str, cut_short: bool = False) -> tuple[str, str]:
+    """`check_session` on the one log this run added under `home`."""
+    new = sorted(session_logs(home) - before)
+    if not new and cut_short:
+        return "incomplete", f"the run was killed before it wrote a session log under {home / 'sessions'}"
+    if len(new) != 1:
+        return "unknown", (f"the run left {len(new)} session logs under {home / 'sessions'}, not one: "
+                           "what it was given can't be checked")
+    return check_session(new[0], wt, mode, cut_short)
+
+
 # --- the run ------------------------------------------------------------------
 
 def _git(args: list[str], cwd: Path) -> str:
@@ -545,14 +757,24 @@ def tail(path: Path, n: int = 20) -> str:
         return ""
 
 
-def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dict[str, Any],
-               log=print) -> tuple[int, Path | None]:
-    """Run Codex on an isolated `CODEX_HOME`, retrying once when it times out or ends with no verdict.
-    (status, the stamped report).
+def _unvouched(why: str, err: Path, log) -> tuple[int, None]:
+    """A run whose session log doesn't show what the repo's settings say it was given: no report, and the reason
+    at the end of `codex.err`, where the skills copy a `review-defer --reason` from."""
+    with err.open("a") as fe:
+        fe.write(f"\n[codex-review] {why}. No report was saved.\n")
+    log(f"{why}. No report was saved (exit {UNAVAILABLE}; the end of {err} says the same)")
+    return UNAVAILABLE, None
 
-    The report is saved only when HEAD is where it was: a review of a commit that moved under it is no
-    review. `UNAVAILABLE` is the status for "Codex can't run" (the skill then defers the review): no `codex`,
-    or no sign-in, both found before Codex is started."""
+
+def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dict[str, Any],
+               log=print, on_version=None) -> tuple[int, Path | None]:
+    """Run Codex on an isolated `CODEX_HOME`, retrying once when it times out or ends with no verdict.
+    (status, the stamped report). `on_version(version)` is called with `codex --version` before Codex runs.
+
+    The report is saved only when HEAD is where it was, and when the run's session log shows what the repo's
+    settings say it was given (`check_run`): a review of a commit that moved under it, or one offered skills
+    `codex.skills` suppresses, is no review. `UNAVAILABLE` is the status for "Codex can't run" (the skill then
+    defers the review): no `codex`, no sign-in, both found before Codex is started, or a run that can't be vouched for."""
     report, err = scratch / "codex.md", scratch / "codex.err"
     report.unlink(missing_ok=True)
     err.write_text("")
@@ -569,8 +791,12 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
         except CannotStart as exc:
             log(f"codex can't be started ({exc}): Codex can't run (exit {UNAVAILABLE}: `review-defer`)")
             return UNAVAILABLE, None
+        if on_version:
+            on_version(prov["codex"])
+        home = Path(env["CODEX_HOME"])
         for attempt in range(1, ATTEMPTS + 1):
             raw = scratch / f"codex-{attempt}.out"
+            before = session_logs(home)
             try:
                 output = run_once(cmd, wt, raw, err, timeout, env)
             except CannotStart as exc:
@@ -582,6 +808,9 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
             if dirty := dirty_files(wt):
                 raise ReviewError("the worktree changed while Codex ran (" + ", ".join(dirty[:8])
                                   + "): it didn't review the pushed head, so no report was saved. Restore it and run again")
+            seen, why = check_run(home, before, wt, settings["skills"], cut_short=output is None)
+            if seen not in ("ok", "incomplete"):    # the next attempt would be given (or log) the same
+                return _unvouched(why, err, log)
             if output is None:
                 log(f"attempt {attempt}: Codex timed out after {timeout:g}s")
                 continue

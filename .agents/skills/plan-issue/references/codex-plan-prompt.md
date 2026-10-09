@@ -16,7 +16,8 @@ it on its merits, and do not assume any claim in it is true.
 Read these yourself:
 - the plan: `<PLAN_FILE>` (JSON; its format is `.agents/skills/plan-issue/references/plan-schema.md`)
 - the approved PRD it must deliver: `<PRD_FILE>`
-- `CLAUDE.md` (especially the read-only vs writing table, and Layout)
+- the safety rules every change is held to: `.agents/skills/review-rules.md`
+- `CLAUDE.md`, for its Layout table only: what lives where in the code
 - any source file the plan names, as far as you need it to judge a slice
 - <ROUND2>the planner's answer to the previous round: `<RESPONSE_FILE>`. Where the
   planner rebutted a finding, decide whether the rebuttal holds. Do not repeat a
@@ -34,9 +35,9 @@ Check:
 4. **Dependencies.** Each `blocked_by` is real: the unit can't start without that
    merged code. Flag any that are missing, any that are spurious, and parallelism
    that is being lost.
-5. **Safety.** Every unit that writes to a speaker or Spotify says so. It requires
-   `--dry-run` and journalling to `logs/interventions.jsonl`, and its tests touch
-   no network, speaker or Spotify.
+5. **Safety.** Every unit that writes to a speaker, Spotify or alarms says so, and its
+   brief holds it to `review-rules.md`: `--dry-run`, journalling, rooms by name,
+   offline tests.
 6. **Handoff quality.** Each unit's Acceptance and Validation sections are
    concrete enough to pass or fail, and its Context section is enough for a
    fresh session to start without reading the whole repo. Non-goals stop scope creep.

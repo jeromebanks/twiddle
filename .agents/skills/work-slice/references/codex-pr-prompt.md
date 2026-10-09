@@ -18,7 +18,7 @@ Read:
   Validation, Demo, Non-goals and Context sections define the job);
 - the change: `git diff <BASE>...HEAD` and `git log <BASE>..HEAD` (`<BASE>` is
   epic #<EPIC>'s branch, which this slice merges into);
-- `CLAUDE.md`, especially the read-only vs writing table;
+- the safety rules every change is held to: `.agents/skills/review-rules.md`;
 - the code around the change, as far as you need it;
 - <ROUND2>the implementer's answer to the previous round: `<RESPONSE_FILE>`. Where they
   rebutted a finding, decide whether the rebuttal holds, and don't repeat a finding it
@@ -32,10 +32,8 @@ you need to check a specific claim.
 Check:
 1. **Acceptance.** Each acceptance criterion in the brief is met, and a test proves it. Name any that aren't.
 2. **Scope.** Nothing outside the Scope; nothing listed in Non-goals; no unrelated changes.
-3. **Safety.** Anything that can write to a speaker or Spotify takes `--dry-run`,
-   journals to `logs/interventions.jsonl`, and resolves rooms by name. No test
-   touches the network, a speaker or Spotify. No secret, token or real device
-   identifier is committed.
+3. **Safety.** Every rule in `review-rules.md` holds: `--dry-run`, journalling,
+   rooms by name, read-only staying read-only, offline tests, nothing private committed.
 4. **Correctness.** Bugs, unhandled failures, edge cases the brief implies, and
    tests that pass without testing what they claim.
 5. **Fit.** The code reads like the surrounding code (naming, comments, idiom), and

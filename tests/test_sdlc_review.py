@@ -471,10 +471,10 @@ def test_codex_gets_the_repos_settings_and_a_config_without_them_is_refused(tmp_
     assert c.run() == 1 and c.calls() == []
     assert "no `codex` section" in capsys.readouterr().err
     assert codex_review.codex_settings(CONFIG)["sandbox"] == "read-only"    # the repo's own section is valid
-    assert codex_review.codex_settings({"codex": {**SETTINGS, "flags": ["--color", "never", "--ephemeral"]}})
+    assert codex_review.codex_settings({"codex": {**SETTINGS, "flags": ["--color", "never", "--ignore-rules"]}})
     for bad in ({"sandbox": "workspace-write"}, {"flags": ["-m", "other"]}, {"flags": ["-c", "x=1"]}, {"flags": ["-mo3"]},
                 {"flags": ["--dangerously-bypass-approvals-and-sandbox"]}, {"flags": ["--json"]}, {"flags": ["-o", "f"]},
-                {"flags": ["--color"]}, {"flags": ["--enable", "x"]}, {"timeout_seconds": 0}, {"model": ""}):
+                {"flags": ["--color"]}, {"flags": ["--enable", "x"]}, {"flags": ["--ephemeral"]}, {"timeout_seconds": 0}, {"model": ""}):
         with pytest.raises(sdlc.SdlcError):
             codex_review.codex_settings({"codex": {**SETTINGS, **bad}})
     with pytest.raises(sdlc.SdlcError, match="lacks timeout_seconds"):
@@ -590,7 +590,7 @@ def test_the_config_strings_are_toml_whatever_they_hold(tmp_path):
     odd = {**SETTINGS, "model": 'a "quoted" \\ model', "reasoning_effort": "high"}
     assert tomllib.loads(codex_review.config_toml(odd)) == {
         "model": 'a "quoted" \\ model', "model_reasoning_effort": "high", "sandbox_mode": "read-only",
-        "cli_auth_credentials_store": "file"}
+        "cli_auth_credentials_store": "file", "skills": {"include_instructions": False}}
 
 
 def test_no_sign_in_is_refused_before_codex_runs(tmp_path, monkeypatch, capsys):

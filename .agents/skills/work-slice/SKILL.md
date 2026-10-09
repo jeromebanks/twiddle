@@ -176,7 +176,10 @@ and runs nothing. Exit 1 is a refusal: fix what it says and run it again.
 **If Codex can't run, defer its review to the milestone.** "Can't run" means `codex-review`
 exits with status 3: `codex` isn't on the PATH, or there was no `VERDICT:` line after the one
 automatic retry (two timeouts count). It also means Codex fails to sign in or says to log in,
-reports a quota, usage or rate limit, or a network error. In those cases the tool prints the
+reports a quota, usage or rate limit, or a network error. And it means the run's session log
+didn't show what the repo's settings say Codex was given: skills offered, an `AGENTS.md` from
+outside the checkout, or a log of a shape the tool doesn't know (a new `codex`); no report is
+saved (SDLC.md, "The review logic's fingerprint"). In those cases the tool prints the
 end of `<SCRATCH>/codex.err`. Copy the failure from there:
 
 ```bash
