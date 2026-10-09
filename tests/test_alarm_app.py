@@ -14,7 +14,8 @@ import pytest
 from textual.widgets import Input, OptionList
 
 from tests.test_alarm_cli import GONE, household
-from tests.test_alarm_clock import RUNNING, ROAM_IP, FakeClock, FakeTransport
+from tests.test_alarm_clock import (FIRED_ITSELF, RUNNING, ROAM_IP, FakeClock, FakeTransport,
+                                   household_clock)
 from twiddle import alarm_cli, cli, devices, play
 from twiddle.alarms import clock
 from twiddle.alarms.app import (AlarmApp, AskScreen, EditorScreen, RingingScreen, SourcePicker,
@@ -952,7 +953,9 @@ async def test_the_ringing_screen_comes_with_the_alarm_and_leaves_with_it(ring):
         await poll(app, pilot)
         assert ringing(app)
         shown = text(app.screen, "#ring-text")
-        assert "Sonos Roam is ringing" in shown and "since 14:58" in shown
+        # the recording's stamp was an older build's local time; read as UTC
+        # it is off by the offset (the slice's non-goal), as such a fire would be
+        assert "Sonos Roam is ringing" in shown and "since 07:58" in shown
         assert "[ x  off ]" in shown and "[ z  snooze 10m ▾ ]" in shown
         assert "Sonos Roam" in shown.splitlines()[1] and "11 mid" not in shown
         assert alarm_cli.brief(app.shown.house, app.shown.alarm("34")) in shown
@@ -966,11 +969,47 @@ async def test_the_ringing_screen_comes_with_the_alarm_and_leaves_with_it(ring):
 
 @pilot
 async def test_it_is_up_at_once_when_the_alarm_is_already_ringing(ring):
-    ring.running[ROAM_IP] = RUNNING
+    household_clock(ring, "2026-10-08 15:40:00", "2026-10-08 22:40:00")
+    ring.running[ROAM_IP] = FIRED_ITSELF        # went off by itself before the TUI opened
     app = make()
     async with app.run_test(size=(140, 50)) as pilot:
         await settle(app, pilot)            # no poll of ours: the first list read starts one
         assert ringing(app)
+        assert text(app.screen, "#ring-text").splitlines()[1].endswith(" · since 15:36")
+
+
+@pytest.mark.parametrize("time_format, said", [("INV", "15:36"), ("12H", "3:36 PM")])
+@pilot
+async def test_the_ringing_screen_says_since_in_the_households_own_time(ring, time_format, said):
+    # The poster's Roam, 2026-10-08: an alarm at 15:36 said "since 22:36", the UTC time.
+    household_clock(ring, "2026-10-08 15:40:00", "2026-10-08 22:40:00", time_format)
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        ring.running[ROAM_IP] = FIRED_ITSELF
+        await poll(app, pilot)
+        assert text(app.screen, "#ring-text").splitlines()[1].endswith(f" · since {said}")
+
+
+@pytest.mark.parametrize("echo, said", [(None, " · since 08:20"), ("garbage", "")])
+@pilot
+async def test_t_sends_utc_and_its_echo_shows_as_the_households_time(ring, echo, said):
+    app = make()
+    async with app.run_test(size=(140, 50)) as pilot:
+        await settle(app, pilot)
+        await pick(app, pilot, "2")
+        await pilot.press("t")
+        await settle(app, pilot)
+        [(ip, _, sent)] = ring.av_writes
+        assert sent["LoggedStartTime"] == "2026-10-04 15:20:01"         # the household's UTC
+        ring.running[ip] = FIRED_ITSELF | {
+            "AlarmID": "2", "LoggedStartTime": echo or sent["LoggedStartTime"]}
+        await poll(app, pilot)
+        assert ringing(app)
+        line = text(app.screen, "#ring-text").splitlines()[1]
+        assert ("since" in line) is bool(said) and line.endswith(said)
+    run = next(j for j in journal() if j["action"] == "alarm_run")
+    assert run["logged_start"] == "2026-10-04 15:20:01"
 
 
 def test_the_clock_swings():

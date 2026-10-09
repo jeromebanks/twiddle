@@ -922,16 +922,28 @@ def cmd_sources(args):
 
 # ---- ringing: status, try, stop, snooze ----------------------------------------
 
+def since_text(logged_start: str, hh: clock.HouseholdTime | None) -> str | None:
+    """When a ringing alarm started, on the household's clock and in its format:
+    LoggedStartTime is UTC (`clock.run_alarm`). None if it can't be read, or
+    the household's time couldn't be."""
+    at = clock.parse_stamp(logged_start)
+    if at is None or hh is None:
+        return None
+    return clock_text(hh.local_of(at).time().replace(second=0), hh.time_format)
+
+
 def ringing_row(house: Household, group, running: clock.Running | None,
-                alarms: clock.AlarmList | None) -> dict:
+                alarms: clock.AlarmList | None, hh: clock.HouseholdTime | None = None) -> dict:
     """One group's alarm state: the room from the alarm's own RoomUUID when the
-    speaker names the alarm, else the group's."""
+    speaker names the alarm, else the group's. `logged_start` stays as the
+    speaker said it; `since` is that in the household's time (`hh`)."""
     row = {"group": group.name, "speaker": group.coordinator.label,
            "ringing": False, "snoozed": False}
     if running is None:
         return row
     alarm = alarms.get(running.alarm_id) if alarms and running.alarm_id else None
-    row |= running.to_dict() | {"ringing": not running.snoozed, "snoozed": running.snoozed}
+    row |= running.to_dict() | {"ringing": not running.snoozed, "snoozed": running.snoozed,
+                                "since": since_text(running.logged_start, hh)}
     row["room"] = aimed_at(house, alarm.room_uuid)["room"] if alarm else group.name
     if alarm is not None:
         row |= {"alarm": alarm.to_attributes(), "what": brief(house, alarm)}
@@ -945,7 +957,7 @@ def ringing_text(row: dict) -> str:
     what = f"alarm {row['alarm_id']}" if row.get("alarm_id") else "an alarm"
     if row.get("what"):
         what += f": {row['what']}"
-    since = f", since {row['logged_start']}" if row.get("logged_start") else ""
+    since = f", since {row['since']}" if row.get("since") else ""
     return f"{row['room']}: {state} {what}{since}"
 
 
@@ -976,7 +988,13 @@ def cmd_status(args):
         alarms = clock.list_alarms(ip, tolerant=True) if any(r for _, r in running) else None
     except Exception as exc:
         return fail(args, f"could not read whether an alarm is ringing: {exc}")
-    rows = [ringing_row(house, g, r, alarms) for g, r in running]
+    hh = None
+    if any(r for _, r in running):
+        try:
+            hh = clock.household_time(ip)
+        except Exception:
+            pass            # no "since", rather than no answer
+    rows = [ringing_row(house, g, r, alarms, hh) for g, r in running]
     return emit(args, {"rooms": rows, "ringing": [r["room"] for r in rows if r["ringing"]]},
                 "\n".join(ringing_text(r) for r in rows))
 
@@ -997,10 +1015,10 @@ def cmd_try(args):
     what = f"alarm {alarm.id} on {coordinator.label}: {brief(house, alarm)}"
     if getattr(args, "dry_run", False):
         return emit(args, about | {"would": "run", "performed": False,
-                                   "sent": dict(clock.run_args(alarm, "<household time>"))},
+                                   "sent": dict(clock.run_args(alarm, "<household UTC time>"))},
                     f"[dry-run] would fire {what}\n  {details(alarm)}")
     try:
-        logged = clock.household_time(ip).local.strftime("%Y-%m-%d %H:%M:%S")
+        logged = clock.household_time(ip).utc.strftime(clock.STAMP)
         stops = clock.run_alarm(coordinator.ip, alarm, logged)
     except Exception as exc:
         return fail(args, f"could not fire alarm {alarm.id}: {exc}",

@@ -229,7 +229,7 @@ def ringing_text(row: dict, minutes: int) -> str:
     """What the ringing screen says beside the clock, as markup: off, snooze
     and its length are links to the screen's own actions (the keys' guards)."""
     what = escape(row.get("what") or "an alarm")
-    since = f" · since {row['logged_start'][11:16]}" if row.get("logged_start") else ""
+    since = f" · since {row['since']}" if row.get("since") else ""
     snooze = "snoozed" if row.get("snoozed") else "is ringing"
     return (f"⏰  {escape(row['room'])} {snooze}\n{what}{escape(since)}\n\n"
             r"[@click=screen.stop]\[ x  off ][/]   "
@@ -846,7 +846,7 @@ class AlarmApp(App):
                 else:
                     found.append((key, g.coordinator.ip,        # named from the list shown
                                   alarm_cli.ringing_row(shown.house, g, running,
-                                                        shown.found)))
+                                                        shown.found, shown.hh)))
             self.call_from_thread(self._polled, found)
         finally:
             self.call_from_thread(setattr, self, "polling", False)
@@ -1027,7 +1027,7 @@ class AlarmApp(App):
             return f"[dry-run] would fire alarm {alarm.id} on {coordinator.label}: {what}", \
                 "information"
         try:
-            logged = clock.household_time(ip).local.strftime("%Y-%m-%d %H:%M:%S")
+            logged = clock.household_time(ip).utc.strftime(clock.STAMP)
             stops = clock.run_alarm(coordinator.ip, alarm, logged)
         except Exception as exc:
             return f"could not fire alarm {alarm.id}: {exc}; `twiddle alarm status` shows " \

@@ -679,6 +679,85 @@ def test_status_names_the_alarm_in_words(av, capsys):
     assert "Living Room: nothing ringing" in out
 
 
+# The poster's Roam, 2026-10-08: alarm 119 made at 22:33Z for 15:36, a household
+# 7 hours behind UTC. Going off by itself, it reported LoggedStartTime in UTC.
+FIRED_ITSELF = {"AlarmID": "34", "GroupID": f"{ROAM_R}:1000000001",
+                "LoggedStartTime": "2026-10-08 22:36:12"}
+
+
+def household_clock(av, local, utc, time_format="INV"):
+    av.GetTimeNow = lambda args: {"CurrentUTCTime": utc, "CurrentLocalTime": local,
+                                  "CurrentTimeZone": "x", "CurrentTimeGeneration": "1"}
+    av.GetFormat = lambda args: {"CurrentTimeFormat": time_format, "CurrentDateFormat": "INV"}
+
+
+@pytest.mark.parametrize("time_format, said", [("INV", "15:36"), ("24H", "15:36"),
+                                               ("12H", "3:36 PM")])
+def test_status_says_since_in_the_households_own_time(av, capsys, time_format, said):
+    household_clock(av, "2026-10-08 15:40:00", "2026-10-08 22:40:00", time_format)
+    av.running[ROAM_IP] = FIRED_ITSELF
+    code, out, _ = run(["alarm", "status", "--room", "Sonos Roam"], capsys)
+    assert code == 0
+    assert out.strip().endswith(f", since {said}")
+    code, out, _ = run(["alarm", "status", "--room", "Sonos Roam", "--json"], capsys)
+    [roam] = json.loads(out)["rooms"]
+    assert (roam["since"], roam["logged_start"]) == (said, "2026-10-08 22:36:12")
+
+
+def test_a_household_on_utc_says_the_stamp_unchanged(av, capsys):
+    household_clock(av, "2026-10-08 22:40:00", "2026-10-08 22:40:00")
+    av.running[ROAM_IP] = FIRED_ITSELF
+    _, out, _ = run(["alarm", "status", "--room", "Sonos Roam"], capsys)
+    assert out.strip().endswith(", since 22:36")
+
+
+@pytest.mark.parametrize("stamp", ["", "soon", "2026-13-40 99:00:00", "15:36"])
+def test_an_unreadable_start_says_no_since(av, capsys, stamp):
+    av.running[ROAM_IP] = FIRED_ITSELF | {"LoggedStartTime": stamp}
+    code, out, _ = run(["alarm", "status", "--room", "Sonos Roam"], capsys)
+    assert code == 0
+    assert out.startswith("Sonos Roam: RINGING alarm 34: ") and "since" not in out
+
+
+def test_status_without_the_households_clock_still_answers(av, capsys):
+    def broken(args):
+        raise requests.HTTPError("500", response=FaultReply(FAULT_800.replace(">800<", ">402<")))
+    av.GetTimeNow = broken
+    av.running[ROAM_IP] = FIRED_ITSELF
+    code, out, _ = run(["alarm", "status", "--room", "Sonos Roam"], capsys)
+    assert code == 0
+    assert out.startswith("Sonos Roam: RINGING alarm 34: ") and "since" not in out
+
+
+def test_try_sends_utc_and_its_echo_reads_back_as_the_households_time(av, capsys):
+    household_clock(av, "2026-10-08 15:36:05", "2026-10-08 22:36:05", "12H")
+    code, out, _ = run(["alarm", "try", "34", "--json"], capsys)
+    assert code == 0, out
+    [(_, _, sent)] = av.av_writes
+    assert sent["LoggedStartTime"] == "2026-10-08 22:36:05"
+    assert journal()[0]["logged_start"] == "2026-10-08 22:36:05"
+    av.running[ROAM_IP] = FIRED_ITSELF | {"LoggedStartTime": sent["LoggedStartTime"]}
+    _, out, _ = run(["alarm", "status", "--room", "Sonos Roam"], capsys)  # a fresh process
+    assert out.strip().endswith(", since 3:36 PM")
+
+
+def test_the_journal_keeps_what_try_sent_whatever_the_speaker_echoes(av, capsys):
+    run(["alarm", "try", "34"], capsys)
+    av.running[ROAM_IP] = FIRED_ITSELF | {"LoggedStartTime": "garbage"}
+    _, out, _ = run(["alarm", "status", "--room", "Sonos Roam"], capsys)
+    assert "since" not in out
+    assert journal()[0]["logged_start"] == "2026-10-04 15:20:01"
+
+
+def test_the_households_offset_is_to_the_minute():
+    from datetime import datetime, timedelta
+    hh = clock.HouseholdTime(datetime(2026, 10, 8, 15, 40, 1), datetime(2026, 10, 8, 22, 40, 0))
+    assert hh.offset == timedelta(hours=-7)
+    assert hh.local_of(datetime(2026, 10, 8, 0, 10)) == datetime(2026, 10, 7, 17, 10)
+    assert clock.parse_stamp("2026-10-08 22:36:12") == datetime(2026, 10, 8, 22, 36, 12)
+    assert clock.parse_stamp("2026-10-08T22:36:12") is None
+
+
 def test_status_with_nothing_ringing(av, capsys):
     av.state[ROAM_IP] = clock.parse_last_change(NOTIFY)
     code, out, _ = run(["alarm", "status", "--json"], capsys)
@@ -703,7 +782,7 @@ def test_try_fires_the_alarm_on_its_rooms_coordinator_and_journals_it(av, capsys
     assert (ip, action) == (ROAM_IP, "RunAlarm")
     alarm = next(a for a in ALARMS if a.id == "34")
     assert args == {"InstanceID": "0", "AlarmID": "34",
-                    "LoggedStartTime": "2026-10-04 08:20:01", "Duration": "02:00:00",
+                    "LoggedStartTime": "2026-10-04 15:20:01", "Duration": "02:00:00",
                     "ProgramURI": alarm.program_uri, "ProgramMetaData": alarm.program_metadata,
                     "PlayMode": "SHUFFLE", "Volume": "25", "IncludeLinkedZones": "0"}
     run_rec, start, end = journal()
