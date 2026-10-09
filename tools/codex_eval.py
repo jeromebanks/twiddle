@@ -309,6 +309,7 @@ LINE_TOLERANCE = 3                     # a finding's line may be this far from t
 BASE_FILES = ("base", "change.patch", "brief.md", "expect.toml")     # what a fixture directory holds
 KINDS = ("bug", "clean")
 # a neutral identity: Codex reads `git log`, so nothing in the repo may say what is being measured
+MARK = ".codex-eval"                   # in each folder this eval made: only those are ever reused
 SCRATCH_GIT = ("-c", "user.name=dev", "-c", "user.email=dev@example.invalid",
                "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-c", "core.autocrlf=false")
 
@@ -380,12 +381,19 @@ def findings(report: str) -> list[str]:
     return [re.sub(r"\n[ \t]*[*_`]*VERDICT:.*\Z", "", t, flags=re.IGNORECASE).strip() for t in out]
 
 
+FILE_RE = re.compile(r"[\w./-]+\.(?:py|md|toml|json|txt|sh|html)\b")
+
+
 def lines_named(text: str, path: str) -> list[tuple[int, int]]:
-    """(first, last) for every line or line range the text gives: `base.py:12`, `base.py#L12-L14`, `line 12`,
-    `lines 12-14`, `L12`."""
-    base = re.escape(path.rsplit("/", 1)[-1])
+    """(first, last) for every line or line range the text gives for `path`: `base.py:12`, `base.py#L12-L14`; and
+    a bare `line 12`, `lines 12-14` or `L12` only when the text names no other file (else it may be that file's)."""
+    name = path.rsplit("/", 1)[-1]
+    base = re.escape(name)
+    pats = [rf"{base}[:#(]\s*{RANGE}"]
+    if all(f.rsplit("/", 1)[-1] == name for f in FILE_RE.findall(text)):
+        pats += [rf"\blines?\s+{RANGE}", rf"\bL(\d+)(?:\s*(?:-|\u2013|\u2014)\s*L?(\d+))?\b"]
     found = []
-    for pat in (rf"{base}[:#(]\s*{RANGE}", rf"\blines?\s+{RANGE}", rf"\bL(\d+)(?:\s*(?:-|\u2013|\u2014)\s*L?(\d+))?\b"):
+    for pat in pats:
         for m in re.finditer(pat, text, re.IGNORECASE):
             a = int(m.group(1))
             found.append((a, int(m.group(2)) if m.group(2) else a))
@@ -473,6 +481,8 @@ def build_repo(fx: Fixture, repo: Path, root: Path = ROOT) -> str:
     copied: `codex.skills` is `suppressed`, so a review is never offered any."""
     if repo.resolve().is_relative_to(Path(root).resolve()):
         raise codex_review.ReviewError(f"the scratch repo {repo} is inside {root}: a fixture is only ever applied elsewhere")
+    if (repo / ".git").is_file() or repo.is_symlink():      # a linked worktree (or a link to one) isn't ours to replace
+        raise codex_review.ReviewError(f"{repo} is a checkout of another repo, not a scratch one: use an empty --out")
     shutil.rmtree(repo, ignore_errors=True)
     shutil.copytree(fx.path / "base", repo, symlinks=True)
     tree = Worktree(root)
@@ -503,11 +513,18 @@ def run_fixtures(fixtures: list[Fixture], settings: dict[str, Any], out: Path, l
     prompt. Nothing Codex is shown names the fixture or the eval (`<out>/f1/` ... , the brief alone, a neutral git
     identity): the name only reaches the log lines this prints. A fixture Codex can't run is `unavailable` and the rest still run; a refusal (`ReviewError`) stops the lot."""
     run = EvalRun()
+    probe = next(p for p in [Path(out).resolve(), *Path(out).resolve().parents] if p.exists())
+    if subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=probe, capture_output=True).returncode == 0:
+        raise codex_review.ReviewError(f"--out {out} is inside a git checkout, whose status it would dirty: use a "
+                                       "folder outside any checkout")
     template = codex_review.PR_PROMPT.read_text()
     for i, fx in enumerate(fixtures, 1):
         # the folder, its path in the prompt and Codex's working directory carry no fixture name: Codex would read it
         began, scratch = time.monotonic(), Path(out) / f"f{i}"
+        if scratch.exists() and any(scratch.iterdir()) and not (scratch / MARK).exists():
+            raise codex_review.ReviewError(f"{scratch} exists and isn't one this eval made: use an empty --out")
         scratch.mkdir(parents=True, exist_ok=True)
+        (scratch / MARK).write_text("made by codex-eval\n")
         head = build_repo(fx, scratch / "repo", root)
         brief = scratch / "slice.md"
         brief.write_text(fx.brief)
@@ -515,7 +532,10 @@ def run_fixtures(fixtures: list[Fixture], settings: dict[str, Any], out: Path, l
         (scratch / "prompt.md").write_text(prompt)
 
         def saw(version: str) -> None:
-            run.version = run.version or version
+            if run.version and version != run.version:
+                raise codex_review.ReviewError(f"codex changed from {run.version} to {version} while the eval ran: a result "
+                                               "belongs to one version, so nothing is posted. Run it again")
+            run.version = version
         status, report = codex_review.run_review(codex_review.codex_command(settings, prompt), scratch / "repo", head,
                                                  scratch, settings, log=log, on_version=saw)
         if report is None:

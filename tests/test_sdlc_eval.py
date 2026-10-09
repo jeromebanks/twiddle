@@ -1,5 +1,6 @@
 """tools/codex_eval.py: the review logic's fingerprint and the eval results recorded against it; and what
 `codex-review` checks of a run's session log (`codex.skills`). Offline: a fake `codex`, tmp git repos, saved bundles."""
+import itertools
 import json
 import re
 import shutil
@@ -826,6 +827,16 @@ def test_a_miss_a_wrong_file_a_far_line_the_wrong_defect_and_a_flagged_clean_cha
     assert not s.hit and "flagged the clean change" in s.reason and "error path" in s.reason
 
 
+def test_a_line_belongs_to_the_file_it_is_given_for_and_a_bare_one_only_when_no_other_file_is_named():
+    fx = BY_NAME["off-by-one-bound"]
+    other = "1. **blocking** `tests/test_journal_newest.py#L19`: off-by-one, as in journal_log.py\n\nVERDICT: changes\n"
+    s = codex_eval.score(fx, other)
+    assert not s.hit and "names line" in s.reason
+    assert not codex_eval.score(fx, other.replace("#L19", ":19")).hit
+    assert codex_eval.score(fx, f"1. `{fx.file}` line {fx.line}: off-by-one\n\nVERDICT: changes\n").hit
+    assert codex_eval.score(fx, f"1. `{fx.file}:{fx.line}` off-by-one, see tests/test_journal_newest.py:99\n\nVERDICT: changes\n").hit
+
+
 def test_a_stamped_report_and_other_numbered_shapes_are_read():
     fx = BY_NAME["off-by-one-bound"]
     stamped = codex_review.stamp(found(fx), "a" * 40, {"model": "m", "effort": "high", "codex": "1.2.3", "prompt": "0" * 64})
@@ -1010,3 +1021,30 @@ def test_a_fixture_that_cant_say_what_it_expects_is_refused_by_name(tmp_path):
     (tmp_path / "fx" / "clean-change").mkdir()
     with pytest.raises(codex_review.ReviewError, match="clean-change lacks"):
         codex_eval.load_fixtures(tmp_path / "fx")
+
+
+def test_a_codex_that_changes_version_mid_run_posts_nothing(tmp_path, monkeypatch, capsys):
+    e = Eval(tmp_path, monkeypatch, finds_everything())
+    versions = itertools.chain(["1.0", "1.0"], itertools.repeat("1.1"))      # the check before the run, then the first fixture
+    monkeypatch.setattr(codex_review, "codex_version", lambda env: next(versions))
+    assert e.run() == 1 and e.posted == []
+    assert "changed from 1.0 to 1.1" in capsys.readouterr().err
+
+
+def test_a_scratch_that_is_or_holds_someone_elses_checkout_is_never_replaced(tmp_path, monkeypatch, capsys):
+    e = Eval(tmp_path, monkeypatch, finds_everything())
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for args in (["init", "-q"], ["commit", "--allow-empty", "-qm", "x"]):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args], cwd=elsewhere, check=True)
+    (tmp_path / "scratch" / "f1").mkdir(parents=True)
+    subprocess.run(["git", "worktree", "add", "-q", str(tmp_path / "scratch" / "f1" / "repo")], cwd=elsewhere, check=True)
+    keep = tmp_path / "scratch" / "f1" / "repo" / ".git"
+    assert e.run() == 1 and e.posted == [] and keep.is_file() and calls(e.log) == []     # nothing deleted, nothing run
+    assert "isn't one this eval made" in capsys.readouterr().err
+    (tmp_path / "scratch" / "f1" / codex_eval.MARK).write_text("x")                  # even marked, a linked checkout is refused
+    assert e.run() == 1 and keep.is_file()
+    assert "checkout of another repo" in capsys.readouterr().err
+    inside = tmp_path / "elsewhere" / "out"                                          # --out inside a checkout
+    assert sdlc.main(["--config", str(e.config), "codex-eval", "--out", str(inside)]) == 1
+    assert "inside a git checkout" in capsys.readouterr().err and calls(e.log) == []
