@@ -568,6 +568,15 @@ def _ignored_skills(wt: Path) -> list[str]:
     return [n for n in proc.stdout.split("\0") if n.endswith("SKILL.md")]
 
 
+def _linked_instructions(d: Path, wt: Path) -> str | None:
+    """An instruction file in `d`, or a directory between the checkout `wt` and `d`, that is a symbolic link: its
+    content would come from somewhere the fingerprint never reads."""
+    rel = Path(os.path.relpath(d, wt))
+    steps = [wt / Path(*rel.parts[:i]) for i in range(1, len(rel.parts) + 1)] if ".." not in rel.parts else []
+    files = [f for f in d.iterdir() if instruction_file(f.name)] if d.is_dir() else []
+    return next((str(p) for p in steps + files if p.is_symlink()), None)
+
+
 def _ignored(path: Path, wt: Path) -> bool:
     """An existing file git ignores in the checkout `wt` (`.gitignore`, `.git/info/exclude`, a global ignore)."""
     return path.is_file() and subprocess.run(["git", "check-ignore", "-q", str(path)], cwd=wt,
@@ -641,6 +650,9 @@ def check_session(log: Path, wt: Path, mode: str, cut_short: bool = False, home:
         a = st.get("agents_md") or {}
         if not a:
             continue
+        if linked := _linked_instructions(Path(a["directory"]), wt):
+            return "offered", (f"Codex loaded the instructions in {a['directory']} through a symbolic link ({linked}): "
+                               f"what it points at isn't in the review logic's fingerprint (session log {log})")
         if not Path(a["directory"]).resolve().is_relative_to(wt.resolve()):
             return "offered", (f"Codex loaded the instructions in {a['directory']}, outside the reviewed checkout "
                                f"{wt} (session log {log})")

@@ -322,7 +322,7 @@ and the repo's own `.agents/skills`, and its session log showed `skills.includeI
   `skills.includeInstructions: false`. Without the setting it has both. After every run the tool
   reads the run's session log (`codex_review.check_session`). If skills were offered, or Codex
   loaded instructions that aren't the content of an instruction file in the reviewed checkout that
-  git doesn't ignore (an ignored file is never in a commit, so it can't be an input), or the log
+  git doesn't ignore, or reached them through a symbolic link (an `AGENTS.md` must be a real file) (an ignored file is never in a commit, so it can't be an input), or the log
   isn't a shape the tool knows
   (a new `codex` may change it), the round saves no report and exits 3, with the reason at the
   end of `codex.err`. Only a run killed on its timeout before it wrote its state is retried. A `codex` that ignores the setting can't produce a review that looks like
