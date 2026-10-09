@@ -2711,10 +2711,13 @@ def command_codex_eval(args: argparse.Namespace, config: dict[str, Any]) -> int:
 
 def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, head: str, out: Path,
                     settings: dict[str, Any], dry_run: bool, record: str, ledger=None) -> int:
-    """Print what the round runs, then run it (or, with --dry-run, print the prompt). `ledger()` gives the eval
-    results: before Codex runs, a warning says when the review logic running this round (`ROOT`'s) has no
-    passing eval with this `codex` version: the files the tool reads from `ROOT`, those Codex reads from `wt`, and
-    the `settings` the round runs with. The round runs either way."""
+    """Print what the round runs, then run it (or, with --dry-run, print the prompt).
+
+    The review logic this round runs under is fingerprinted first: the files the tool reads from `ROOT`, those
+    Codex reads from `wt`, and the `settings` it runs with. Inputs that can't be fingerprinted (a symbolic link
+    among them, say) refuse the round before Codex starts: a review that can't say what it ran under is none.
+    `ledger()` gives the eval results, and a pair with no passing one (or results that can't be read) is only a
+    warning: the round runs."""
     cmd = codex_review.codex_command(settings, prompt)
     print(f"{title}\n"
           + "".join(f"  {k}: {v}\n" for k, v in files.items())
@@ -2724,12 +2727,17 @@ def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, h
     if dry_run:
         print(f"\n{prompt}")
         return 0
+    try:
+        fp = codex_eval.fingerprint(codex_eval.Worktree(ROOT), codex_eval.Worktree(wt), settings)
+    except (SdlcError, OSError) as exc:
+        raise SdlcError(f"the review logic can't be fingerprinted ({exc}), so this review couldn't say what it ran "
+                        "under: nothing was run. Fix that, then run this again")
+
     def check_eval(version: str) -> None:
         try:
-            fp = codex_eval.fingerprint(codex_eval.Worktree(ROOT), codex_eval.Worktree(wt), settings)
             result = codex_eval.pair_result(ledger() if ledger else [], fp, version)
         except (SdlcError, OSError, ValueError) as exc:
-            print(f"warning: couldn't check the review eval ({exc}); the review still runs", file=sys.stderr)
+            print(f"warning: couldn't read the review eval's results ({exc}); the review still runs", file=sys.stderr)
             return
         if warn := codex_eval.warning(fp, version, result):
             print(warn, file=sys.stderr)

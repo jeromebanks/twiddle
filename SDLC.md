@@ -353,8 +353,11 @@ logic that round actually runs under. The files the tool reads (the prompts, its
 fixtures) come from the checkout the command runs from. The files Codex reads (`review-rules.md`,
 `plan-schema.md`, any `AGENTS.md`, and the skills in fingerprinted mode) come from the checkout
 Codex runs in: the slice's worktree, the scratch checkout of `main` for a plan, or the epic's
-worktree. The settings are the ones the round runs with, a `--config` of its own included. It
-warns when that pair has no passing result, and the round still runs.
+worktree. The settings are the ones the round runs with, a `--config` of its own included. If an
+input can't be fingerprinted (a symbolic link, or a file where a directory of inputs belongs), the
+round is refused before Codex starts (exit 1: fix it and run again, never a `review-defer`): a
+review that can't say what it ran under isn't one. It only warns when that pair has no passing
+result, or the results can't be read, and the round still runs.
 
 **Round limits** (`.sdlc/config.json`): `max_pr_rounds` (default 5) is how many Codex rounds
 that ask for changes a slice PR, or a milestone, may take before it escalates.
