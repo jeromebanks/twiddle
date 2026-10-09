@@ -1169,7 +1169,8 @@ def test_every_play_mode_has_a_line():
 
 
 @pytest.mark.parametrize("verb", [["add", "--room", "x", "--time", "7:00"], ["edit", "66"]])
-def test_mode_help_lists_each_mode_with_its_line(verb, capsys):
+def test_mode_help_lists_each_mode_with_its_line(verb, capsys, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")          # argparse wraps (and splits hyphens) by width
     with pytest.raises(SystemExit):
         cli.main(["alarm", *verb, "--help"])
     out = " ".join(capsys.readouterr().out.split())

@@ -584,6 +584,9 @@ async def test_the_editor_says_what_the_chosen_play_mode_does(fake, providers):
             ed.query_one("#mode").value = alarm_cli.PLAY_MODES[name]
             await pilot.pause()
             assert str(ed.query_one("#mode-line").render()) == line, name
+        ed.query_one("#mode").value = alarm_cli.PLAY_MODES["normal"]     # back: it changes
+        await pilot.pause()
+        assert str(ed.query_one("#mode-line").render()) == alarm_cli.PLAY_MODE_LINES["normal"]
         await pilot.press("escape")
         await pilot.pause()
         ed = await open_edit(app, pilot, "301")
