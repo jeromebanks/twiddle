@@ -381,7 +381,8 @@ is `suppressed`, so a review is never offered any. A planted bug counts as found
 numbered finding** names the file, a line within ±3 of the planted one (or of another place `expect.toml` allows) or the enclosing function, and one of the
 fixture's keywords (case-insensitive); the clean change must come back `approve`. A line counts only when it is written
 right after the file's name (`journal_log.py:19`, `` `journal_log.py` line 19 ``), and a name is the whole token, so
-`journal_log.py.orig:19` or `line 19 of journal_log.py` never credits `journal_log.py`.
+`journal_log.py.orig:19` never credits `journal_log.py`. Words may give a line to a file (`line 19 of journal_log.py`), and
+a range wider than 10 lines points at none.
 
 - Every fixture runs, and a full eval takes 10-15 minutes. It prints a line per fixture as it goes, so run it in the background.
 - Any miss posts a `fail` with the misses. A fixture Codex couldn't run is `unavailable` and the rest still run. If one was

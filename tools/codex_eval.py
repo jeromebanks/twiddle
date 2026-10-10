@@ -387,42 +387,53 @@ def findings(report: str) -> list[str]:
 # `journal_log.py`. A line number counts only when it is written right after the token it belongs to.
 SEPARATORS = " \t\r\n`*\"'()[]{}<>,;:#!?|‘’“”–—…"
 TOKEN_RE = re.compile(rf"[^{re.escape(SEPARATORS)}]+")
-# what may sit between a token and its line: `f.py:12`, `f.py#L12-L14`, `` `f.py` line 12 ``, `f.py (lines 12-14)`,
-# `f.py, L12`, `f.py at line 12`
-ATTACHED = re.compile(rf"[`*_]*(?:[:#(]|[\s,(`*_:]+(?:(?:at|on)\s+)?(?:lines?\s+|(?=L\d)))\s*{RANGE}", re.IGNORECASE)
+# a line written onto its file: `f.py:12`, `f.py#L12-L14`, `f.py(12)`
+TIGHT = re.compile(rf"[`*_]*[:#(]\s*{RANGE}", re.IGNORECASE)
+# a line written after it in words: `` `f.py` line 12 ``, `f.py (lines 12-14)`, `f.py, L12`, `f.py at line 12`;
+# unless the words go on to give it to another (`f.py, line 12 of g.py`)
+LOOSE = re.compile(rf"[\s,(`*_:]+(?:(?:at|on)\s+)?(?:lines?\s+|(?=L\d))\s*{RANGE}", re.IGNORECASE)
+OWNED_BY = re.compile(r"[`*_]*\s+(?:of|in)\s+[`*]*")
+WIDEST = 10                            # a wider range (`f.py:1-200`) points at no line in particular
 
 
-def _tokens(text: str) -> list[tuple[str, int]]:
-    """Each token with where it ends; a full stop after it is the sentence's, and `_name_` is markdown."""
-    out = []
-    for m in TOKEN_RE.finditer(text):
-        t = m.group().rstrip(".")
-        if len(t) > 2 and t[0] == t[-1] == "_":
-            t = t.strip("_")
-        out.append((t.removeprefix("./"), m.end()))
-    return out
+def _tokens(text: str) -> list[tuple[str, int, int]]:
+    """Each token with where it starts and ends; a full stop after it is the sentence's."""
+    return [(m.group().rstrip(".").removeprefix("./"), m.start(), m.end()) for m in TOKEN_RE.finditer(text)]
 
 
 def _is(token: str, path: str) -> bool:
-    """The token is the path itself, a tail of it (`journal_log.py`, `twiddle/journal_log.py`) or the path under a
-    directory (an absolute link, a diff's `a/`): never just a file with the same name somewhere else."""
-    return bool(token) and (token == path or path.endswith("/" + token) or token.endswith("/" + path))
+    """The token is the path itself, a tail of it (`journal_log.py`, `twiddle/journal_log.py`), an absolute path
+    ending in it (Codex's links) or a diff's `a/` / `b/` side: never the same name in another directory."""
+    return bool(token) and (token == path or path.endswith("/" + token) or token in (f"a/{path}", f"b/{path}")
+                            or (token.startswith("/") and token.endswith("/" + path)))
 
 
 def lines_named(text: str, path: str) -> list[tuple[int, int]]:
     """(first, last) for every line or line range written right after `path`: `base.py:12`, `base.py#L12-L14`,
-    `` `base.py` line 12 ``. A line written anywhere else (`line 12 of base.py`) is never credited to it."""
+    `` `base.py` line 12 ``, or given to it in words (`line 12 of base.py`). A line written anywhere else is never
+    credited to it, nor a range wider than `WIDEST`."""
+    toks = _tokens(text)
+    starts = {s: t for t, s, _ in toks}
     found = []
-    for token, end in _tokens(text):
-        if _is(token, path) and (m := ATTACHED.match(text, end)):
-            a = int(m.group(1))
-            found.append((a, int(m.group(2)) if m.group(2) else a))
+    for token, _, end in toks:
+        if m := TIGHT.match(text, end):
+            owner = token
+        elif m := LOOSE.match(text, end):
+            owner = token
+            if (f := OWNED_BY.match(text, m.end())) and (tail := TOKEN_RE.match(text, f.end())):
+                owner = starts.get(tail.start(), "")
+        else:
+            continue
+        a = int(m.group(1))
+        a, b = sorted((a, int(m.group(2)) if m.group(2) else a))
+        if _is(owner, path) and b - a <= WIDEST:
+            found.append((a, b))
     return found
 
 
 def names_file(text: str, path: str) -> bool:
     """The text names the file, whole, by its repo path or a tail of it."""
-    return any(_is(t, path) for t, _ in _tokens(text))
+    return any(_is(t, path) for t, _, _ in _tokens(text))
 
 
 @dataclass

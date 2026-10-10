@@ -856,9 +856,9 @@ def foreign_names(path):
     name = path.rsplit("/", 1)[-1]
     stem = name.rsplit(".", 1)[0]
     glue = [c for c in string.printable.strip() if c not in codex_eval.SEPARATORS and c != "."]
-    return ([name + c for c in glue] + [c + name for c in glue if c not in "/"]
+    return ([name + c for c in glue] + [c + name for c in glue if c not in "/"] + [c + name + c for c in glue]
             + [f"{name}.orig", f"{name}.bak", f"{name}-backup", f"{stem}.pyc", f"{stem}.cfg", f"{stem}.log", stem,
-               f"other/{name}", f"test_{name}"])
+               f"other/{name}", f"other/{path}", f"test_{name}"])
 
 
 @pytest.mark.parametrize("fx", BUGS, ids=lambda f: f.name)
@@ -871,8 +871,14 @@ def test_no_other_file_lends_the_planted_line_however_its_name_is_written(fx):
                            f"1. **blocking** `{name}` is fine, but {ref}: {kw}\n\nVERDICT: changes\n"):
                 s = codex_eval.score(fx, report)
                 assert not s.hit, (report, s.reason)
-    # a line not written right after the file's name is no one's
-    assert not codex_eval.score(fx, f"1. **blocking** line {n} of `{name}`: {kw}\n\nVERDICT: changes\n").hit
+        for words in (f"`{name}`, line {n} of `{other}`", f"{name} line {n} in {other}", f"`{name}` (lines {n}-{n + 1} of {other})"):
+            report = f"1. **blocking** {words}: {kw}\n\nVERDICT: changes\n"
+            s = codex_eval.score(fx, report)
+            assert not s.hit, (report, s.reason)
+    # a line given to nothing is no one's, and a range wide enough to hold any line points at none
+    for where in (f"line {n}: see `{name}`", f"`{name}` is fine. Line {n}", f"{name}:1-200", f"`{name}` lines {n - 10}-{n + 10}"):
+        report = f"1. **blocking** {where}: {kw}\n\nVERDICT: changes\n"
+        assert not codex_eval.score(fx, report).hit, report
 
 
 @pytest.mark.parametrize("fx", BUGS, ids=lambda f: f.name)
@@ -880,7 +886,7 @@ def test_every_way_a_review_cites_the_planted_line_is_a_hit(fx):
     name, n, kw = fx.file.rsplit("/", 1)[-1], fx.line, fx.keywords[0]
     for ref in (f"`{fx.file}:{n}`", f"[{fx.file}:{n}](/tmp/codex-eval/repo/{fx.file}:{n})", f"{name}#L{n}-L{n + 2}",
                 f"`{name}` line {n}", f"{name}, line {n}", f"{name} (line {n})", f"{name} at line {n}", f"{name}: line {n}",
-                f"**{name}:{n}**", f"_{name}_ line {n}", f"./{fx.file}:{n}", f"a/{fx.file}:{n}", f"{name}:{n}.",
+                f"**{name}:{n}**", f"line {n} of `{fx.file}`", f"{name}:{n + 1}-{n - 1}", f"./{fx.file}:{n}", f"a/{fx.file}:{n}", f"{name}:{n}.",
                 f"{name} lines {n - 1}–{n + 1}", f"`{fx.file.rsplit('/', 2)[-2]}/{name}:{n}`"):
         s = codex_eval.score(fx, f"1. **blocking** {ref} {kw}; see also other/{name}:99.\n\nVERDICT: changes\n")
         assert s.hit, (ref, s.reason)
