@@ -852,11 +852,11 @@ def test_a_line_belongs_to_the_file_it_is_given_for_and_a_bare_one_only_when_no_
 
 def foreign_names(path):
     """Every way to write a file that isn't `path` but looks like it: a character glued on either end, another
-    extension, none, another directory."""
+    extension, none, another directory. (`_name_` is markdown's italics, so it is the file itself.)"""
     name = path.rsplit("/", 1)[-1]
     stem = name.rsplit(".", 1)[0]
     glue = [c for c in string.printable.strip() if c not in codex_eval.SEPARATORS and c != "."]
-    return ([name + c for c in glue] + [c + name for c in glue if c not in "/"] + [c + name + c for c in glue]
+    return ([name + c for c in glue] + [c + name for c in glue if c not in "/"] + [c + name + c for c in glue if c != "_"]
             + [f"{name}.orig", f"{name}.bak", f"{name}-backup", f"{stem}.pyc", f"{stem}.cfg", f"{stem}.log", stem,
                f"other/{name}", f"other/{path}", f"test_{name}"])
 
@@ -875,6 +875,11 @@ def test_no_other_file_lends_the_planted_line_however_its_name_is_written(fx):
             report = f"1. **blocking** {words}: {kw}\n\nVERDICT: changes\n"
             s = codex_eval.score(fx, report)
             assert not s.hit, (report, s.reason)
+    stem, ext = name.rsplit(".", 1)
+    # an unpaired or inner underscore is part of a name
+    for ref in (f"{name}_:{n}", f"_{name}:{n}", f"{stem}_.{ext}:{n}", f"_{stem}_.{ext}:{n}", f"__{name}_:{n}"):
+        report = f"1. **blocking** {ref} {kw}; `{name}` is otherwise fine.\n\nVERDICT: changes\n"
+        assert not codex_eval.score(fx, report).hit, report
     # a line given to nothing is no one's, and a range wide enough to hold any line points at none
     for where in (f"line {n}: see `{name}`", f"`{name}` is fine. Line {n}", f"{name}:1-200", f"`{name}` lines {n - 10}-{n + 10}"):
         report = f"1. **blocking** {where}: {kw}\n\nVERDICT: changes\n"
@@ -886,7 +891,7 @@ def test_every_way_a_review_cites_the_planted_line_is_a_hit(fx):
     name, n, kw = fx.file.rsplit("/", 1)[-1], fx.line, fx.keywords[0]
     for ref in (f"`{fx.file}:{n}`", f"[{fx.file}:{n}](/tmp/codex-eval/repo/{fx.file}:{n})", f"{name}#L{n}-L{n + 2}",
                 f"`{name}` line {n}", f"{name}, line {n}", f"{name} (line {n})", f"{name} at line {n}", f"{name}: line {n}",
-                f"**{name}:{n}**", f"line {n} of `{fx.file}`", f"{name}:{n + 1}-{n - 1}", f"./{fx.file}:{n}", f"a/{fx.file}:{n}", f"{name}:{n}.",
+                f"**{name}:{n}**", f"_{fx.file}:{n}_", f"__{name}__ line {n}", f"**_{name}:{n}_**", f"_{name}_:{n}", f"line {n} of `{fx.file}`", f"{name}:{n + 1}-{n - 1}", f"./{fx.file}:{n}", f"a/{fx.file}:{n}", f"{name}:{n}.",
                 f"{name} lines {n - 1}–{n + 1}", f"`{fx.file.rsplit('/', 2)[-2]}/{name}:{n}`"):
         s = codex_eval.score(fx, f"1. **blocking** {ref} {kw}; see also other/{name}:99.\n\nVERDICT: changes\n")
         assert s.hit, (ref, s.reason)

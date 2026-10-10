@@ -396,6 +396,17 @@ OWNED_BY = re.compile(r"[`*_]*\s+(?:of|in)\s+[`*]*")
 WIDEST = 10                            # a wider range (`f.py:1-200`) points at no line in particular
 
 
+# markdown's `_emphasis_` and `__strong__`, read as markdown does: opened after a separator, closed before one (a full
+# stop between allowed), the same run each side. An unpaired underscore (`journal_log.py_`) or one inside a name
+# (`journal_log_.py`, `__init__.py`) is part of the name.
+_SEP = f"[{re.escape(SEPARATORS)}]"
+EMPHASIS = re.compile(rf"(?:^|(?<={_SEP}))(_+)(?=[^_\s])([^\n]*?[^_\s])\1(?=\.*(?:{_SEP}|$))")
+
+
+def _unemphasized(text: str) -> str:
+    return EMPHASIS.sub(r"\2", text)
+
+
 def _tokens(text: str) -> list[tuple[str, int, int]]:
     """Each token with where it starts and ends; a full stop after it is the sentence's."""
     return [(m.group().rstrip(".").removeprefix("./"), m.start(), m.end()) for m in TOKEN_RE.finditer(text)]
@@ -412,6 +423,7 @@ def lines_named(text: str, path: str) -> list[tuple[int, int]]:
     """(first, last) for every line or line range written right after `path`: `base.py:12`, `base.py#L12-L14`,
     `` `base.py` line 12 ``, or given to it in words (`line 12 of base.py`). A line written anywhere else is never
     credited to it, nor a range wider than `WIDEST`."""
+    text = _unemphasized(text)
     toks = _tokens(text)
     starts = {s: t for t, s, _ in toks}
     found = []
@@ -433,7 +445,7 @@ def lines_named(text: str, path: str) -> list[tuple[int, int]]:
 
 def names_file(text: str, path: str) -> bool:
     """The text names the file, whole, by its repo path or a tail of it."""
-    return any(_is(t, path) for t, _, _ in _tokens(text))
+    return any(_is(t, path) for t, _, _ in _tokens(_unemphasized(text)))
 
 
 @dataclass
