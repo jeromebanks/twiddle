@@ -267,7 +267,9 @@ tool step; never merge or push by hand.
    the epic, and pushes only on a pass. Run it even when `epic/N` is current: it
    records the run on the head that ships. A conflict or a failing suite escalates
    the epic to a human, and you stop.
-2. **Codex reviews the milestone's whole diff** on that head, run by the tool. Run the Bash
+2. **Codex reviews the milestone's whole diff** on that head, run by the tool. If the milestone changed the review
+   logic (the fingerprint's inputs, listed in `SDLC.md`), `uv run python tools/sdlc.py codex-eval --status` says
+   whether this pair has a passing eval; if not, run `codex-eval` first (in the background, 10-15 minutes), before this review. Run the Bash
    call in the background (`run_in_background`) and wait for it to finish: with its one retry
    it can take longer than a foreground call is allowed to.
 

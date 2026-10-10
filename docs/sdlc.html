@@ -304,7 +304,7 @@ config. It writes the report's <code>HEAD:</code> line itself and retries once w
 runs the plan's review (<code>--plan N</code>) and the milestone's (<code>--milestone N</code>): it is the only way a review is run. Before each round it warns when the review logic (the prompts, the rules, the
 <code>codex</code> settings and the code that runs them, fingerprinted together) has no passing eval for this
 <code>codex</code> version. <code>codex-eval --status</code> shows the fingerprint, the version and the result recorded
-for them. Codex is offered no skills during a review, and a run whose session log shows otherwise saves no report. Each round is
+for them; plain <code>codex-eval</code> runs the eval (a change with a planted bug each, and one clean one, scored) and posts it. Codex is offered no skills during a review, and a run whose session log shows otherwise saves no report. Each round is
 recorded with <code>pr-review</code> <em>before</em> any fix is pushed. Fixing or rebutting continues until Codex approves the current head. After
 <code>max_pr_rounds</code> (5 by default) rounds asking for changes the slice escalates. If it was built on a cheaper model,
 it's retried once on the strongest.

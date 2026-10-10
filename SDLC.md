@@ -285,8 +285,7 @@ the header existed is still recorded, without it.
 
 How a review behaves is decided by its prompts, its rules, its settings, the code that fills and
 runs it, and the `codex` binary. The repo owns all of these except the binary. `tools/codex_eval.py`
-hashes the parts it owns into one **fingerprint**, and an eval result (`codex-eval`, run in a later
-slice) is recorded against the pair (fingerprint, `codex --version`). A pass for one pair never
+hashes the parts it owns into one **fingerprint**, and an eval result (`codex-eval`) is recorded against the pair (fingerprint, `codex --version`). A pass for one pair never
 counts for another, so a new `codex` needs a new eval even when nothing in the repo changed.
 
 The fingerprint's inputs, by name (`codex-eval --status --inputs` lists them):
@@ -369,6 +368,34 @@ or `tests/codex_eval/` that git doesn't list, or a link named like an `AGENTS.md
 round is refused before Codex starts (exit 1: fix it and run again, never a `review-defer`): a
 review that can't say what it ran under isn't one. It only warns when that pair has no passing
 result, or the results can't be read, and the round still runs.
+
+**Running the eval.** `uv run python tools/sdlc.py codex-eval` shows Codex the fixtures under
+`tests/codex_eval/` and scores what it says. Each fixture is a tiny base tree, a `change.patch`, a `brief.md` and an
+`expect.toml`. Four carry one planted bug each (an off-by-one bound, an unchecked error path, a speaker write without
+`--dry-run`, a test that proves nothing), and one is a clean change that must be approved. The patch is applied
+only in a scratch git repo the tool builds under `--out` (a temp dir by default; never the primary checkout or a
+worktree of it). The repo holds the real `review-rules.md` and any repo `AGENTS.md` / `AGENTS.override.md` at the same
+paths, with the base as `origin/epic/1` and the change as `slice/1`. Codex then reviews it with the PR prompt through the same
+`run_review` as a real round, one fixture at a time, each under its own scratch `CODEX_HOME`. No skills are copied in: `codex.skills`
+is `suppressed`, so a review is never offered any. A planted bug counts as found when the verdict is `changes` and **one
+numbered finding** names the file, a line within ±3 of the planted one (or of another place `expect.toml` allows) or the enclosing function, and one of the
+fixture's keywords (case-insensitive); the clean change must come back `approve`. A line counts only when it is written
+right after the file's name (`journal_log.py:19`, `` `journal_log.py` line 19 ``), and a name is the whole token, so
+`journal_log.py.orig:19` never credits `journal_log.py`. Words may give a line to a file (`line 19 of journal_log.py`), and
+a range wider than 10 lines points at none.
+
+- Every fixture runs, and a full eval takes 10-15 minutes. It prints a line per fixture as it goes, so run it in the background.
+- Any miss posts a `fail` with the misses. A fixture Codex couldn't run is `unavailable` and the rest still run. If one was
+  missed, the `fail` lists the unrun ones. If none was missed, nothing is posted and the command exits with the
+  runner's `UNAVAILABLE` status (3), so the review is deferred as `codex-review`'s is.
+- A pair that already passed runs nothing (`--force` runs it again), and `--dry-run` lists the fixtures, the
+  fingerprint and what would run, and prints no `codex` command. Exit status: 0 a pass (posted, or already recorded), 1 a `fail`
+  or a refusal, 3 Codex couldn't run.
+- It posts the fingerprint of the repo it runs from, and posts nothing if that moved while it ran.
+
+Run it after a change to the review logic (anything in the fingerprint's inputs), before the PR's `test-record` and
+`codex-review`: a later commit to the inputs voids the result. Editing the eval itself, its fixtures included, is
+such a change.
 
 **Round limits** (`.sdlc/config.json`): `max_pr_rounds` (default 5) is how many Codex rounds
 that ask for changes a slice PR, or a milestone, may take before it escalates.

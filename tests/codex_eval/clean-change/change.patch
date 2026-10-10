@@ -1,0 +1,41 @@
+diff --git a/src/twiddle/clock_text.py b/src/twiddle/clock_text.py
+index 2c0b798..1cebd36 100644
+--- a/src/twiddle/clock_text.py
++++ b/src/twiddle/clock_text.py
+@@ -5,3 +5,14 @@ from __future__ import annotations
+ def pad2(n: int) -> str:
+     """`n` as at least two digits."""
+     return f"{n:02d}"
++
++
++def format_duration(seconds: int) -> str:
++    """`M:SS` under an hour, `H:MM:SS` from an hour up. Raises `ValueError` for a negative number of seconds."""
++    if seconds < 0:
++        raise ValueError(f"a duration can't be negative: {seconds}")
++    minutes, secs = divmod(seconds, 60)
++    hours, minutes = divmod(minutes, 60)
++    if hours:
++        return f"{hours}:{pad2(minutes)}:{pad2(secs)}"
++    return f"{minutes}:{pad2(secs)}"
+diff --git a/tests/test_clock_text.py b/tests/test_clock_text.py
+new file mode 100644
+index 0000000..e9fafea
+--- /dev/null
++++ b/tests/test_clock_text.py
+@@ -0,0 +1,16 @@
++import pytest
++
++from twiddle.clock_text import format_duration
++
++
++@pytest.mark.parametrize("seconds, text", [
++    (0, "0:00"), (5, "0:05"), (65, "1:05"), (599, "9:59"), (3599, "59:59"),
++    (3600, "1:00:00"), (3723, "1:02:03"), (36000, "10:00:00"),
++])
++def test_a_duration_reads_as_minutes_or_hours(seconds, text):
++    assert format_duration(seconds) == text
++
++
++def test_a_negative_duration_is_refused():
++    with pytest.raises(ValueError):
++        format_duration(-1)

@@ -11,18 +11,26 @@ reads and posts them; `latest_results` picks the latest per (fingerprint, versio
 `codex` never counts for a newer one.
 
     uv run python tools/sdlc.py codex-eval --status     # the fingerprint, `codex --version`, and that pair's result
+    uv run python tools/sdlc.py codex-eval              # run the fixtures, score them, post one result (once per pair)
 
-Nothing here runs `codex exec`.
+The eval (`load_fixtures`, `score`, `run_fixtures`, `overall`) shows Codex the changes under `tests/codex_eval/`, each
+with one planted bug (and one clean one), through the same runner as a real review, and checks it found them. Only
+`run_fixtures` runs `codex exec`, and only on a scratch git repo it builds; `--status` and `--dry-run` never do.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import tempfile
+import time
+import tomllib
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     from tools import codex_review          # imported as tools.codex_eval (the tests)
@@ -292,3 +300,312 @@ def warning(fp: str, version: str, result: dict[str, Any] | None) -> str | None:
         return None
     return (f"warning: the review logic {short(fp)} on codex {version} has no passing eval ({describe(result)}). "
             "The review still runs; `uv run python tools/sdlc.py codex-eval --status` says more")
+
+
+# --- the eval: fixtures, scoring, the run ------------------------------------------------
+
+EVAL_EPIC = 1                          # the epic the scratch repo's `origin/epic/1` stands for in the PR prompt
+LINE_TOLERANCE = 3                     # a finding's line may be this far from the planted one
+BASE_FILES = ("base", "change.patch", "brief.md", "expect.toml")     # what a fixture directory holds
+KINDS = ("bug", "clean")
+# a neutral identity: Codex reads `git log`, so nothing in the repo may say what is being measured
+MARK = ".codex-eval"                   # in each folder this eval made: only those are ever reused
+SCRATCH_GIT = ("-c", "user.name=dev", "-c", "user.email=dev@example.invalid",
+               "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-c", "core.autocrlf=false")
+
+
+@dataclass
+class Fixture:
+    """One change to review: `base/` (the tree before), `change.patch`, the `brief` Codex is given, and what it
+    must find (`expect.toml`: `kind` `bug` with `file`, `line`, `anchor`, `functions` and `keywords`; or `clean`)."""
+    name: str
+    path: Path
+    brief: str
+    kind: str
+    file: str = ""
+    line: int = 0
+    anchor: str = ""
+    also_lines: list[int] = field(default_factory=list)    # other places a finding may rightly cite (each ±LINE_TOLERANCE)
+    functions: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
+
+
+def load_fixtures(root: Path = FIXTURES) -> list[Fixture]:
+    """Every fixture under `root`, by name; a malformed one is refused (naming it), so a typo never skips a bug."""
+    found = []
+    for d in sorted(p for p in Path(root).iterdir() if p.is_dir()) if Path(root).is_dir() else []:
+        if missing := [f for f in BASE_FILES if not (d / f).exists()]:
+            raise codex_review.ReviewError(f"fixture {d.name} lacks {', '.join(missing)}")
+        try:
+            exp = tomllib.loads((d / "expect.toml").read_text())
+        except (tomllib.TOMLDecodeError, OSError) as exc:
+            raise codex_review.ReviewError(f"fixture {d.name}: expect.toml can't be read ({exc})") from exc
+        if exp.get("kind") not in KINDS:
+            raise codex_review.ReviewError(f"fixture {d.name}: `kind` must be one of {', '.join(KINDS)}")
+        fx = Fixture(d.name, d, (d / "brief.md").read_text(), exp["kind"])
+        if fx.kind == "bug":
+            fx.file, fx.anchor = exp.get("file", ""), exp.get("anchor", "")
+            fx.line = exp.get("line") if isinstance(exp.get("line"), int) and not isinstance(exp.get("line"), bool) else 0
+            fx.functions, fx.keywords = exp.get("functions", []), exp.get("keywords", [])
+            fx.also_lines = exp.get("also_lines", [])
+            if not (isinstance(fx.also_lines, list) and all(isinstance(n, int) and not isinstance(n, bool) and n > 0
+                                                            for n in fx.also_lines)):
+                raise codex_review.ReviewError(f"fixture {d.name}: `also_lines` must be a list of line numbers")
+            ok = (isinstance(fx.file, str) and fx.file and fx.line > 0 and isinstance(fx.anchor, str) and fx.anchor
+                  and isinstance(fx.functions, list) and isinstance(fx.keywords, list) and fx.keywords
+                  and all(isinstance(x, str) and x for x in fx.functions + fx.keywords))
+            if not ok:
+                raise codex_review.ReviewError(f"fixture {d.name}: a bug needs `file`, `line`, `anchor`, `keywords` "
+                                               "(non-empty strings) and `functions` (a list of strings)")
+            # a keyword the location contains would match any finding that names the place, whatever its defect
+            place = " ".join([fx.file, *fx.functions]).lower()
+            if inside := [k for k in fx.keywords if k.lower() in place]:
+                raise codex_review.ReviewError(f"fixture {d.name}: keyword {inside[0]!r} is part of the file or function "
+                                               "names, so it would match any finding there: pick words for the defect")
+        found.append(fx)
+    if not any(f.kind == "bug" for f in found) or not any(f.kind == "clean" for f in found):
+        raise codex_review.ReviewError(f"{root} must hold at least one fixture with a planted bug and one clean change")
+    return found
+
+
+# a numbered finding opens a line: `1.`, `1)`, `**1.**`, `### 1.`, `- 1.`
+FINDING_RE = re.compile(r"^[ \t]*(?:[-*][ \t]+)?(?:#+[ \t]*)?[*_`]*\d+[.)][*_`]*[ \t]", re.MULTILINE)
+# markup may wrap the numbers: `line **19**`, `` :`19` ``
+RANGE = r"[`*_]*L?(\d+)[`*_]*(?:\s*(?:-|\u2013|\u2014|to)\s*[`*_]*L?(\d+)[`*_]*)?"
+
+
+def findings(report: str) -> list[str]:
+    """The numbered findings of a report, each with its continuation lines; the `VERDICT:` line is not one."""
+    body = report or ""
+    starts = [m.start() for m in FINDING_RE.finditer(body)]
+    out = [body[a:b].strip() for a, b in zip(starts, starts[1:] + [len(body)])]
+    return [re.sub(r"\n[ \t]*[*_`]*VERDICT:.*\Z", "", t, flags=re.IGNORECASE).strip() for t in out]
+
+
+# What a finding cites is read by position, never by what a file name looks like: the text splits into tokens at
+# the characters prose and markdown put around a name, and anything else stays part of the token, so
+# `journal_log.py.orig`, `journal_log.py-backup` or `journal_log.py~` is one token, a different file from
+# `journal_log.py`. A line number counts only when it is written right after the token it belongs to.
+SEPARATORS = " \t\r\n`*\"'()[]{}<>,;:#!?|‘’“”–—…"
+TOKEN_RE = re.compile(rf"[^{re.escape(SEPARATORS)}]+")
+# a line written onto its file: `f.py:12`, `f.py#L12-L14`, `f.py(12)`
+TIGHT = re.compile(rf"[`*_]*[:#(]\s*{RANGE}", re.IGNORECASE)
+# a line written after it in words: `` `f.py` line 12 ``, `f.py (lines 12-14)`, `f.py, L12`, `f.py at line 12`;
+# unless the words go on to give it to another (`f.py, line 12 of g.py`, `f.py line 12 (in g.py)`)
+LOOSE = re.compile(rf"[\s,(`*_:]+(?:(?:at|on)\s+)?(?:lines?\s+|(?=[`*_]*L\d))\s*{RANGE}", re.IGNORECASE)
+OWNED_BY = re.compile(r"[`*_]*[\s,;:(\u2013\u2014-]+(?:of|in|inside|within|from)\b\s*[`*\"'\[(\u2018\u201c]*")
+WIDEST = 10                            # a wider range (`f.py:1-200`) points at no line in particular
+
+
+# markdown's `_emphasis_` and `__strong__`, read as markdown does: opened after a separator, closed before one (a full
+# stop between allowed), the same run each side. An unpaired underscore (`journal_log.py_`) or one inside a name
+# (`journal_log_.py`, `__init__.py`) is part of the name.
+_SEP = f"[{re.escape(SEPARATORS)}]"
+EMPHASIS = re.compile(rf"(?:^|(?<={_SEP}))(_+)(?=[^_\s])([^\n]*?[^_\s])\1(?=\.*(?:{_SEP}|$))")
+
+
+def _unemphasized(text: str) -> str:
+    return EMPHASIS.sub(r"\2", text)
+
+
+def _tokens(text: str) -> list[tuple[str, int, int]]:
+    """Each token with where it starts and ends; a full stop after it is the sentence's."""
+    return [(m.group().rstrip(".").removeprefix("./"), m.start(), m.end()) for m in TOKEN_RE.finditer(text)]
+
+
+def _is(token: str, path: str) -> bool:
+    """The token is the path itself, a tail of it (`journal_log.py`, `twiddle/journal_log.py`), an absolute path
+    ending in it (Codex's links) or a diff's `a/` / `b/` side: never the same name in another directory."""
+    return bool(token) and (token == path or path.endswith("/" + token) or token in (f"a/{path}", f"b/{path}")
+                            or (token.startswith("/") and token.endswith("/" + path)))
+
+
+def lines_named(text: str, path: str) -> list[tuple[int, int]]:
+    """(first, last) for every line or line range written right after `path`: `base.py:12`, `base.py#L12-L14`,
+    `` `base.py` line 12 ``, or given to it in words (`line 12 of base.py`). A line written anywhere else is never
+    credited to it, nor a range wider than `WIDEST`."""
+    text = _unemphasized(text)
+    toks = _tokens(text)
+    starts = {s: t for t, s, _ in toks}
+    found = []
+    for token, _, end in toks:
+        if m := TIGHT.match(text, end):
+            owner = token
+        elif m := LOOSE.match(text, end):
+            owner = token
+            if f := OWNED_BY.match(text, m.end()):        # the words decide, or the line is no file's
+                tail = TOKEN_RE.match(text, f.end())
+                owner = starts.get(tail.start(), "") if tail else ""
+        else:
+            continue
+        a = int(m.group(1))
+        a, b = sorted((a, int(m.group(2)) if m.group(2) else a))
+        if _is(owner, path) and b - a <= WIDEST:
+            found.append((a, b))
+    return found
+
+
+def names_file(text: str, path: str) -> bool:
+    """The text names the file, whole, by its repo path or a tail of it."""
+    return any(_is(t, path) for t, _, _ in _tokens(_unemphasized(text)))
+
+
+@dataclass
+class Score:
+    hit: bool
+    reason: str
+
+
+def score(fx: Fixture, report: str) -> Score:
+    """Whether a report (the saved one, or just Codex's text) is what the fixture needs. A bug: `VERDICT: changes`
+    and one finding that names the file, a line within `LINE_TOLERANCE` of the planted one or the enclosing
+    function, and one of the keywords (case-insensitive). The clean change: `VERDICT: approve`.
+
+    A line must be written right after the file's name, since line numbers repeat across files; a function's name
+    may sit anywhere in the finding, since each fixture's functions are unique in its tree, so naming one names
+    the place whatever other file the finding mentions."""
+    try:
+        verdict = codex_review.parse_verdict(report)
+    except codex_review.ReviewError as exc:
+        return Score(False, f"no verdict: {exc}")
+    items = findings(report)
+    if fx.kind == "clean":
+        if verdict == "approve":
+            return Score(True, "approved the clean change")
+        first = re.sub(r"\s+", " ", items[0])[:160] if items else "no numbered finding"
+        return Score(False, f"flagged the clean change (VERDICT: changes): {first}")
+    if verdict != "changes":
+        return Score(False, "approved the change with the planted bug (VERDICT: approve)")
+    if not items:
+        return Score(False, "VERDICT: changes with no numbered finding")
+    stage, near = 0, ""
+    for text in items:
+        if not names_file(text, fx.file):
+            continue
+        stage = max(stage, 1)
+        close = any(a - LINE_TOLERANCE <= n <= b + LINE_TOLERANCE for a, b in lines_named(text, fx.file)
+                    for n in [fx.line, *fx.also_lines])
+        in_function = any(re.search(rf"\b{re.escape(f)}\b", text) for f in fx.functions)
+        if not (close or in_function):
+            continue
+        stage = max(stage, 2)
+        plain = re.sub(r"[`*_]", "", text).lower()          # `is not `None`` and **is not None** read alike
+        if any(re.sub(r"[`*_]", "", k).lower() in plain for k in fx.keywords):
+            return Score(True, f"found at {fx.file}")
+        near = re.sub(r"\s+", " ", text)[:120]
+    if stage == 0:
+        return Score(False, f"no finding names {fx.file}")
+    if stage == 1:
+        where = f"line {fx.line}±{LINE_TOLERANCE}" + (f" or {', '.join(fx.functions)}" if fx.functions else "")
+        return Score(False, f"no finding at {fx.file} names {where}")
+    return Score(False, f"the finding at the right place doesn't name the defect (none of its keywords): {near}")
+
+
+@dataclass
+class Outcome:
+    """One fixture's result: `hit`, `miss` or `unavailable` (Codex couldn't run it)."""
+    name: str
+    outcome: str
+    detail: str = ""
+
+
+@dataclass
+class EvalRun:
+    version: str | None = None             # `codex --version`, as the first run that started saw it
+    outcomes: list[Outcome] = field(default_factory=list)
+
+
+def _scratch_git(args: list[str], cwd: Path) -> str:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") or k.startswith(("GIT_AUTHOR", "GIT_COMMITTER"))}
+    env.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+    proc = subprocess.run(["git", *SCRATCH_GIT, *args], cwd=cwd, env=env, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise codex_review.ReviewError(f"git {' '.join(args[:2])} failed in {cwd}: {(proc.stderr or proc.stdout).strip()}")
+    return proc.stdout.strip()
+
+
+def build_repo(fx: Fixture, repo: Path, root: Path = ROOT) -> str:
+    """A fresh git repo at `repo` holding the fixture: its base tree, the real `review-rules.md` and every
+    `AGENTS.md` / `AGENTS.override.md` the repo has (at the same paths) as the base commit, which is also
+    `origin/epic/1`; then `slice/1` with the patch applied. Returns the head. Never touches `root`. No skills are
+    copied: `codex.skills` is `suppressed`, so a review is never offered any."""
+    if repo.resolve().is_relative_to(Path(root).resolve()):
+        raise codex_review.ReviewError(f"the scratch repo {repo} is inside {root}: a fixture is only ever applied elsewhere")
+    if (repo / ".git").is_file() or repo.is_symlink():      # a linked worktree (or a link to one) isn't ours to replace
+        raise codex_review.ReviewError(f"{repo} is a checkout of another repo, not a scratch one: use an empty --out")
+    shutil.rmtree(repo, ignore_errors=True)
+    shutil.copytree(fx.path / "base", repo, symlinks=True)
+    tree = Worktree(root)
+    extra = {RULES.relative_to(ROOT).as_posix(): tree.read(RULES.relative_to(ROOT).as_posix())}
+    extra.update({n: tree.read(n) for n in tree.names() if codex_review.instruction_file(n.rsplit("/", 1)[-1])})
+    for name, data in extra.items():
+        if data is None:
+            raise codex_review.ReviewError(f"{name} is missing: a fixture is reviewed under the real rules")
+        if (repo / name).exists():
+            raise codex_review.ReviewError(f"fixture {fx.name} holds {name}, which is copied in from the repo at run time")
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_bytes(data)
+    _scratch_git(["init", "-q", "-b", "main"], repo)
+    _scratch_git(["add", "-A"], repo)
+    _scratch_git(["commit", "-qm", "base"], repo)
+    _scratch_git(["update-ref", f"refs/remotes/origin/epic/{EVAL_EPIC}", "HEAD"], repo)
+    _scratch_git(["checkout", "-q", "-b", "slice/1"], repo)
+    _scratch_git(["apply", str((fx.path / "change.patch").resolve())], repo)
+    _scratch_git(["add", "-A"], repo)
+    _scratch_git(["commit", "-qm", "the change"], repo)
+    return codex_review.git_head(repo)
+
+
+def run_fixtures(fixtures: list[Fixture], settings: dict[str, Any], out: Path, log: Callable[[str], Any] = print,
+                 root: Path = ROOT) -> EvalRun:
+    """Review each fixture, one at a time (the sign-in copy-back assumes one run per `CODEX_HOME`), each in its own
+    `<out>/<name>/` with its own scratch repo and `codex-home`, through `codex_review.run_review` with the PR
+    prompt. Nothing Codex is shown names the fixture or the eval (`<out>/f1/` ... , the brief alone, a neutral git
+    identity): the name only reaches the log lines this prints. A fixture Codex can't run is `unavailable` and the rest still run; a refusal (`ReviewError`) stops the lot."""
+    run = EvalRun()
+    probe = next(p for p in [Path(out).resolve(), *Path(out).resolve().parents] if p.exists())
+    if subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=probe, capture_output=True).returncode == 0:
+        raise codex_review.ReviewError(f"--out {out} is inside a git checkout, whose status it would dirty: use a "
+                                       "folder outside any checkout")
+    template = codex_review.PR_PROMPT.read_text()
+    for i, fx in enumerate(fixtures, 1):
+        # the folder, its path in the prompt and Codex's working directory carry no fixture name: Codex would read it
+        began, scratch = time.monotonic(), Path(out) / f"f{i}"
+        if scratch.exists() and any(scratch.iterdir()) and not (scratch / MARK).exists():
+            raise codex_review.ReviewError(f"{scratch} exists and isn't one this eval made: use an empty --out")
+        scratch.mkdir(parents=True, exist_ok=True)
+        (scratch / MARK).write_text("made by codex-eval\n")
+        head = build_repo(fx, scratch / "repo", root)
+        brief = scratch / "slice.md"
+        brief.write_text(fx.brief)
+        prompt = codex_review.fill_pr_prompt(template, brief, f"origin/epic/{EVAL_EPIC}", EVAL_EPIC, None)
+        (scratch / "prompt.md").write_text(prompt)
+
+        def saw(version: str) -> None:
+            if run.version and version != run.version:
+                raise codex_review.ReviewError(f"codex changed from {run.version} to {version} while the eval ran: a result "
+                                               "belongs to one version, so nothing is posted. Run it again")
+            run.version = version
+        status, report = codex_review.run_review(codex_review.codex_command(settings, prompt), scratch / "repo", head,
+                                                 scratch, settings, log=log, on_version=saw)
+        if report is None:
+            outcome = Outcome(fx.name, "unavailable", f"Codex couldn't run it (exit {status}; {scratch / 'codex.err'})")
+        else:
+            s = score(fx, report.read_text())
+            outcome = Outcome(fx.name, "hit" if s.hit else "miss", s.reason)
+        run.outcomes.append(outcome)
+        log(f"[{i}/{len(fixtures)}] {fx.name}: {outcome.outcome}: {outcome.detail} ({time.monotonic() - began:.0f}s)")
+    return run
+
+
+def overall(outcomes: list[Outcome]) -> tuple[str | None, str]:
+    """("pass" | "fail" | None, the reason). Any miss is a `fail`, listing the fixtures that couldn't run; with no
+    miss, one that couldn't run leaves no result (None): Codex couldn't vouch for the review logic."""
+    misses = [o for o in outcomes if o.outcome == "miss"]
+    unrun = [o for o in outcomes if o.outcome == "unavailable"]
+    if misses:
+        text = "missed: " + "; ".join(f"{o.name} ({o.detail})" for o in misses)
+        return "fail", text + (f". Not run (Codex couldn't): {', '.join(o.name for o in unrun)}" if unrun else "")
+    if unrun:
+        return None, f"Codex couldn't run: {', '.join(o.name for o in unrun)}"
+    return "pass", ""

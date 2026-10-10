@@ -1,0 +1,33 @@
+diff --git a/src/twiddle/volume_step.py b/src/twiddle/volume_step.py
+new file mode 100644
+index 0000000..29de963
+--- /dev/null
++++ b/src/twiddle/volume_step.py
+@@ -0,0 +1,9 @@
++"""Stepping a speaker's volume up or down."""
++from __future__ import annotations
++
++MIN_VOLUME, MAX_VOLUME = 0, 100
++
++
++def step_volume(current: int, delta: int) -> int:
++    """`current` moved by `delta`, held between MIN_VOLUME and MAX_VOLUME."""
++    return max(MIN_VOLUME, min(MAX_VOLUME, current + delta))
+diff --git a/tests/test_volume_step.py b/tests/test_volume_step.py
+new file mode 100644
+index 0000000..c2aa652
+--- /dev/null
++++ b/tests/test_volume_step.py
+@@ -0,0 +1,12 @@
++from twiddle.volume_step import step_volume
++
++
++def test_a_step_adds_its_delta():
++    assert step_volume(40, 10) == 50
++
++
++def test_volume_never_leaves_the_range():
++    for current in range(0, 101, 25):
++        for delta in (-200, -10, 10, 200):
++            level = step_volume(current, delta)
++            assert level is not None

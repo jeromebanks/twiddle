@@ -1,0 +1,61 @@
+diff --git a/src/twiddle/mute_cli.py b/src/twiddle/mute_cli.py
+new file mode 100644
+index 0000000..b3cdb5b
+--- /dev/null
++++ b/src/twiddle/mute_cli.py
+@@ -0,0 +1,21 @@
++"""`twiddle mute ROOM [--off]`: mute, or unmute, a room by name."""
++from __future__ import annotations
++
++import argparse
++
++from twiddle import intervention_log, rooms_api
++
++
++def add_parser(sub: argparse._SubParsersAction) -> None:
++    p = sub.add_parser("mute", help="mute or unmute a room")
++    p.add_argument("room", help="the room's name")
++    p.add_argument("--off", action="store_true", help="unmute instead")
++    p.set_defaults(fn=run_mute)
++
++
++def run_mute(args: argparse.Namespace) -> int:
++    muted = not args.off
++    intervention_log.record("mute", room=args.room, muted=muted)
++    rooms_api.set_mute(args.room, muted)
++    print(f"{args.room}: {'muted' if muted else 'unmuted'}")
++    return 0
+diff --git a/tests/test_mute_cli.py b/tests/test_mute_cli.py
+new file mode 100644
+index 0000000..3c5c6ad
+--- /dev/null
++++ b/tests/test_mute_cli.py
+@@ -0,0 +1,28 @@
++import argparse
++
++from twiddle import intervention_log, mute_cli, rooms_api
++
++
++def parse(*argv):
++    parser = argparse.ArgumentParser()
++    mute_cli.add_parser(parser.add_subparsers())
++    return parser.parse_args(list(argv))
++
++
++def test_mute_writes_the_room_and_journals_it(monkeypatch):
++    wrote, journal = [], []
++    monkeypatch.setattr(rooms_api, "set_mute", lambda room, muted: wrote.append((room, muted)))
++    monkeypatch.setattr(intervention_log, "record", lambda event, **kw: journal.append((event, kw)))
++    args = parse("mute", "Kitchen")
++    assert args.fn(args) == 0
++    assert wrote == [("Kitchen", True)]
++    assert journal == [("mute", {"room": "Kitchen", "muted": True})]
++
++
++def test_off_unmutes(monkeypatch):
++    wrote = []
++    monkeypatch.setattr(rooms_api, "set_mute", lambda room, muted: wrote.append((room, muted)))
++    monkeypatch.setattr(intervention_log, "record", lambda event, **kw: None)
++    args = parse("mute", "Kitchen", "--off")
++    args.fn(args)
++    assert wrote == [("Kitchen", False)]
