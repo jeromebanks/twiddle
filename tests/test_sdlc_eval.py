@@ -4,6 +4,7 @@ import itertools
 import json
 import re
 import shutil
+import string
 import subprocess
 import sys
 import tomllib
@@ -847,6 +848,42 @@ def test_a_line_belongs_to_the_file_it_is_given_for_and_a_bare_one_only_when_no_
     assert not codex_eval.score(fx, suffix).hit                      # `journal_log.py` inside another file's name
     assert codex_eval.score(fx, f"1. `{fx.file}` line {fx.line}: off-by-one\n\nVERDICT: changes\n").hit
     assert codex_eval.score(fx, f"1. `{fx.file}:{fx.line}` off-by-one, see tests/test_journal_newest.py:99\n\nVERDICT: changes\n").hit
+
+
+def foreign_names(path):
+    """Every way to write a file that isn't `path` but looks like it: a character glued on either end, another
+    extension, none, another directory."""
+    name = path.rsplit("/", 1)[-1]
+    stem = name.rsplit(".", 1)[0]
+    glue = [c for c in string.printable.strip() if c not in codex_eval.SEPARATORS and c != "."]
+    return ([name + c for c in glue] + [c + name for c in glue if c not in "/"]
+            + [f"{name}.orig", f"{name}.bak", f"{name}-backup", f"{stem}.pyc", f"{stem}.cfg", f"{stem}.log", stem,
+               f"other/{name}", f"test_{name}"])
+
+
+@pytest.mark.parametrize("fx", BUGS, ids=lambda f: f.name)
+def test_no_other_file_lends_the_planted_line_however_its_name_is_written(fx):
+    name, n, kw = fx.file.rsplit("/", 1)[-1], fx.line, fx.keywords[0]
+    for other in foreign_names(fx.file):
+        for ref in (f"{other}:{n}", f"{other}#L{n}", f"`{other}` line {n}", f"{other} L{n}", f"{other} (lines {n}-{n + 1})"):
+            for report in (f"1. **blocking** {ref}: {kw}\n\nVERDICT: changes\n",
+                           f"1. **blocking** {ref}: {kw}; `{name}` is otherwise fine.\n\nVERDICT: changes\n",
+                           f"1. **blocking** `{name}` is fine, but {ref}: {kw}\n\nVERDICT: changes\n"):
+                s = codex_eval.score(fx, report)
+                assert not s.hit, (report, s.reason)
+    # a line not written right after the file's name is no one's
+    assert not codex_eval.score(fx, f"1. **blocking** line {n} of `{name}`: {kw}\n\nVERDICT: changes\n").hit
+
+
+@pytest.mark.parametrize("fx", BUGS, ids=lambda f: f.name)
+def test_every_way_a_review_cites_the_planted_line_is_a_hit(fx):
+    name, n, kw = fx.file.rsplit("/", 1)[-1], fx.line, fx.keywords[0]
+    for ref in (f"`{fx.file}:{n}`", f"[{fx.file}:{n}](/tmp/codex-eval/repo/{fx.file}:{n})", f"{name}#L{n}-L{n + 2}",
+                f"`{name}` line {n}", f"{name}, line {n}", f"{name} (line {n})", f"{name} at line {n}", f"{name}: line {n}",
+                f"**{name}:{n}**", f"_{name}_ line {n}", f"./{fx.file}:{n}", f"a/{fx.file}:{n}", f"{name}:{n}.",
+                f"{name} lines {n - 1}–{n + 1}", f"`{fx.file.rsplit('/', 2)[-2]}/{name}:{n}`"):
+        s = codex_eval.score(fx, f"1. **blocking** {ref} {kw}; see also other/{name}:99.\n\nVERDICT: changes\n")
+        assert s.hit, (ref, s.reason)
 
 
 def test_a_stamped_report_and_other_numbered_shapes_are_read():

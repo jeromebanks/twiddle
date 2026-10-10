@@ -381,34 +381,48 @@ def findings(report: str) -> list[str]:
     return [re.sub(r"\n[ \t]*[*_`]*VERDICT:.*\Z", "", t, flags=re.IGNORECASE).strip() for t in out]
 
 
-# a file name as written, whole: `journal_log.py`, not a prefix of `journal_log.py.orig` or `journal_log.pyc`
-FILE_RE = re.compile(r"(?<![\w.-])[\w./-]+\.(?:py|md|toml|json|txt|sh|html)\w*(?:[.-]\w+)*")
+# What a finding cites is read by position, never by what a file name looks like: the text splits into tokens at
+# the characters prose and markdown put around a name, and anything else stays part of the token, so
+# `journal_log.py.orig`, `journal_log.py-backup` or `journal_log.py~` is one token, a different file from
+# `journal_log.py`. A line number counts only when it is written right after the token it belongs to.
+SEPARATORS = " \t\r\n`*\"'()[]{}<>,;:#!?|‘’“”–—…"
+TOKEN_RE = re.compile(rf"[^{re.escape(SEPARATORS)}]+")
+# what may sit between a token and its line: `f.py:12`, `f.py#L12-L14`, `` `f.py` line 12 ``, `f.py (lines 12-14)`,
+# `f.py, L12`, `f.py at line 12`
+ATTACHED = re.compile(rf"[`*_]*(?:[:#(]|[\s,(`*_:]+(?:(?:at|on)\s+)?(?:lines?\s+|(?=L\d)))\s*{RANGE}", re.IGNORECASE)
+
+
+def _tokens(text: str) -> list[tuple[str, int]]:
+    """Each token with where it ends; a full stop after it is the sentence's, and `_name_` is markdown."""
+    out = []
+    for m in TOKEN_RE.finditer(text):
+        t = m.group().rstrip(".")
+        if len(t) > 2 and t[0] == t[-1] == "_":
+            t = t.strip("_")
+        out.append((t.removeprefix("./"), m.end()))
+    return out
 
 
 def _is(token: str, path: str) -> bool:
-    return token.rsplit("/", 1)[-1] == path.rsplit("/", 1)[-1]
+    """The token is the path itself, a tail of it (`journal_log.py`, `twiddle/journal_log.py`) or the path under a
+    directory (an absolute link, a diff's `a/`): never just a file with the same name somewhere else."""
+    return bool(token) and (token == path or path.endswith("/" + token) or token.endswith("/" + path))
 
 
 def lines_named(text: str, path: str) -> list[tuple[int, int]]:
-    """(first, last) for every line or line range the text gives for `path`: `base.py:12`, `base.py#L12-L14`; and
-    a bare `line 12`, `lines 12-14` or `L12` only when every file the text names is `path` (else it may be another's)."""
-    pats = [rf"({FILE_RE.pattern})[:#(]\s*{RANGE}"]
-    if all(_is(t, path) for t in FILE_RE.findall(text)):
-        pats += [rf"\blines?\s+{RANGE}", rf"\bL(\d+)(?:\s*(?:-|\u2013|\u2014)\s*L?(\d+))?\b"]
+    """(first, last) for every line or line range written right after `path`: `base.py:12`, `base.py#L12-L14`,
+    `` `base.py` line 12 ``. A line written anywhere else (`line 12 of base.py`) is never credited to it."""
     found = []
-    for k, pat in enumerate(pats):
-        for m in re.finditer(pat, text, re.IGNORECASE):
-            if k == 0 and not _is(m.group(1), path):
-                continue
-            g = m.groups()[1:] if k == 0 else m.groups()
-            a = int(g[0])
-            found.append((a, int(g[1]) if g[1] else a))
+    for token, end in _tokens(text):
+        if _is(token, path) and (m := ATTACHED.match(text, end)):
+            a = int(m.group(1))
+            found.append((a, int(m.group(2)) if m.group(2) else a))
     return found
 
 
 def names_file(text: str, path: str) -> bool:
-    """The text names the file, whole, by its repo path or its name (every fixture's file names are unique)."""
-    return any(_is(t, path) for t in FILE_RE.findall(text))
+    """The text names the file, whole, by its repo path or a tail of it."""
+    return any(_is(t, path) for t, _ in _tokens(text))
 
 
 @dataclass
@@ -420,7 +434,11 @@ class Score:
 def score(fx: Fixture, report: str) -> Score:
     """Whether a report (the saved one, or just Codex's text) is what the fixture needs. A bug: `VERDICT: changes`
     and one finding that names the file, a line within `LINE_TOLERANCE` of the planted one or the enclosing
-    function, and one of the keywords (case-insensitive). The clean change: `VERDICT: approve`."""
+    function, and one of the keywords (case-insensitive). The clean change: `VERDICT: approve`.
+
+    A line must be written right after the file's name, since line numbers repeat across files; a function's name
+    may sit anywhere in the finding, since each fixture's functions are unique in its tree, so naming one names
+    the place whatever other file the finding mentions."""
     try:
         verdict = codex_review.parse_verdict(report)
     except codex_review.ReviewError as exc:
