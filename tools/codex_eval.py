@@ -370,7 +370,8 @@ def load_fixtures(root: Path = FIXTURES) -> list[Fixture]:
 
 # a numbered finding opens a line: `1.`, `1)`, `**1.**`, `### 1.`, `- 1.`
 FINDING_RE = re.compile(r"^[ \t]*(?:[-*][ \t]+)?(?:#+[ \t]*)?[*_`]*\d+[.)][*_`]*[ \t]", re.MULTILINE)
-RANGE = r"L?(\d+)(?:\s*(?:-|\u2013|\u2014|to)\s*L?(\d+))?"
+# markup may wrap the numbers: `line **19**`, `` :`19` ``
+RANGE = r"[`*_]*L?(\d+)[`*_]*(?:\s*(?:-|\u2013|\u2014|to)\s*[`*_]*L?(\d+)[`*_]*)?"
 
 
 def findings(report: str) -> list[str]:
@@ -390,9 +391,9 @@ TOKEN_RE = re.compile(rf"[^{re.escape(SEPARATORS)}]+")
 # a line written onto its file: `f.py:12`, `f.py#L12-L14`, `f.py(12)`
 TIGHT = re.compile(rf"[`*_]*[:#(]\s*{RANGE}", re.IGNORECASE)
 # a line written after it in words: `` `f.py` line 12 ``, `f.py (lines 12-14)`, `f.py, L12`, `f.py at line 12`;
-# unless the words go on to give it to another (`f.py, line 12 of g.py`)
-LOOSE = re.compile(rf"[\s,(`*_:]+(?:(?:at|on)\s+)?(?:lines?\s+|(?=L\d))\s*{RANGE}", re.IGNORECASE)
-OWNED_BY = re.compile(r"[`*_]*\s+(?:of|in)\s+[`*]*")
+# unless the words go on to give it to another (`f.py, line 12 of g.py`, `f.py line 12 (in g.py)`)
+LOOSE = re.compile(rf"[\s,(`*_:]+(?:(?:at|on)\s+)?(?:lines?\s+|(?=[`*_]*L\d))\s*{RANGE}", re.IGNORECASE)
+OWNED_BY = re.compile(r"[`*_]*[\s,;:(\u2013\u2014-]+(?:of|in|inside|within|from)\b\s*[`*\"'\[(\u2018\u201c]*")
 WIDEST = 10                            # a wider range (`f.py:1-200`) points at no line in particular
 
 
@@ -432,8 +433,9 @@ def lines_named(text: str, path: str) -> list[tuple[int, int]]:
             owner = token
         elif m := LOOSE.match(text, end):
             owner = token
-            if (f := OWNED_BY.match(text, m.end())) and (tail := TOKEN_RE.match(text, f.end())):
-                owner = starts.get(tail.start(), "")
+            if f := OWNED_BY.match(text, m.end()):        # the words decide, or the line is no file's
+                tail = TOKEN_RE.match(text, f.end())
+                owner = starts.get(tail.start(), "") if tail else ""
         else:
             continue
         a = int(m.group(1))
