@@ -549,6 +549,13 @@ def epic_building(st: dict[str, Any]) -> bool:
     return st["state"] in BUILD_STATES and not is_quick(st)
 
 
+def refuse_quick(st: dict[str, Any], what: str) -> None:
+    """Epic-only commands stop here for a quick change, before they look up any plan or progress."""
+    if is_quick(st):
+        raise SdlcError(f"#{st['number']} is a quick change, not an epic: it has no {what} "
+                        f"(`/work-slice {st['number']} --quick` builds it)")
+
+
 def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> str:
     """The one thing to run next for this issue, so no session has to remember the workflow.
 
@@ -682,6 +689,9 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
     """{phases, current, due, cleanup, offered, next}: due is one of verify, done, plan_next, review, demo, ship,
     cleanup, sync, build."""
     n = st["number"]
+    if is_quick(st):   # no milestones, demos or slices: never offer an epic's next step for it
+        return {"number": n, "phases": [], "current": None, "due": "quick", "cleanup": None, "offered": [],
+                "cleanup_open": [], "cleanup_needs": [], "next": f"/work-slice {n} --quick: a quick change is no epic"}
     phases = milestone_phases(st, progress)
     cur = next((m for m in phases if m["phase"] != "shipped"), None)
     offered = offered_slices(progress, cur)
@@ -824,10 +834,10 @@ def check_transition(st: dict[str, Any], to: str, kind: str, config: dict[str, A
             errs.append(f"unknown lane {lane!r} (the only one is {QUICK})")
         if kind not in DOC_KINDS:
             errs.append(f"--lane goes on a prd or diagnosis revision, not a {kind}")
-        if f"{COMPLEXITY_PREFIX}routine" not in labels:
-            have = complexity_of(list(labels))
-            errs.append(f"only an issue labelled {COMPLEXITY_PREFIX}routine can take the quick lane "
-                        f"(#{n} is " + (f"{COMPLEXITY_PREFIX}{have}" if have else "unrated") + ")")
+        rated = sorted(l for l in labels if l.startswith(COMPLEXITY_PREFIX))
+        if rated != [f"{COMPLEXITY_PREFIX}routine"]:   # a judgment or novel label anywhere disqualifies it
+            errs.append(f"only an issue labelled {COMPLEXITY_PREFIX}routine (and no other complexity) can take the "
+                        f"quick lane (#{n} is " + (", ".join(rated) if rated else "unrated") + ")")
     if f"{PREFIX}{to}" not in state_labels(config):
         errs.append(f"unknown state {to!r}")
         return errs
@@ -2861,6 +2871,7 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
         already = lambda title: bool(b.get("on_main"))  # noqa: E731
     else:
         bundle = fetch_bundle(n, config)
+        refuse_quick(bundle_state(bundle, config), "milestone to review")
         progress = epic_progress(n, config, set(bundle["trusted"]))
         head = epic_head(n, config)
         gh_ms = {m["title"]: m for m in gh_pages(f"repos/{repo_of(config)}/milestones?state=all&per_page=100")}
@@ -3319,6 +3330,7 @@ def command_ship_review(args: argparse.Namespace, config: dict[str, Any]) -> int
         already = lambda title: bool(b.get("on_main"))  # noqa: E731
     else:
         bundle = fetch_bundle(args.number, config)
+        refuse_quick(bundle_state(bundle, config), "milestone to review")
         progress = epic_progress(args.number, config, set(bundle["trusted"]))
         head = epic_head(args.number, config)
         leaves = [r for r in fetch_plan_issues(args.number, config, set(bundle["trusted"])) if r["kind"] == "slice"]
@@ -3780,6 +3792,7 @@ def demo_brief(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str
     """Everything milestone-demo needs: each milestone's demo steps, slices, PRs and demo state."""
     repo = repo_of(config)
     st = bundle_state(fetch_bundle(epic, config, trusted), config)
+    refuse_quick(st, "milestones to demo")
     records = fetch_plan_issues(epic, config, trusted)
     leaves = [r for r in records if r["kind"] == "slice"]
     progress = epic_progress(epic, config, trusted)    # the same progress `state` uses, so `next` agrees

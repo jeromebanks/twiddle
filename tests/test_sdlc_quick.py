@@ -61,7 +61,9 @@ def test_a_quick_revision_carries_the_lane(tmp_path, capsys, monkeypatch, kind, 
 
 
 @pytest.mark.parametrize("labels,named", [([], "unrated"), (["complexity:judgment"], "complexity:judgment"),
-                                          (["complexity:novel"], "complexity:novel")])
+                                          (["complexity:novel"], "complexity:novel"),
+                                          ([ROUTINE, "complexity:judgment"], "complexity:judgment"),
+                                          ([ROUTINE, "complexity:novel"], "complexity:novel")])
 def test_only_a_routine_issue_takes_the_quick_lane(tmp_path, capsys, labels, named):
     f, body = bundle_file(tmp_path, labels)
     assert sdlc.main(["transition", "12", "prd-review", "--kind", "prd", "--lane", "quick", "--body-file", body,
@@ -205,6 +207,35 @@ def test_epic_commands_refuse_a_quick_issue(tmp_path, capsys, monkeypatch, argv)
     argv = [a.format(d=tmp_path, b=tmp_path / "body.md") for a in argv] + ["--from-file", str(f), "--dry-run"]
     assert sdlc.main(argv) == 1
     assert "is in-progress" in capsys.readouterr().err
+
+
+def test_demo_status_refuses_a_quick_issue_before_any_epic_lookup(capsys, monkeypatch):
+    bundle = {"issue": issue([ROUTINE, "sdlc:in-progress"]), "comments": approved_quick(), "trusted": [OWNER]}
+    monkeypatch.setattr(sdlc, "repo_of", lambda config: "o/r")
+    monkeypatch.setattr(sdlc, "fetch_trusted", lambda config: TRUSTED)
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, config, trusted=None: bundle)
+    monkeypatch.setattr(sdlc, "fetch_plan_issues", lambda *a: pytest.fail("a quick issue has no plan issues"))
+    monkeypatch.setattr(sdlc, "epic_progress", lambda *a: pytest.fail("a quick issue is not an epic"))
+    assert sdlc.main(["demo-status", "12"]) == 1
+    assert "quick change" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [["ship-review", "12", "--report", "r.md"], ["codex-review", "--milestone", "12"]])
+def test_milestone_reviews_refuse_a_quick_issue(capsys, monkeypatch, argv):
+    bundle = {"issue": issue([ROUTINE, "sdlc:in-progress"]), "comments": approved_quick(), "trusted": [OWNER]}
+    monkeypatch.setattr(sdlc, "repo_of", lambda config: "o/r")
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, config, trusted=None: bundle)
+    monkeypatch.setattr(sdlc, "epic_progress", lambda *a: pytest.fail("a quick issue is not an epic"))
+    assert sdlc.main(argv) == 1
+    assert "quick change" in capsys.readouterr().err
+
+
+def test_epic_view_never_offers_an_epic_step_for_a_quick_issue():
+    st = derive([ROUTINE, "sdlc:in-progress"], approved_quick())
+    empty = sdlc.summarise_progress([], {})
+    view = sdlc.epic_view(st, {**empty, "behind_main": 0, "debt": [], "cleanup_budget": 1})
+    assert view["due"] == "quick" and view["next"].startswith("/work-slice 12 --quick")
+    assert sdlc.pause_errors(view) == []
 
 
 def test_ship_refuses_a_quick_issue(capsys, monkeypatch):
