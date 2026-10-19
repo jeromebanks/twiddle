@@ -1,6 +1,7 @@
 """tools/sdlc.py: the quick lane in the ledger — the lane marker, the state, `next`, the frozen brief. No network."""
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -623,3 +624,308 @@ def test_a_refusal_triage_cannot_see_goes_back_to_triage(tmp_path, capsys, label
     assert st["state"] == "not-ready" and st["next"].startswith("/triage-issue 12: ") and needle in st["next"]
     out = status(tmp_path, capsys, b)[1]
     assert "refused: " in out and needle in out and "/work-slice" not in out
+
+
+# --- the quick merge gate: config, denied paths, the diff rules, `quick-gate` ----------------
+
+QUICK_RULES = sdlc.load_quick(CONFIG)
+
+
+def test_load_quick_reads_the_defaults():
+    q = sdlc.load_quick(sdlc.load_config())
+    assert (q.max_files, q.max_lines, q.max_change_rounds) == (5, 200, 2)
+    assert "tools/" in q.denied_paths and "src/twiddle/play.py" in q.denied_paths
+    with pytest.raises(Exception):
+        q.max_files = 9   # frozen
+
+
+def test_every_denied_twiddle_path_exists():
+    # derived from CLAUDE.md's writing rows and layout table, and the code: what writes to a speaker (devices.soap is
+    # the SOAP write path), Spotify or launchd, and the TUIs' app.py files, where a key is wired to a write
+    root = Path(__file__).resolve().parent.parent
+    listed = [d for d in QUICK_RULES.denied_paths if d.startswith("src/twiddle/")]
+    assert len(listed) > 15
+    assert [d for d in listed if not (root / d).exists()] == []
+
+
+def bad_quick(**over):
+    q = {**CONFIG["quick"], **over}
+    return {**CONFIG, "quick": {k: v for k, v in q.items() if v is not ...}}
+
+
+@pytest.mark.parametrize("key", ["max_files", "max_lines", "max_change_rounds"])
+@pytest.mark.parametrize("value", [-1, 0, True, 2.0, "5", None, ...])
+def test_a_bad_quick_number_names_its_key(key, value):
+    with pytest.raises(sdlc.SdlcError, match=f"quick.{key}"):
+        sdlc.load_quick(bad_quick(**{key: value}))
+
+
+@pytest.mark.parametrize("value", [[], "tools/", None, ..., ["/etc/passwd"], ["tools/", ""], ["../x"], ["a/../b"], [3]])
+def test_bad_denied_paths_name_the_key(value):
+    with pytest.raises(sdlc.SdlcError, match="quick.denied_paths"):
+        sdlc.load_quick(bad_quick(denied_paths=value))
+
+
+def test_no_quick_section_is_refused():
+    with pytest.raises(sdlc.SdlcError, match="quick"):
+        sdlc.load_quick({k: v for k, v in CONFIG.items() if k != "quick"})
+
+
+@pytest.mark.parametrize("path,denied", [
+    ("tools/sdlc.py", True), (".agents/skills/x/SKILL.md", True), ("uv.lock", True), ("src/twiddle/play.py", True),
+    ("src/twiddle/alarms/clock.py", True), ("SDLC.md", True),
+    ("src/twiddle/stations/catalog/psyched.toml", False), ("tests/test_stations.py", False),
+    ("toolsx/a.py", False), ("uv.lock.bak", False), ("src/twiddle/play.pyc", False), ("docs/SDLC.md", False),
+])
+def test_path_denied(path, denied):
+    assert sdlc_quick.path_denied(path, QUICK_RULES) is denied
+
+
+def test_a_denied_directory_without_its_slash_still_matches_only_under_it():
+    q = sdlc.load_quick(bad_quick(denied_paths=["tools"]))
+    assert sdlc_quick.path_denied("tools/sdlc.py", q) and not sdlc_quick.path_denied("toolsx/a.py", q)
+
+
+GATE_BRIEF = BRIEF.replace("## Files\nfiles of the change",
+                           "## Files\n- `src/twiddle/stations/catalog/*.toml`: the new station\n"
+                           "- tests/test_stations.py\n* `docs/STATIONS.md` (its row)")
+STATION = "src/twiddle/stations/catalog/psyched.toml"
+
+
+def changed(name, adds=10, dels=0, previous=None, status="added"):
+    return {"filename": name, "status": "renamed" if previous else status, "additions": adds, "deletions": dels,
+            **({"previous_filename": previous} if previous else {})}
+
+
+def gate_bundle(labels=(ROUTINE, "sdlc:in-progress"), comments=None, pr=None, records=None, files=None,
+                behind_by=0, brief_of=None, **issue_kw):
+    """A quick PR that passes every rule; each test breaks one thing. `records` may be a function of the
+    approved brief's comment id (the ids are fresh each call)."""
+    comments = ready_quick(GATE_BRIEF) + [CLAIM] if comments is None else comments
+    st = sdlc.derive_state(issue(list(labels)), comments, TRUSTED, CONFIG)
+    brief = sdlc.approved_brief_id(st) if brief_of is None else brief_of
+    pr = {"number": 50, "state": "OPEN", "isDraft": False, "baseRefName": "main", "headRefName": "slice/12",
+          "headRefOid": HEAD, "mergeable": "MERGEABLE", "body": "Adds a station.\n\nCloses #12", **(pr or {})}
+    if callable(records):
+        records = records(sdlc.approved_brief_id(st))
+    elif records is None:
+        records = [marked("tests", 7, sha=HEAD, result="pass", passed="1300"),
+                   marked("pr-review", 8, sha=HEAD, verdict="approve", round="1", **({"brief": brief} if brief else {}))]
+    return {"pr": pr, "pr_comments": records, "trusted": [OWNER], "behind_by": behind_by,
+            "files": [changed(STATION), changed("tests/test_stations.py", 5, 1)] if files is None else files,
+            "issue": {**issue(list(labels)), **issue_kw}, "comments": comments}
+
+
+def gate(b, config=CONFIG):
+    return sdlc.quick_gate_errors(b, config)
+
+
+def refused(b, needle, config=CONFIG):
+    errs = gate(b, config)
+    assert any(needle in e for e in errs), errs
+    return errs
+
+
+def test_a_good_quick_pr_passes_the_gate():
+    assert gate(gate_bundle()) == []
+
+
+@pytest.mark.parametrize("case,needle", [
+    ("merged", "PR is MERGED, not OPEN"),
+    ("draft", "PR is a draft"),
+    ("epic-base", "PR targets epic/12, not main"),
+    ("closes-none", "it closes none"),
+    ("closes-two", "it closes [12, 13]"),
+    ("unread", "#12 could not be read"),
+    ("closed-issue", "#12 is closed"),
+    ("slice-issue", "is a plan:slice issue"),
+    ("no-review", "no Codex review of the current head"),
+    ("old-review", "no Codex review of the current head"),
+    ("changes", "asks for changes"),
+    ("no-tests", "no recorded test run"),
+    ("failed", "the tests failed"),
+    ("old-tests", "no recorded test run"),
+    ("behind", "1 commit(s) behind main"),
+    ("unknown-behind", "could not tell whether the head is up to date with main"),
+    ("conflicts", "GitHub says the PR conflicts (CONFLICTING)"),
+    ("computing", "still computing mergeability"),
+])
+def test_each_gate_rule_refuses_with_its_own_message(case, needle):
+    tests = marked("tests", 7, sha=HEAD, result="pass", passed="1300")
+    approve = lambda sha: lambda brief: marked("pr-review", 8, sha=sha, verdict="approve", round="1", brief=brief)  # noqa: E731
+    withr = lambda *rs: lambda brief: [r(brief) if callable(r) else r for r in rs]   # noqa: E731
+    b = {"merged": lambda: gate_bundle(pr={"state": "MERGED"}),
+         "draft": lambda: gate_bundle(pr={"isDraft": True}),
+         "epic-base": lambda: gate_bundle(pr={"baseRefName": "epic/12"}),
+         "closes-none": lambda: gate_bundle(pr={"body": "no keyword"}),
+         "closes-two": lambda: gate_bundle(pr={"body": "Closes #12, closes #13"}),
+         "unread": lambda: {**gate_bundle(), "issue": None},
+         "closed-issue": lambda: gate_bundle(state="closed"),
+         "slice-issue": lambda: gate_bundle(labels=["plan:slice", ROUTINE, "sdlc:in-progress"]),
+         "no-review": lambda: gate_bundle(records=[tests]),
+         "old-review": lambda: gate_bundle(records=withr(tests, approve("b" * 40))),
+         "changes": lambda: gate_bundle(records=withr(tests, approve(HEAD),
+                                                 marked("pr-review", 9, sha=HEAD, verdict="changes", round="2"))),
+         "no-tests": lambda: gate_bundle(records=withr(approve(HEAD))),
+         "failed": lambda: gate_bundle(records=withr(marked("tests", 7, sha=HEAD, result="fail"), approve(HEAD))),
+         "old-tests": lambda: gate_bundle(records=withr(marked("tests", 7, sha="b" * 40, result="pass"), approve(HEAD))),
+         "behind": lambda: gate_bundle(behind_by=1),
+         "unknown-behind": lambda: gate_bundle(behind_by=None),
+         "conflicts": lambda: gate_bundle(pr={"mergeable": "CONFLICTING"}),
+         "computing": lambda: gate_bundle(pr={"mergeable": "UNKNOWN"}),
+         }[case]()
+    errs = refused(b, needle)
+    if case not in ("unread", "closes-none", "closes-two", "slice-issue"):   # those also lose what hangs off the issue
+        assert len(errs) == 1, errs
+
+
+@pytest.mark.parametrize("case,needle", [
+    ("revised", "the latest is rev 2"),
+    ("unrated", "complexity:routine"),
+    ("rerated", "complexity:judgment"),
+    ("escalated", "escalated to a human"),
+    ("conflict", "needs a human first"),
+    ("not-in-progress", "is approved, not in-progress"),
+    ("full-lane", "is not a quick brief"),
+])
+def test_what_changed_after_the_claim_is_refused_at_merge(case, needle):
+    revised = ready_quick(GATE_BRIEF) + [CLAIM, quick_brief(ts=9, rev=2, body=GATE_BRIEF)]
+    b = {"revised": lambda: gate_bundle(labels=[ROUTINE, "sdlc:prd-review"], comments=revised),
+         "unrated": lambda: gate_bundle(labels=["sdlc:in-progress"]),
+         "rerated": lambda: gate_bundle(labels=["complexity:judgment", "sdlc:in-progress"]),
+         "escalated": lambda: gate_bundle(labels=[ROUTINE, "sdlc:escalated"]),
+         # two state labels at once is a conflict derive_state reports
+         "conflict": lambda: gate_bundle(labels=[ROUTINE, "sdlc:in-progress", "sdlc:approved"]),
+         "not-in-progress": lambda: gate_bundle(labels=[ROUTINE, "sdlc:approved"]),
+         "full-lane": lambda: gate_bundle(comments=[agent("prd", 1, 1, GATE_BRIEF), agent("approval", 1, 2, by=POSTER),
+                                                    CLAIM]),
+         }[case]()
+    refused(b, needle)
+
+
+def test_a_denied_path_is_refused_even_with_a_pass_and_an_approval():
+    for path in ("src/twiddle/play.py", "tools/sdlc.py", ".sdlc/config.json"):
+        brief = GATE_BRIEF.replace("- tests/test_stations.py", f"- tests/test_stations.py\n- `{path}`")
+        b = gate_bundle(comments=ready_quick(brief) + [CLAIM], files=[changed(STATION), changed(path, status="modified")])
+        errs = gate(b)
+        assert len(errs) == 1 and path in errs[0] and errs[0].endswith("`escalate-to-full 12`"), errs
+
+
+@pytest.mark.parametrize("files,ok", [
+    ([changed(f"src/twiddle/stations/catalog/s{i}.toml", 40) for i in range(5)], True),            # 5 files, 200 lines
+    ([changed(f"src/twiddle/stations/catalog/s{i}.toml", 20, 20) for i in range(5)], True),        # deletions count too
+    ([changed(f"src/twiddle/stations/catalog/s{i}.toml", 1) for i in range(6)], False),            # 6 files
+    ([changed(STATION, 150, 51)], False),                                                         # 201 lines
+])
+def test_the_size_cap(files, ok):
+    errs = gate(gate_bundle(files=files))
+    assert (errs == []) is ok, errs
+    if not ok:
+        assert len(errs) == 1 and "more than the quick lane's" in errs[0] and "escalate-to-full 12" in errs[0]
+
+
+def test_the_size_cap_comes_from_the_config():
+    tight = bad_quick(max_files=1, max_lines=10)
+    refused(gate_bundle(), "changes 2 files, more than the quick lane's 1", tight)
+    refused(gate_bundle(files=[changed(STATION, 11)]), "changes 11 lines, more than the quick lane's 10", tight)
+    assert gate(gate_bundle(files=[changed(STATION, 10)]), tight) == []
+
+
+def test_a_file_outside_the_brief_is_refused():
+    errs = refused(gate_bundle(files=[changed(STATION), changed("src/twiddle/stations/model.py", status="modified")]),
+                   "outside the brief's `## Files` list (src/twiddle/stations/model.py)")
+    assert len(errs) == 1 and errs[0].endswith("`escalate-to-full 12`")
+    assert sdlc_quick.brief_files(GATE_BRIEF) == ["src/twiddle/stations/catalog/*.toml", "tests/test_stations.py",
+                                                  "docs/STATIONS.md"]
+
+
+def test_a_brief_without_a_files_list_allows_nothing():
+    b = gate_bundle(comments=ready_quick(GATE_BRIEF.replace("- `src", "the station: `src")) + [CLAIM])
+    assert sdlc_quick.brief_files(sdlc.approved_brief(sdlc.derive_state(
+        issue([ROUTINE]), b["comments"], TRUSTED, CONFIG))) == ["tests/test_stations.py", "docs/STATIONS.md"]
+    refused(b, f"outside the brief's `## Files` list ({STATION})")
+
+
+@pytest.mark.parametrize("files,needle", [
+    ([changed(STATION, previous="src/twiddle/play.py")], "may not (src/twiddle/play.py)"),       # out of a denied place
+    ([changed(STATION, previous="src/twiddle/stations/old.toml")], "list (src/twiddle/stations/old.toml)"),
+    ([{**changed(STATION, previous="tools/x.toml"), "status": "copied"}], "may not (tools/x.toml)"),
+])
+def test_a_move_is_read_at_both_ends(files, needle):
+    refused(gate_bundle(files=files), needle)
+
+
+def test_a_plain_add_in_the_allowed_directory_passes():
+    assert gate(gate_bundle(files=[changed("src/twiddle/stations/catalog/new.toml")])) == []
+    # a rename inside the list passes too
+    assert gate(gate_bundle(files=[changed(STATION, previous="src/twiddle/stations/catalog/old.toml")])) == []
+
+
+def test_a_removed_denied_file_is_still_a_change():
+    brief = GATE_BRIEF.replace("- tests/test_stations.py", "- tests/test_stations.py\n- `tools/old.py`")
+    refused(gate_bundle(comments=ready_quick(brief) + [CLAIM], files=[changed("tools/old.py", 0, 30, status="removed")]),
+            "may not (tools/old.py)")
+
+
+def test_too_many_change_rounds_go_to_the_full_lane():
+    b = gate_bundle()
+    changes = [marked("pr-review", 3 + i, sha="c" * 40, verdict="changes", round=str(i + 1)) for i in range(3)]
+    two = {**b, "pr_comments": changes[:2] + b["pr_comments"]}
+    assert gate(two) == []                                                    # max_change_rounds 2: still allowed
+    errs = refused({**b, "pr_comments": changes + b["pr_comments"]}, "Codex asked for changes in 3 rounds")
+    assert len(errs) == 1 and errs[0].endswith("`escalate-to-full 12`")
+
+
+def test_a_deferral_is_never_a_quick_review():
+    b = gate_bundle(records=[marked("tests", 7, sha=HEAD, result="pass"), marked("review-deferred", 8, sha=HEAD)])
+    errs = refused(b, "no Codex review of the current head")
+    assert len(errs) == 1 and "review-defer" not in errs[0]
+
+
+def test_a_review_is_bound_to_the_brief_it_read():
+    # recorded against another brief comment, at the same head: refused
+    other = gate_bundle(brief_of="999")
+    refused(other, "recorded against brief 999, not the approved brief "
+            + sdlc.approved_brief_id(sdlc.quick_issue_state(other, CONFIG)))
+    # recorded with no brief at all (a record written before reviews named their brief): refused
+    refused(gate_bundle(brief_of=""), "recorded against brief none")
+    # the brief revised and re-approved: rev 2 is the approved brief, so the review of rev 1 at head H no longer counts
+    rev2 = ready_quick(GATE_BRIEF) + [quick_brief(ts=3, rev=2, body=GATE_BRIEF), agent("approval", 2, 4, by=POSTER),
+                                      CLAIM]
+    rev1_id = sdlc.comment_anchor({"url": rev2[0]["url"], "id": rev2[0]["id"]})
+    b = gate_bundle(comments=rev2, brief_of=rev1_id)
+    rev2_id = sdlc.approved_brief_id(sdlc.quick_issue_state(b, CONFIG))
+    assert rev2_id != rev1_id
+    refused(b, f"recorded against brief {rev1_id}, not the approved brief {rev2_id}")
+    # ...until a Codex round against rev 2 is recorded on the same head H
+    b["pr_comments"].append(marked("pr-review", 20, sha=HEAD, verdict="approve", round="2", brief=rev2_id))
+    assert gate(b) == []
+
+
+def gate_cli(tmp_path, capsys, monkeypatch, b):
+    for name in ("gh", "gh_json", "gh_pages", "post_comment", "patch_comment", "fetch_trusted"):
+        monkeypatch.setattr(sdlc, name, lambda *a, **k: pytest.fail("quick-gate --from-file reads nothing else"))
+    f = tmp_path / "g.json"
+    f.write_text(json.dumps(b))
+    code = sdlc.main(["quick-gate", "50", "--from-file", str(f)])
+    return code, capsys.readouterr().out
+
+
+def test_quick_gate_prints_ok(tmp_path, capsys, monkeypatch):
+    assert gate_cli(tmp_path, capsys, monkeypatch, gate_bundle()) == (0, "ok\n")
+
+
+def test_quick_gate_prints_every_refusal(tmp_path, capsys, monkeypatch):
+    files = [changed(f"src/twiddle/stations/catalog/s{i}.toml") for i in range(5)] + [changed("src/twiddle/play.py")]
+    code, out = gate_cli(tmp_path, capsys, monkeypatch, gate_bundle(files=files, pr={"isDraft": True}))
+    lines = out.splitlines()
+    assert code == 1 and all(l.startswith("refused: ") for l in lines) and "ok" not in lines
+    assert any("draft" in l for l in lines) and any("may not (src/twiddle/play.py)" in l for l in lines)
+    assert any("6 files" in l for l in lines) and any("outside the brief" in l for l in lines)
+
+
+def test_slice_status_shows_a_quick_change_s_rounds(tmp_path, capsys):
+    b = quick_bundle([ROUTINE, "sdlc:in-progress"], ready_quick() + [CLAIM], pr=PR,
+                     pr_comments=RECORDS + [marked("pr-review", 9, sha="b" * 40, verdict="changes", round="2")])
+    out = status(tmp_path, capsys, b)[1]
+    assert "change rounds 1/2" in out and "rounds 1/5" not in out
