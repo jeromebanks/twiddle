@@ -879,3 +879,23 @@ def test_the_wrong_base_is_refused_and_names_the_expected_one(tmp_path, monkeypa
     assert sdlc.main(["--config", str(s.config), "codex-review", "--pr", "50", "--out", str(s.out),
                       "--from-file", s.bundle(baseRefName="main"), "--dry-run"]) == 1
     assert "targets main, not epic/12: a slice merges into its epic's branch" in capsys.readouterr().err
+
+
+def test_a_slice_round_end_to_end_is_unchanged(tmp_path, monkeypatch, capsys):
+    # through the routing that tells a quick change from a slice: a real slice issue takes the slice path
+    c = Codex(tmp_path, monkeypatch)
+    assert c.run("--dry-run") == 0
+    capsys.readouterr()
+    prompt = (c.out / "prompt.md").read_text().replace(str(c.out), "/scratch")
+    assert prompt == (GOLDEN / "slice-round1.txt").read_text()
+    b = json.loads(Path(c.bundle()).read_text())
+    assert (c.out / "slice.md").read_text() == f"{b['slice']['title']}\n\n{b['slice']['body']}\n"
+
+
+def test_a_slice_record_with_its_issue_is_unchanged(tmp_path, capsys):
+    b = json.loads((GOLDEN / "slice-pr.json").read_text())
+    f = tmp_path / "with-issue.json"
+    f.write_text(json.dumps({**b, "slice": slice_issue(JUDGMENT), "comments": []}))
+    assert sdlc.main(["pr-review", "50", "--report", str(GOLDEN / "slice-report.md"), "--response",
+                      str(GOLDEN / "slice-response.md"), "--from-file", str(f), "--dry-run"]) == 0
+    assert capsys.readouterr().out == (GOLDEN / "slice-record.txt").read_text()
