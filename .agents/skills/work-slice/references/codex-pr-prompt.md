@@ -1,10 +1,12 @@
 # The Codex PR-review prompt
 
 `uv run python tools/sdlc.py codex-review --pr PR` fills this and runs it: the text
-below the line, `<SLICE_FILE>`, `<BASE>`, `<EPIC>` and `<RESPONSE_FILE>` replaced, and
-the `<ROUND2>` bullet kept only from round 2 on. Don't fill it by hand. The tool
-checks the worktree's HEAD itself and writes the report's `HEAD:` line, so the
-prompt doesn't ask Codex for it.
+below the line, `<SLICE_FILE>`, `<BASE>`, `<EPIC>` and `<RESPONSE_FILE>` replaced, the
+`<SLICE>` bullets kept for a slice PR and the `<QUICK>` bullets for a quick change's
+(which has no epic, so no `<EPIC>`), and the `<ROUND2>` bullet kept only from round 2
+on. Don't fill it by hand. The tool checks the worktree's HEAD itself and writes the
+report's `HEAD:` line (and, for a quick change, the `Brief:` line naming the approved
+brief it gave Codex), so the prompt asks Codex for neither.
 
 ---
 
@@ -14,10 +16,17 @@ did not write this code. Judge it on its merits, and do not assume any claim in
 the PR, the commits or a previous review is true.
 
 Read:
-- the slice's brief: `<SLICE_FILE>` (its Outcome, Scope, Acceptance criteria,
-  Validation, Demo, Non-goals and Context sections define the job);
-- the change: `git diff <BASE>...HEAD` and `git log <BASE>..HEAD` (`<BASE>` is
-  epic #<EPIC>'s branch, which this slice merges into);
+- <SLICE>the slice's brief: `<SLICE_FILE>` (its Outcome, Scope, Acceptance criteria,
+  Validation, Demo, Non-goals and Context sections define the job);</SLICE>
+- <SLICE>the change: `git diff <BASE>...HEAD` and `git log <BASE>..HEAD` (`<BASE>` is
+  epic #<EPIC>'s branch, which this slice merges into);</SLICE>
+- <QUICK>the approved brief of this quick change: `<SLICE_FILE>` (its Outcome, Scope,
+  Files, Acceptance criteria, Validation, Non-goals and Context sections define the job).
+  Its Files section bounds the change: a changed file it doesn't list is a blocking
+  finding;</QUICK>
+- <QUICK>the change: `git diff <BASE>...HEAD` and `git log <BASE>..HEAD` (`<BASE>` is
+  main: a quick change merges straight into main, with no epic, milestone or demo
+  after it, so this review is the last look anyone takes before it lands);</QUICK>
 - `CLAUDE.md`, especially the read-only vs writing table;
 - the code around the change, as far as you need it;
 - <ROUND2>the implementer's answer to the previous round: `<RESPONSE_FILE>`. Where they
