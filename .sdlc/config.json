@@ -30,7 +30,8 @@
     {"name": "complexity:routine", "color": "C2E0C6", "description": "SDLC plan: a clear pattern to follow, little design"},
     {"name": "complexity:judgment", "color": "FEF2C0", "description": "SDLC plan: real design choices, safety or the evidence path"},
     {"name": "tech-debt", "color": "D4C5F9", "description": "SDLC: non-blocking work found while building an epic (cleanup pass)"},
-    {"name": "complexity:novel", "color": "F9D0C4", "description": "SDLC plan: unknowns that need investigating first"}
+    {"name": "complexity:novel", "color": "F9D0C4", "description": "SDLC plan: unknowns that need investigating first"},
+    {"name": "lane:quick", "color": "C2E0C6", "description": "SDLC: a small, safe change built from one approved brief (work-slice --quick)"}
   ],
   "plan_labels": [
     {"name": "plan:subtask", "color": "C5DEF5", "description": "SDLC plan: a subtask of an epic; its slices are sub-issues"},
