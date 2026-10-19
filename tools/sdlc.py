@@ -2794,12 +2794,9 @@ def recorded_rounds(comments: list[dict[str, Any]], trusted: set[str], kind: str
 
 
 def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """Record one Codex round on the PR's current head, with Claude's answer to it."""
-    if args.from_file:
-        b = json.loads(Path(args.from_file).read_text())
-        pr, comments, trusted = b["pr"], b["pr_comments"], set(b["trusted"])
-    else:
-        (pr, comments), trusted = fetch_pr(args.pr, config), fetch_trusted(config)
+    """Record one Codex round on the PR's current head, with Claude's answer to it. A quick change's round is
+    also bound to the approved brief it was given (`brief=`, which its merge gate requires)."""
+    pr, comments, trusted, _, quick = pr_issue(args, config)
     _, reviews = pr_records(comments, trusted)
     limit = config.get("max_pr_rounds", 5)
     if pr.get("state") != "OPEN":
@@ -2816,6 +2813,16 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if m.group(1) != pr["headRefOid"]:
         raise SdlcError(f"Codex reviewed {m.group(1)[:12]} but the PR head is {pr['headRefOid'][:12]}: "
                         "review the current head (record each round before pushing its fixes)")
+    stamped = codex_review.parse_provenance(report).get("brief")
+    if quick and not stamped:
+        raise SdlcError("the Codex report has no `Brief:` line: a quick change's review is bound to the approved brief "
+                        "it read, so save it with `codex-review --pr`, which stamps it")
+    if quick and stamped != (want := approved_brief_id(quick)):
+        raise SdlcError(f"Codex reviewed against brief {stamped}, but #{quick['number']}'s approved brief is now {want}: "
+                        "run `codex-review --pr` again on the approved brief")
+    if not quick and stamped:
+        raise SdlcError("the Codex report names a `Brief:`, but the PR closes no quick change: save it again with "
+                        "`codex-review --pr`")
     response = Path(args.response).read_text().strip() if args.response else ""
     rnd = len(reviews) + 1
     head = (f"**Review {rnd} — Codex on `{pr['headRefOid'][:12]}`: `{verdict}`** "
@@ -2895,8 +2902,9 @@ def review_scratch(args: argparse.Namespace, label: str, *inside: Path) -> Path:
 
 
 def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, head: str, out: Path,
-                    settings: dict[str, Any], dry_run: bool, record: str) -> int:
-    """Print what the round runs, then run it (or, with --dry-run, print the prompt)."""
+                    settings: dict[str, Any], dry_run: bool, record: str, brief: str | None = None) -> int:
+    """Print what the round runs, then run it (or, with --dry-run, print the prompt). `brief`: a quick change's
+    approved brief comment id, stamped on the report as its `Brief:` line (and shown, with the brief, in a dry run)."""
     cmd = codex_review.codex_command(settings, prompt)
     print(f"{title}\n"
           + "".join(f"  {k}: {v}\n" for k, v in files.items())
@@ -2905,39 +2913,59 @@ def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, h
           + f"  run (timeout {settings['timeout_seconds']}s): {codex_review.show_command(cmd, wt, files['prompt'])}")
     if dry_run:
         print(f"\n{prompt}")
+        if brief:
+            print(f"Brief: {brief} (the approved brief Codex reads, {files['brief']}):\n\n{files['brief'].read_text()}")
         return 0
-    status, report = codex_review.run_review(cmd, wt, head, out, settings)
+    status, report = codex_review.run_review(cmd, wt, head, out, settings, brief=brief)
     if report:
         print(f"\n{report.read_text()}\nsaved: {report}\nrecord it: uv run python tools/sdlc.py {record}")
     return status
 
 
-def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: dict[str, Any]) -> int:
+def pr_issue(args: argparse.Namespace, config: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], set[str],
+                                                                       dict[str, Any] | None, dict[str, Any] | None]:
+    """(the PR, its comments, the trusted logins, the issue it closes, that issue's quick state or None).
+    `--from-file`: a bundle with `pr`, `pr_comments`, `trusted`, and the issue as `slice` (+ its `comments`)."""
     if args.from_file:
         b = json.loads(Path(args.from_file).read_text())
-        pr, comments, trusted, slice_issue = b["pr"], b["pr_comments"], set(b["trusted"]), b.get("slice")
+        pr, comments, trusted, issue = b["pr"], b["pr_comments"], set(b["trusted"]), b.get("slice")
+        issue_comments = b.get("comments") or []
     else:
         (pr, comments), trusted = fetch_pr(args.pr, config), fetch_trusted(config)
         refs = closes_refs(pr.get("body", ""))
-        slice_issue = fetch_slice(refs[0], config)[0] if len(refs) == 1 else None
+        issue, issue_comments = fetch_slice(refs[0], config) if len(refs) == 1 else (None, [])
+    quick = bundle_quick({"issue": issue, "comments": issue_comments, "trusted": trusted}, config) if issue else None
+    return pr, comments, trusted, issue, quick
+
+
+def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: dict[str, Any]) -> int:
+    pr, comments, trusted, slice_issue, quick = pr_issue(args, config)
     if pr.get("state") != "OPEN":
         raise SdlcError(f"PR #{pr['number']} is {pr.get('state')}")
     refs = closes_refs(pr.get("body", ""))
-    if len(refs) != 1 or not slice_issue or (epic := slice_epic(slice_issue)) is None:
+    if quick:   # held to its approved brief, never the poster's request, and merged into main
+        if len(refs) != 1 or not (brief_text := approved_brief(quick)):
+            raise SdlcError(f"PR #{pr['number']} must close exactly one quick change with an approved brief")
+        brief, brief_id, base = (f"{slice_issue.get('title', '')}\n\n{brief_text}\n", approved_brief_id(quick),
+                                 config.get("default_branch", "main"))
+    elif len(refs) != 1 or not slice_issue or (epic := slice_epic(slice_issue)) is None:
         raise SdlcError(f"PR #{pr['number']} must close exactly one slice of an epic (it closes {refs or 'none'})")
+    else:
+        brief, brief_id, base = (f"{slice_issue.get('title', '')}\n\n{slice_issue.get('body', '')}\n", None,
+                                 epic_branch(epic))
     wt = worktree_path(refs[0], config)
     out = review_scratch(args, str(pr["number"]), wt)
     if not args.from_file and (wt / ".git").exists() and git(["rev-parse", "HEAD"], cwd=wt) != pr["headRefOid"]:
         pr = wait_for_pr_head(pr["number"], git(["rev-parse", "HEAD"], cwd=wt), config)   # a push GitHub hasn't shown yet
     head = codex_review.check_worktree(wt, pr["headRefOid"])
-    base = f"origin/{epic_branch(epic)}"
-    git(["fetch", "origin", epic_branch(epic)], cwd=wt, check=False)
-    if not git(["rev-parse", "--verify", "--quiet", base], cwd=wt, check=False):
-        raise SdlcError(f"the worktree has no {base} to diff against: `git fetch origin {epic_branch(epic)}`")
+    git(["fetch", "origin", base], cwd=wt, check=False)
+    if not git(["rev-parse", "--verify", "--quiet", f"origin/{base}"], cwd=wt, check=False):
+        raise SdlcError(f"the worktree has no origin/{base} to diff against: `git fetch origin {base}`")
     rounds = recorded_rounds(comments, trusted, "pr-review")
-    prompt, files = codex_review.prepare_pr_round(pr, slice_issue, epic, rounds, out)
+    prompt, files = codex_review.prepare_pr_round(pr, brief, base, rounds, out, quick=bool(quick))
     return run_codex_round(f"PR #{pr['number']} round {len(rounds) + 1} on {head[:12]}", prompt, files, wt, head, out,
-                           settings, args.dry_run, f"pr-review {pr['number']} --report {out / 'codex.md'} --response <your answers>")
+                           settings, args.dry_run, f"pr-review {pr['number']} --report {out / 'codex.md'} --response <your answers>",
+                           brief=brief_id)
 
 
 def comment_anchor(doc: dict[str, Any]) -> str:
