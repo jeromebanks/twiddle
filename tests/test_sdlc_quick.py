@@ -1,4 +1,5 @@
 """tools/sdlc.py: the quick lane in the ledger — the lane marker, the state, `next`, the frozen brief. No network."""
+import dataclasses
 import json
 import subprocess
 from pathlib import Path
@@ -635,8 +636,8 @@ def test_load_quick_reads_the_defaults():
     q = sdlc.load_quick(sdlc.load_config())
     assert (q.max_files, q.max_lines, q.max_change_rounds) == (5, 200, 2)
     assert "tools/" in q.denied_paths and "src/twiddle/play.py" in q.denied_paths
-    with pytest.raises(Exception):
-        q.max_files = 9   # frozen
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        q.max_files = 9
 
 
 def test_every_denied_twiddle_path_exists():
@@ -660,7 +661,8 @@ def test_a_bad_quick_number_names_its_key(key, value):
         sdlc.load_quick(bad_quick(**{key: value}))
 
 
-@pytest.mark.parametrize("value", [[], "tools/", None, ..., ["/etc/passwd"], ["tools/", ""], ["../x"], ["a/../b"], [3]])
+@pytest.mark.parametrize("value", [[], "tools/", None, ..., ["/etc/passwd"], ["tools/", ""], ["../x"], ["a/../b"], [3],
+                                   ["./tools/"], ["tools//x"], [" tools/"], ["tools/ "], ["/"]])
 def test_bad_denied_paths_name_the_key(value):
     with pytest.raises(sdlc.SdlcError, match="quick.denied_paths"):
         sdlc.load_quick(bad_quick(denied_paths=value))
@@ -855,6 +857,14 @@ def test_a_move_is_read_at_both_ends(files, needle):
     refused(gate_bundle(files=files), needle)
 
 
+@pytest.mark.parametrize("files", [[], ...])
+def test_an_unread_diff_never_passes(files):
+    b = gate_bundle()
+    b = {**b, "files": files} if files is not ... else {k: v for k, v in b.items() if k != "files"}
+    errs = refused(b, "could not read the PR's changed files")
+    assert len(errs) == 1, errs
+
+
 def test_a_plain_add_in_the_allowed_directory_passes():
     assert gate(gate_bundle(files=[changed("src/twiddle/stations/catalog/new.toml")])) == []
     # a rename inside the list passes too
@@ -929,3 +939,20 @@ def test_slice_status_shows_a_quick_change_s_rounds(tmp_path, capsys):
                      pr_comments=RECORDS + [marked("pr-review", 9, sha="b" * 40, verdict="changes", round="2")])
     out = status(tmp_path, capsys, b)[1]
     assert "change rounds 1/2" in out and "rounds 1/5" not in out
+
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "quick_gate"
+
+
+@pytest.mark.parametrize("name,code,needles", [
+    ("ok", 0, ["ok"]),
+    ("denied_path", 1, ["may not (src/twiddle/play.py)"]),
+    ("sixth_file", 1, ["changes 6 files, more than the quick lane's 5"]),
+    ("unlisted_file", 1, ["outside the brief's `## Files` list (src/twiddle/stations/model.py)"]),
+])
+def test_the_demo_fixtures(capsys, monkeypatch, name, code, needles):
+    # the milestone demo runs `quick-gate 50 --from-file tests/fixtures/quick_gate/<name>.json` on these
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("quick-gate --from-file reads nothing else"))
+    assert sdlc.main(["quick-gate", "50", "--from-file", str(FIXTURES / f"{name}.json")]) == code
+    out = capsys.readouterr().out
+    assert all(n in out for n in needles), out

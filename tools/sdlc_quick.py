@@ -46,11 +46,12 @@ def load_quick(config: dict[str, Any]) -> QuickRules:
     denied = q.get("denied_paths")
     if not isinstance(denied, list) or not denied:
         raise QuickConfigError(f"config quick.denied_paths must be a non-empty list, not {denied!r}")
-    for d in denied:
-        if (not isinstance(d, str) or not d.strip("/") or d.startswith("/") or "\\" in d
-                or ".." in d.split("/")):
-            raise QuickConfigError(f"config quick.denied_paths has {d!r}: each is a non-empty "
-                                   "repo-relative path (no leading slash, no `..`)")
+    for d in denied:   # each must be able to match: a typo here would silently allow the path
+        parts = d.rstrip("/").split("/") if isinstance(d, str) else []
+        if (not parts or d.startswith("/") or d != d.strip() or "\\" in d
+                or any(p in ("", ".", "..") for p in parts)):
+            raise QuickConfigError(f"config quick.denied_paths has {d!r}: each is a non-empty, normalised "
+                                   "repo-relative path (no leading slash, no `.`, `..` or empty part, no spaces round it)")
     return QuickRules(*(q[k] for k in QUICK_NUMBERS), denied_paths=tuple(denied))
 
 
@@ -81,11 +82,14 @@ def changed_paths(f: dict[str, Any]) -> list[str]:
     return [f["filename"]] + ([f["previous_filename"]] if f.get("previous_filename") else [])
 
 
-def diff_errors(n: int, files: list[dict[str, Any]], brief: str, rules: QuickRules) -> list[str]:
+def diff_errors(n: int, files: list[dict[str, Any]] | None, brief: str, rules: QuickRules) -> list[str]:
     """Why this diff is not a quick change, each its own message ending in what to run instead.
 
     `files` is GitHub's `pulls/N/files` (filename, previous_filename, status, additions, deletions); every rule
-    reads a rename's source as well as its destination, so a file can't be moved out of a denied place."""
+    reads a rename's source as well as its destination, so a file can't be moved out of a denied place.
+    No files (unread, or an empty diff) is refused: an unread diff must never pass as a small one."""
+    if not files:
+        return ["could not read the PR's changed files (`pulls/N/files` gave none)"]
     to_full = f": `escalate-to-full {n}`"
     paths = [p for f in files for p in changed_paths(f)]
     errs = []

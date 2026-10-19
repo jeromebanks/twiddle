@@ -2290,7 +2290,7 @@ def load_quick(config: dict[str, Any]) -> sdlc_quick.QuickRules:
 
 
 def quick_merge_gate_errors(pr: dict[str, Any], issue_state: dict[str, Any] | None, tests: list[dict[str, Any]],
-                            reviews: list[dict[str, Any]], behind_by: int | None, files: list[dict[str, Any]],
+                            reviews: list[dict[str, Any]], behind_by: int | None, files: list[dict[str, Any]] | None,
                             brief: str | None, quick: sdlc_quick.QuickRules, base: str = "main") -> list[str]:
     """Why the agent may not merge this quick PR into main (empty list = merge). `merge_gate_errors`'s sibling.
 
@@ -2534,7 +2534,7 @@ def quick_gate_errors(b: dict[str, Any], config: dict[str, Any]) -> list[str]:
     quick = load_quick(config)
     tests, reviews = pr_records(b["pr_comments"], set(b["trusted"]))   # deferrals are never read
     st = quick_issue_state(b, config) if b.get("issue") else None
-    return quick_merge_gate_errors(b["pr"], st, tests, reviews, b.get("behind_by"), b.get("files") or [],
+    return quick_merge_gate_errors(b["pr"], st, tests, reviews, b.get("behind_by"), b.get("files"),
                                    approved_brief(st) if st else None, quick, config.get("default_branch", "main"))
 
 
