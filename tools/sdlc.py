@@ -3214,7 +3214,7 @@ def merge_quick(args: argparse.Namespace, config: dict[str, Any]) -> int:
                             f"(`gh issue close {n} --reason completed`)")
         set_state_label(n, issue["labels"], "done", config)
         post_comment(n, record, config)
-    except SdlcError as exc:
+    except Exception as exc:   # anything (a bad read-back too): the PR is merged, so say what is left by hand
         with tempfile.NamedTemporaryFile("w", suffix=".md", prefix=f"quick-merged-{n}-", delete=False) as fh:
             fh.write(record)
         raise SdlcError(f"merged PR #{args.pr} into {base} at {head[:12]}, then: {exc}. Still to do, by hand: "

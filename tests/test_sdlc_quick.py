@@ -2,6 +2,7 @@
 import dataclasses
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -1020,7 +1021,7 @@ def test_merge_dry_run_on_a_failing_quick_pr_lists_every_refusal(monkeypatch, ca
     assert "PR is a draft" in err and "may not (src/twiddle/play.py)" in err
 
 
-def test_a_quick_merge_squashes_closes_labels_and_records_in_that_order(monkeypatch, capsys):
+def test_a_quick_merge_squashes_closes_labels_and_records_in_that_order(tmp_path, monkeypatch, capsys):
     b = gate_bundle()
     gh = MergeGitHub(monkeypatch, b, reads=("open", "closed"))
     code, out, _ = run_merge(capsys)
@@ -1039,8 +1040,11 @@ def test_a_quick_merge_squashes_closes_labels_and_records_in_that_order(monkeypa
     # what `state 12` then reads: closed, done, the record posted, and nothing left to do
     after = {"issue": {**b["issue"], "state": "closed", "labels": [ROUTINE, "sdlc:done"]},
              "comments": b["comments"] + [comment(OWNER, record, 30)], "trusted": [OWNER]}
-    st = sdlc.derive_state(after["issue"], after["comments"], TRUSTED, CONFIG)
-    assert st["state"] == "done" and st["turn"] == "none" and not st["conflicts"]
+    f = tmp_path / "after.json"
+    f.write_text(json.dumps(after))
+    assert sdlc.main(["state", "--from-file", str(f)]) == 0
+    out = capsys.readouterr().out
+    assert "state: done   lane: quick   turn: none   action: none" in out and "next: nothing" in out
 
 
 def test_a_quick_issue_github_closed_itself_is_not_closed_twice(monkeypatch, capsys):
@@ -1049,7 +1053,8 @@ def test_a_quick_issue_github_closed_itself_is_not_closed_twice(monkeypatch, cap
     assert gh.kinds() == ["pr merge", "api -X", "issue edit", "post"]
 
 
-def test_a_quick_issue_that_will_not_close_fails_loudly(monkeypatch, capsys):
+def test_a_quick_issue_that_will_not_close_fails_loudly(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     gh = MergeGitHub(monkeypatch, gate_bundle(), reads=("open", "open"))
     code, _, err = run_merge(capsys)
     assert code == 1 and "reads back open" in err and "gh issue close 12 --reason completed" in err
@@ -1057,15 +1062,32 @@ def test_a_quick_issue_that_will_not_close_fails_loudly(monkeypatch, capsys):
     assert "merged PR #50 into main" in err and "gh issue comment 12 --body-file" in err
 
 
-def test_a_failed_label_move_after_the_squash_says_what_is_left(monkeypatch, capsys):
+def test_a_failed_label_move_after_the_squash_says_what_is_left(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     gh = MergeGitHub(monkeypatch, gate_bundle(), reads=("open", "closed"), fail_on=["issue", "edit"])
     code, _, err = run_merge(capsys)
     assert code == 1 and gh.kinds() == ["pr merge", "api -X", "issue close", "issue edit"]   # closed, nothing posted
     assert f"merged PR #50 into main at {HEAD[:12]}" in err
     assert "--add-label sdlc:done --remove-label sdlc:in-progress" in err
     path = err.split("--body-file ")[1].split("`")[0]
-    assert "kind=quick-merged" in Path(path).read_text()
-    Path(path).unlink()
+    assert Path(path).parent == tmp_path and "kind=quick-merged" in Path(path).read_text()
+
+
+def test_a_bad_read_back_after_the_squash_still_says_what_is_left(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    gh = MergeGitHub(monkeypatch, gate_bundle())
+    reads = []
+
+    def fetch_slice(n, cfg):   # the routing read works; the read-back after the squash gets malformed JSON
+        reads.append(n)
+        if len(reads) > 1:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+        return gh.b["issue"], gh.b["comments"]
+    monkeypatch.setattr(sdlc, "fetch_slice", fetch_slice)
+    code, _, err = run_merge(capsys)
+    assert code == 1 and gh.kinds() == ["pr merge", "api -X"]
+    assert f"merged PR #50 into main at {HEAD[:12]}" in err and "gh issue close 12 --reason completed" in err
+    assert "--add-label sdlc:done" in err and "gh issue comment 12 --body-file" in err
 
 
 def test_merge_squashes_the_head_the_gate_checked(monkeypatch, capsys):
