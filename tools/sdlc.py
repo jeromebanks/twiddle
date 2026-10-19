@@ -1329,7 +1329,11 @@ def merge_escalated_prd(n: int, pr_number: int, st: dict[str, Any], config: dict
         "--match-head-commit", pr["headRefOid"]])
     print(f"merged PR #{pr_number}")
     if not st.get("prd_merged"):
-        record_prd_merged(n, st, paths[0], pr_number, config)
+        try:
+            record_prd_merged(n, st, paths[0], pr_number, config)
+        except Exception as exc:   # the PR is merged: a rerun of commit-prd finds the file on main and records it
+            raise SdlcError(f"merged PR #{pr_number} ({paths[0]}), then: {exc}. "
+                            f"Rerun `commit-prd {n}` to record it (planning waits for that record)")
     print(f"next: /plan-issue {n}")
     return 0
 
@@ -1433,7 +1437,7 @@ def commit_prd(n: int, config: dict[str, Any], dry_run: bool = False, root: Path
                         "--json", "number,url"]) or []
     if len(open_prs) > 1:
         raise SdlcError(f"{len(open_prs)} open PRs from {branch}: close all but one, then rerun")
-    remote = git(["ls-remote", "--heads", "origin", branch], cwd=root, check=False).split()
+    remote = git(["ls-remote", "origin", f"refs/heads/{branch}"], cwd=root, check=False).split()
     # an open PR's branch is updated in place; without one, the branch starts again from main
     base = f"origin/{branch}" if open_prs and remote else f"origin/{main}"
     content = render_prd_file(n, bundle["issue"].get("title", ""), bundle, st, repo)
@@ -1480,6 +1484,10 @@ def commit_prd(n: int, config: dict[str, Any], dry_run: bool = False, root: Path
         number = int(m.group(1))
         print(f"opened PR #{number}")
     wait_mergeable(number, config)
+    st = bundle_state(fetch_bundle(n, config), config)   # read again: a revision posted meanwhile stops the merge
+    if not st.get("to_full"):
+        raise SdlcError(f"#{n} changed while PR #{number} was being made (a new revision?): nothing merged. "
+                        f"{next_command(st)}")
     return merge_escalated_prd(n, number, st, config, False, root)
 
 

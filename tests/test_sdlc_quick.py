@@ -1206,7 +1206,7 @@ class PrdGitHub:
     def __init__(self, monkeypatch, root, comments, labels=ESCALATED_LABELS):
         self.root, self.origin = root, root.parent / "origin.git"
         self.issue, self.comments, self.calls, self.posted = issue(labels), list(comments), [], []
-        self.prs, self.fail = {}, set()
+        self.prs, self.fail, self.after_create = {}, set(), []
         monkeypatch.setattr(sdlc, "repo_of", lambda config: "o/r")
         monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, config, trusted=None: self.bundle())
         monkeypatch.setattr(sdlc, "post_comment", self.post)
@@ -1252,6 +1252,8 @@ class PrdGitHub:
         if args[:2] == ["pr", "create"]:
             number = 100 + len(self.prs)
             self.prs[number] = {"head": args[args.index("--head") + 1], "state": "OPEN"}
+            for more in self.after_create:     # what someone posts on the issue while the PR is being made
+                self.comments.append(more)
             return f"https://github.com/o/r/pull/{number}\n"
         if args[:2] == ["pr", "merge"]:
             if "merge" in self.fail:
@@ -1310,6 +1312,10 @@ def test_commit_prd_merges_the_brief_and_planning_starts(repo, monkeypatch, caps
     assert len(fake.posted) == 1 and f"comment={anchor(brief)}" in fake.posted[0].splitlines()[0]
     st = fake.state()
     assert (st["action"], sdlc.next_command(st)) == ("plan", "/plan-issue 12")
+    capsys.readouterr()
+    assert sdlc.main(["state", "12"]) == 0
+    out = capsys.readouterr().out
+    assert "action: plan" in out and "next: /plan-issue 12" in out
     # planning finds it: the plan prompt's requirements, and plan-validate's criteria
     assert sdlc.approved_requirements(12, anchor(brief), "", "origin/main", repo)[1] == Path("docs/prd/12-add-a-station.md")
     _git("merge", "-q", "--ff-only", "origin/main", cwd=repo)
@@ -1357,6 +1363,7 @@ def test_commit_prd_after_a_merge_that_was_not_recorded_only_records_it(repo, mo
     fake = PrdGitHub(monkeypatch, repo, escalated())
     fake.fail.add("post")
     assert sdlc.main(["commit-prd", "12"]) == 1
+    assert "Rerun `commit-prd 12` to record it" in capsys.readouterr().err
     assert fake.on_main() == ["docs/prd/12-add-a-station.md"] and fake.state()["action"] == "commit_prd"
     calls = len(fake.calls)
     assert sdlc.main(["commit-prd", "12"]) == 0
@@ -1425,3 +1432,11 @@ def test_wait_mergeable_is_bounded(monkeypatch):
     assert sdlc.wait_mergeable(5, CONFIG, wait=4, poll=2) == "UNKNOWN" and slept == [2, 2]
     with pytest.raises(sdlc.SdlcError):
         sdlc.wait_mergeable(5, CONFIG, wait=4, poll=0)
+
+
+def test_a_revision_posted_while_the_pr_is_made_stops_the_merge(repo, monkeypatch, capsys):
+    fake = PrdGitHub(monkeypatch, repo, escalated())
+    fake.after_create = [agent("prd", 2, 30, "## Outcome\nbigger", lane="quick")]
+    assert sdlc.main(["commit-prd", "12"]) == 1
+    assert "changed while PR" in capsys.readouterr().err
+    assert not any(c[:2] == ["pr", "merge"] for c in fake.calls) and fake.posted == [] and fake.on_main() == []
