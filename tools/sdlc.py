@@ -10,6 +10,7 @@ and every label change and agent comment. Config is `.sdlc/config.json`.
     uv run python tools/sdlc.py next
     uv run python tools/sdlc.py transition 12 prd-review --kind prd --body-file prd.md --dry-run
     uv run python tools/sdlc.py reconcile 12
+    uv run python tools/sdlc.py commit-prd 12 --dry-run   # a quick brief moved to the full lane -> docs/prd/
     uv run python tools/sdlc.py plan-validate plan.json
     uv run python tools/sdlc.py plan-post 12 plan.json --dry-run
     uv run python tools/sdlc.py codex-review --plan 12 --out review       # Codex on the posted plan revision
@@ -93,6 +94,7 @@ LATER_STATES = {"done"}
 BUILD_STATES = {"planned", "in-progress"}     # the epic's slices are being built (`work-slice`)
 QUICK = sdlc_quick.QUICK                        # the lane of a small, safe change: one brief, no epic
 QUICK_LABEL = f"lane:{QUICK}"
+FULL = "full"            # a `kind=lane lane=full` record: an approved quick brief moved to the full lane
 TRIAGE_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label"}
 PLAN_ACTIONS = {"plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone",
                 "escalate_plan"}
@@ -105,7 +107,7 @@ DEMO_ACTIONS = {"record_demo_acceptance", "demo_reply", "demo_heard"}
 ALL_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label",
                "plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone", "escalate_plan",
                "record_demo_acceptance", "demo_reply", "demo_heard",
-               "work_slices", "work_quick", "wait_for_poster", "human", "fix_conflict", "none"}
+               "work_slices", "work_quick", "commit_prd", "wait_for_poster", "human", "fix_conflict", "none"}
 NO_MILESTONE = "all"     # an epic planned without milestones has one demo, for all of it
 # from-state -> states the triage skill may move to. `escalated` is open from anywhere.
 TRANSITIONS = {
@@ -197,6 +199,10 @@ class Ledger:
     # until an approving milestone review after them
     review_owed: dict[str, list[dict[str, str]]] = field(default_factory=dict)
     doc_body: str = ""                   # the latest revision's comment, as read
+    # the `lane=full` record that moved the approved quick brief to the full lane, and the `prd-merged` record
+    # after it: until that one, the brief is committed to docs/prd/ (`commit-prd`) before anything is planned
+    to_full: dict[str, Any] | None = None
+    prd_merged: dict[str, Any] | None = None
 
 
 def _rev(mk: dict[str, str]) -> int | None:
@@ -234,12 +240,29 @@ def _on_doc(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
         L.latest_doc = {"kind": mk["kind"], "rev": rev, "id": c.get("id"), "url": c.get("url"), "lane": L.lane}
         L.approved_rev = None
         L.doc_body = c.get("body", "")
+        L.to_full = L.prd_merged = None   # a new revision is what gets approved, and committed, next
 
 
 def _on_approval(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     if L.latest_doc and _rev(mk) == L.latest_doc["rev"]:
         L.approved_rev, L.approval_by = _rev(mk), mk.get("by")
         L.approved_doc = {**L.latest_doc, "body": L.doc_body}
+
+
+def _on_lane(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    """`lane=full`: the approved quick brief leaves the quick lane (counted only while it is the approved latest)."""
+    doc = L.approved_doc
+    if (mk.get("lane") == FULL and doc and doc.get("lane") == QUICK and L.latest_doc
+            and doc["rev"] == L.latest_doc["rev"] == L.approved_rev):
+        L.lane = None
+        L.latest_doc = {**L.latest_doc, "lane": None}
+        L.approved_doc = {**doc, "lane": None}
+        L.to_full, L.prd_merged = {"id": c.get("id"), "url": c.get("url")}, None
+
+
+def _on_prd_merged(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    if L.to_full:
+        L.prd_merged = {"id": c.get("id"), "url": c.get("url"), "pr": mk.get("pr"), "comment": mk.get("comment")}
 
 
 def _on_plan(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
@@ -343,6 +366,7 @@ MARKERS = {
     "demo-void": _on_demo_void, "demo-request": _on_demo_request,
     "shipped": _on_shipped, "ship-review": _on_ship_review, "epic-tests": _on_epic_tests,
     "main-tests": _on_main_tests, "review-owed": _on_review_owed,
+    "lane": _on_lane, "prd-merged": _on_prd_merged,
 }
 
 
@@ -445,6 +469,10 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
             "a quick change has no plan" if state == "planned" else
             f"its latest revision (rev {latest_doc['rev']}) is " + ("not approved" if L.lane == QUICK else "not quick")))
 
+    commit_due = bool(L.to_full and not L.prd_merged)   # the escalated brief isn't in docs/prd/ yet
+    if commit_due and state in BUILD_STATES:
+        conflicts.append(f"{PREFIX}{state}, but its quick brief moved to the full lane: it goes back to "
+                         f"{PREFIX}approved, and its brief to docs/prd/, before it is planned")
     try:
         latest_plan_json = extract_plan(plan_body) if plan_body else {}
     except SdlcError:
@@ -501,6 +529,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
             action = "reconcile_label"
         elif L.lane == QUICK:
             action = "work_quick"
+        elif commit_due:
+            action = "commit_prd"   # the brief that left the quick lane goes to docs/prd/ first (`commit-prd N`)
         elif latest_plan is None:
             action = "plan"
         elif plan_verdict == "approve":
@@ -524,7 +554,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     return {
         "number": issue.get("number"), "title": issue.get("title"), "state": state, "turn": turn,
         "action": action, "type": type_label, "lane": L.lane, "latest_doc": latest_doc, "approved_rev": approved_rev,
-        "approved_doc": L.approved_doc,
+        "approved_doc": L.approved_doc, "to_full": L.to_full, "prd_merged": L.prd_merged,
         "approval_by": approval_by, "rounds": rounds, "max_rounds": config.get("max_rounds", 5),
         "replies": [{"id": c.get("id"), "by": c.get("author"), "url": c.get("url")} for c in replies],
         "decision": decision, "ignored_keywords": ignored, "reconcile": reconcile, "stale_labels": stale,
@@ -584,6 +614,8 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
         return f"nothing for an agent: #{n} needs a human" + (f" ({'; '.join(st['conflicts'])})" if st["conflicts"] else "")
     if a == "work_quick":
         return f"/work-slice {n} --quick"
+    if a == "commit_prd":
+        return f"`uv run python tools/sdlc.py commit-prd {n}`"
     if a == "work_slices":
         if progress is None:
             return f"`uv run python tools/sdlc.py state {n}` (needs the slices' progress)"
@@ -894,6 +926,8 @@ HEADERS = {
     "review-deferred": "Codex review deferred to the milestone",
     "review-owed": "Codex review owed at the milestone",
     "quick-merged": "merged to main",
+    "lane": "moved to the full lane",
+    "prd-merged": "PRD merged",
 }
 FOOTERS = {
     "question": "Reply in a comment. Anything you leave unanswered, I will assume the stated default.",
@@ -1195,6 +1229,8 @@ def command_merge_prd(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Squash-merge the docs-only PR that carries an approved PRD."""
     repo = repo_of(config)
     st = bundle_state(fetch_bundle(args.number, config), config)
+    if st.get("to_full"):   # a quick brief moved to the full lane: its one file is checked, and the merge recorded
+        return merge_escalated_prd(args.number, args.pr, st, config, args.dry_run)
     errs = [] if st["state"] == "approved" else [f"#{args.number} is {st['state']}, not approved"]
     pr = gh_json(["pr", "view", str(args.pr), "--repo", repo, "--json", "state,mergeable,baseRefName,files"])
     errs += prd_pr_errors(pr, config.get("default_branch", "main"))
@@ -1206,6 +1242,249 @@ def command_merge_prd(args: argparse.Namespace, config: dict[str, Any]) -> int:
     gh(["pr", "merge", str(args.pr), "--repo", repo, "--squash", "--delete-branch"])
     print(f"merged PR #{args.pr}")
     return 0
+
+
+# --- a quick brief that moved to the full lane: committed to docs/prd/ ----------
+#
+# Planning reads the PRD from docs/prd/N-*.md (plan-validate, codex-review --plan). A quick brief
+# lives only in its comment, so when it leaves the quick lane (a `kind=lane lane=full` record),
+# `commit-prd` writes it there through a docs-only PR and `merge-prd`, and records `prd-merged`:
+# only then does `state` offer planning. Everything is rerun-safe: what exists is finished.
+
+PRD_FILE_WAIT_SECONDS = 30   # how long `commit-prd` waits for GitHub to say whether a new PR is mergeable
+PRD_FILE_POLL_SECONDS = 2
+SLUG_MAX = 48
+
+
+def prd_branch(n: int) -> str:
+    return f"prd/{n}"
+
+
+def header_links(text: str, comment_id: str) -> bool:
+    """A docs/prd file's header (the text before its first `## ` section) links the comment `comment_id`."""
+    return bool(re.search(rf"#issuecomment-{re.escape(str(comment_id))}(?!\d)", text.split("\n## ", 1)[0]))
+
+
+def prd_slug(title: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")[:SLUG_MAX].rstrip("-") or "prd"
+
+
+def escalated_prd_errors(n: int, st: dict[str, Any], pr: dict[str, Any], text: str | None) -> list[str]:
+    """Why this PR is not the docs/prd file of #n's escalated quick brief (empty list = it is).
+    `text` is its one file at the PR's head (None: unread)."""
+    paths = [f["path"] for f in pr.get("files", [])]
+    if len(paths) != 1 or not re.fullmatch(rf"docs/prd/{n}-[^/]*\.md", paths[0]):
+        return [f"the PRD PR of #{n}'s brief changes exactly one file, docs/prd/{n}-*.md "
+                f"(it changes: {', '.join(paths[:5]) or 'nothing'})"]
+    if not st.get("doc_approved"):
+        return [f"#{n}'s latest revision is not approved: there is no approved brief to commit"]
+    want = approved_brief_id(st)
+    if text is None:
+        return [f"could not read {paths[0]} at the PR's head"]
+    if not header_links(text, want):
+        return [f"{paths[0]}'s header doesn't link #{n}'s approved comment {want} "
+                "(an earlier revision, or another issue's): `commit-prd` writes it"]
+    return []
+
+
+def pr_file_text(pr: dict[str, Any], path: str, root: Path) -> str | None:
+    """`path` at the PR's head commit, fetched from origin (None if that head can't be read)."""
+    git(["fetch", "-q", "origin", pr.get("headRefName", "")], cwd=root, check=False)
+    sha = pr.get("headRefOid") or ""
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return None
+    proc = subprocess.run(["git", "show", f"{sha}:{path}"], cwd=root, capture_output=True, text=True)
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def record_prd_merged(n: int, st: dict[str, Any], path: str, pr: int | None, config: dict[str, Any]) -> None:
+    anchor = approved_brief_id(st)
+    body = (f"The approved brief (rev {st['approved_doc']['rev']}) is `{path}` on "
+            f"`{config.get('default_branch', 'main')}`" + (f", merged in PR #{pr}" if pr else "")
+            + f". Next: planning (`/plan-issue {n}`).")
+    extra = {"comment": anchor, **({"pr": str(pr)} if pr else {})}
+    post_comment(n, render_comment("prd-merged", None, body, config, **extra), config)
+
+
+def merge_escalated_prd(n: int, pr_number: int, st: dict[str, Any], config: dict[str, Any], dry_run: bool,
+                        root: Path | None = None) -> int:
+    """`merge-prd` for an issue whose quick brief moved to the full lane: the PR's one file must be
+    docs/prd/N-*.md with a header linking the approved comment; the merge is bound to the head that was
+    read, and recorded (`prd-merged`), which is what lets planning start."""
+    repo, root = repo_of(config), root or primary_root()
+    errs = [] if st["state"] == "approved" else [f"#{n} is {st['state']}, not approved"]
+    pr = gh_json(["pr", "view", str(pr_number), "--repo", repo, "--json",
+                  "state,mergeable,baseRefName,files,headRefName,headRefOid"])
+    errs += prd_pr_errors(pr, config.get("default_branch", "main"))
+    paths = [f["path"] for f in pr.get("files", [])]
+    text = pr_file_text(pr, paths[0], root) if len(paths) == 1 else None
+    errs += escalated_prd_errors(n, st, pr, text)
+    if errs:
+        raise SdlcError("; ".join(errs))
+    if dry_run:
+        print(f"would squash-merge PR #{pr_number} ({paths[0]}) for #{n} at {pr['headRefOid'][:12]}, "
+              "then record prd-merged")
+        return 0
+    gh(["pr", "merge", str(pr_number), "--repo", repo, "--squash", "--delete-branch",
+        "--match-head-commit", pr["headRefOid"]])
+    print(f"merged PR #{pr_number}")
+    if not st.get("prd_merged"):
+        record_prd_merged(n, st, paths[0], pr_number, config)
+    print(f"next: /plan-issue {n}")
+    return 0
+
+
+def merged_prd_path(n: int, comment_id: str, ref: str, root: Path) -> str | None:
+    """The docs/prd/N-*.md on `ref` whose header links `comment_id`, if any."""
+    listed = git(["ls-tree", "--name-only", ref, "docs/prd/"], cwd=root, check=False).splitlines()
+    for path in sorted(p for p in listed if re.fullmatch(rf"docs/prd/{n}-[^/]*\.md", p)):
+        if header_links(git(["show", f"{ref}:{path}"], cwd=root, check=False), comment_id):
+            return path
+    return None
+
+
+def approval_links(bundle: dict[str, Any], st: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """(the approval record of the approved revision, the poster's `/approve` it records; None for a label)."""
+    trusted, rev = set(bundle["trusted"]), st["approved_doc"]["rev"]
+    ordered = sorted(bundle["comments"], key=lambda c: (c.get("created_at", ""), c.get("id", 0)))
+    start = next((i for i, c in enumerate(ordered) if c.get("id") == st["approved_doc"]["id"]), 0)
+    record, at = None, None
+    for i, c in enumerate(ordered[start:], start):
+        mk = parse_marker(c.get("body", "")) if c.get("author") in trusted else None
+        if mk and mk.get("kind") == "approval" and _rev(mk) == rev:
+            record, at = c, i
+    if record is None or (parse_marker(record["body"]) or {}).get("via") == "label":
+        return record, None
+    signoff = next((c for c in reversed(ordered[start:at]) if c.get("author") == st.get("approval_by")
+                    and any(a == "approve" for a, _ in keyword_lines(c.get("body", "")))), None)
+    return record, signoff
+
+
+BOT_TITLE_RE = re.compile(r"\A> 🤖 \*\*[^*\n]*\*\* — [^\n]*\n")
+
+
+def render_prd_file(n: int, title: str, bundle: dict[str, Any], st: dict[str, Any], repo: str) -> str:
+    """docs/prd/N-*.md for an escalated brief: a header linking the approved comment, the sign-off and the
+    approval record (what `approved_requirements` and `merge-prd` look for), then the brief as approved."""
+    doc = st["approved_doc"]
+    anchor = approved_brief_id(st)
+    url = lambda c: c.get("url") or f"https://github.com/{repo}/issues/{n}#issuecomment-{c.get('id')}"  # noqa: E731
+    doc_url = doc.get("url") if (doc.get("url") or "").endswith(f"#issuecomment-{anchor}") else \
+        f"https://github.com/{repo}/issues/{n}#issuecomment-{anchor}"
+    record, signoff = approval_links(bundle, st)
+    name = "PRD" if doc["kind"] == "prd" else "diagnosis"
+    links = [f"[{name}]({doc_url})"] + ([f"[sign-off]({url(signoff)})"] if signoff else []) \
+        + ([f"[approval record]({url(record)})"] if record else [])
+    when = f" on {record['created_at'][:10]}" if record and record.get("created_at") else ""
+    how = "" if signoff or not record else " (label)"
+    text = BOT_TITLE_RE.sub("", approved_brief(st) or "", count=1).strip()
+    if (foot := FOOTERS.get(doc["kind"])) and text.endswith(f"---\n{foot}"):
+        text = text[: -len(f"---\n{foot}")].rstrip()
+    moved = f" It was approved as a quick brief and moved to the full lane ([record]({url(st['to_full'])}))."
+    return (f"# {name[0].upper() + name[1:]}: {title} (#{n})\n\n"
+            f"Approved revision {doc['rev']}, signed off by @{st.get('approval_by')}{how}{when} ({', '.join(links)})."
+            f"{moved} The text below is rev {doc['rev']} exactly as approved.\n\n{text}\n")
+
+
+def wait_mergeable(pr_number: int, config: dict[str, Any], wait: float | None = None,
+                   poll: float | None = None) -> str:
+    """The PR's `mergeable` once GitHub has computed it (a new PR reads UNKNOWN for a few seconds)."""
+    wait = PRD_FILE_WAIT_SECONDS if wait is None else wait
+    poll = PRD_FILE_POLL_SECONDS if poll is None else poll
+    if poll <= 0 or wait < 0:
+        raise SdlcError(f"the wait for GitHub needs a positive poll interval and a non-negative timeout (got {poll}, {wait})")
+    waited = 0.0
+    while True:
+        state = (gh_json(["pr", "view", str(pr_number), "--repo", repo_of(config), "--json", "mergeable"])
+                 or {}).get("mergeable")
+        if state != "UNKNOWN" or waited >= wait:
+            return state
+        time.sleep(poll)
+        waited += poll
+
+
+def commit_prd(n: int, config: dict[str, Any], dry_run: bool = False, root: Path | None = None) -> int:
+    """Write an escalated quick brief to docs/prd/N-*.md on `prd/N`, open (or reuse) its docs-only PR and
+    `merge-prd` it. A rerun finishes what exists: a file already on main is only recorded, an open PR is
+    reused, the branch is updated in place, so there is never a second PR or a second file."""
+    bundle = fetch_bundle(n, config)
+    st = bundle_state(bundle, config)
+    if not st.get("to_full"):
+        raise SdlcError(f"#{n} never left the quick lane (no `lane=full` record on its approved brief): "
+                        "commit-prd is only for that; a full-lane PRD is merged by triage (`merge-prd`)")
+    if st.get("prd_merged"):
+        print(f"#{n}: the brief is already in docs/prd/ ({st['prd_merged']['url']})\nnext: /plan-issue {n}")
+        return 0
+    if st["state"] != "approved" or not st.get("doc_approved"):
+        raise SdlcError(f"#{n} is {st['state']}" + ("" if st.get("doc_approved") else " with an unapproved revision")
+                        + f", not approved: {next_command(st)}")
+    repo, root = repo_of(config), root or primary_root()
+    main, branch, anchor = config.get("default_branch", "main"), prd_branch(n), approved_brief_id(st)
+    if not dry_run:
+        git(["fetch", "-q", "origin", main], cwd=root)
+    if found := merged_prd_path(n, anchor, f"origin/{main}", root):   # merged before; only its record is missing
+        if dry_run:
+            print(f"would record prd-merged on #{n}: {found} on {main} links comment {anchor}")
+            return 0
+        record_prd_merged(n, st, found, None, config)
+        print(f"#{n}: {found} was already on {main}; recorded\nnext: /plan-issue {n}")
+        return 0
+    open_prs = gh_json(["pr", "list", "--repo", repo, "--head", branch, "--base", main, "--state", "open",
+                        "--json", "number,url"]) or []
+    if len(open_prs) > 1:
+        raise SdlcError(f"{len(open_prs)} open PRs from {branch}: close all but one, then rerun")
+    remote = git(["ls-remote", "--heads", "origin", branch], cwd=root, check=False).split()
+    # an open PR's branch is updated in place; without one, the branch starts again from main
+    base = f"origin/{branch}" if open_prs and remote else f"origin/{main}"
+    content = render_prd_file(n, bundle["issue"].get("title", ""), bundle, st, repo)
+    title = f"docs: approved PRD for #{n} ({bundle['issue'].get('title', '')})"
+    if dry_run:
+        have = sorted(p for p in git(["ls-tree", "--name-only", f"origin/{main}", "docs/prd/"], cwd=root,
+                                     check=False).splitlines() if re.fullmatch(rf"docs/prd/{n}-[^/]*\.md", p))
+        path = have[0] if have else f"docs/prd/{n}-{prd_slug(bundle['issue'].get('title', ''))}.md"
+        print(f"would write {path} on {branch} (from {base}), push it, "
+              + (f"reuse PR #{open_prs[0]['number']}" if open_prs else f"open a docs-only PR \"{title}\"")
+              + f", and merge-prd it\n----- {path} -----\n{content}")
+        return 0
+    if base != f"origin/{main}":
+        git(["fetch", "-q", "origin", branch], cwd=root)
+    scratch = Path(tempfile.mkdtemp(prefix=f"prd-{n}-"))
+    wt = scratch / "wt"
+    try:
+        git(["worktree", "add", "-q", "--detach", str(wt), base], cwd=root)
+        have = sorted((wt / "docs" / "prd").glob(f"{n}-*.md"))
+        path = (have[0].relative_to(wt).as_posix() if have
+                else f"docs/prd/{n}-{prd_slug(bundle['issue'].get('title', ''))}.md")
+        (wt / path).parent.mkdir(parents=True, exist_ok=True)
+        (wt / path).write_text(content)
+        git(["add", path], cwd=wt)
+        if git(["status", "--porcelain"], cwd=wt):
+            git(["commit", "-q", "-m", title], cwd=wt)
+        lease = f"--force-with-lease=refs/heads/{branch}:{remote[0] if remote else ''}"
+        git(["push", "-q", lease, "origin", f"HEAD:refs/heads/{branch}"], cwd=wt)
+    finally:
+        git(["worktree", "remove", "--force", str(wt)], cwd=root, check=False)
+        shutil.rmtree(scratch, ignore_errors=True)
+    if open_prs:
+        number = int(open_prs[0]["number"])
+    else:
+        with tempfile.NamedTemporaryFile("w", suffix=".md") as fh:
+            fh.write(f"The brief approved for #{n}, which moved from the quick lane to the full lane, as `{path}` "
+                     f"(docs only). Opened and merged by `tools/sdlc.py commit-prd {n}` through `merge-prd`.\n")
+            fh.flush()
+            out = gh(["pr", "create", "--repo", repo, "--base", main, "--head", branch, "--title", title,
+                      "--body-file", fh.name])
+        m = re.search(r"/pull/(\d+)", out)
+        if not m:
+            raise SdlcError(f"opened a PR from {branch} but can't read its number from {out.strip()!r}: rerun")
+        number = int(m.group(1))
+        print(f"opened PR #{number}")
+    wait_mergeable(number, config)
+    return merge_escalated_prd(n, number, st, config, False, root)
+
+
+def command_commit_prd(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    return commit_prd(args.number, config, args.dry_run)
 
 
 def command_reconcile(args: argparse.Namespace, config: dict[str, Any]) -> int:
@@ -3004,13 +3283,8 @@ def approved_requirements(n: int, comment_id: str, comment_body: str, ref: str, 
     """(what was used, the requirements for the plan prompt): the merged `docs/prd/N-*.md` at `ref` whose header
     links the approved comment, as a path relative to a checkout of `ref`; else the approved comment's text.
     A doc of an older revision, or none merged yet, is never what the plan is held to."""
-    listed = git(["ls-tree", "--name-only", ref, "docs/prd/"], cwd=root, check=False).splitlines()
-    anchor = re.compile(rf"#issuecomment-{comment_id}(?!\d)")
-    for path in sorted(p for p in listed if re.fullmatch(rf"docs/prd/{n}-[^/]*\.md", p)):
-        text = git(["show", f"{ref}:{path}"], cwd=root, check=False)
-        header = text.split("\n## ", 1)[0]
-        if anchor.search(header):
-            return f"{path} (its header links comment {comment_id})", Path(path)
+    if path := merged_prd_path(n, comment_id, ref, root):
+        return f"{path} (its header links comment {comment_id})", Path(path)
     body = "\n".join(l for l in comment_body.splitlines() if not MARKER_RE.match(l.strip())).strip()
     return f"the approved comment {comment_id} (no docs/prd/{n}-*.md on {ref} links it)", body
 
@@ -4430,6 +4704,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("pr", type=int)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_merge_prd)
+
+    p = sub.add_parser("commit-prd", help="a quick brief moved to the full lane: commit it to docs/prd/ and merge it")
+    p.add_argument("number", type=int, help="the issue")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=command_commit_prd)
 
     p = sub.add_parser("plan-validate", help="check a plan file: sections, dependencies, PRD coverage")
     p.add_argument("file")
