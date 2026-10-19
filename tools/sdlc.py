@@ -893,6 +893,7 @@ HEADERS = {
     "retry": "retried on a stronger model",
     "review-deferred": "Codex review deferred to the milestone",
     "review-owed": "Codex review owed at the milestone",
+    "quick-merged": "merged to main",
 }
 FOOTERS = {
     "question": "Reply in a comment. Anything you leave unanswered, I will assume the stated default.",
@@ -2837,10 +2838,16 @@ def command_review_defer(args: argparse.Namespace, config: dict[str, Any]) -> in
     if args.from_file:
         b = json.loads(Path(args.from_file).read_text())
         pr, comments, trusted, slice_issue = b["pr"], b["pr_comments"], set(b["trusted"]), b.get("slice")
+        issue_comments = b.get("comments") or []
     else:
         (pr, comments), trusted = fetch_pr(args.pr, config), fetch_trusted(config)
         refs = closes_refs(pr.get("body", ""))
-        slice_issue = fetch_slice(refs[0], config)[0] if len(refs) == 1 else None
+        slice_issue, issue_comments = fetch_slice(refs[0], config) if len(refs) == 1 else (None, [])
+    if slice_issue and bundle_quick({"issue": slice_issue, "comments": issue_comments, "trusted": trusted}, config):
+        n = slice_issue["number"]
+        raise SdlcError(f"PR #{pr['number']} is a quick change's (#{n}): its Codex review is never deferred, since there "
+                        "is no milestone to owe it to. The PR stays open; a person decides between waiting for Codex "
+                        f"and `escalate-to-full {n}`")
     if not args.reason.strip():
         raise SdlcError("--reason is required: what failed when Codex was run (its error, verbatim)")
     _, reviews = pr_records(comments, trusted)
@@ -3118,7 +3125,9 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     tests, reviews = pr_records(comments, trusted)
     deferrals = pr_deferrals(comments, trusted)
     refs = closes_refs(pr.get("body", ""))
-    slice_issue = fetch_slice(refs[0], config)[0] if len(refs) == 1 else None
+    slice_issue, issue_comments = fetch_slice(refs[0], config) if len(refs) == 1 else (None, [])
+    if slice_issue and bundle_quick({"issue": slice_issue, "comments": issue_comments, "trusted": trusted}, config):
+        return merge_quick(args, config)   # onto main: no epic, no milestone hold, no review owed
     epic = slice_epic(slice_issue) if slice_issue else None
     branch = epic_branch(epic) if epic else "epic/?"
     try:
@@ -3174,15 +3183,76 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     return 0
 
 
+def merge_quick(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Squash a quick PR into main once T3.1's gate passes, then close its issue as completed, move it to
+    `sdlc:done` and record what merged. Everything that can fail without writing happens before the squash;
+    a failure after it says what is left to do by hand, since a rerun is refused (the PR is merged)."""
+    repo, base = repo_of(config), config.get("default_branch", "main")
+    b = quick_gate_bundle(args.pr, config)
+    if errs := quick_gate_errors(b, config):
+        raise SdlcError("; ".join(errs))
+    pr, issue = b["pr"], b["issue"]
+    n, head = issue["number"], pr["headRefOid"]   # the head the gate checked: GitHub merges only that one
+    t, r = head_records(pr, *pr_records(b["pr_comments"], set(b["trusted"])))
+    record = render_comment(
+        "quick-merged", None, f"Merged PR #{args.pr} into `{base}` at `{head[:12]}`: tests {t['url']}, "
+        f"Codex review {r['url']}.", config, pr=str(args.pr), sha=head,
+        tests=comment_anchor({"id": "?", **t}), review=comment_anchor({"id": "?", **r}))
+    if args.dry_run:
+        print(f"would squash-merge quick PR #{args.pr} (closes #{n}) into {base} at {head[:12]}, then close #{n} "
+              f"as completed, move it to {PREFIX}done and post:\n{record}")
+        return 0
+    gh(["pr", "merge", str(args.pr), "--repo", repo, "--squash", "--match-head-commit", head])
+    gh(["api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{pr['headRefName']}"], check=False)
+    try:
+        issue = fetch_slice(n, config)[0]
+        if issue["state"] != "closed":   # `Closes #N` on main usually closes it already: never close twice
+            gh(["issue", "close", str(n), "--repo", repo, "--reason", "completed", "--comment", f"Merged in #{args.pr}."])
+            issue = fetch_slice(n, config)[0]
+        if not (issue["state"] == "closed" and issue.get("state_reason") == "completed"):
+            raise SdlcError(f"#{n} reads back {issue['state']} ({issue.get('state_reason')}): close it as completed "
+                            f"(`gh issue close {n} --reason completed`)")
+        set_state_label(n, issue["labels"], "done", config)
+        post_comment(n, record, config)
+    except SdlcError as exc:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", prefix=f"quick-merged-{n}-", delete=False) as fh:
+            fh.write(record)
+        raise SdlcError(f"merged PR #{args.pr} into {base} at {head[:12]}, then: {exc}. Still to do, by hand: "
+                        f"close #{n} as completed if it isn't (`gh issue close {n} --reason completed`); "
+                        f"`gh issue edit {n} --add-label {PREFIX}done --remove-label {PREFIX}in-progress`; "
+                        f"post the record: `gh issue comment {n} --body-file {fh.name}`")
+    print(f"merged PR #{args.pr} into {base}; #{n} closed and {PREFIX}done")
+    print(f"next: nothing for #{n} (`state {n}` reads it as done)")
+    return 0
+
+
 def command_escalate_slice(args: argparse.Namespace, config: dict[str, Any]) -> int:
     body = "Handing this slice to a human: " + args.reason
+    b = slice_bundle_for_escalation(args.number, config)
+    # a quick change carries an sdlc:* label: swap it, since two state labels at once are a conflict
+    quick = bundle_quick(b, config) if b else None
     if args.dry_run:
         print(render_comment("escalation", None, body, config))
+        if quick:
+            print(f"would move #{args.number} to {ESCALATED_LABEL} (from {', '.join(state_labels_on(b['issue'], config)) or 'none'})")
         return 0
     post_comment(args.number, render_comment("escalation", None, body, config), config)
-    gh(["issue", "edit", str(args.number), "--repo", repo_of(config), "--add-label", ESCALATED_LABEL])
+    if quick:
+        set_state_label(args.number, b["issue"]["labels"], "escalated", config)
+    else:
+        gh(["issue", "edit", str(args.number), "--repo", repo_of(config), "--add-label", ESCALATED_LABEL])
     print(f"#{args.number}: escalated")
     return 0
+
+
+def slice_bundle_for_escalation(n: int, config: dict[str, Any]) -> dict[str, Any]:
+    """The issue and its comments, enough to tell a quick change (an sdlc:* label to swap) from a slice."""
+    issue, comments = fetch_slice(n, config)
+    return {"issue": issue, "comments": comments, "trusted": sorted(fetch_trusted(config))}
+
+
+def state_labels_on(issue: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    return [l for l in issue.get("labels", []) if l in state_labels(config)]
 
 
 def command_cleanup(args: argparse.Namespace, config: dict[str, Any]) -> int:
