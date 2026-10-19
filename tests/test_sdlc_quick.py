@@ -592,3 +592,21 @@ def test_slice_check_reads_the_quick_brief(tmp_path, capsys, monkeypatch):
 def test_complexity_rule_is_shared_with_the_transition():
     assert sdlc_quick.complexity_errors(12, [ROUTINE]) == []
     assert sdlc_quick.complexity_errors(12, [ROUTINE, "complexity:novel"])
+
+
+@pytest.mark.parametrize("pr", [None, PR])
+def test_a_brief_revised_after_the_claim_stops_the_build(tmp_path, capsys, pr):
+    revised = ready_quick() + [CLAIM, quick_brief(ts=9, rev=2, body=BRIEF)]
+    st = status(tmp_path, capsys, quick_bundle([ROUTINE, "sdlc:in-progress"], revised, pr=pr), "--json")[1]
+    assert st["state"] == ("in-review" if pr else "claimed")
+    assert any("the latest is rev 2" in e for e in st["refusals"])
+    assert "--quick" not in st["next"] and st["next"].startswith("nothing for an agent")
+
+
+def test_a_deferral_never_counts_for_a_quick_change(tmp_path, capsys):
+    deferred = [RECORDS[0], marked("review-deferred", 8, sha=HEAD)]
+    b = quick_bundle([ROUTINE, "sdlc:in-progress"], ready_quick() + [CLAIM], pr=PR, pr_comments=deferred)
+    st = status(tmp_path, capsys, b, "--json")[1]
+    assert st["deferred_on_head"] is False and st["review_on_head"] is None and st["review_mandatory"] is True
+    out = status(tmp_path, capsys, b)[1]
+    assert "Codex not yet" in out and "milestone" not in out.replace("never owed to a milestone", "")

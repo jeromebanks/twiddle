@@ -2423,12 +2423,17 @@ def derive_quick(b: dict[str, Any], st: dict[str, Any]) -> dict[str, Any]:
     blockers. Its Codex review is always on the PR: it has no milestone to owe one to."""
     out = derive_slice(b["issue"], b["comments"], set(b["trusted"]), [], b.get("pr"), b.get("pr_comments") or [])
     n = out["number"]
-    refusals = sdlc_quick.quick_check_errors(b["issue"], st, approved_brief(st), out["claim"])
-    if out["state"] == "ready" and refusals:     # not claimed, and not claimable yet: what triage says comes next
-        out["state"], out["next"] = "not-ready", next_command(st)
-    elif out["state"] in ("ready", "claimed", "in-review"):
+    building = out["state"] in ("ready", "claimed", "in-review")
+    # a claimed change is checked as a resume would be: a brief revised since the claim stops the build too
+    refusals = sdlc_quick.quick_check_errors(b["issue"], st, approved_brief(st), out["claim"],
+                                             resume=bool(out["claim"])) if building else []
+    if refusals:     # not claimable, or no longer buildable: what triage says comes next
+        out["state"] = "not-ready" if out["state"] == "ready" else out["state"]
+        out["next"] = next_command(st)
+    elif building:
         out["next"] = f"/work-slice {n} --quick"
-    return {**out, "lane": QUICK, "refusals": refusals if out["state"] == "not-ready" else [],
+    # no milestone to owe a review to: a deferral never counts, Codex reviews the PR
+    return {**out, "deferred_on_head": False, "lane": QUICK, "refusals": refusals,
             "review": "slice", "review_mandatory": True}
 
 
