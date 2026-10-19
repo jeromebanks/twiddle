@@ -147,12 +147,26 @@ def test_a_full_lane_state_line_is_unchanged(tmp_path, capsys):
 
 @pytest.mark.parametrize("kind", ["prd", "diagnosis"])
 @pytest.mark.parametrize("label", ["sdlc:approved", "sdlc:in-progress"])
-def test_an_approved_quick_issue_is_built_not_planned(kind, label):
+def test_an_approved_quick_issue_is_built_not_planned(monkeypatch, kind, label):
+    monkeypatch.setattr(sdlc, "epic_progress", lambda *a: pytest.fail("a quick issue is not an epic"))
     st = derive([ROUTINE, label], approved_quick(kind))
     assert (st["turn"], st["action"], st["conflicts"]) == ("agent", "work_quick", [])
     assert sdlc.next_command(st) == "/work-slice 12 --quick"
     # `with_next` asks GitHub for nothing: a quick issue has no epic progress
     assert sdlc.with_next(st, CONFIG, trusted=TRUSTED)["progress"] is None
+
+
+def test_a_question_on_an_approved_quick_brief_is_triage_not_planning(tmp_path, capsys):
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps({"issue": issue([ROUTINE, "sdlc:approved"]), "comments": approved_quick(),
+                             "trusted": [OWNER]}))
+    (tmp_path / "q.md").write_text("which stream?")
+    assert sdlc.main(["transition", "12", "needs-info", "--kind", "question", "--body-file", str(tmp_path / "q.md"),
+                      "--from-file", str(f), "--dry-run"]) == 0
+    assert "phase=plan" not in capsys.readouterr().out
+    asked = approved_quick() + [agent("question", None, 3), comment(POSTER, "the AAC one", 4)]
+    st = derive([ROUTINE, "sdlc:needs-info"], asked)
+    assert st["action"] == "respond_to_reply" and sdlc.next_command(st) == "/triage-issue 12"
 
 
 def test_a_quick_approval_is_reconciled_first():

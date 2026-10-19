@@ -510,7 +510,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
             action = "continue_plan"
     elif replies:
         turn = "agent"
-        if state == "needs-info" and doc_approved:
+        if state == "needs-info" and doc_approved and L.lane != QUICK:   # a quick brief is never planned
             action = "replan"
         elif decision and decision["action"] == "approve" and decision.get("valid"):
             action = "record_approval"
@@ -1138,7 +1138,7 @@ def command_transition(args: argparse.Namespace, config: dict[str, Any]) -> int:
     else:
         raise SdlcError("--body-file is required")
     extra = {"by": st["decision"]["by"], "via": "comment"} if kind == "approval" else {}
-    if kind == "question" and st.get("doc_approved"):
+    if kind == "question" and st.get("doc_approved") and st.get("lane") != QUICK:   # a quick brief's is triage
         extra = {"phase": "plan"}
     if kind in DOC_KINDS and lane:
         extra = {"lane": lane}
