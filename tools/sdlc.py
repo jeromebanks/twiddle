@@ -1258,7 +1258,7 @@ COMMENT_LIMIT = 65000   # GitHub refuses comments over 65536 characters
 LEAF_LABEL, CONTAINER_LABEL = "plan:slice", "plan:subtask"
 # How hard a unit of work is, rated by the planner; `.sdlc/config.json` maps it to the model that builds it.
 COMPLEXITY = ("routine", "judgment", "novel")
-COMPLEXITY_PREFIX = "complexity:"
+COMPLEXITY_PREFIX = sdlc_quick.COMPLEXITY_PREFIX
 COMPLEXITY_LINE_RE = re.compile(r"^Complexity: (\w+) — .*$", re.MULTILINE)
 
 

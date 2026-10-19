@@ -369,12 +369,14 @@ def test_an_approved_quick_brief_may_be_claimed():
     ("full-lane", "is not a quick brief"),
     ("stale-full", "the latest is rev 2"),
     ("escalated", "escalated to a human"),
+    ("needs-info", "is needs-info, not approved"),
     ("closed", "is closed"),
     ("unrated", "complexity:routine"),
     ("judgment", "complexity:judgment"),
     ("claimed", "already claimed"),
     ("no-files", "lacks sections: Files"),
     ("no-context", "lacks sections: Context"),
+    ("lowercase", "lacks sections: Non-goals"),     # read as codex_review.section reads it: exactly
     ("resume-unclaimed", "no claim to resume"),
     ("slice", "is a plan:slice issue"),
 ])
@@ -385,12 +387,14 @@ def test_each_refusal_has_its_own_message(case, needle):
          "full-lane": quick_bundle(comments=[agent("prd", 1, 1, BRIEF), agent("approval", 1, 2, by=POSTER)]),
          "stale-full": quick_bundle([ROUTINE, "sdlc:prd-review"], ready_quick() + [agent("prd", 2, 3, BRIEF)]),
          "escalated": quick_bundle([ROUTINE, "sdlc:escalated"]),
+         "needs-info": quick_bundle([ROUTINE, "sdlc:needs-info"], ready_quick() + [agent("question", None, 3)]),
          "closed": quick_bundle(state="closed"),
          "unrated": quick_bundle(["sdlc:approved"]),
          "judgment": quick_bundle([ROUTINE, "complexity:judgment", "sdlc:approved"]),
          "claimed": quick_bundle([ROUTINE, "sdlc:in-progress"], ready_quick() + [CLAIM]),
          "no-files": quick_bundle(comments=ready_quick(BRIEF.replace("## Files", "## Paths"))),
          "no-context": quick_bundle(comments=ready_quick(BRIEF.replace("## Context", "Context:"))),
+         "lowercase": quick_bundle(comments=ready_quick(BRIEF.replace("## Non-goals", "## non-goals"))),
          "resume-unclaimed": quick_bundle(),
          "slice": quick_bundle(["plan:slice", ROUTINE]),
          }[case]
@@ -482,6 +486,11 @@ def test_claim_quick_makes_the_worktree_posts_one_claim_and_moves_the_label(repo
     assert sdlc.main(["claim", "12", "--quick", "--resume"]) == 0
     assert f"WORKTREE={wt}" in capsys.readouterr().out
     assert fake.posted == [] and fake.edits == []   # no second claim, and the label is already in-progress
+
+    # `cleanup` needs nothing new: the worktree and the branch are a slice's
+    monkeypatch.setattr(sdlc, "find_slice_pr", lambda n, config: {"state": "MERGED"})
+    assert sdlc.main(["cleanup", "12"]) == 0
+    assert not wt.exists() and not _git("branch", "--list", "slice/12", cwd=repo)
 
 
 def test_claim_quick_resume_reattaches_a_pushed_branch(repo, monkeypatch, capsys):

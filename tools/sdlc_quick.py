@@ -32,9 +32,9 @@ def complexity_errors(n: int, labels: list[str]) -> list[str]:
 
 
 def missing_sections(brief: str) -> list[str]:
-    """The brief's sections it lacks, each wanted as a `## Name` heading line."""
+    """The brief's sections it lacks: a `## Name` heading line, matched as `codex_review.section` reads one."""
     return [name for name in BRIEF_SECTIONS
-            if not re.search(rf"^##\s+{re.escape(name)}\s*$", brief or "", re.MULTILINE | re.IGNORECASE)]
+            if not re.search(rf"^## {re.escape(name)}\s*\n", (brief or "") + "\n", re.MULTILINE)]
 
 
 def lane_error(n: int, quick_flag: bool, is_slice: bool, quick: bool) -> str | None:
