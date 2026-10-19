@@ -64,9 +64,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 try:
-    from tools import codex_review          # imported as tools.sdlc (the tests)
+    from tools import codex_review, sdlc_quick   # imported as tools.sdlc (the tests)
 except ModuleNotFoundError:
     import codex_review                     # run as tools/sdlc.py
+    import sdlc_quick
 # how a review runs and what counts as one live there; sdlc.py reads GitHub, posts and gates
 HEAD_RE, VERDICT_RE, parse_verdict = codex_review.HEAD_RE, codex_review.VERDICT_RE, codex_review.parse_verdict
 
@@ -90,7 +91,7 @@ REVIEW_STATES = {"needs-info", "prd-review", "diagnosis-review"}
 REVIEW_DOC = {"prd-review": "prd", "diagnosis-review": "diagnosis"}
 LATER_STATES = {"done"}
 BUILD_STATES = {"planned", "in-progress"}     # the epic's slices are being built (`work-slice`)
-QUICK = "quick"                                 # the lane of a small, safe change: one brief, no epic
+QUICK = sdlc_quick.QUICK                        # the lane of a small, safe change: one brief, no epic
 QUICK_LABEL = f"lane:{QUICK}"
 TRIAGE_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label"}
 PLAN_ACTIONS = {"plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone",
@@ -539,9 +540,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     }
 
 
-def is_quick(st: dict[str, Any]) -> bool:
-    """A quick change (its latest or its approved revision is in the quick lane): never an epic."""
-    return st.get("lane") == QUICK or (st.get("approved_doc") or {}).get("lane") == QUICK
+is_quick = sdlc_quick.is_quick     # a quick change: its latest or its approved revision is in the quick lane
 
 
 def epic_building(st: dict[str, Any]) -> bool:
@@ -834,10 +833,7 @@ def check_transition(st: dict[str, Any], to: str, kind: str, config: dict[str, A
             errs.append(f"unknown lane {lane!r} (the only one is {QUICK})")
         if kind not in DOC_KINDS:
             errs.append(f"--lane goes on a prd or diagnosis revision, not a {kind}")
-        rated = sorted(l for l in labels if l.startswith(COMPLEXITY_PREFIX))
-        if rated != [f"{COMPLEXITY_PREFIX}routine"]:   # a judgment or novel label anywhere disqualifies it
-            errs.append(f"only an issue labelled {COMPLEXITY_PREFIX}routine (and no other complexity) can take the "
-                        f"quick lane (#{n} is " + (", ".join(rated) if rated else "unrated") + ")")
+        errs += sdlc_quick.complexity_errors(n, labels)
     if f"{PREFIX}{to}" not in state_labels(config):
         errs.append(f"unknown state {to!r}")
         return errs
@@ -2344,6 +2340,7 @@ def fetch_slice(n: int, config: dict[str, Any]) -> tuple[dict[str, Any], list[di
     repo = repo_of(config)
     raw = gh_json(["api", f"repos/{repo}/issues/{n}"])
     issue = {"number": raw["number"], "title": raw.get("title", ""), "state": raw.get("state", "open"),
+             "author": (raw.get("user") or {}).get("login", ""),
              "state_reason": raw.get("state_reason"), "body": raw.get("body") or "",
              "labels": [l["name"] for l in raw.get("labels", [])],
              "assignees": [a["login"] for a in raw.get("assignees") or []],
@@ -2408,17 +2405,49 @@ def bundle_slice(b: dict[str, Any]) -> dict[str, Any]:
     return derive_slice(b["issue"], b["comments"], set(b["trusted"]), b["blockers"], b["pr"], b["pr_comments"])
 
 
+def bundle_issue_state(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+    """The issue's triage state, which says whether it is a quick change; None for a plan:slice (never one)."""
+    if LEAF_LABEL in b["issue"].get("labels", []):
+        return None
+    return derive_state(b["issue"], b["comments"], set(b["trusted"]), config)
+
+
+def bundle_quick(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+    """The issue's state if it is a quick change, else None (a slice, or an issue in the full lane)."""
+    st = bundle_issue_state(b, config)
+    return st if st and is_quick(st) else None
+
+
+def derive_quick(b: dict[str, Any], st: dict[str, Any]) -> dict[str, Any]:
+    """A quick change's build state, read like a slice's (claim, PR, records on its head) with no epic or
+    blockers. Its Codex review is always on the PR: it has no milestone to owe one to."""
+    out = derive_slice(b["issue"], b["comments"], set(b["trusted"]), [], b.get("pr"), b.get("pr_comments") or [])
+    n = out["number"]
+    refusals = sdlc_quick.quick_check_errors(b["issue"], st, approved_brief(st), out["claim"])
+    if out["state"] == "ready" and refusals:     # not claimed, and not claimable yet: what triage says comes next
+        out["state"], out["next"] = "not-ready", next_command(st)
+    elif out["state"] in ("ready", "claimed", "in-review"):
+        out["next"] = f"/work-slice {n} --quick"
+    return {**out, "lane": QUICK, "refusals": refusals if out["state"] == "not-ready" else [],
+            "review": "slice", "review_mandatory": True}
+
+
 def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> int:
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(args.number, config)
-    st = bundle_slice(b)
+    quick = bundle_quick(b, config)
+    st = derive_quick(b, quick) if quick else bundle_slice(b)
     st["model"] = model_for(st["complexity"], config)
-    st["review"] = review_mode(st["complexity"], config)
+    if not quick:
+        st["review"] = review_mode(st["complexity"], config)
     if args.json:
         print(json.dumps(st, indent=2))
         return 0
-    print(f"#{st['number']} {st['title']}\n  state: {st['state']}   epic: #{st['epic']}   key: {st['key']}"
+    where = f"lane: {QUICK}" if quick else f"epic: #{st['epic']}   key: {st['key']}"
+    review = ("on the PR (mandatory: a quick change is never owed to a milestone)" if quick
+              else "with the milestone" if st["review"] == "milestone" else "on the PR")
+    print(f"#{st['number']} {st['title']}\n  state: {st['state']}   {where}"
           + (f"   complexity: {st['complexity']} (model {st['model']})" if st["complexity"] else "")
-          + f"   Codex review: {'with the milestone' if st['review'] == 'milestone' else 'on the PR'}")
+          + f"   Codex review: {review}")
     if st["claim"]:
         print(f"  claimed: {st['claim']['url']} (branch {st['claim']['branch']}"
               + (f", model {st['claim']['model']})" if st["claim"].get("model") else ")"))
@@ -2455,19 +2484,82 @@ def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -
 
 def command_slice_check(args: argparse.Namespace, config: dict[str, Any]) -> int:
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(args.number, config)
-    errs = slice_check_errors(b["issue"], b["blockers"], claim_status(b["comments"], set(b["trusted"])), args.resume)
-    errs += epic_pause_errors(b, config, args.resume)
+    claim = claim_status(b["comments"], set(b["trusted"]))
+    if quick := bundle_quick(b, config):   # built from its approved brief, onto main: no epic to pause it
+        errs = sdlc_quick.quick_check_errors(b["issue"], quick, approved_brief(quick), claim, args.resume)
+    else:
+        errs = slice_check_errors(b["issue"], b["blockers"], claim, args.resume)
+        errs += epic_pause_errors(b, config, args.resume)
     for e in errs:
         print(f"  - {e}")
     print(f"#{args.number}: " + ("not workable" if errs else "ok to " + ("resume" if args.resume else "start")))
     return 1 if errs else 0
 
 
+def add_slice_worktree(n: int, base: str, resume: bool, config: dict[str, Any]) -> None:
+    """Make (or, resuming, reattach) worktree `.worktrees/slice-N` on branch slice/N, new branches from origin/<base>."""
+    root, wt, branch = primary_root(), worktree_path(n, config), slice_branch(n)
+    git(["fetch", "origin", base], cwd=root)
+    local = bool(git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root, check=False))
+    remote = bool(git(["ls-remote", "--heads", "origin", branch], cwd=root, check=False))
+    if wt.exists():
+        if not resume:
+            raise SdlcError(f"{wt} already exists: `claim {n} --resume`, or `cleanup {n} --force` to discard it")
+    elif local:
+        if not resume:
+            raise SdlcError(f"branch {branch} already exists: `claim {n} --resume`")
+        git(["worktree", "add", str(wt), branch], cwd=root)
+    elif remote and resume:
+        git(["fetch", "origin", branch], cwd=root)
+        git(["worktree", "add", "-b", branch, str(wt), f"origin/{branch}"], cwd=root)
+    else:
+        git(["worktree", "add", "-b", branch, str(wt), f"origin/{base}"], cwd=root)
+
+
+def claim_quick(args: argparse.Namespace, config: dict[str, Any], b: dict[str, Any],
+                claim: dict[str, Any] | None) -> int:
+    """Claim an approved quick change: its own worktree on slice/N from origin/main, the issue to in-progress."""
+    n = args.number
+    if args.retry:
+        raise SdlcError("--retry takes over an escalated slice; a quick change is never retried on another model")
+    is_slice = LEAF_LABEL in b["issue"].get("labels", [])
+    st = bundle_issue_state(b, config) or {}
+    errs = sdlc_quick.quick_check_errors(b["issue"], st, approved_brief(st), claim, args.resume, is_slice)
+    if errs:
+        raise SdlcError("; ".join(errs))
+    root, wt, branch = primary_root(), worktree_path(n, config), slice_branch(n)
+    base = config.get("default_branch", "main")
+    if not remote_has(base, root):
+        raise SdlcError(f"origin has no {base}")
+    if args.dry_run:
+        print(f"would {'resume' if args.resume else 'claim'} #{n}: worktree {wt} on {branch} from origin/{base}; "
+              "a quick change")
+        return 0
+    add_slice_worktree(n, base, args.resume, config)
+    if not claim:
+        model = {"model": args.model} if args.model else {}
+        post_comment(n, render_comment("claim", None, f"Building this quick change in `{branch}`, from `{base}`"
+                                       + (f", with {args.model}." if model else "."), config,
+                                       branch=branch, base=base, quick="1", **model), config)
+        gh(["issue", "edit", str(n), "--repo", repo_of(config), "--add-assignee", "@me"])
+    labels = b["issue"].get("labels", [])
+    if f"{PREFIX}approved" in labels:   # also on --resume: a claim cut short before the label moved
+        set_state_label(n, labels, "in-progress", config)
+        print(f"#{n}: approved -> in-progress")
+    print(f"WORKTREE={wt}\nPRIMARY={root}\nBRANCH={branch}\nBASE=origin/{base}")
+    return 0
+
+
 def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """Claim a ready slice and give it its own worktree on branch slice/N, from origin/epic/E."""
+    """Claim a ready slice and give it its own worktree on branch slice/N, from origin/epic/E
+    (`--quick`: an approved quick change, from origin/main)."""
     n = args.number
     b = slice_bundle(n, config)
     claim = claim_status(b["comments"], set(b["trusted"]))
+    if args.quick:
+        return claim_quick(args, config, b, claim)
+    if bundle_quick(b, config):
+        raise SdlcError(sdlc_quick.lane_error(n, False, False, True))
     if args.retry:
         if not args.model:
             raise SdlcError("--retry needs --model: the stronger model taking it over")
@@ -2485,21 +2577,7 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if args.dry_run:
         print(f"would {'resume' if args.resume else 'claim'} #{n}: worktree {wt} on {branch} from origin/{base}; epic #{epic}")
         return 0
-    git(["fetch", "origin", base], cwd=root)
-    local = bool(git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root, check=False))
-    remote = bool(git(["ls-remote", "--heads", "origin", branch], cwd=root, check=False))
-    if wt.exists():
-        if not args.resume:
-            raise SdlcError(f"{wt} already exists: `claim {n} --resume`, or `cleanup {n} --force` to discard it")
-    elif local:
-        if not args.resume:
-            raise SdlcError(f"branch {branch} already exists: `claim {n} --resume`")
-        git(["worktree", "add", str(wt), branch], cwd=root)
-    elif remote and args.resume:
-        git(["fetch", "origin", branch], cwd=root)
-        git(["worktree", "add", "-b", branch, str(wt), f"origin/{branch}"], cwd=root)
-    else:
-        git(["worktree", "add", "-b", branch, str(wt), f"origin/{base}"], cwd=root)
+    add_slice_worktree(n, base, args.resume, config)
     if args.retry:
         gh(["issue", "edit", str(n), "--repo", repo_of(config), "--remove-label", ESCALATED_LABEL])
         post_comment(n, render_comment("claim", None, f"Retrying on {args.model}: the slice escalated on a cheaper model. "
@@ -4180,8 +4258,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--from-file")
     p.set_defaults(fn=command_slice_check)
 
-    p = sub.add_parser("claim", help="claim a ready slice and make its worktree")
+    p = sub.add_parser("claim", help="claim a ready slice (or an approved quick change) and make its worktree")
     p.add_argument("number", type=int)
+    p.add_argument("--quick", action="store_true", help="an approved quick change: its worktree from origin/main")
     p.add_argument("--resume", action="store_true", help="reattach to this slice's existing claim and branch")
     p.add_argument("--model", help="the model building it (recorded on the claim)")
     p.add_argument("--retry", action="store_true",
