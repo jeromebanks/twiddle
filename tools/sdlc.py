@@ -2109,7 +2109,8 @@ def pr_records(comments: list[dict[str, Any]], trusted: set[str]) -> tuple[list[
         if mk.get("kind") == "tests":
             tests.append({"sha": mk.get("sha"), "result": mk.get("result"), "passed": mk.get("passed"), "url": c.get("url")})
         elif mk.get("kind") == "pr-review":
-            reviews.append({"sha": mk.get("sha"), "verdict": mk.get("verdict"), "round": mk.get("round"), "url": c.get("url")})
+            reviews.append({"sha": mk.get("sha"), "verdict": mk.get("verdict"), "round": mk.get("round"), "url": c.get("url")}
+                           | ({"brief": mk["brief"]} if mk.get("brief") else {}))   # a quick PR's: the brief it read
         elif mk.get("kind") == "retry":
             for r in reviews:
                 r["before_retry"] = True
@@ -2280,6 +2281,73 @@ def merge_gate_errors(pr: dict[str, Any], slice_issue: dict[str, Any] | None, te
     return errs
 
 
+def load_quick(config: dict[str, Any]) -> sdlc_quick.QuickRules:
+    """The quick lane's rules from the config (sdlc_quick.load_quick), a bad section as SdlcError."""
+    try:
+        return sdlc_quick.load_quick(config)
+    except sdlc_quick.QuickConfigError as exc:
+        raise SdlcError(str(exc))
+
+
+def quick_merge_gate_errors(pr: dict[str, Any], issue_state: dict[str, Any] | None, tests: list[dict[str, Any]],
+                            reviews: list[dict[str, Any]], behind_by: int | None, files: list[dict[str, Any]] | None,
+                            brief: str | None, quick: sdlc_quick.QuickRules, base: str = "main") -> list[str]:
+    """Why the agent may not merge this quick PR into main (empty list = merge). `merge_gate_errors`'s sibling.
+
+    `issue_state` is the closed issue's `derive_state`, with the issue itself (number, state, labels) under
+    "issue" (`quick_issue_state`); `brief` is its approved brief's text; `files` is GitHub's `pulls/N/files`.
+    Codex must approve this head having read this brief (its record's `brief` is the approved comment's id),
+    and a `review-defer` never stands in for it: a quick change has no milestone to owe a review to.
+    """
+    errs = []
+    if pr.get("state") != "OPEN":
+        errs.append(f"PR is {pr.get('state')}, not OPEN")
+    if pr.get("isDraft"):
+        errs.append("PR is a draft")
+    if pr.get("baseRefName") != base:
+        errs.append(f"PR targets {pr.get('baseRefName')}, not {base}")
+    refs = closes_refs(pr.get("body", ""))
+    issue = (issue_state or {}).get("issue")
+    n = refs[0] if len(refs) == 1 else None
+    if n is None:
+        errs.append(f"PR must close exactly one quick issue (`Closes #N`); it closes {refs or 'none'}")
+    elif not issue or issue["number"] != n:
+        errs.append(f"#{n} could not be read")
+    elif LEAF_LABEL in issue.get("labels", []):
+        errs.append(f"#{n} is a plan:slice issue, not a quick change")
+    else:
+        errs += sdlc_quick.eligibility_errors(issue, issue_state)
+    t, r = head_records(pr, tests, reviews)
+    head = (pr.get("headRefOid") or "")[:12]
+    want = approved_brief_id(issue_state) if issue_state else None
+    if not r:
+        errs.append(f"no Codex review of the current head {head} (a quick change's review is never deferred)")
+    elif r["verdict"] != "approve":
+        errs.append(f"Codex's latest review of {head} asks for changes")
+    elif not want or r.get("brief") != want:
+        errs.append(f"Codex's approval of {head} was recorded against brief {r.get('brief') or 'none'}, not the "
+                    f"approved brief {want or '(none)'}: a Codex round against the approved brief comes first")
+    if not t:
+        errs.append(f"no recorded test run on the current head {head} (`test-record`)")
+    elif t["result"] != "pass":
+        errs.append(f"the tests failed on {head}")
+    if behind_by is None:
+        errs.append(f"could not tell whether the head is up to date with {base}")
+    elif behind_by:
+        errs.append(f"the head is {behind_by} commit(s) behind {base}: rebase onto origin/{base}, "
+                    "push with --force-with-lease, then `test-record` and a Codex round on the new head")
+    mergeable = pr.get("mergeable")
+    if mergeable == "UNKNOWN":
+        errs.append("GitHub is still computing mergeability (UNKNOWN): wait a few seconds and try again")
+    elif mergeable != "MERGEABLE":
+        errs.append(f"GitHub says the PR conflicts ({mergeable}): rebase onto origin/{base}")
+    if n is not None:
+        errs += sdlc_quick.diff_errors(n, files, brief or "", quick)
+        if err := sdlc_quick.rounds_error(n, changes_rounds(reviews), quick):
+            errs.append(err)
+    return errs
+
+
 def parse_pytest_summary(text: str) -> tuple[int, int]:
     """(passed, failed + errors) from pytest's summary line."""
     tail = "\n".join((text or "").strip().splitlines()[-3:])
@@ -2439,6 +2507,48 @@ def derive_quick(b: dict[str, Any], st: dict[str, Any]) -> dict[str, Any]:
             "review": "slice", "review_mandatory": True}
 
 
+def quick_issue_state(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    """An issue bundle's derived state with the issue itself under "issue": what quick_merge_gate_errors reads."""
+    return {**derive_state(b["issue"], b["comments"], set(b["trusted"]), config), "issue": b["issue"]}
+
+
+def quick_gate_bundle(pr_number: int, config: dict[str, Any]) -> dict[str, Any]:
+    """Everything the quick gate reads, fetched (read-only): the PR, its records, its files (with rename
+    sources, which `gh pr view --json files` lacks), how far it is behind main, and the issue it closes."""
+    repo, base = repo_of(config), config.get("default_branch", "main")
+    trusted = fetch_trusted(config)
+    pr, pr_comments = fetch_pr(pr_number, config)
+    files = gh_pages(f"repos/{repo}/pulls/{pr_number}/files?per_page=100")
+    try:
+        behind = gh_json(["api", f"repos/{repo}/compare/{base}...{pr['headRefOid']}"]).get("behind_by")
+    except SdlcError:
+        behind = None
+    refs = closes_refs(pr.get("body", ""))
+    issue = fetch_bundle(refs[0], config, trusted) if len(refs) == 1 else None
+    return {"pr": pr, "pr_comments": pr_comments, "trusted": sorted(trusted), "files": files, "behind_by": behind,
+            "issue": issue and issue["issue"], "comments": issue["comments"] if issue else []}
+
+
+def quick_gate_errors(b: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    """quick_merge_gate_errors over a quick-gate bundle (`quick_gate_bundle`, or `--from-file`)."""
+    quick = load_quick(config)
+    tests, reviews = pr_records(b["pr_comments"], set(b["trusted"]))   # deferrals are never read
+    st = quick_issue_state(b, config) if b.get("issue") else None
+    return quick_merge_gate_errors(b["pr"], st, tests, reviews, b.get("behind_by"), b.get("files"),
+                                   approved_brief(st) if st else None, quick, config.get("default_branch", "main"))
+
+
+def command_quick_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """May this quick PR merge into main? Prints each refusal (or `ok`); reads only, never escalates."""
+    b = json.loads(Path(args.from_file).read_text()) if args.from_file else quick_gate_bundle(args.pr, config)
+    errs = quick_gate_errors(b, config)
+    for e in errs:
+        print(f"refused: {e}")
+    if not errs:
+        print("ok")
+    return 1 if errs else 0
+
+
 def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> int:
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(args.number, config)
     quick = bundle_quick(b, config)
@@ -2464,7 +2574,8 @@ def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> in
         t, r = st["tests_on_head"], st["review_on_head"]
         print(f"  PR #{st['pr']} ({st['pr_state']}) head {(st['head'] or '')[:12]}: tests {t['result'] if t else 'not run'}, "
               f"Codex {r['verdict'] if r else 'deferred to the milestone' if st['deferred_on_head'] else 'not yet'}, "
-              f"rounds {st['pr_rounds']}/{config.get('max_pr_rounds', 5)}")
+              + (f"change rounds {st['pr_rounds']}/{load_quick(config).max_change_rounds}" if quick
+                 else f"rounds {st['pr_rounds']}/{config.get('max_pr_rounds', 5)}"))
     print(f"  next: {st['next']}")
     return 0
 
@@ -4260,6 +4371,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true")
     p.add_argument("--from-file")
     p.set_defaults(fn=command_slice_status)
+
+    p = sub.add_parser("quick-gate", help="may this quick PR merge into main? (read-only; each refusal, or ok)")
+    p.add_argument("pr", type=int)
+    p.add_argument("--from-file", help="a JSON bundle: pr, pr_comments, files, behind_by, issue, comments, trusted")
+    p.set_defaults(fn=command_quick_gate)
 
     p = sub.add_parser("slice-check", help="may this slice be started (or resumed) now?")
     p.add_argument("number", type=int)
