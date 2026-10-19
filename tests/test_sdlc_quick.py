@@ -2,6 +2,7 @@
 import dataclasses
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -958,3 +959,188 @@ def test_the_demo_fixtures(capsys, monkeypatch, name, code, needles):
     assert sdlc.main(["quick-gate", "50", "--from-file", str(FIXTURES / f"{name}.json")]) == code
     out = capsys.readouterr().out
     assert all(n in out for n in needles), out
+
+
+# --- merge for a quick PR: squash into main, close, sdlc:done, one record ----------------------
+
+class MergeGitHub:
+    """`gh` faked at the module boundary: every call in order, the posts among them, and the issue's read-backs."""
+
+    def __init__(self, monkeypatch, b, reads=("open", "closed"), first_head=HEAD, fail_on=None):
+        self.calls, self.b, self.fail_on = [], b, fail_on
+        states = iter(reads)
+        routed = {**b["issue"], "state": "open"}
+        self.reads = 0
+
+        def fetch_slice(n, cfg):
+            self.reads += 1
+            if self.reads == 1:   # merge's routing read: the issue and its comments
+                return routed, b["comments"]
+            st = next(states)
+            labels = [l for l in b["issue"]["labels"]]
+            return {**b["issue"], "state": st, "state_reason": "completed" if st == "closed" else None,
+                    "labels": labels}, []
+
+        monkeypatch.setattr(sdlc, "repo_of", lambda cfg: "o/r")
+        monkeypatch.setattr(sdlc, "fetch_trusted", lambda cfg: set(b["trusted"]))
+        monkeypatch.setattr(sdlc, "fetch_pr", lambda n, cfg: ({**b["pr"], "headRefOid": first_head}, b["pr_comments"]))
+        monkeypatch.setattr(sdlc, "fetch_slice", fetch_slice)
+        monkeypatch.setattr(sdlc, "quick_gate_bundle", lambda n, cfg: b)
+        monkeypatch.setattr(sdlc, "gh", self.gh)
+        monkeypatch.setattr(sdlc, "post_comment", lambda n, body, cfg: self.calls.append(["post", n, body]) or {})
+
+    def gh(self, args, check=True):
+        self.calls.append(args)
+        if self.fail_on and args[:2] == self.fail_on:
+            raise sdlc.SdlcError(f"gh {' '.join(args[:3])} failed: boom")
+        return ""
+
+    def kinds(self):
+        return [c[0] if c[0] == "post" else " ".join(c[:2]) for c in self.calls]
+
+
+def run_merge(capsys, *flags):
+    code = sdlc.main(["merge", "50", *flags])
+    out = capsys.readouterr()
+    return code, out.out, out.err
+
+
+def test_merge_dry_run_on_a_quick_pr_names_the_pr_issue_and_head(monkeypatch, capsys):
+    gh = MergeGitHub(monkeypatch, gate_bundle())
+    code, out, _ = run_merge(capsys, "--dry-run")
+    assert code == 0 and gh.calls == []
+    assert f"would squash-merge quick PR #50 (closes #12) into main at {HEAD[:12]}" in out
+    assert "kind=quick-merged pr=50 sha=" + HEAD in out and "epic" not in out
+
+
+def test_merge_dry_run_on_a_failing_quick_pr_lists_every_refusal(monkeypatch, capsys):
+    b = gate_bundle(pr={"isDraft": True}, files=[changed(STATION), changed("src/twiddle/play.py")])
+    gh = MergeGitHub(monkeypatch, b)
+    code, _, err = run_merge(capsys, "--dry-run")
+    assert code == 1 and gh.calls == []
+    assert "PR is a draft" in err and "may not (src/twiddle/play.py)" in err
+
+
+def test_a_quick_merge_squashes_closes_labels_and_records_in_that_order(tmp_path, monkeypatch, capsys):
+    b = gate_bundle()
+    gh = MergeGitHub(monkeypatch, b, reads=("open", "closed"))
+    code, out, _ = run_merge(capsys)
+    assert code == 0, out
+    assert gh.kinds() == ["pr merge", "api -X", "issue close", "issue edit", "post"]
+    merge = gh.calls[0]
+    assert merge == ["pr", "merge", "50", "--repo", "o/r", "--squash", "--match-head-commit", HEAD]
+    edit = gh.calls[3]
+    assert edit[edit.index("sdlc:in-progress") - 1] == "--remove-label" and "sdlc:done" in edit
+    posts = [c for c in gh.calls if c[0] == "post"]
+    assert len(posts) == 1 and posts[0][1] == 12
+    record = posts[0][2]
+    tests_url, review_url = (c["url"] for c in b["pr_comments"])
+    assert f"kind=quick-merged pr=50 sha={HEAD}" in record and tests_url in record and review_url in record
+    assert "into main; #12 closed and sdlc:done" in out
+    # what `state 12` then reads: closed, done, the record posted, and nothing left to do
+    after = {"issue": {**b["issue"], "state": "closed", "labels": [ROUTINE, "sdlc:done"]},
+             "comments": b["comments"] + [comment(OWNER, record, 30)], "trusted": [OWNER]}
+    f = tmp_path / "after.json"
+    f.write_text(json.dumps(after))
+    assert sdlc.main(["state", "--from-file", str(f)]) == 0
+    out = capsys.readouterr().out
+    assert "state: done   lane: quick   turn: none   action: none" in out and "next: nothing" in out
+
+
+def test_a_quick_issue_github_closed_itself_is_not_closed_twice(monkeypatch, capsys):
+    gh = MergeGitHub(monkeypatch, gate_bundle(), reads=("closed",))
+    assert run_merge(capsys)[0] == 0
+    assert gh.kinds() == ["pr merge", "api -X", "issue edit", "post"]
+
+
+def test_a_quick_issue_that_will_not_close_fails_loudly(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    gh = MergeGitHub(monkeypatch, gate_bundle(), reads=("open", "open"))
+    code, _, err = run_merge(capsys)
+    assert code == 1 and "reads back open" in err and "gh issue close 12 --reason completed" in err
+    assert gh.kinds() == ["pr merge", "api -X", "issue close"]   # no label move, no record
+    assert "merged PR #50 into main" in err and "gh issue comment 12 --body-file" in err
+
+
+def test_a_failed_label_move_after_the_squash_says_what_is_left(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    gh = MergeGitHub(monkeypatch, gate_bundle(), reads=("open", "closed"), fail_on=["issue", "edit"])
+    code, _, err = run_merge(capsys)
+    assert code == 1 and gh.kinds() == ["pr merge", "api -X", "issue close", "issue edit"]   # closed, nothing posted
+    assert f"merged PR #50 into main at {HEAD[:12]}" in err
+    assert "--add-label sdlc:done --remove-label sdlc:in-progress" in err
+    path = err.split("--body-file ")[1].split("`")[0]
+    assert Path(path).parent == tmp_path and "kind=quick-merged" in Path(path).read_text()
+
+
+def test_a_bad_read_back_after_the_squash_still_says_what_is_left(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    gh = MergeGitHub(monkeypatch, gate_bundle())
+    reads = []
+
+    def fetch_slice(n, cfg):   # the routing read works; the read-back after the squash gets malformed JSON
+        reads.append(n)
+        if len(reads) > 1:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+        return gh.b["issue"], gh.b["comments"]
+    monkeypatch.setattr(sdlc, "fetch_slice", fetch_slice)
+    code, _, err = run_merge(capsys)
+    assert code == 1 and gh.kinds() == ["pr merge", "api -X"]
+    assert f"merged PR #50 into main at {HEAD[:12]}" in err and "gh issue close 12 --reason completed" in err
+    assert "--add-label sdlc:done" in err and "gh issue comment 12 --body-file" in err
+
+
+def test_merge_squashes_the_head_the_gate_checked(monkeypatch, capsys):
+    gh = MergeGitHub(monkeypatch, gate_bundle(), first_head="d" * 40)   # merge's first read saw an older head
+    assert run_merge(capsys)[0] == 0
+    assert gh.calls[0][-2:] == ["--match-head-commit", HEAD]
+
+
+def test_a_quick_merge_never_looks_up_an_epic(monkeypatch, capsys):
+    MergeGitHub(monkeypatch, gate_bundle())
+    for name in ("epic_progress", "milestone_hold_errors", "with_next"):
+        monkeypatch.setattr(sdlc, name, lambda *a, **k: pytest.fail(f"a quick merge has no epic ({name})"))
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda *a, **k: pytest.fail("no epic bundle"))
+    assert run_merge(capsys)[0] == 0
+
+
+def test_review_defer_refuses_a_quick_pr_and_names_the_options(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("refused before anything is posted"))
+    b = gate_bundle(records=lambda brief: [marked("tests", 7, sha=HEAD, result="pass")])
+    f = tmp_path / "d.json"
+    f.write_text(json.dumps({"pr": b["pr"], "pr_comments": b["pr_comments"], "trusted": [OWNER],
+                             "slice": b["issue"], "comments": b["comments"]}))
+    assert sdlc.main(["review-defer", "50", "--reason", "codex: not found", "--from-file", str(f), "--dry-run"]) == 1
+    err = capsys.readouterr().err
+    assert "never deferred" in err and "stays open" in err and "escalate-to-full 12" in err
+
+
+@pytest.mark.parametrize("dry", [False, True])
+def test_escalate_slice_on_a_quick_issue_leaves_one_state_label(monkeypatch, capsys, dry):
+    b = gate_bundle()
+    calls = []
+    monkeypatch.setattr(sdlc, "repo_of", lambda cfg: "o/r")
+    monkeypatch.setattr(sdlc, "fetch_trusted", lambda cfg: TRUSTED)
+    monkeypatch.setattr(sdlc, "fetch_slice", lambda n, cfg: (b["issue"], b["comments"]))
+    monkeypatch.setattr(sdlc, "gh", lambda args, **k: calls.append(args) or "")
+    monkeypatch.setattr(sdlc, "post_comment", lambda n, body, cfg: calls.append(["post"]) or {})
+    assert sdlc.main(["escalate-slice", "12", "--reason", "stuck", *(["--dry-run"] if dry else [])]) == 0
+    if dry:
+        assert calls == [] and "would move #12 to sdlc:escalated (from sdlc:in-progress)" in capsys.readouterr().out
+        return
+    (edit,) = [c for c in calls if c[:2] == ["issue", "edit"]]
+    labels = set(b["issue"]["labels"]) - {edit[i + 1] for i, a in enumerate(edit) if a == "--remove-label"}
+    labels |= {edit[i + 1] for i, a in enumerate(edit) if a == "--add-label"}
+    assert [l for l in labels if l.startswith("sdlc:")] == ["sdlc:escalated"]
+
+
+def test_escalate_slice_on_a_slice_only_adds_the_label(monkeypatch, capsys):
+    calls = []
+    slice_issue = {**issue(["plan:slice", "complexity:judgment"]), "body": ""}
+    monkeypatch.setattr(sdlc, "repo_of", lambda cfg: "o/r")
+    monkeypatch.setattr(sdlc, "fetch_trusted", lambda cfg: TRUSTED)
+    monkeypatch.setattr(sdlc, "fetch_slice", lambda n, cfg: (slice_issue, []))
+    monkeypatch.setattr(sdlc, "gh", lambda args, **k: calls.append(args) or "")
+    monkeypatch.setattr(sdlc, "post_comment", lambda n, body, cfg: {})
+    assert sdlc.main(["escalate-slice", "12", "--reason", "stuck"]) == 0
+    assert calls == [["issue", "edit", "12", "--repo", "o/r", "--add-label", "sdlc:escalated"]]
