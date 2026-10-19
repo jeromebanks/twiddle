@@ -610,3 +610,16 @@ def test_a_deferral_never_counts_for_a_quick_change(tmp_path, capsys):
     assert st["deferred_on_head"] is False and st["review_on_head"] is None and st["review_mandatory"] is True
     out = status(tmp_path, capsys, b)[1]
     assert "Codex not yet" in out and "milestone" not in out.replace("never owed to a milestone", "")
+
+
+@pytest.mark.parametrize("labels,brief,needle", [
+    ([ROUTINE, "sdlc:approved"], "## Outcome\nonly this", "lacks sections"),
+    (["sdlc:approved"], BRIEF, "complexity:routine"),
+    ([ROUTINE, "complexity:novel", "sdlc:approved"], BRIEF, "complexity:novel"),
+])
+def test_a_refusal_triage_cannot_see_goes_back_to_triage(tmp_path, capsys, labels, brief, needle):
+    b = quick_bundle(labels, ready_quick(brief))
+    st = status(tmp_path, capsys, b, "--json")[1]
+    assert st["state"] == "not-ready" and st["next"].startswith("/triage-issue 12: ") and needle in st["next"]
+    out = status(tmp_path, capsys, b)[1]
+    assert "refused: " in out and needle in out and "/work-slice" not in out

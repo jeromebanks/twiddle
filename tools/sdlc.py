@@ -2430,6 +2430,8 @@ def derive_quick(b: dict[str, Any], st: dict[str, Any]) -> dict[str, Any]:
     if refusals:     # not claimable, or no longer buildable: what triage says comes next
         out["state"] = "not-ready" if out["state"] == "ready" else out["state"]
         out["next"] = next_command(st)
+        if out["next"].startswith("/work-slice"):   # triage can't see these (the brief's sections, the rating)
+            out["next"] = f"/triage-issue {n}: " + "; ".join(refusals)
     elif building:
         out["next"] = f"/work-slice {n} --quick"
     # no milestone to owe a review to: a deferral never counts, Codex reviews the PR
@@ -2453,6 +2455,8 @@ def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> in
     print(f"#{st['number']} {st['title']}\n  state: {st['state']}   {where}"
           + (f"   complexity: {st['complexity']} (model {st['model']})" if st["complexity"] else "")
           + f"   Codex review: {review}")
+    for e in st.get("refusals") or []:
+        print(f"  refused: {e}")
     if st["claim"]:
         print(f"  claimed: {st['claim']['url']} (branch {st['claim']['branch']}"
               + (f", model {st['claim']['model']})" if st["claim"].get("model") else ")"))
