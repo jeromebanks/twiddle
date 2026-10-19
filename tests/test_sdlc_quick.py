@@ -642,7 +642,8 @@ def test_load_quick_reads_the_defaults():
 
 def test_every_denied_twiddle_path_exists():
     # derived from CLAUDE.md's writing rows and layout table, and the code: what writes to a speaker (devices.soap is
-    # the SOAP write path), Spotify or launchd, and the TUIs' app.py files, where a key is wired to a write
+    # the SOAP write path), Spotify or launchd, and where a key or a click is wired to a write (the TUIs' app.py,
+    # dial's volume gauge, the visualizer screen's volume and mute keys)
     root = Path(__file__).resolve().parent.parent
     listed = [d for d in QUICK_RULES.denied_paths if d.startswith("src/twiddle/")]
     assert len(listed) > 15
@@ -806,7 +807,8 @@ def test_what_changed_after_the_claim_is_refused_at_merge(case, needle):
 
 
 def test_a_denied_path_is_refused_even_with_a_pass_and_an_approval():
-    for path in ("src/twiddle/play.py", "tools/sdlc.py", ".sdlc/config.json"):
+    for path in ("src/twiddle/play.py", "tools/sdlc.py", ".sdlc/config.json", "src/twiddle/viz/screen.py",
+                 "src/twiddle/dial/gauge.py"):
         brief = GATE_BRIEF.replace("- tests/test_stations.py", f"- tests/test_stations.py\n- `{path}`")
         b = gate_bundle(comments=ready_quick(brief) + [CLAIM], files=[changed(STATION), changed(path, status="modified")])
         errs = gate(b)

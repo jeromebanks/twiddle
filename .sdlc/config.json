@@ -35,7 +35,7 @@
                              "src/twiddle/discover_cli.py", "src/twiddle/cli.py", "src/twiddle/daemon.py",
                              "src/twiddle/gain.py", "src/twiddle/scene/players.py", "src/twiddle/scene/local.py",
                              "src/twiddle/scene/app.py", "src/twiddle/dial/output.py", "src/twiddle/dial/bluetooth.py",
-                             "src/twiddle/dial/app.py"]},
+                             "src/twiddle/dial/app.py", "src/twiddle/dial/gauge.py", "src/twiddle/viz/screen.py"]},
   "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high", "sandbox": "read-only", "timeout_seconds": 900,
             "flags": ["--skip-git-repo-check", "--color", "never"]},
   "extra_labels": [
