@@ -1,9 +1,10 @@
 """tools/sdlc.py: the quick lane in the ledger — the lane marker, the state, `next`, the frozen brief. No network."""
 import json
+import subprocess
 
 import pytest
 
-from tools import sdlc
+from tools import sdlc, sdlc_quick
 
 CONFIG = sdlc.load_config()
 OWNER, POSTER = "owner", "poster"
@@ -324,3 +325,301 @@ def test_approved_brief_is_the_earlier_revision_while_a_newer_one_is_in_review()
 def test_nothing_approved_means_no_brief():
     st = derive([ROUTINE, "sdlc:prd-review"], [quick_brief()])
     assert sdlc.approved_brief(st) is None and sdlc.approved_brief_id(st) is None
+
+
+# --- claiming a quick change (`claim N --quick`), and slice-check / slice-status ---------
+
+BRIEF = "\n\n".join(f"## {name}\n{name.lower()} of the change" for name in sdlc_quick.BRIEF_SECTIONS)
+HEAD = "a" * 40
+
+
+def marked(kind, ts, **extra):
+    return comment(OWNER, sdlc.marker(kind, None, **extra) + "\nx", ts)
+
+
+def ready_quick(brief=BRIEF, kind="prd"):
+    return [quick_brief(kind=kind, body=brief), agent("approval", 1, 2, by=POSTER, via="comment")]
+
+
+CLAIM = marked("claim", 5, branch="slice/12", base="main", quick="1")
+
+
+def quick_bundle(labels=(ROUTINE, "sdlc:approved"), comments=None, state="open", pr=None, pr_comments=(), **kw):
+    i = {**issue(list(labels), state=state), "body": "the poster's request", **kw}
+    return {"issue": i, "comments": ready_quick() if comments is None else list(comments), "trusted": [OWNER],
+            "blockers": [], "pr": pr, "pr_comments": list(pr_comments)}
+
+
+def check(b, resume=False, is_slice=False):
+    st = sdlc.derive_state(b["issue"], b["comments"], TRUSTED, CONFIG)
+    return sdlc_quick.quick_check_errors(b["issue"], st, sdlc.approved_brief(st),
+                                         sdlc.claim_status(b["comments"], TRUSTED), resume, is_slice)
+
+
+def test_an_approved_quick_brief_may_be_claimed():
+    assert check(quick_bundle()) == []
+    # a diagnosis brief too, and a brief with no Demo: the quick lane's sections have Files instead
+    assert check(quick_bundle(comments=ready_quick(kind="diagnosis"))) == []
+    assert "Demo" not in BRIEF
+
+
+@pytest.mark.parametrize("case,needle", [
+    ("unapproved", "has no approved brief"),
+    ("stale", "the latest is rev 2"),
+    ("full-lane", "is not a quick brief"),
+    ("stale-full", "the latest is rev 2"),
+    ("escalated", "escalated to a human"),
+    ("needs-info", "is needs-info, not approved"),
+    ("closed", "is closed"),
+    ("unrated", "complexity:routine"),
+    ("judgment", "complexity:judgment"),
+    ("claimed", "already claimed"),
+    ("no-files", "lacks sections: Files"),
+    ("no-context", "lacks sections: Context"),
+    ("lowercase", "lacks sections: Non-goals"),     # read as codex_review.section reads it: exactly
+    ("resume-unclaimed", "no claim to resume"),
+    ("slice", "is a plan:slice issue"),
+])
+def test_each_refusal_has_its_own_message(case, needle):
+    resume, is_slice = case == "resume-unclaimed", case == "slice"
+    b = {"unapproved": quick_bundle([ROUTINE, "sdlc:prd-review"], [quick_brief(body=BRIEF)]),
+         "stale": quick_bundle([ROUTINE, "sdlc:prd-review"], ready_quick() + [quick_brief(ts=3, rev=2, body=BRIEF)]),
+         "full-lane": quick_bundle(comments=[agent("prd", 1, 1, BRIEF), agent("approval", 1, 2, by=POSTER)]),
+         "stale-full": quick_bundle([ROUTINE, "sdlc:prd-review"], ready_quick() + [agent("prd", 2, 3, BRIEF)]),
+         "escalated": quick_bundle([ROUTINE, "sdlc:escalated"]),
+         "needs-info": quick_bundle([ROUTINE, "sdlc:needs-info"], ready_quick() + [agent("question", None, 3)]),
+         "closed": quick_bundle(state="closed"),
+         "unrated": quick_bundle(["sdlc:approved"]),
+         "judgment": quick_bundle([ROUTINE, "complexity:judgment", "sdlc:approved"]),
+         "claimed": quick_bundle([ROUTINE, "sdlc:in-progress"], ready_quick() + [CLAIM]),
+         "no-files": quick_bundle(comments=ready_quick(BRIEF.replace("## Files", "## Paths"))),
+         "no-context": quick_bundle(comments=ready_quick(BRIEF.replace("## Context", "Context:"))),
+         "lowercase": quick_bundle(comments=ready_quick(BRIEF.replace("## Non-goals", "## non-goals"))),
+         "resume-unclaimed": quick_bundle(),
+         "slice": quick_bundle(["plan:slice", ROUTINE]),
+         }[case]
+    errs = check(b, resume, is_slice)
+    assert errs and any(needle in e for e in errs), errs
+    if case not in ("unapproved", "stale", "stale-full"):   # each other defect is the only refusal it causes
+        assert len(errs) == 1, errs
+
+
+def test_the_brief_is_checked_not_the_issue_body():
+    b = quick_bundle(body=BRIEF)   # the poster's issue body has every section, the approved brief has one
+    b["comments"] = ready_quick("## Outcome\nonly this")
+    assert any("lacks sections: Scope, Files" in e for e in check(b))
+
+
+def test_a_released_claim_may_be_claimed_again():
+    b = quick_bundle([ROUTINE, "sdlc:in-progress"], ready_quick() + [CLAIM, marked("release", 6)])
+    assert check(b) == []
+
+
+# --- claim N --quick against a scratch repo with a bare origin -------------------------
+
+def _git(*args, cwd):
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    origin, root = tmp_path / "origin.git", tmp_path / "repo"
+    _git("init", "-q", "--bare", "-b", "main", str(origin), cwd=tmp_path)
+    _git("init", "-q", "-b", "main", str(root), cwd=tmp_path)
+    for k, v in (("user.name", "t"), ("user.email", "t@example.com")):
+        _git("config", k, v, cwd=root)
+    (root / "code.py").write_text("x = 1\n")
+    (root / ".gitignore").write_text(".worktrees/\n")
+    _git("add", ".", cwd=root)
+    _git("commit", "-q", "-m", "main", cwd=root)
+    _git("remote", "add", "origin", str(origin), cwd=root)
+    _git("push", "-q", "origin", "main", cwd=root)
+    monkeypatch.chdir(root)    # primary_root() and worktree_path() read the checkout they run in
+    return root
+
+
+class FakeClaim:
+    """`gh` for a claim: the bundle it reads, the comments it posts, the edits it makes."""
+
+    def __init__(self, monkeypatch, bundle):
+        self.bundle, self.posted, self.edits = bundle, [], []
+        monkeypatch.setattr(sdlc, "repo_of", lambda config: "o/r")
+        monkeypatch.setattr(sdlc, "slice_bundle", lambda n, config: self.bundle)
+        monkeypatch.setattr(sdlc, "post_comment", lambda n, body, config: self.posted.append(body) or {"html_url": "u"})
+        monkeypatch.setattr(sdlc, "gh", lambda args, **k: self.edits.append(args) or "")
+        monkeypatch.setattr(sdlc, "gh_json", lambda args: pytest.fail(f"a quick claim reads no epic: {args}"))
+        monkeypatch.setattr(sdlc, "fetch_bundle", lambda *a, **k: pytest.fail("a quick claim reads no epic"))
+
+
+def test_claim_quick_dry_run_names_the_worktree_and_makes_nothing(repo, monkeypatch, capsys):
+    fake = FakeClaim(monkeypatch, quick_bundle())
+    assert sdlc.main(["claim", "12", "--quick", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    wt = repo / ".worktrees" / "slice-12"
+    assert f"worktree {wt} on slice/12 from origin/main" in out
+    assert not wt.exists() and fake.posted == [] and fake.edits == []
+    assert not _git("branch", "--list", "slice/12", cwd=repo)
+
+
+def test_claim_quick_makes_the_worktree_posts_one_claim_and_moves_the_label(repo, monkeypatch, capsys):
+    fake = FakeClaim(monkeypatch, quick_bundle())
+    assert sdlc.main(["claim", "12", "--quick", "--model", "sonnet"]) == 0
+    out = capsys.readouterr().out
+    wt = repo / ".worktrees" / "slice-12"
+    assert f"WORKTREE={wt}" in out and "BRANCH=slice/12" in out and "BASE=origin/main" in out
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=wt) == "slice/12"
+    assert _git("rev-parse", "HEAD", cwd=wt) == _git("rev-parse", "origin/main", cwd=repo)
+    assert len(fake.posted) == 1
+    mk = sdlc.parse_marker(fake.posted[0])
+    assert (mk["kind"], mk["branch"], mk["base"], mk["quick"], mk["model"]) == ("claim", "slice/12", "main", "1", "sonnet")
+    assert any("--add-assignee" in e for e in fake.edits)
+    label = next(e for e in fake.edits if "--add-label" in e)
+    assert label[label.index("--add-label") + 1] == "sdlc:in-progress"
+    assert label[label.index("--remove-label") + 1] == "sdlc:approved"
+    assert "#12: approved -> in-progress" in out
+
+    # the claim is now on record: a second fresh claim is refused, a resume carries on
+    fake.bundle = quick_bundle([ROUTINE, "sdlc:in-progress"], ready_quick() + [CLAIM])
+    fake.posted.clear(), fake.edits.clear()
+    assert sdlc.main(["claim", "12", "--quick"]) == 1
+    assert "already claimed" in capsys.readouterr().err
+    assert sdlc.main(["claim", "12", "--quick", "--resume"]) == 0
+    assert f"WORKTREE={wt}" in capsys.readouterr().out
+    assert fake.posted == [] and fake.edits == []   # no second claim, and the label is already in-progress
+
+    # `cleanup` needs nothing new: the worktree and the branch are a slice's
+    monkeypatch.setattr(sdlc, "find_slice_pr", lambda n, config: {"state": "MERGED"})
+    assert sdlc.main(["cleanup", "12"]) == 0
+    assert not wt.exists() and not _git("branch", "--list", "slice/12", cwd=repo)
+
+
+def test_claim_quick_resume_reattaches_a_pushed_branch(repo, monkeypatch, capsys):
+    FakeClaim(monkeypatch, quick_bundle())
+    sdlc.main(["claim", "12", "--quick"])
+    wt = repo / ".worktrees" / "slice-12"
+    (wt / "station.toml").write_text("key = 'x'\n")
+    _git("add", ".", cwd=wt)
+    _git("commit", "-q", "-m", "station", cwd=wt)
+    _git("push", "-q", "origin", "slice/12", cwd=wt)
+    pushed = _git("rev-parse", "HEAD", cwd=wt)
+    _git("worktree", "remove", "--force", str(wt), cwd=repo)
+    _git("branch", "-D", "slice/12", cwd=repo)
+    # a claim cut short before its label moved: resuming finishes the move
+    fake = FakeClaim(monkeypatch, quick_bundle([ROUTINE, "sdlc:approved"], ready_quick() + [CLAIM]))
+    capsys.readouterr()
+    assert sdlc.main(["claim", "12", "--quick", "--resume"]) == 0
+    assert _git("rev-parse", "HEAD", cwd=wt) == pushed
+    assert fake.posted == [] and any("sdlc:in-progress" in e for e in fake.edits)
+
+
+@pytest.mark.parametrize("argv,bundle,needle", [
+    (["claim", "12"], quick_bundle(), "`claim 12 --quick`"),
+    (["claim", "12", "--quick"], quick_bundle(["plan:slice", ROUTINE]), "without --quick"),
+    (["claim", "12", "--quick", "--retry", "--model", "opus"], quick_bundle(), "never retried"),
+])
+def test_the_wrong_flag_is_refused_either_way(repo, monkeypatch, capsys, argv, bundle, needle):
+    fake = FakeClaim(monkeypatch, bundle)
+    assert sdlc.main(argv) == 1
+    assert needle in capsys.readouterr().err
+    assert fake.posted == [] and fake.edits == [] and not (repo / ".worktrees").exists()
+
+
+# --- slice-status and slice-check read a quick change -------------------------------
+
+def status(tmp_path, capsys, b, *flags):
+    f = tmp_path / "s.json"
+    f.write_text(json.dumps(b))
+    code = sdlc.main(["slice-status", "12", "--from-file", str(f), *flags])
+    out = capsys.readouterr().out
+    return code, (json.loads(out) if "--json" in flags else out)
+
+
+PR = {"number": 50, "state": "OPEN", "headRefOid": HEAD, "baseRefName": "main", "headRefName": "slice/12"}
+RECORDS = [marked("tests", 7, sha=HEAD, result="pass", passed="1300"),
+           marked("pr-review", 8, sha=HEAD, verdict="approve", round="1")]
+
+
+@pytest.mark.parametrize("case,want", [("ready", "ready"), ("claimed", "claimed"), ("in-review", "in-review"),
+                                       ("merged", "merged")])
+def test_slice_status_reads_a_quick_change(tmp_path, capsys, case, want):
+    b = {"ready": quick_bundle(),
+         "claimed": quick_bundle([ROUTINE, "sdlc:in-progress"], ready_quick() + [CLAIM]),
+         "in-review": quick_bundle([ROUTINE, "sdlc:in-progress"], ready_quick() + [CLAIM], pr=PR, pr_comments=RECORDS),
+         "merged": quick_bundle([ROUTINE, "sdlc:done"], ready_quick() + [CLAIM], state="closed", state_reason="completed",
+                                pr={**PR, "state": "MERGED"}, pr_comments=RECORDS),
+         }[case]
+    assert status(tmp_path, capsys, b)[0] == 0
+    st = status(tmp_path, capsys, b, "--json")[1]
+    assert (st["state"], st["lane"], st["epic"]) == (want, "quick", None)
+    assert (st["review"], st["review_mandatory"]) == ("slice", True)
+    if case in ("in-review", "merged"):
+        assert st["tests_on_head"]["result"] == "pass" and st["review_on_head"]["verdict"] == "approve"
+    if case != "merged":
+        assert st["next"] == "/work-slice 12 --quick"
+    out = status(tmp_path, capsys, b)[1]
+    assert f"state: {want}   lane: quick" in out
+    assert "Codex review: on the PR (mandatory" in out and "with the milestone" not in out
+
+
+def test_a_routine_quick_change_is_still_reviewed_on_the_pr(tmp_path, capsys):
+    # every quick change is routine, which the config sends to the milestone for a slice; never for a quick one
+    assert sdlc.review_mode("routine", CONFIG) == "milestone"
+    st = status(tmp_path, capsys, quick_bundle(), "--json")[1]
+    assert st["complexity"] == "routine" and st["review"] == "slice"
+
+
+def test_slice_status_of_a_brief_still_in_review_says_what_comes_first(tmp_path, capsys):
+    st = status(tmp_path, capsys, quick_bundle([ROUTINE, "sdlc:prd-review"], [quick_brief(body=BRIEF)]), "--json")[1]
+    assert st["state"] == "not-ready" and st["next"] == "nothing: waiting on the poster to reply on #12"
+    assert any("has no approved brief" in e for e in st["refusals"])
+
+
+def test_slice_check_reads_the_quick_brief(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda *a, **k: pytest.fail("a quick change has no epic to pause it"))
+    f = tmp_path / "c.json"
+    f.write_text(json.dumps(quick_bundle()))
+    assert sdlc.main(["slice-check", "12", "--from-file", str(f)]) == 0
+    assert "#12: ok to start" in capsys.readouterr().out
+    f.write_text(json.dumps(quick_bundle(comments=ready_quick("## Outcome\nonly this"))))
+    assert sdlc.main(["slice-check", "12", "--from-file", str(f)]) == 1
+    out = capsys.readouterr().out
+    assert "lacks sections" in out and "not workable" in out
+    f.write_text(json.dumps(quick_bundle([ROUTINE, "sdlc:in-progress"], ready_quick() + [CLAIM])))
+    assert sdlc.main(["slice-check", "12", "--from-file", str(f), "--resume"]) == 0
+    assert "#12: ok to resume" in capsys.readouterr().out
+
+
+def test_complexity_rule_is_shared_with_the_transition():
+    assert sdlc_quick.complexity_errors(12, [ROUTINE]) == []
+    assert sdlc_quick.complexity_errors(12, [ROUTINE, "complexity:novel"])
+
+
+@pytest.mark.parametrize("pr", [None, PR])
+def test_a_brief_revised_after_the_claim_stops_the_build(tmp_path, capsys, pr):
+    revised = ready_quick() + [CLAIM, quick_brief(ts=9, rev=2, body=BRIEF)]
+    st = status(tmp_path, capsys, quick_bundle([ROUTINE, "sdlc:in-progress"], revised, pr=pr), "--json")[1]
+    assert st["state"] == ("in-review" if pr else "claimed")
+    assert any("the latest is rev 2" in e for e in st["refusals"])
+    assert "--quick" not in st["next"] and st["next"].startswith("nothing for an agent")
+
+
+def test_a_deferral_never_counts_for_a_quick_change(tmp_path, capsys):
+    deferred = [RECORDS[0], marked("review-deferred", 8, sha=HEAD)]
+    b = quick_bundle([ROUTINE, "sdlc:in-progress"], ready_quick() + [CLAIM], pr=PR, pr_comments=deferred)
+    st = status(tmp_path, capsys, b, "--json")[1]
+    assert st["deferred_on_head"] is False and st["review_on_head"] is None and st["review_mandatory"] is True
+    out = status(tmp_path, capsys, b)[1]
+    assert "Codex not yet" in out and "milestone" not in out.replace("never owed to a milestone", "")
+
+
+@pytest.mark.parametrize("labels,brief,needle", [
+    ([ROUTINE, "sdlc:approved"], "## Outcome\nonly this", "lacks sections"),
+    (["sdlc:approved"], BRIEF, "complexity:routine"),
+    ([ROUTINE, "complexity:novel", "sdlc:approved"], BRIEF, "complexity:novel"),
+])
+def test_a_refusal_triage_cannot_see_goes_back_to_triage(tmp_path, capsys, labels, brief, needle):
+    b = quick_bundle(labels, ready_quick(brief))
+    st = status(tmp_path, capsys, b, "--json")[1]
+    assert st["state"] == "not-ready" and st["next"].startswith("/triage-issue 12: ") and needle in st["next"]
+    out = status(tmp_path, capsys, b)[1]
+    assert "refused: " in out and needle in out and "/work-slice" not in out
