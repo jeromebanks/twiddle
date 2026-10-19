@@ -1144,3 +1144,299 @@ def test_escalate_slice_on_a_slice_only_adds_the_label(monkeypatch, capsys):
     monkeypatch.setattr(sdlc, "post_comment", lambda n, body, cfg: {})
     assert sdlc.main(["escalate-slice", "12", "--reason", "stuck"]) == 0
     assert calls == [["issue", "edit", "12", "--repo", "o/r", "--add-label", "sdlc:escalated"]]
+
+
+# --- a brief that moved to the full lane: `commit-prd`, `merge-prd`, then planning -------------------------
+
+MOVED_BRIEF = ("## Outcome\nthe station plays\n\n## Files\n- `src/twiddle/stations/catalog/x.toml`\n\n"
+         "## Acceptance criteria\n1. it is listed\n2. it plays\n\n## Validation\npytest\n")
+
+
+def escalated(rev2=False, lane=True):
+    """An approved quick brief (and, with `rev2`, a second approved revision) moved to the full lane by hand."""
+    out = [quick_brief(1, body=MOVED_BRIEF), comment(POSTER, "/approve", 2), agent("approval", 1, 3, by=POSTER, via="comment")]
+    if rev2:
+        out += [quick_brief(4, rev=2, body=MOVED_BRIEF + "\nrevised\n"), comment(POSTER, "/approve", 5),
+                agent("approval", 2, 6, by=POSTER, via="comment")]
+    return out + ([agent("lane", None, 7, "Moved to the full lane: Codex asked for changes 3 times.", lane="full")]
+                  if lane else [])
+
+
+def anchor(c):
+    return c["url"].rsplit("-", 1)[1]
+
+
+ESCALATED_LABELS = [ROUTINE, "sdlc:approved", "lane:quick"]
+
+
+def test_a_brief_moved_to_the_full_lane_is_committed_before_it_is_planned():
+    st = derive(ESCALATED_LABELS, escalated())
+    assert (st["action"], st["turn"], st["lane"]) == ("commit_prd", "agent", None)
+    assert not sdlc.is_quick(st)            # never a quick change again: no quick claim, gate or merge
+    assert sdlc.next_command(st) == "`uv run python tools/sdlc.py commit-prd 12`"
+    assert sdlc_quick.quick_check_errors(issue(ESCALATED_LABELS), st, sdlc.approved_brief(st), None)
+    done = derive(ESCALATED_LABELS, escalated() + [agent("prd-merged", None, 9, comment="1")])
+    assert (done["action"], sdlc.next_command(done)) == ("plan", "/plan-issue 12")
+
+
+def test_a_lane_record_counts_only_on_an_approved_quick_brief():
+    full_prd = [agent("prd", 1, 1), agent("approval", 1, 2, by=POSTER, via="comment"), agent("lane", None, 3, lane="full")]
+    assert derive(["sdlc:approved"], full_prd)["action"] == "plan"          # never quick: nothing to commit
+    unapproved = [quick_brief(1), agent("lane", None, 2, lane="full")]
+    assert derive([ROUTINE, "sdlc:prd-review"], unapproved)["to_full"] is None
+    # a prd-merged before any escalation means nothing
+    early = [agent("prd-merged", None, 1)] + escalated()[1:]
+    assert derive(ESCALATED_LABELS, [quick_brief(0, body=MOVED_BRIEF)] + early)["action"] == "commit_prd"
+
+
+def test_a_new_revision_after_the_escalation_is_what_gets_approved_next():
+    st = derive([ROUTINE, "sdlc:prd-review"], escalated() + [agent("prd", 2, 8, "## Outcome\nbigger")])
+    assert st["to_full"] is None and st["action"] == "wait_for_poster"
+
+
+def test_an_escalated_brief_still_labelled_in_progress_needs_a_human():
+    st = derive([ROUTINE, "sdlc:in-progress", "lane:quick"], escalated())
+    assert st["action"] == "fix_conflict" and any("docs/prd/" in c for c in st["conflicts"])
+
+
+class PrdGitHub:
+    """`gh` for commit-prd / merge-prd over a scratch repo's bare origin: PRs are branches there, and a merge
+    moves origin's main to the PR's head. Every call is kept; `fail` names a step that fails once."""
+
+    def __init__(self, monkeypatch, root, comments, labels=ESCALATED_LABELS):
+        self.root, self.origin = root, root.parent / "origin.git"
+        self.issue, self.comments, self.calls, self.posted = issue(labels), list(comments), [], []
+        self.prs, self.fail, self.after_create = {}, set(), []
+        monkeypatch.setattr(sdlc, "repo_of", lambda config: "o/r")
+        monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, config, trusted=None: self.bundle())
+        monkeypatch.setattr(sdlc, "post_comment", self.post)
+        monkeypatch.setattr(sdlc, "gh", self.gh)
+        monkeypatch.setattr(sdlc, "gh_json", self.gh_json)
+        monkeypatch.setattr(sdlc.time, "sleep", lambda s: pytest.fail("a fake PR is mergeable at once"))
+
+    def bundle(self):
+        return {"issue": self.issue, "comments": list(self.comments), "trusted": [OWNER]}
+
+    def state(self):
+        return sdlc.bundle_state(self.bundle(), CONFIG)
+
+    def post(self, n, body, config):
+        if "post" in self.fail:
+            self.fail.discard("post")
+            raise sdlc.SdlcError("network down")
+        self.posted.append(body)
+        self.comments.append(comment(OWNER, body, 40 + len(self.posted)))
+        return {"html_url": self.comments[-1]["url"]}
+
+    def sha(self, ref):
+        return subprocess.run(["git", "rev-parse", "--verify", "-q", f"refs/heads/{ref}"], cwd=self.origin,
+                              capture_output=True, text=True).stdout.strip()
+
+    def open_pr(self, branch, files):
+        """A PR someone else opened: `files` committed on `branch` from main."""
+        wt = self.root.parent / f"wt-{branch.replace('/', '-')}"
+        _git("worktree", "add", "-q", "--detach", str(wt), "origin/main", cwd=self.root)
+        for path, text in files.items():
+            (wt / path).parent.mkdir(parents=True, exist_ok=True)
+            (wt / path).write_text(text)
+        _git("add", ".", cwd=wt)
+        _git("commit", "-q", "-m", "docs", cwd=wt)
+        _git("push", "-q", "origin", f"HEAD:refs/heads/{branch}", cwd=wt)
+        _git("worktree", "remove", "--force", str(wt), cwd=self.root)
+        number = 100 + len(self.prs)
+        self.prs[number] = {"head": branch, "state": "OPEN"}
+        return number
+
+    def gh(self, args, **k):
+        self.calls.append(args)
+        if args[:2] == ["pr", "create"]:
+            number = 100 + len(self.prs)
+            self.prs[number] = {"head": args[args.index("--head") + 1], "state": "OPEN"}
+            for more in self.after_create:     # what someone posts on the issue while the PR is being made
+                self.comments.append(more)
+            return f"https://github.com/o/r/pull/{number}\n"
+        if args[:2] == ["pr", "merge"]:
+            if "merge" in self.fail:
+                self.fail.discard("merge")
+                raise sdlc.SdlcError("gh pr merge failed: GitHub is down")
+            pr = self.prs[int(args[2])]
+            sha = self.sha(pr["head"])
+            assert args[args.index("--match-head-commit") + 1] == sha
+            _git("update-ref", "refs/heads/main", sha, cwd=self.origin)
+            _git("update-ref", "-d", f"refs/heads/{pr['head']}", cwd=self.origin)
+            pr["state"] = "MERGED"
+            return ""
+        pytest.fail(f"unexpected gh {args}")
+
+    def gh_json(self, args):
+        self.calls.append(args)
+        if args[:2] == ["pr", "list"]:
+            head, state = args[args.index("--head") + 1], args[args.index("--state") + 1]
+            return [{"number": n, "url": f"u/{n}"} for n, pr in self.prs.items()
+                    if pr["head"] == head and pr["state"].lower() == state]
+        if args[:2] == ["pr", "view"]:
+            pr = self.prs[int(args[2])]
+            if args[-1] == "mergeable":
+                return {"mergeable": "MERGEABLE"}
+            files = _git("diff", "--name-only", f"main...{pr['head']}", cwd=self.origin).split()
+            return {"state": pr["state"], "mergeable": "MERGEABLE", "baseRefName": "main", "headRefName": pr["head"],
+                    "headRefOid": self.sha(pr["head"]), "files": [{"path": p} for p in files]}
+        pytest.fail(f"unexpected gh_json {args}")
+
+    def on_main(self):
+        _git("fetch", "-q", "origin", "main", cwd=self.root)
+        return [p for p in _git("ls-tree", "--name-only", "origin/main", "docs/prd/", cwd=self.root).split() if p]
+
+    def created(self):
+        return [c for c in self.calls if c[:2] == ["pr", "create"]]
+
+
+def plan_for_12():
+    leaf = {"key": "T1", "title": "do it", "blocked_by": [], "covers": [1, 2], "outcome": "o", "scope": "s",
+            "acceptance": ["a"], "validation": "v", "demo": "d", "non_goals": "n", "context": "c",
+            "complexity": "routine", "complexity_reason": "small", "milestone": "M1"}
+    return {"issue": 12, "kind": "feature", "milestones": [{"key": "M1", "title": "it", "demo": "d"}],
+            "subtasks": [leaf]}
+
+
+def test_commit_prd_merges_the_brief_and_planning_starts(repo, monkeypatch, capsys, tmp_path):
+    fake = PrdGitHub(monkeypatch, repo, escalated())
+    assert sdlc.main(["commit-prd", "12"]) == 0
+    assert len(fake.created()) == 1 and "Closes" not in json.dumps(fake.calls)   # main must never close the issue
+    assert fake.on_main() == ["docs/prd/12-add-a-station.md"]
+    text = _git("show", "origin/main:docs/prd/12-add-a-station.md", cwd=repo)
+    brief = fake.comments[0]
+    assert sdlc.header_links(text, anchor(brief))
+    assert "[sign-off](" in text and "[approval record](" in text and "moved to the full lane" in text
+    assert "## Acceptance criteria\n1. it is listed" in text and "🤖" not in text and "/approve" not in text
+    assert len(fake.posted) == 1 and f"comment={anchor(brief)}" in fake.posted[0].splitlines()[0]
+    st = fake.state()
+    assert (st["action"], sdlc.next_command(st)) == ("plan", "/plan-issue 12")
+    capsys.readouterr()
+    assert sdlc.main(["state", "12"]) == 0
+    out = capsys.readouterr().out
+    assert "action: plan" in out and "next: /plan-issue 12" in out
+    # planning finds it: the plan prompt's requirements, and plan-validate's criteria
+    assert sdlc.approved_requirements(12, anchor(brief), "", "origin/main", repo)[1] == Path("docs/prd/12-add-a-station.md")
+    _git("merge", "-q", "--ff-only", "origin/main", cwd=repo)
+    monkeypatch.setattr(sdlc, "ROOT", repo)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(plan_for_12()))
+    assert sdlc.main(["plan-validate", str(plan)]) == 0
+    assert sdlc.plan_criteria(plan_for_12())[0] == {1, 2}
+    assert _git("worktree", "list", cwd=repo).count("\n") == 0                     # the throwaway worktree is gone
+
+
+@pytest.mark.parametrize("files", [
+    {"docs/prd/notes.md": "# notes\n"},                                                  # unrelated docs
+    {"docs/prd/47-other.md": "# PRD\n\n[PRD](x#issuecomment-{a})\n\n## Problem\n"},      # another issue's PRD
+    {"docs/prd/12-x.md": "# PRD\n\n[PRD](x#issuecomment-{a})\n", "docs/prd/assets/a.png": "png"},   # two files
+    {"docs/prd/12-x.md": "# PRD\n\n[PRD](x#issuecomment-{stale})\n\n## Problem\n"},      # an earlier revision
+    {"docs/prd/12-x.md": "# PRD\n\nno link\n\n## Problem\n[PRD](x#issuecomment-{a})\n"},  # linked below the header
+])
+def test_merge_prd_refuses_anything_but_this_brief_s_file(repo, monkeypatch, capsys, files):
+    fake = PrdGitHub(monkeypatch, repo, escalated(rev2=True))
+    a, stale = anchor(fake.comments[3]), anchor(fake.comments[0])
+    pr = fake.open_pr("docs-x", {p: t.format(a=a, stale=stale) for p, t in files.items()})
+    assert sdlc.main(["merge-prd", "12", str(pr)]) == 1
+    assert "pr merge" not in " ".join(" ".join(c) for c in fake.calls) and fake.posted == []
+    assert fake.state()["action"] == "commit_prd"
+
+
+def test_merge_prd_takes_this_brief_s_file_and_records_it(repo, monkeypatch, capsys):
+    fake = PrdGitHub(monkeypatch, repo, escalated(rev2=True))
+    pr = fake.open_pr("docs-x", {"docs/prd/12-x.md": f"# PRD\n\n[PRD](x#issuecomment-{anchor(fake.comments[3])})\n\n## P\n"})
+    assert sdlc.main(["merge-prd", "12", str(pr)]) == 0
+    assert fake.state()["action"] == "plan"
+
+
+def test_commit_prd_after_an_unmerged_pr_reuses_it(repo, monkeypatch, capsys):
+    fake = PrdGitHub(monkeypatch, repo, escalated())
+    fake.fail.add("merge")
+    assert sdlc.main(["commit-prd", "12"]) == 1 and fake.on_main() == []
+    assert fake.state()["action"] == "commit_prd"
+    assert sdlc.main(["commit-prd", "12"]) == 0
+    assert len(fake.created()) == 1 and fake.on_main() == ["docs/prd/12-add-a-station.md"] and len(fake.posted) == 1
+
+
+def test_commit_prd_after_a_merge_that_was_not_recorded_only_records_it(repo, monkeypatch, capsys):
+    fake = PrdGitHub(monkeypatch, repo, escalated())
+    fake.fail.add("post")
+    assert sdlc.main(["commit-prd", "12"]) == 1
+    assert "Rerun `commit-prd 12` to record it" in capsys.readouterr().err
+    assert fake.on_main() == ["docs/prd/12-add-a-station.md"] and fake.state()["action"] == "commit_prd"
+    calls = len(fake.calls)
+    assert sdlc.main(["commit-prd", "12"]) == 0
+    assert len(fake.created()) == 1 and fake.on_main() == ["docs/prd/12-add-a-station.md"] and len(fake.posted) == 1
+    assert not any(c[:2] in (["pr", "create"], ["pr", "merge"]) for c in fake.calls[calls:])
+    assert fake.state()["action"] == "plan"
+    assert sdlc.main(["commit-prd", "12"]) == 0 and "already" in capsys.readouterr().out   # a third run: nothing
+    assert len(fake.posted) == 1
+
+
+def test_commit_prd_reuses_a_file_already_there_rather_than_adding_one(repo, monkeypatch, capsys):
+    fake = PrdGitHub(monkeypatch, repo, escalated(rev2=True))
+    # an earlier escalation's file (rev 1) is on main: the new one overwrites it, never sits beside it
+    pr = fake.open_pr("old", {"docs/prd/12-old-name.md": f"# PRD\n\n[PRD](x#issuecomment-{anchor(fake.comments[0])})\n"})
+    fake.gh(["pr", "merge", str(pr), "--match-head-commit", fake.sha("old")])
+    fake.calls.clear()
+    assert sdlc.main(["commit-prd", "12"]) == 0
+    assert fake.on_main() == ["docs/prd/12-old-name.md"]
+    assert sdlc.header_links(_git("show", "origin/main:docs/prd/12-old-name.md", cwd=repo), anchor(fake.comments[3]))
+
+
+def test_merge_prd_on_a_normal_prd_does_what_it_always_did(monkeypatch, capsys):
+    calls, posted = [], []
+    bundle = {"issue": issue(["sdlc:approved"]), "trusted": [OWNER],
+              "comments": [agent("prd", 1, 1), comment(POSTER, "/approve", 2), agent("approval", 1, 3, by=POSTER)]}
+    monkeypatch.setattr(sdlc, "repo_of", lambda config: "o/r")
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, config, trusted=None: bundle)
+    monkeypatch.setattr(sdlc, "post_comment", lambda *a: posted.append(a))
+    monkeypatch.setattr(sdlc, "git", lambda *a, **k: pytest.fail("a normal merge-prd runs no git"))
+    monkeypatch.setattr(sdlc, "gh_json", lambda args: calls.append(args) or {
+        "state": "OPEN", "mergeable": "MERGEABLE", "baseRefName": "main", "files": [{"path": "docs/prd/12-x.md"}]})
+    monkeypatch.setattr(sdlc, "gh", lambda args, **k: calls.append(args) or "")
+    assert sdlc.main(["merge-prd", "12", "7"]) == 0
+    assert calls == [["pr", "view", "7", "--repo", "o/r", "--json", "state,mergeable,baseRefName,files"],
+                     ["pr", "merge", "7", "--repo", "o/r", "--squash", "--delete-branch"]]
+    assert posted == [] and capsys.readouterr().out == "merged PR #7\n"
+
+
+@pytest.mark.parametrize("comments,labels", [
+    (approved_quick(), [ROUTINE, "sdlc:approved", "lane:quick"]),                       # still quick
+    ([agent("prd", 1, 1), agent("approval", 1, 2, by=POSTER, via="comment")], ["sdlc:approved"]),   # full lane
+])
+def test_commit_prd_refuses_an_issue_that_never_left_the_quick_lane(repo, monkeypatch, capsys, comments, labels):
+    fake = PrdGitHub(monkeypatch, repo, comments, labels)
+    assert sdlc.main(["commit-prd", "12"]) == 1
+    assert "never left the quick lane" in capsys.readouterr().err and fake.calls == [] and fake.posted == []
+
+
+def test_commit_prd_dry_run_writes_pushes_and_posts_nothing(repo, monkeypatch, capsys):
+    fake = PrdGitHub(monkeypatch, repo, escalated())
+    refs = _git("for-each-ref", cwd=fake.origin), _git("for-each-ref", cwd=repo)
+    trees = _git("worktree", "list", cwd=repo)
+    assert sdlc.main(["commit-prd", "12", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "would write docs/prd/12-add-a-station.md" in out and f"#issuecomment-{anchor(fake.comments[0])}" in out
+    assert (_git("for-each-ref", cwd=fake.origin), _git("for-each-ref", cwd=repo)) == refs
+    assert _git("worktree", "list", cwd=repo) == trees and _git("status", "--porcelain", cwd=repo) == ""
+    assert fake.posted == [] and all(c[:2] == ["pr", "list"] for c in fake.calls)
+
+
+def test_wait_mergeable_is_bounded(monkeypatch):
+    monkeypatch.setattr(sdlc, "repo_of", lambda config: "o/r")
+    monkeypatch.setattr(sdlc, "gh_json", lambda args: {"mergeable": "UNKNOWN"})
+    slept = []
+    monkeypatch.setattr(sdlc.time, "sleep", slept.append)
+    assert sdlc.wait_mergeable(5, CONFIG, wait=4, poll=2) == "UNKNOWN" and slept == [2, 2]
+    with pytest.raises(sdlc.SdlcError):
+        sdlc.wait_mergeable(5, CONFIG, wait=4, poll=0)
+
+
+def test_a_revision_posted_while_the_pr_is_made_stops_the_merge(repo, monkeypatch, capsys):
+    fake = PrdGitHub(monkeypatch, repo, escalated())
+    fake.after_create = [agent("prd", 2, 30, "## Outcome\nbigger", lane="quick")]
+    assert sdlc.main(["commit-prd", "12"]) == 1
+    assert "changed while PR" in capsys.readouterr().err
+    assert not any(c[:2] == ["pr", "merge"] for c in fake.calls) and fake.posted == [] and fake.on_main() == []

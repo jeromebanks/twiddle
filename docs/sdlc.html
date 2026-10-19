@@ -242,6 +242,9 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <tr><td><span class="chip">sdlc:approved</span> / <span class="chip">sdlc:in-progress</span> with <span class="chip">lane:quick</span></td><td class="turn agent">agent</td>
 <td>A small, safe change whose brief was posted with <code>transition N prd-review --kind prd --lane quick</code> (only on a <span class="chip">complexity:routine</span> issue). It is built from that one approved brief, with no plan or epic. Once building starts the brief is frozen: <code>escalate-to-full N</code> is the only way to change course.</td>
 <td><code>work_quick</code> → <code>/work-slice N --quick</code></td></tr>
+<tr><td><span class="chip">sdlc:approved</span>, its quick brief moved to the full lane</td><td class="turn agent">agent</td>
+<td>A <code>kind=lane lane=full</code> record took the approved brief out of the quick lane. Planning reads the PRD from <code>docs/prd/</code>, so <code>commit-prd N</code> first writes the brief there through a docs-only PR and <code>merge-prd</code>, which checks the file links the approved comment and records <code>prd-merged</code>. Then planning starts as usual.</td>
+<td><code>commit_prd</code> → <code>commit-prd N</code>, then <code>plan</code> → <code>/plan-issue N</code></td></tr>
 </tbody></table></div>
 <p class="note">The slices themselves (<span class="chip">plan:slice</span>, <span class="chip">plan:subtask</span>) and filed
 <span class="chip">tech-debt</span> are never triaged on their own. They move with their epic.</p>
@@ -265,7 +268,8 @@ orchestrator) knows exactly what to run.</p>
 <td><span class="chip">in-progress</span> ⇄ <span class="chip">demo-review</span>. The last ship makes it <span class="chip">done</span>.</td>
 <td><code>demo-status</code>, <code>demo-request</code>, <code>demo-post</code>, <code>demo-accept</code>, <code>demo-changes</code>, <code>sync</code>, <code>ship-review</code>, <code>ship</code>, <code>verify-main</code>, <code>revert-slice</code>, <code>file-issue</code></td></tr>
 </tbody></table></div>
-<p class="note">Also: <code>epic-branch N</code> gives an older epic its branch, <code>next</code> lists every issue where it's the
+<p class="note">Also: <code>commit-prd N</code> (<code>--dry-run</code>, safe to rerun) puts a quick brief that moved to the
+full lane into <code>docs/prd/</code> before it is planned; <code>epic-branch N</code> gives an older epic its branch, <code>next</code> lists every issue where it's the
 agent's move, and <code>state N</code> explains one. <code>quick-gate PR</code> (read-only) says why a quick PR may not
 merge into main yet: a denied path, more than the size cap in <code>.sdlc/config.json</code>'s <code>quick</code> section, a file
 outside the brief's <code>## Files</code>, too many Codex change rounds, or the issue no longer an eligible quick change.</p>
