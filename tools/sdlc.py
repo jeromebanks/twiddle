@@ -3887,6 +3887,7 @@ def command_demo_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Publish a milestone's demo pictures and post the demo on the epic for the poster."""
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
+    refuse_quick(st, "milestone to demo")
     n, key, offline = st["number"], args.milestone, bool(getattr(args, "from_file", None))
     errs = []
     if st["conflicts"] or not (epic_building(st) or st["state"] == "demo-review") or st.get("feedback"):

@@ -198,15 +198,20 @@ def test_a_quick_issue_never_reaches_epic_code():
     ["demo-request", "12", "--milestone", "M1", "--body-file", "{b}"],
     ["demo-changes", "12", "--milestone", "M1", "--found", "--body-file", "{b}"],
 ])
-def test_epic_commands_refuse_a_quick_issue(tmp_path, capsys, monkeypatch, argv):
+@pytest.mark.parametrize("offline", [True, False])
+def test_epic_commands_refuse_a_quick_issue(tmp_path, capsys, monkeypatch, argv, offline):
+    bundle = {"issue": issue([ROUTINE, "sdlc:in-progress"]), "comments": approved_quick(), "trusted": [OWNER]}
     monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("must refuse before GitHub"))
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, config, trusted=None: bundle)
+    monkeypatch.setattr(sdlc, "fetch_plan_issues", lambda *a: pytest.fail("a quick issue has no plan issues"))
+    monkeypatch.setattr(sdlc, "epic_progress", lambda *a: pytest.fail("a quick issue is not an epic"))
     f = tmp_path / "b.json"
-    f.write_text(json.dumps({"issue": issue([ROUTINE, "sdlc:in-progress"]), "comments": approved_quick(),
-                             "trusted": [OWNER]}))
+    f.write_text(json.dumps(bundle))
     (tmp_path / "body.md").write_text("x")
-    argv = [a.format(d=tmp_path, b=tmp_path / "body.md") for a in argv] + ["--from-file", str(f), "--dry-run"]
-    assert sdlc.main(argv) == 1
-    assert "is in-progress" in capsys.readouterr().err
+    argv = [a.format(d=tmp_path, b=tmp_path / "body.md") for a in argv] + ["--dry-run"]
+    assert sdlc.main(argv + (["--from-file", str(f)] if offline else [])) == 1
+    err = capsys.readouterr().err
+    assert "quick change" in err or "is in-progress" in err
 
 
 def test_demo_status_refuses_a_quick_issue_before_any_epic_lookup(capsys, monkeypatch):
