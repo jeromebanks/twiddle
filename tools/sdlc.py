@@ -90,6 +90,8 @@ REVIEW_STATES = {"needs-info", "prd-review", "diagnosis-review"}
 REVIEW_DOC = {"prd-review": "prd", "diagnosis-review": "diagnosis"}
 LATER_STATES = {"done"}
 BUILD_STATES = {"planned", "in-progress"}     # the epic's slices are being built (`work-slice`)
+QUICK = "quick"                                 # the lane of a small, safe change: one brief, no epic
+QUICK_LABEL = f"lane:{QUICK}"
 TRIAGE_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label"}
 PLAN_ACTIONS = {"plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone",
                 "escalate_plan"}
@@ -102,7 +104,7 @@ DEMO_ACTIONS = {"record_demo_acceptance", "demo_reply", "demo_heard"}
 ALL_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label",
                "plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone", "escalate_plan",
                "record_demo_acceptance", "demo_reply", "demo_heard",
-               "work_slices", "wait_for_poster", "human", "fix_conflict", "none"}
+               "work_slices", "work_quick", "wait_for_poster", "human", "fix_conflict", "none"}
 NO_MILESTONE = "all"     # an epic planned without milestones has one demo, for all of it
 # from-state -> states the triage skill may move to. `escalated` is open from anywhere.
 TRANSITIONS = {
@@ -169,6 +171,8 @@ def keyword_lines(body: str) -> list[tuple[str, str]]:
 class Ledger:
     latest_doc: dict[str, Any] | None = None
     approved_rev: int | None = None
+    approved_doc: dict[str, Any] | None = None   # the latest approved revision, kept when a newer one is posted
+    lane: str | None = None              # the latest revision's lane: `quick`, or None for the full lane
     approval_by: str | None = None
     rounds: int = 0                      # triage rounds (questions and PRD/diagnosis revisions)
     latest_plan: dict[str, Any] | None = None
@@ -191,6 +195,7 @@ class Ledger:
     # milestone -> its slices that merged without their own Codex approval (routine, or Codex unavailable),
     # until an approving milestone review after them
     review_owed: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    doc_body: str = ""                   # the latest revision's comment, as read
 
 
 def _rev(mk: dict[str, str]) -> int | None:
@@ -224,13 +229,16 @@ def _on_question(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> No
 def _on_doc(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     L.rounds += 1
     if (rev := _rev(mk)) is not None:
-        L.latest_doc = {"kind": mk["kind"], "rev": rev, "id": c.get("id"), "url": c.get("url")}
+        L.lane = mk.get("lane") if mk.get("lane") == QUICK else None
+        L.latest_doc = {"kind": mk["kind"], "rev": rev, "id": c.get("id"), "url": c.get("url"), "lane": L.lane}
         L.approved_rev = None
+        L.doc_body = c.get("body", "")
 
 
 def _on_approval(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     if L.latest_doc and _rev(mk) == L.latest_doc["rev"]:
         L.approved_rev, L.approval_by = _rev(mk), mk.get("by")
+        L.approved_doc = {**L.latest_doc, "body": L.doc_body}
 
 
 def _on_plan(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
@@ -429,6 +437,12 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         conflicts.append(f"rev {approved_rev} is approved on record but the label is {PREFIX}{state}")
     if state == "demo-review" and not latest_demo:
         conflicts.append(f"{PREFIX}demo-review but no milestone demo has been posted")
+    quick = is_quick({"lane": L.lane, "approved_doc": L.approved_doc})
+    if state in BUILD_STATES and quick and not (state == "in-progress" and doc_approved and L.lane == QUICK):
+        # a quick change is built from its approved brief alone: never let it fall through to an epic's slices
+        conflicts.append(f"{PREFIX}{state} on a quick change, but " + (
+            "a quick change has no plan" if state == "planned" else
+            f"its latest revision (rev {latest_doc['rev']}) is " + ("not approved" if L.lane == QUICK else "not quick")))
 
     try:
         latest_plan_json = extract_plan(plan_body) if plan_body else {}
@@ -449,6 +463,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         turn, action = "human", "human"
     elif state in LATER_STATES:
         turn, action = "later", "none"
+    elif state in BUILD_STATES and quick:
+        turn, action = "agent", "work_quick"   # the approved quick brief is being built (`work-slice N --quick`)
     elif state in BUILD_STATES and (feedback or next_due or plan_after_created):
         # the plan is being amended: the poster's changes at a demo, or the next milestone's replan
         turn = "agent"
@@ -482,6 +498,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         turn = "agent"
         if reconcile:
             action = "reconcile_label"
+        elif L.lane == QUICK:
+            action = "work_quick"
         elif latest_plan is None:
             action = "plan"
         elif plan_verdict == "approve":
@@ -492,7 +510,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
             action = "continue_plan"
     elif replies:
         turn = "agent"
-        if state == "needs-info" and doc_approved:
+        if state == "needs-info" and doc_approved and L.lane != QUICK:   # a quick brief is never planned
             action = "replan"
         elif decision and decision["action"] == "approve" and decision.get("valid"):
             action = "record_approval"
@@ -504,7 +522,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     type_label = next((t for t in ("bug", "enhancement") if t in issue.get("labels", [])), None)
     return {
         "number": issue.get("number"), "title": issue.get("title"), "state": state, "turn": turn,
-        "action": action, "type": type_label, "latest_doc": latest_doc, "approved_rev": approved_rev,
+        "action": action, "type": type_label, "lane": L.lane, "latest_doc": latest_doc, "approved_rev": approved_rev,
+        "approved_doc": L.approved_doc,
         "approval_by": approval_by, "rounds": rounds, "max_rounds": config.get("max_rounds", 5),
         "replies": [{"id": c.get("id"), "by": c.get("author"), "url": c.get("url")} for c in replies],
         "decision": decision, "ignored_keywords": ignored, "reconcile": reconcile, "stale_labels": stale,
@@ -518,6 +537,23 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "planned_milestones": planned_ms, "created_milestones": sorted(created_ms, key=natural_key),
         "uncreated_milestones": uncreated, "create_mode": latest_plan_json.get("create") or config.get("create", "milestone"),
     }
+
+
+def is_quick(st: dict[str, Any]) -> bool:
+    """A quick change (its latest or its approved revision is in the quick lane): never an epic."""
+    return st.get("lane") == QUICK or (st.get("approved_doc") or {}).get("lane") == QUICK
+
+
+def epic_building(st: dict[str, Any]) -> bool:
+    """An epic whose slices are being built: `planned` or `in-progress`, and not a quick change."""
+    return st["state"] in BUILD_STATES and not is_quick(st)
+
+
+def refuse_quick(st: dict[str, Any], what: str) -> None:
+    """Epic-only commands stop here for a quick change, before they look up any plan or progress."""
+    if is_quick(st):
+        raise SdlcError(f"#{st['number']} is a quick change, not an epic: it has no {what} "
+                        f"(`/work-slice {st['number']} --quick` builds it)")
 
 
 def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> str:
@@ -547,6 +583,8 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
         return f"nothing: waiting on the poster to reply on #{n}"
     if a in ("human", "fix_conflict"):
         return f"nothing for an agent: #{n} needs a human" + (f" ({'; '.join(st['conflicts'])})" if st["conflicts"] else "")
+    if a == "work_quick":
+        return f"/work-slice {n} --quick"
     if a == "work_slices":
         if progress is None:
             return f"`uv run python tools/sdlc.py state {n}` (needs the slices' progress)"
@@ -651,6 +689,9 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
     """{phases, current, due, cleanup, offered, next}: due is one of verify, done, plan_next, review, demo, ship,
     cleanup, sync, build."""
     n = st["number"]
+    if is_quick(st):   # no milestones, demos or slices: never offer an epic's next step for it
+        return {"number": n, "phases": [], "current": None, "due": "quick", "cleanup": None, "offered": [],
+                "cleanup_open": [], "cleanup_needs": [], "next": f"/work-slice {n} --quick: a quick change is no epic"}
     phases = milestone_phases(st, progress)
     cur = next((m for m in phases if m["phase"] != "shipped"), None)
     offered = offered_slices(progress, cur)
@@ -777,11 +818,26 @@ def milestone_hold_errors(epic: dict[str, Any], progress: dict[str, Any] | None,
     return merge_errors(epic_view(epic, progress), slice_milestone) if progress else []
 
 
-def check_transition(st: dict[str, Any], to: str, kind: str, config: dict[str, Any]) -> list[str]:
-    """Reasons a transition is not allowed (empty list = fine)."""
+def check_transition(st: dict[str, Any], to: str, kind: str, config: dict[str, Any],
+                     lane: str | None = None, labels: list[str] | tuple[str, ...] = ()) -> list[str]:
+    """Reasons a transition is not allowed (empty list = fine). `lane` is the new revision's (`--lane`)."""
     errs: list[str] = []
+    n = st["number"]
     if st.get("plan_kind"):
-        return [f"#{st['number']} is a plan:{st['plan_kind']} issue: work-slice drives it, not transition"]
+        return [f"#{n} is a plan:{st['plan_kind']} issue: work-slice drives it, not transition"]
+    if is_quick(st) and st["state"] == "in-progress" and to in REVIEW_STATES:
+        # the brief is frozen once building starts: the only change of course is the full lane
+        return [f"#{n} is a quick change being built, so its brief is frozen: "
+                f"`uv run python tools/sdlc.py escalate-to-full {n}` is the way to change course"]
+    if lane is not None:
+        if lane != QUICK:
+            errs.append(f"unknown lane {lane!r} (the only one is {QUICK})")
+        if kind not in DOC_KINDS:
+            errs.append(f"--lane goes on a prd or diagnosis revision, not a {kind}")
+        rated = sorted(l for l in labels if l.startswith(COMPLEXITY_PREFIX))
+        if rated != [f"{COMPLEXITY_PREFIX}routine"]:   # a judgment or novel label anywhere disqualifies it
+            errs.append(f"only an issue labelled {COMPLEXITY_PREFIX}routine (and no other complexity) can take the "
+                        f"quick lane (#{n} is " + (", ".join(rated) if rated else "unrated") + ")")
     if f"{PREFIX}{to}" not in state_labels(config):
         errs.append(f"unknown state {to!r}")
         return errs
@@ -945,10 +1001,14 @@ def patch_comment(comment_id: int, body: str, config: dict[str, Any]) -> None:
         gh(["api", "-X", "PATCH", f"repos/{repo_of(config)}/issues/comments/{comment_id}", "-F", f"body=@{fh.name}"])
 
 
-def set_state_label(n: int, current: list[str], to: str, config: dict[str, Any]) -> None:
+def set_state_label(n: int, current: list[str], to: str, config: dict[str, Any],
+                    add: tuple[str, ...] = (), remove: tuple[str, ...] = ()) -> None:
+    """Move the sdlc:* label to `to`; `add`/`remove` change other labels (the lane's) in the same edit."""
     args = ["issue", "edit", str(n), "--repo", repo_of(config), "--add-label", f"{PREFIX}{to}"]
+    for extra in add:
+        args += ["--add-label", extra]
     for old in current:
-        if old in state_labels(config) and old != f"{PREFIX}{to}":
+        if (old in state_labels(config) and old != f"{PREFIX}{to}") or old in remove:
             args += ["--remove-label", old]
     gh(args)
 
@@ -961,7 +1021,8 @@ def print_state(st: dict[str, Any]) -> None:
         return
     doc = st["latest_doc"]
     print(f"#{st['number']} {st['title']}")
-    print(f"  state: {st['state']}   turn: {st['turn']}   action: {st['action']}   type: {st['type'] or '?'}")
+    print(f"  state: {st['state']}" + (f"   lane: {st['lane']}" if st.get("lane") else "")
+          + f"   turn: {st['turn']}   action: {st['action']}   type: {st['type'] or '?'}")
     print(f"  latest revision: {('%s rev %s' % (doc['kind'], doc['rev'])) if doc else 'none'}"
           f"   approved: {st['approved_rev'] or 'no'}" + (f" (comment {approved_comment(st)})" if st.get("doc_approved") else "")
           + f"   rounds: {st['rounds']}/{st['max_rounds']}")
@@ -1061,7 +1122,8 @@ def command_transition(args: argparse.Namespace, config: dict[str, Any]) -> int:
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
     kind = args.kind
-    errs = check_transition(st, args.to, kind, config)
+    lane = getattr(args, "lane", None)
+    errs = check_transition(st, args.to, kind, config, lane=lane, labels=bundle["issue"]["labels"])
     doc = st["latest_doc"]
     if kind in DOC_KINDS:
         rev = (doc["rev"] if doc else 0) + 1
@@ -1077,7 +1139,8 @@ def command_transition(args: argparse.Namespace, config: dict[str, Any]) -> int:
         body = Path(args.body_file).read_text()
     elif kind == "approval":
         body = (f"{doc['kind'].upper()} rev {rev} approved by @{st['decision']['by']}. "
-                "Next: planning (`plan-issue`).")
+                + (f"Next: building it in the quick lane (`work-slice {st['number']} --quick`)."
+                   if st.get("lane") == QUICK else "Next: planning (`plan-issue`)."))
     elif kind == "note" and args.to == "triage":
         body = "Triaging this now: reading the issue and the code it touches."
     elif kind == "escalation":
@@ -1085,25 +1148,32 @@ def command_transition(args: argparse.Namespace, config: dict[str, Any]) -> int:
     else:
         raise SdlcError("--body-file is required")
     extra = {"by": st["decision"]["by"], "via": "comment"} if kind == "approval" else {}
-    if kind == "question" and st.get("doc_approved"):
+    if kind == "question" and st.get("doc_approved") and st.get("lane") != QUICK:   # a quick brief's is triage
         extra = {"phase": "plan"}
+    if kind in DOC_KINDS and lane:
+        extra = {"lane": lane}
     comment = render_comment(kind, rev, body, config, **extra)
     current = [l for l in bundle["issue"]["labels"]]
+    # a revision's lane is its label too: a quick brief adds it, a full-lane revision takes it off
+    add_lane = (QUICK_LABEL,) if kind in DOC_KINDS and lane else ()
+    drop_lane = (QUICK_LABEL,) if kind in DOC_KINDS and not lane else ()
     if args.dry_run:
         print(f"DRY RUN #{st['number']}: {st['state']} -> {args.to}")
-        print(f"labels: add {PREFIX}{args.to}, remove {[l for l in current if l in state_labels(config) and l != PREFIX + args.to]}")
+        print(f"labels: add {[PREFIX + args.to, *add_lane]}, remove "
+              f"{[l for l in current if (l in state_labels(config) and l != PREFIX + args.to) or l in drop_lane]}")
         print("----- comment -----")
         print(comment)
         return 0
     n = st["number"]
     have = {l["name"] for l in gh_json(["label", "list", "--repo", repo_of(config), "--limit", "200", "--json", "name"])}
-    if f"{PREFIX}{args.to}" not in have:
-        raise SdlcError(f"label {PREFIX}{args.to} does not exist: run `bootstrap-labels` first (nothing was posted)")
+    for want in (f"{PREFIX}{args.to}", *add_lane):
+        if want not in have:
+            raise SdlcError(f"label {want} does not exist: run `bootstrap-labels` first (nothing was posted)")
     posted = post_comment(n, comment, config)
     if kind in DOC_KINDS and doc:
         old = next(c for c in bundle["comments"] if c["id"] == doc["id"])
         patch_comment(old["id"], render_superseded(old["body"], rev, posted.get("html_url", "")), config)
-    set_state_label(n, current, args.to, config)
+    set_state_label(n, current, args.to, config, add=add_lane, remove=drop_lane)
     print(f"#{n}: {st['state']} -> {args.to}  {posted.get('html_url', '')}")
     return 0
 
@@ -2372,8 +2442,8 @@ def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -
     else:
         trusted = set(b["trusted"])
         st = bundle_state(fetch_bundle(int(epic), config, trusted), config)
-        progress = epic_progress(int(epic), config, trusted) if st["state"] in BUILD_STATES else None
-    if st["state"] not in BUILD_STATES | {"demo-review"}:
+        progress = epic_progress(int(epic), config, trusted) if epic_building(st) else None
+    if not epic_building(st) and st["state"] != "demo-review":
         return [f"epic #{epic} is {st['state']}: no new slices until it's back in progress"]
     if st.get("untested"):
         return [f"main holds a release no recorded run saw ({', '.join(st['untested'])}): `verify-main {epic}` first"]
@@ -2665,11 +2735,36 @@ def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: 
                            settings, args.dry_run, f"pr-review {pr['number']} --report {out / 'codex.md'} --response <your answers>")
 
 
-def approved_comment(st: dict[str, Any]) -> str:
-    """The approved PRD or diagnosis comment's id, as its `#issuecomment-` anchor (and `merge-prd`'s doc) gives it."""
-    doc = st["latest_doc"]
+def comment_anchor(doc: dict[str, Any]) -> str:
+    """A revision's comment id, as its `#issuecomment-` anchor (and `merge-prd`'s doc) gives it."""
     m = re.search(r"#issuecomment-(\d+)$", doc.get("url") or "")
     return m.group(1) if m else str(doc["id"])
+
+
+def approved_comment(st: dict[str, Any]) -> str:
+    """The approved PRD or diagnosis comment's id, as its `#issuecomment-` anchor (and `merge-prd`'s doc) gives it."""
+    return comment_anchor(st["latest_doc"])
+
+
+SUPERSEDED_RE = re.compile(r"<details><summary>[^<]*\(superseded\)</summary>\n\n(.*)\n\n</details>\s*\Z", re.DOTALL)
+
+
+def approved_brief(st: dict[str, Any]) -> str | None:
+    """The approved revision's text (the latest one approved, even if a newer one is under review), without its
+    marker; a comment `render_superseded` collapsed is unwrapped. None: nothing approved. The quick lane's brief."""
+    doc = st.get("approved_doc")
+    if not doc:
+        return None
+    body = doc.get("body") or ""
+    if m := SUPERSEDED_RE.search(body):
+        body = m.group(1)
+    return "\n".join(l for l in body.splitlines() if not MARKER_RE.match(l.strip())).strip()
+
+
+def approved_brief_id(st: dict[str, Any]) -> str | None:
+    """The approved revision's comment id (see approved_brief), or None."""
+    doc = st.get("approved_doc")
+    return comment_anchor(doc) if doc else None
 
 
 def approved_requirements(n: int, comment_id: str, comment_body: str, ref: str, root: Path) -> tuple[str, str | Path]:
@@ -2776,6 +2871,7 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
         already = lambda title: bool(b.get("on_main"))  # noqa: E731
     else:
         bundle = fetch_bundle(n, config)
+        refuse_quick(bundle_state(bundle, config), "milestone to review")
         progress = epic_progress(n, config, set(bundle["trusted"]))
         head = epic_head(n, config)
         gh_ms = {m["title"]: m for m in gh_pages(f"repos/{repo_of(config)}/milestones?state=all&per_page=100")}
@@ -3234,6 +3330,7 @@ def command_ship_review(args: argparse.Namespace, config: dict[str, Any]) -> int
         already = lambda title: bool(b.get("on_main"))  # noqa: E731
     else:
         bundle = fetch_bundle(args.number, config)
+        refuse_quick(bundle_state(bundle, config), "milestone to review")
         progress = epic_progress(args.number, config, set(bundle["trusted"]))
         head = epic_head(args.number, config)
         leaves = [r for r in fetch_plan_issues(args.number, config, set(bundle["trusted"])) if r["kind"] == "slice"]
@@ -3343,8 +3440,9 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
     bundle = fetch_bundle(n, config)
     trusted = set(bundle["trusted"])
     st = bundle_state(bundle, config)
-    if st["conflicts"] or st["state"] not in BUILD_STATES | {"done"}:
-        raise SdlcError(f"#{n} is {st['state']}: nothing to ship")
+    if st["conflicts"] or st["state"] not in BUILD_STATES | {"done"} or is_quick(st):
+        raise SdlcError(f"#{n} is {st['state']}" + (" (a quick change: it merges to main itself)" if is_quick(st) else "")
+                        + ": nothing to ship")
     records = fetch_plan_issues(n, config, trusted)
     leaves = [r for r in records if r["kind"] == "slice"]
     progress = summarise_progress(leaves, {})
@@ -3694,6 +3792,7 @@ def demo_brief(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str
     """Everything milestone-demo needs: each milestone's demo steps, slices, PRs and demo state."""
     repo = repo_of(config)
     st = bundle_state(fetch_bundle(epic, config, trusted), config)
+    refuse_quick(st, "milestones to demo")
     records = fetch_plan_issues(epic, config, trusted)
     leaves = [r for r in records if r["kind"] == "slice"]
     progress = epic_progress(epic, config, trusted)    # the same progress `state` uses, so `next` agrees
@@ -3788,9 +3887,10 @@ def command_demo_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Publish a milestone's demo pictures and post the demo on the epic for the poster."""
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
+    refuse_quick(st, "milestone to demo")
     n, key, offline = st["number"], args.milestone, bool(getattr(args, "from_file", None))
     errs = []
-    if st["conflicts"] or st["state"] not in BUILD_STATES | {"demo-review"} or st.get("feedback"):
+    if st["conflicts"] or not (epic_building(st) or st["state"] == "demo-review") or st.get("feedback"):
         errs.append(f"#{n} is {st['state']} (action {st['action']}): not the time for a demo")
     elif st["state"] == "demo-review" and (st["latest_demo"] or {}).get("milestone") != key:
         errs.append(f"#{n} is already in review for {st['latest_demo']['milestone']}: that comes first")
@@ -3924,7 +4024,7 @@ def record_agent_findings(args: argparse.Namespace, bundle: dict[str, Any], st: 
         raise SdlcError("--found needs --milestone: the milestone the demo found broken")
     if key in (st.get("shipped") or {}):
         raise SdlcError(f"{key} has shipped to main: file what's wrong with `file-issue {n}` instead")
-    if st["conflicts"] or st["state"] not in BUILD_STATES | {"demo-review"}:
+    if st["conflicts"] or not (epic_building(st) or st["state"] == "demo-review"):
         raise SdlcError(f"#{n} is {st['state']}: no milestone is being demoed")
     if st.get("feedback"):
         raise SdlcError(f"#{n} already has changes waiting to be planned: `/plan-issue {n}` first")
@@ -3949,7 +4049,7 @@ def command_demo_request(args: argparse.Namespace, config: dict[str, Any]) -> in
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
     n = st["number"]
-    if st["conflicts"] or st["state"] not in BUILD_STATES:
+    if st["conflicts"] or not epic_building(st):
         raise SdlcError(f"#{n} is {st['state']}: not the time to ask for demo steps")
     if (r := st.get("demo_request")) and not r["replies"]:
         raise SdlcError(f"#{n} already has demo steps waiting for an answer: {r['url']}")
@@ -4017,6 +4117,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--body-file")
     p.add_argument("--rev", type=int)
     p.add_argument("--reason", help="why, for an escalation")
+    p.add_argument("--lane", choices=[QUICK], help="a prd/diagnosis revision is a quick brief (complexity:routine only)")
     p.add_argument("--dry-run", action="store_true", help="print the labels and comment, change nothing")
     p.add_argument("--from-file")
     p.set_defaults(fn=command_transition)
