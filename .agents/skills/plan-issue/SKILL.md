@@ -59,6 +59,11 @@ Dispatch on `action`:
 ## 2. Read what is being built
 
 - The approved PRD (`docs/prd/N-*.md`) or the diagnosis comment, and the issue's comments.
+  A PRD merged on GitHub (`merge-prd`, `commit-prd`, `escalate-to-full`) may not be in this checkout yet:
+  if there is no local `docs/prd/N-*.md`, run `git fetch origin main`, find it with
+  `git ls-tree --name-only origin/main docs/prd/` and read it with `git show origin/main:docs/prd/N-<name>.md`.
+  Don't pull or fast-forward the checkout. `plan-validate`, `plan-post` and `plan-create` look there
+  on their own, the same way.
 - `CLAUDE.md`, especially the read-only vs writing table and the layout table.
 - The code the work touches. Read enough to know the seams, not everything.
 

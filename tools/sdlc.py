@@ -1769,21 +1769,60 @@ def prd_path(n: int) -> Path | None:
     return found[0] if found else None
 
 
-def plan_criteria(plan: dict[str, Any]) -> tuple[set[int] | None, list[str]]:
+def prd_at(n: int, ref: str, root: Path, comment_id: str | None = None) -> tuple[str, str] | None:
+    """(path, text) of the docs/prd/N-*.md on `ref`, read from git with no fetch; the one whose header links
+    `comment_id` when there is one, else the first by name. None when `ref` has none (or doesn't exist)."""
+    listed = git(["ls-tree", "--name-only", ref, "docs/prd/"], cwd=root, check=False).splitlines()
+    found = [(p, git(["show", f"{ref}:{p}"], cwd=root, check=False))
+             for p in sorted(p for p in listed if re.fullmatch(rf"docs/prd/{n}-[^/]*\.md", p))]
+    linked = [f for f in found if comment_id and header_links(f[1], comment_id)]
+    return (linked or found or [None])[0]
+
+
+def find_prd(n: int, ref: str | None = None, comment_id: str | None = None) -> tuple[str, str] | None:
+    """(path relative to the repo, text) of issue N's PRD: the working tree's, as always; only when it has none,
+    the one on `ref` (see `planning_ref`)."""
+    if path := prd_path(n):
+        return path.relative_to(ROOT).as_posix(), path.read_text()
+    return prd_at(n, ref, ROOT, comment_id) if ref else None
+
+
+def planning_ref(n: Any, config: dict[str, Any], offline: bool) -> str | None:
+    """Where planning also looks for issue N's PRD: `origin/<default_branch>`, fetched once here, but only when
+    the working tree has no docs/prd/N-*.md (a PRD merged on GitHub that this checkout hasn't pulled). None
+    offline (`--from-file` never fetches) or when the working tree has it, so that case is exactly as before.
+    A failed fetch is said on stderr, and the last fetched ref is read instead."""
+    if offline or not isinstance(n, int) or prd_path(n):
+        return None
+    main = config.get("default_branch", "main")
+    try:
+        git(["fetch", "-q", "origin", main], cwd=ROOT)
+    except SdlcError as exc:
+        print(f"{exc}: reading docs/prd/{n}-*.md from the last fetched origin/{main}", file=sys.stderr)
+    return f"origin/{main}"
+
+
+def plan_criteria(plan: dict[str, Any], ref: str | None = None,
+                  comment_id: str | None = None) -> tuple[set[int] | None, list[str]]:
     """The criteria a plan must cover. A feature needs its merged PRD; a bug's diagnosis may have none."""
-    path = prd_path(plan.get("issue", 0)) if isinstance(plan.get("issue"), int) else None
-    criteria = parse_criteria(path.read_text()) if path else set()
+    found = find_prd(plan["issue"], ref, comment_id) if isinstance(plan.get("issue"), int) else None
+    criteria = parse_criteria(found[1]) if found else set()
     if plan.get("kind") == "feature" and not criteria:
         return None, [f"no numbered acceptance criteria found in docs/prd/{plan.get('issue')}-*.md "
-                      "(merge the approved PRD first)"]
+                      + (f"(nor on {ref}) " if ref else "") + "(merge the approved PRD first)"]
     return (criteria or None), []
 
 
-def check_plan(plan: Any) -> list[str]:
+def check_plan(plan: Any, ref: str | None = None, comment_id: str | None = None) -> list[str]:
     if not isinstance(plan, dict):
         return ["the plan is not a JSON object"]
-    criteria, errs = plan_criteria(plan)
+    criteria, errs = plan_criteria(plan, ref, comment_id)
     return errs + validate_plan(plan, criteria)
+
+
+def plan_errors(plan: Any, ref: str | None, comment_id: str | None = None) -> list[str]:
+    """`check_plan`, also at `ref` when planning looks there; with no ref, exactly `check_plan(plan)` as before."""
+    return check_plan(plan, ref, comment_id) if ref else check_plan(plan)
 
 
 def _fence(text: str) -> str:
@@ -2018,7 +2057,7 @@ def latest_plan_of(bundle: dict[str, Any], st: dict[str, Any]) -> tuple[dict[str
 
 def command_plan_validate(args: argparse.Namespace, config: dict[str, Any]) -> int:
     plan = json.loads(Path(args.file).read_text())
-    errs = check_plan(plan)
+    errs = plan_errors(plan, planning_ref(plan.get("issue") if isinstance(plan, dict) else None, config, offline=False))
     for e in errs:
         print(f"  - {e}")
     if errs:
@@ -2065,7 +2104,8 @@ def command_plan_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
         raise SdlcError(f"#{st['number']} is {st['state']} (action {st['action']}): not the time to post a plan"
                         + (" — the Codex rounds are spent; ask the poster (`transition N needs-info --kind question`)"
                            if st["action"] == "ask_poster" else ""))
-    errs = check_plan(plan)
+    ref = planning_ref(plan.get("issue"), config, offline=bool(getattr(args, "from_file", None)))
+    errs = plan_errors(plan, ref, st.get("latest_doc") and approved_comment(st))
     if plan.get("issue") != st["number"]:
         errs.append(f"the plan is for #{plan.get('issue')}, not #{st['number']}")
     if st["state"] in BUILD_STATES and st["latest_plan"]:
@@ -2132,7 +2172,9 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
                         "(it needs Codex's `approve` on the latest plan revision)")
     plan_comment, plan = latest_plan_of(bundle, st)
     epic = st["number"]
-    errs = check_plan(plan) + ([] if plan.get("issue") == epic else [f"the plan is for #{plan.get('issue')}"])
+    ref = planning_ref(plan.get("issue"), config, offline=bool(getattr(args, "from_file", None)))
+    cid = st.get("latest_doc") and approved_comment(st)
+    errs = plan_errors(plan, ref, cid) + ([] if plan.get("issue") == epic else [f"the plan is for #{plan.get('issue')}"])
     errs += cleanup_budget_errors(plan, st, config)
     if errs:
         raise SdlcError("the reviewed plan no longer validates: " + "; ".join(errs))
@@ -2159,8 +2201,8 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
     items = {t["key"]: t for t in plan["subtasks"]} | {l["key"]: l for l in plan_leaves(plan)}
     in_scope = (lambda k: True) if target is None else (  # noqa: E731
         lambda k: (items[k].get("milestone") or items[k].get("_milestone")) in target)
-    path = prd_path(epic)
-    prd_url = f"https://github.com/{repo}/blob/{config.get('default_branch', 'main')}/{path.relative_to(ROOT)}" if path else None
+    prd = find_prd(epic, ref, cid)   # the plan is for the epic (checked above), so `ref` was looked up for it
+    prd_url = f"https://github.com/{repo}/blob/{config.get('default_branch', 'main')}/{prd[0]}" if prd else None
     if acts and not offline and not args.dry_run:
         have = {l["name"] for l in gh_json(["label", "list", "--repo", repo, "--limit", "200", "--json", "name"])}
         need = [LEAF_LABEL, CONTAINER_LABEL] + [COMPLEXITY_PREFIX + c for c in COMPLEXITY]

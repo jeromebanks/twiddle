@@ -1341,6 +1341,115 @@ def test_commit_prd_merges_the_brief_and_planning_starts(repo, monkeypatch, caps
     assert _git("worktree", "list", cwd=repo).count("\n") == 0                     # the throwaway worktree is gone
 
 
+# --- planning finds a PRD merged on GitHub that this checkout hasn't pulled (F2) ---------------------------
+
+def _recording_git(monkeypatch):
+    """Wrap `sdlc.git`, keeping every call's arguments, so a test can say whether anything was fetched."""
+    calls, real = [], sdlc.git
+    monkeypatch.setattr(sdlc, "git", lambda args, *a, **k: calls.append(list(args)) or real(args, *a, **k))
+    return calls
+
+
+def _merge_on_origin(fake, files):
+    """Someone else's PR with `files`, merged into the bare origin's main: this checkout is now behind it."""
+    pr = fake.open_pr(f"docs-{len(fake.prs)}", files)
+    fake.gh(["pr", "merge", str(pr), "--match-head-commit", fake.sha(fake.prs[pr]["head"])])
+
+
+PRD_12 = "# PRD: add a station (#12)\n\n[PRD](x#issuecomment-1)\n\n## Acceptance criteria\n\n1. a\n2. b\n"
+
+
+def test_commit_prd_then_planning_starts_with_no_fast_forward(repo, monkeypatch, capsys, tmp_path):
+    fake = PrdGitHub(monkeypatch, repo, escalated())
+    assert sdlc.main(["commit-prd", "12"]) == 0
+    assert not (repo / "docs").exists()          # the checkout's working tree never has it: nobody pulled
+    monkeypatch.setattr(sdlc, "ROOT", repo)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(plan_for_12()))
+    capsys.readouterr()
+    assert sdlc.main(["plan-validate", str(plan)]) == 0
+    assert "ok" in capsys.readouterr().out
+    assert sdlc.main(["plan-post", "12", str(plan), "--dry-run"]) == 0       # plan-post finds it the same way
+    assert "plan rev 1" in capsys.readouterr().out
+    assert not (repo / "docs").exists() and _git("status", "--porcelain", cwd=repo) == ""   # nothing pulled
+
+
+def test_plan_validate_finds_a_full_lane_prd_merged_after_the_last_pull(repo, monkeypatch, capsys, tmp_path):
+    fake = PrdGitHub(monkeypatch, repo, [], labels=["sdlc:approved"])
+    _merge_on_origin(fake, {"docs/prd/12-add-a-station.md": PRD_12})
+    assert _git("ls-tree", "--name-only", "origin/main", "docs/prd/", cwd=repo) == ""   # behind: not fetched yet
+    monkeypatch.setattr(sdlc, "ROOT", repo)
+    calls = _recording_git(monkeypatch)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(plan_for_12()))
+    assert sdlc.main(["plan-validate", str(plan)]) == 0
+    assert [c for c in calls if c[0] == "fetch"] == [["fetch", "-q", "origin", "main"]]   # once
+    assert sdlc.plan_criteria(plan_for_12(), "origin/main")[0] == {1, 2}
+    assert not (repo / "docs").exists()
+
+
+def test_a_prd_in_the_working_tree_is_read_as_before_with_no_fetch(repo, monkeypatch, capsys, tmp_path):
+    fake = PrdGitHub(monkeypatch, repo, [], labels=["sdlc:approved"])
+    _merge_on_origin(fake, {"docs/prd/12-other.md": PRD_12 + "3. c\n"})   # main has another: the local one wins
+    (repo / "docs" / "prd").mkdir(parents=True)
+    (repo / "docs" / "prd" / "12-local.md").write_text(PRD_12)
+    monkeypatch.setattr(sdlc, "ROOT", repo)
+    calls = _recording_git(monkeypatch)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(plan_for_12()))
+    assert sdlc.main(["plan-validate", str(plan)]) == 0
+    assert calls == [] and sdlc.planning_ref(12, CONFIG, offline=False) is None
+    assert sdlc.find_prd(12, "origin/main") == ("docs/prd/12-local.md", PRD_12)
+    assert sdlc.plan_errors(plan_for_12(), None) == sdlc.check_plan(plan_for_12()) == []
+
+
+def test_a_failed_fetch_is_said_and_the_last_fetched_main_is_read(repo, monkeypatch, capsys, tmp_path):
+    fake = PrdGitHub(monkeypatch, repo, [], labels=["sdlc:approved"])
+    _merge_on_origin(fake, {"docs/prd/12-add-a-station.md": PRD_12})
+    _git("fetch", "-q", "origin", "main", cwd=repo)
+    _git("remote", "set-url", "origin", str(tmp_path / "gone.git"), cwd=repo)   # a local path: no network
+    monkeypatch.setattr(sdlc, "ROOT", repo)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(plan_for_12()))
+    assert sdlc.main(["plan-validate", str(plan)]) == 0
+    assert "git fetch -q origin failed" in (err := capsys.readouterr().err)
+    assert "reading docs/prd/12-*.md from the last fetched origin/main" in err
+
+
+def test_a_feature_with_no_prd_anywhere_still_fails_and_says_where_it_looked(repo, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(sdlc, "ROOT", repo)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(plan_for_12()))
+    assert sdlc.main(["plan-validate", str(plan)]) == 1
+    assert "docs/prd/12-*.md (nor on origin/main)" in capsys.readouterr().out
+    bug = {**plan_for_12(), "kind": "bug"}
+    assert sdlc.check_plan(bug, "origin/main") == []                   # a bug with no PRD validates as before
+
+
+def test_from_file_never_fetches_and_reads_only_the_working_tree(repo, monkeypatch, capsys, tmp_path):
+    fake = PrdGitHub(monkeypatch, repo, escalated())
+    assert sdlc.main(["commit-prd", "12"]) == 0      # origin/main has it (and this checkout fetched it)
+    monkeypatch.setattr(sdlc, "ROOT", repo)
+    bundle, plan = tmp_path / "bundle.json", tmp_path / "plan.json"
+    bundle.write_text(json.dumps(fake.bundle()))
+    plan.write_text(json.dumps(plan_for_12()))
+    calls = _recording_git(monkeypatch)
+    assert sdlc.main(["plan-post", "12", str(plan), "--from-file", str(bundle), "--dry-run"]) == 1
+    assert "no numbered acceptance criteria found in docs/prd/12-*.md (merge" in capsys.readouterr().err
+    assert calls == []
+
+
+def test_prd_at_prefers_the_file_that_links_the_approved_comment(repo, monkeypatch):
+    fake = PrdGitHub(monkeypatch, repo, [], labels=["sdlc:approved"])
+    _merge_on_origin(fake, {"docs/prd/12-a.md": PRD_12, "docs/prd/12-b.md": PRD_12.replace("comment-1)", "comment-9)"),
+                            "docs/prd/120-c.md": PRD_12})
+    _git("fetch", "-q", "origin", "main", cwd=repo)
+    assert sdlc.prd_at(12, "origin/main", repo, "9")[0] == "docs/prd/12-b.md"
+    assert sdlc.prd_at(12, "origin/main", repo)[0] == "docs/prd/12-a.md"          # none known: the first by name
+    assert sdlc.prd_at(12, "origin/main", repo, "5")[0] == "docs/prd/12-a.md"     # none links it: the first too
+    assert sdlc.prd_at(13, "origin/main", repo) is None and sdlc.prd_at(12, "origin/nope", repo) is None
+
+
 @pytest.mark.parametrize("files", [
     {"docs/prd/notes.md": "# notes\n"},                                                  # unrelated docs
     {"docs/prd/47-other.md": "# PRD\n\n[PRD](x#issuecomment-{a})\n\n## Problem\n"},      # another issue's PRD
