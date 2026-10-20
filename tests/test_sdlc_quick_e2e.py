@@ -765,7 +765,10 @@ def test_a_full_lane_slice_still_goes_from_its_plan_to_its_epic_branch(lane):
     assert code == 0, err
     assert "Brief:" not in report.read_text()                      # a slice's review names no quick brief
     out = lane.ok("merge", pr)
-    assert f"merged PR #{pr} into epic/{epic}; #{s} closed" in out and "next: " in out
+    assert out.splitlines() == [f"merged PR #{pr} into epic/{epic}; #{s} closed",
+                                f"milestone #{epic} M1: alarms listed is complete: its demo comes before any new slice",
+                                f"next: /milestone-demo {epic}: #{epic} M1: alarms listed is complete, and new slices "
+                                "wait for its demo"]
 
     # one squash on epic/E; main untouched; the slice closed by the tool (GitHub only closes on main)
     assert gh.origin_git("rev-parse", f"epic/{epic}^") == epic_before and lane.main_sha() == main_before
