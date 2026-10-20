@@ -473,7 +473,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     commit_due = bool(L.to_full and not L.prd_merged)   # the escalated brief isn't in docs/prd/ yet
     if commit_due and state in BUILD_STATES:
         conflicts.append(f"{PREFIX}{state}, but its quick brief moved to the full lane: it goes back to "
-                         f"{PREFIX}approved, and its brief to docs/prd/, before it is planned")
+                         f"{PREFIX}approved, and its brief to docs/prd/, before it is planned "
+                         f"(`escalate-to-full {issue.get('number')}` finishes it)")
     try:
         latest_plan_json = extract_plan(plan_body) if plan_body else {}
     except SdlcError:
@@ -3624,11 +3625,15 @@ def escalate_to_full(n: int, reason: str, trigger: str, config: dict[str, Any], 
             raise SdlcError(f"posted the lane record on #{n}, but its state doesn't count it "
                             f"(state {st['state']}, latest rev {(st.get('latest_doc') or {}).get('rev')}): "
                             "nothing else changed; a human decides")
-    set_state_label(n, bundle["issue"].get("labels", []), "approved", config, remove=(QUICK_LABEL,))
+    try:   # the record is posted: whatever fails from here, say how to finish
+        set_state_label(n, bundle["issue"].get("labels", []), "approved", config, remove=(QUICK_LABEL,))
+    except Exception as exc:
+        raise SdlcError(f"#{n}'s lane record is posted, but its labels didn't move: {exc}. "
+                        f"Rerun `escalate-to-full {n}` to finish it")
     print(f"#{n}: moved to the full lane, {PREFIX}approved")
     try:
         return commit_prd(n, config)
-    except SdlcError as exc:
+    except Exception as exc:
         raise SdlcError(f"#{n} is in the full lane, but its brief isn't in docs/prd/ yet: {exc}. "
                         f"`commit-prd {n}` is safe to rerun")
 

@@ -1598,6 +1598,22 @@ def test_a_commit_prd_failure_leaves_the_escalation_and_says_how_to_finish(monke
     assert sorted(fake.issue["labels"]) == [ROUTINE, "sdlc:approved"] and fake.state()["action"] == "commit_prd"
 
 
+def test_a_failed_label_move_says_to_rerun(monkeypatch, capsys):
+    fake = EscalateGitHub(monkeypatch, gate_bundle(labels=ESC_LABELS))
+    edit = fake.gh
+
+    def failing(args, check=True):
+        if args[:2] == ["issue", "edit"]:
+            raise sdlc.SdlcError("gh issue edit failed: boom")
+        return edit(args, check)
+    monkeypatch.setattr(sdlc, "gh", failing)
+    assert sdlc.main(["escalate-to-full", "12", "--reason", "x"]) == 1
+    assert "Rerun `escalate-to-full 12` to finish it" in capsys.readouterr().err
+    assert len(fake.posted) == 1 and fake.committed == [] and fake.issue["labels"] == ESC_LABELS
+    st = fake.state()   # what `state 12` shows meanwhile names the way out
+    assert st["action"] == "fix_conflict" and any("escalate-to-full 12" in c for c in st["conflicts"])
+
+
 class EscalatePrd(PrdGitHub):
     """PrdGitHub (a real `commit-prd` over a scratch origin) that also applies `issue edit` to the labels."""
 
