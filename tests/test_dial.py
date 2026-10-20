@@ -1892,3 +1892,21 @@ def test_an_output_that_cannot_say_what_it_was_playing_returns_nothing_and_canno
     import pytest
     with pytest.raises(PlaybackError):
         out.restore({})
+
+
+@pytest.mark.parametrize("site", ["Outputs", "DialApp"])
+@pytest.mark.parametrize("flags,want", [(["--dry-run"], True), ([], False)])
+def test_dial_passes_dry_run_on_to_its_outputs_and_app(monkeypatch, site, flags, want):
+    # `dial` tunes a real Sonos room when told to: its --dry-run has to reach both the Outputs that write and the
+    # app that offers the keys (cmd_dial), or "nothing is tuned or changed" quietly stops being true
+    import importlib
+    from twiddle import cli
+    made = {}
+    for module, name in (("twiddle.dial.app", "DialApp"), ("twiddle.dial.output", "Outputs")):
+        def build(self, *args, _name=name, **kw):
+            made[_name] = kw
+        monkeypatch.setattr(importlib.import_module(module), name,
+                            type(name, (), {"__init__": build, "run": lambda self: None}))
+    assert cli.main(["dial", *flags]) == 0
+    assert set(made) == {"DialApp", "Outputs"}
+    assert made[site]["dry_run"] is want
