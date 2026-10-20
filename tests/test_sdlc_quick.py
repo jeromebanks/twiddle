@@ -2051,3 +2051,10 @@ def test_state_reads_the_debt_issues_own_body_from_github(monkeypatch):
     monkeypatch.setattr(sdlc, "gh_pages", lambda path: [])
     b = sdlc.fetch_bundle(77, {**CONFIG, "repository": "o/r"}, trusted={OWNER})
     assert sdlc.next_command(sdlc.bundle_state(b, CONFIG)) == QUICK_DEBT_NEXT
+
+
+def test_file_issue_from_a_bundle_only_dry_runs(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("refused before any gh call"))
+    f, body = bundle_file(tmp_path, [ROUTINE, "sdlc:in-progress"], approved_quick())
+    assert sdlc.main(["file-issue", "12", "--title", "t", "--body-file", body, "--debt", "--from-file", f]) == 1
+    assert "use it with --dry-run" in capsys.readouterr().err

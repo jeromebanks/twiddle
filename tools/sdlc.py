@@ -4820,6 +4820,8 @@ def command_file_issue(args: argparse.Namespace, config: dict[str, Any]) -> int:
     title, body = args.title.strip(), Path(args.body_file).read_text().strip()
     if hits := identifier_hits(title + "\n" + body):
         raise SdlcError("the issue would contain " + ", ".join(hits) + ": the repo is public")
+    if args.from_file and not args.dry_run:
+        raise SdlcError("--from-file reads a saved bundle, not GitHub: use it with --dry-run")
     kind = "debt" if args.debt else "finding"
     quick = args.debt and bundle_state(load_bundle(args, config), config).get("lane") == QUICK
     extra = {"epic": str(args.number), "source": args.source, **({"lane": QUICK} if quick else {})}
@@ -5089,7 +5091,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="work this epic or quick change needed to support itself (label tech-debt), not a new problem")
     p.add_argument("--source", choices=["demo", "review", "advisor", "adjacent"], default="demo")
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--from-file", help="a saved {issue, comments, trusted} bundle of N, for --debt, instead of GitHub")
+    p.add_argument("--from-file", help="with --dry-run: a saved {issue, comments, trusted} bundle of N, for --debt, "
+                                         "instead of GitHub")
     p.set_defaults(fn=command_file_issue)
 
     p = sub.add_parser("demo-accept", help="record the poster's /approve of a demo (then `ship` releases it)")
