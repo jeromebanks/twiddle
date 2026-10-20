@@ -1,0 +1,249 @@
+<svg class="rich-terminal" viewBox="0 0 1482 1221.1999999999998" xmlns="http://www.w3.org/2000/svg">
+    <!-- Generated with Rich https://www.textualize.io -->
+    <style>
+
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Regular"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Regular.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Regular.woff") format("woff");
+        font-style: normal;
+        font-weight: 400;
+    }
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Bold"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Bold.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Bold.woff") format("woff");
+        font-style: bold;
+        font-weight: 700;
+    }
+
+    .terminal-2582225855-matrix {
+        font-family: Fira Code, monospace;
+        font-size: 20px;
+        line-height: 24.4px;
+        font-variant-east-asian: full-width;
+    }
+
+    .terminal-2582225855-title {
+        font-size: 18px;
+        font-weight: bold;
+        font-family: arial;
+    }
+
+    .terminal-2582225855-r1 { fill: #c5c8c6 }
+.terminal-2582225855-r2 { fill: #868887 }
+.terminal-2582225855-r3 { fill: #98a84b;font-weight: bold }
+.terminal-2582225855-r4 { fill: #c5c8c6;font-weight: bold }
+    </style>
+
+    <defs>
+    <clipPath id="terminal-2582225855-clip-terminal">
+      <rect x="0" y="0" width="1463.0" height="1170.1999999999998" />
+    </clipPath>
+    <clipPath id="terminal-2582225855-line-0">
+    <rect x="0" y="1.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-1">
+    <rect x="0" y="25.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-2">
+    <rect x="0" y="50.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-3">
+    <rect x="0" y="74.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-4">
+    <rect x="0" y="99.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-5">
+    <rect x="0" y="123.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-6">
+    <rect x="0" y="147.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-7">
+    <rect x="0" y="172.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-8">
+    <rect x="0" y="196.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-9">
+    <rect x="0" y="221.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-10">
+    <rect x="0" y="245.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-11">
+    <rect x="0" y="269.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-12">
+    <rect x="0" y="294.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-13">
+    <rect x="0" y="318.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-14">
+    <rect x="0" y="343.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-15">
+    <rect x="0" y="367.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-16">
+    <rect x="0" y="391.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-17">
+    <rect x="0" y="416.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-18">
+    <rect x="0" y="440.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-19">
+    <rect x="0" y="465.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-20">
+    <rect x="0" y="489.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-21">
+    <rect x="0" y="513.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-22">
+    <rect x="0" y="538.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-23">
+    <rect x="0" y="562.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-24">
+    <rect x="0" y="587.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-25">
+    <rect x="0" y="611.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-26">
+    <rect x="0" y="635.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-27">
+    <rect x="0" y="660.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-28">
+    <rect x="0" y="684.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-29">
+    <rect x="0" y="709.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-30">
+    <rect x="0" y="733.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-31">
+    <rect x="0" y="757.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-32">
+    <rect x="0" y="782.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-33">
+    <rect x="0" y="806.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-34">
+    <rect x="0" y="831.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-35">
+    <rect x="0" y="855.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-36">
+    <rect x="0" y="879.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-37">
+    <rect x="0" y="904.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-38">
+    <rect x="0" y="928.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-39">
+    <rect x="0" y="953.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-40">
+    <rect x="0" y="977.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-41">
+    <rect x="0" y="1001.9" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-42">
+    <rect x="0" y="1026.3" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-43">
+    <rect x="0" y="1050.7" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-44">
+    <rect x="0" y="1075.1" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-45">
+    <rect x="0" y="1099.5" width="1464" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-2582225855-line-46">
+    <rect x="0" y="1123.9" width="1464" height="24.65"/>
+            </clipPath>
+    </defs>
+
+    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1480" height="1219.2" rx="8"/><text class="terminal-2582225855-title" fill="#c5c8c6" text-anchor="middle" x="740" y="27">staged&#160;run&#160;on&#160;epic/181&#160;(26b9a44):&#160;quick_demo.py&#160;happy</text>
+            <g transform="translate(26,22)">
+            <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
+            <circle cx="22" cy="0" r="7" fill="#febc2e"/>
+            <circle cx="44" cy="0" r="7" fill="#28c840"/>
+            </g>
+        
+    <g transform="translate(9, 41)" clip-path="url(#terminal-2582225855-clip-terminal)">
+    
+    <g class="terminal-2582225855-matrix">
+    <text class="terminal-2582225855-r1" x="0" y="20" textLength="671" clip-path="url(#terminal-2582225855-line-0)">$&#160;staged&#160;run&#160;on&#160;epic/181&#160;(26b9a44):&#160;quick_demo.py&#160;happy</text><text class="terminal-2582225855-r1" x="1464" y="20" textLength="12.2" clip-path="url(#terminal-2582225855-line-0)">
+</text><text class="terminal-2582225855-r2" x="0" y="44.4" textLength="1195.6" clip-path="url(#terminal-2582225855-line-1)">#&#160;#11&#160;is&#160;a&#160;request&#160;to&#160;add&#160;one&#160;station.&#160;Triage&#160;writes&#160;a&#160;short&#160;brief&#160;and&#160;posts&#160;it&#160;in&#160;the&#160;quick&#160;lane:</text><text class="terminal-2582225855-r1" x="1464" y="44.4" textLength="12.2" clip-path="url(#terminal-2582225855-line-1)">
+</text><text class="terminal-2582225855-r3" x="0" y="68.8" textLength="12.2" clip-path="url(#terminal-2582225855-line-2)">$</text><text class="terminal-2582225855-r4" x="24.4" y="68.8" textLength="1159" clip-path="url(#terminal-2582225855-line-2)">sdlc.py&#160;transition&#160;11&#160;prd-review&#160;--kind&#160;prd&#160;--lane&#160;quick&#160;--body-file&#160;&lt;scratch&gt;/scratch/brief.md</text><text class="terminal-2582225855-r1" x="1464" y="68.8" textLength="12.2" clip-path="url(#terminal-2582225855-line-2)">
+</text><text class="terminal-2582225855-r1" x="0" y="93.2" textLength="963.8" clip-path="url(#terminal-2582225855-line-3)">#11:&#160;untriaged&#160;-&gt;&#160;prd-review&#160;&#160;https://github.com/o/r/issues/11#issuecomment-901</text><text class="terminal-2582225855-r1" x="1464" y="93.2" textLength="12.2" clip-path="url(#terminal-2582225855-line-3)">
+</text><text class="terminal-2582225855-r1" x="1464" y="117.6" textLength="12.2" clip-path="url(#terminal-2582225855-line-4)">
+</text><text class="terminal-2582225855-r2" x="0" y="142" textLength="756.4" clip-path="url(#terminal-2582225855-line-5)">#&#160;the&#160;poster&#160;replies&#160;/approve&#160;on&#160;the&#160;issue;&#160;triage&#160;records&#160;it:</text><text class="terminal-2582225855-r1" x="1464" y="142" textLength="12.2" clip-path="url(#terminal-2582225855-line-5)">
+</text><text class="terminal-2582225855-r3" x="0" y="166.4" textLength="12.2" clip-path="url(#terminal-2582225855-line-6)">$</text><text class="terminal-2582225855-r4" x="24.4" y="166.4" textLength="561.2" clip-path="url(#terminal-2582225855-line-6)">sdlc.py&#160;transition&#160;11&#160;approved&#160;--kind&#160;approval</text><text class="terminal-2582225855-r1" x="1464" y="166.4" textLength="12.2" clip-path="url(#terminal-2582225855-line-6)">
+</text><text class="terminal-2582225855-r1" x="0" y="190.8" textLength="951.6" clip-path="url(#terminal-2582225855-line-7)">#11:&#160;prd-review&#160;-&gt;&#160;approved&#160;&#160;https://github.com/o/r/issues/11#issuecomment-903</text><text class="terminal-2582225855-r1" x="1464" y="190.8" textLength="12.2" clip-path="url(#terminal-2582225855-line-7)">
+</text><text class="terminal-2582225855-r1" x="1464" y="215.2" textLength="12.2" clip-path="url(#terminal-2582225855-line-8)">
+</text><text class="terminal-2582225855-r3" x="0" y="239.6" textLength="12.2" clip-path="url(#terminal-2582225855-line-9)">$</text><text class="terminal-2582225855-r4" x="24.4" y="239.6" textLength="195.2" clip-path="url(#terminal-2582225855-line-9)">sdlc.py&#160;state&#160;11</text><text class="terminal-2582225855-r1" x="1464" y="239.6" textLength="12.2" clip-path="url(#terminal-2582225855-line-9)">
+</text><text class="terminal-2582225855-r1" x="0" y="264" textLength="219.6" clip-path="url(#terminal-2582225855-line-10)">#11&#160;Add&#160;Psyched&#160;FM</text><text class="terminal-2582225855-r1" x="1464" y="264" textLength="12.2" clip-path="url(#terminal-2582225855-line-10)">
+</text><text class="terminal-2582225855-r1" x="0" y="288.4" textLength="927.2" clip-path="url(#terminal-2582225855-line-11)">&#160;&#160;state:&#160;approved&#160;&#160;&#160;lane:&#160;quick&#160;&#160;&#160;turn:&#160;agent&#160;&#160;&#160;action:&#160;work_quick&#160;&#160;&#160;type:&#160;?</text><text class="terminal-2582225855-r1" x="1464" y="288.4" textLength="12.2" clip-path="url(#terminal-2582225855-line-11)">
+</text><text class="terminal-2582225855-r1" x="0" y="312.8" textLength="854" clip-path="url(#terminal-2582225855-line-12)">&#160;&#160;latest&#160;revision:&#160;prd&#160;rev&#160;1&#160;&#160;&#160;approved:&#160;1&#160;(comment&#160;901)&#160;&#160;&#160;rounds:&#160;1/5</text><text class="terminal-2582225855-r1" x="1464" y="312.8" textLength="12.2" clip-path="url(#terminal-2582225855-line-12)">
+</text><text class="terminal-2582225855-r1" x="0" y="337.2" textLength="366" clip-path="url(#terminal-2582225855-line-13)">&#160;&#160;next:&#160;/work-slice&#160;11&#160;--quick</text><text class="terminal-2582225855-r1" x="1464" y="337.2" textLength="12.2" clip-path="url(#terminal-2582225855-line-13)">
+</text><text class="terminal-2582225855-r1" x="1464" y="361.6" textLength="12.2" clip-path="url(#terminal-2582225855-line-14)">
+</text><text class="terminal-2582225855-r3" x="0" y="386" textLength="12.2" clip-path="url(#terminal-2582225855-line-15)">$</text><text class="terminal-2582225855-r4" x="24.4" y="386" textLength="292.8" clip-path="url(#terminal-2582225855-line-15)">sdlc.py&#160;claim&#160;11&#160;--quick</text><text class="terminal-2582225855-r1" x="1464" y="386" textLength="12.2" clip-path="url(#terminal-2582225855-line-15)">
+</text><text class="terminal-2582225855-r1" x="0" y="410.4" textLength="341.6" clip-path="url(#terminal-2582225855-line-16)">#11:&#160;approved&#160;-&gt;&#160;in-progress</text><text class="terminal-2582225855-r1" x="1464" y="410.4" textLength="12.2" clip-path="url(#terminal-2582225855-line-16)">
+</text><text class="terminal-2582225855-r1" x="0" y="434.8" textLength="268.4" clip-path="url(#terminal-2582225855-line-17)">PRIMARY=&lt;scratch&gt;/repo</text><text class="terminal-2582225855-r1" x="1464" y="434.8" textLength="12.2" clip-path="url(#terminal-2582225855-line-17)">
+</text><text class="terminal-2582225855-r1" x="0" y="459.2" textLength="183" clip-path="url(#terminal-2582225855-line-18)">BRANCH=slice/11</text><text class="terminal-2582225855-r1" x="1464" y="459.2" textLength="12.2" clip-path="url(#terminal-2582225855-line-18)">
+</text><text class="terminal-2582225855-r1" x="0" y="483.6" textLength="195.2" clip-path="url(#terminal-2582225855-line-19)">BASE=origin/main</text><text class="terminal-2582225855-r1" x="1464" y="483.6" textLength="12.2" clip-path="url(#terminal-2582225855-line-19)">
+</text><text class="terminal-2582225855-r1" x="1464" y="508" textLength="12.2" clip-path="url(#terminal-2582225855-line-20)">
+</text><text class="terminal-2582225855-r2" x="0" y="532.4" textLength="1000.4" clip-path="url(#terminal-2582225855-line-21)">#&#160;one&#160;catalog&#160;file&#160;is&#160;written&#160;in&#160;that&#160;worktree,&#160;pushed,&#160;and&#160;a&#160;PR&#160;opened&#160;into&#160;main:</text><text class="terminal-2582225855-r1" x="1464" y="532.4" textLength="12.2" clip-path="url(#terminal-2582225855-line-21)">
+</text><text class="terminal-2582225855-r1" x="1464" y="556.8" textLength="12.2" clip-path="url(#terminal-2582225855-line-22)">
+</text><text class="terminal-2582225855-r2" x="0" y="581.2" textLength="1146.8" clip-path="url(#terminal-2582225855-line-23)">#&#160;the&#160;test&#160;suite&#160;is&#160;faked&#160;in&#160;this&#160;staged&#160;run&#160;(its&#160;&#x27;1300&#160;passed&#x27;&#160;is&#160;canned);&#160;the&#160;record&#160;is&#160;real</text><text class="terminal-2582225855-r1" x="1464" y="581.2" textLength="12.2" clip-path="url(#terminal-2582225855-line-23)">
+</text><text class="terminal-2582225855-r3" x="0" y="605.6" textLength="12.2" clip-path="url(#terminal-2582225855-line-24)">$</text><text class="terminal-2582225855-r4" x="24.4" y="605.6" textLength="268.4" clip-path="url(#terminal-2582225855-line-24)">sdlc.py&#160;test-record&#160;12</text><text class="terminal-2582225855-r1" x="1464" y="605.6" textLength="12.2" clip-path="url(#terminal-2582225855-line-24)">
+</text><text class="terminal-2582225855-r1" x="0" y="630" textLength="1183.4" clip-path="url(#terminal-2582225855-line-25)">PR&#160;#12:&#160;tests&#160;pass&#160;on&#160;b4a184230fd0&#160;(1300&#160;passed)&#160;&#160;https://github.com/o/r/pull/12#issuecomment-905</text><text class="terminal-2582225855-r1" x="1464" y="630" textLength="12.2" clip-path="url(#terminal-2582225855-line-25)">
+</text><text class="terminal-2582225855-r1" x="1464" y="654.4" textLength="12.2" clip-path="url(#terminal-2582225855-line-26)">
+</text><text class="terminal-2582225855-r3" x="0" y="678.8" textLength="12.2" clip-path="url(#terminal-2582225855-line-27)">$</text><text class="terminal-2582225855-r4" x="24.4" y="678.8" textLength="524.6" clip-path="url(#terminal-2582225855-line-27)">sdlc.py&#160;codex-review&#160;--pr&#160;12&#160;--out&#160;&lt;review&gt;</text><text class="terminal-2582225855-r1" x="1464" y="678.8" textLength="12.2" clip-path="url(#terminal-2582225855-line-27)">
+</text><text class="terminal-2582225855-r2" x="0" y="703.2" textLength="512.4" clip-path="url(#terminal-2582225855-line-28)">#&#160;the&#160;fake&#160;Codex&#160;answers:&#160;VERDICT:&#160;approve</text><text class="terminal-2582225855-r1" x="1464" y="703.2" textLength="12.2" clip-path="url(#terminal-2582225855-line-28)">
+</text><text class="terminal-2582225855-r1" x="1464" y="727.6" textLength="12.2" clip-path="url(#terminal-2582225855-line-29)">
+</text><text class="terminal-2582225855-r3" x="0" y="752" textLength="12.2" clip-path="url(#terminal-2582225855-line-30)">$</text><text class="terminal-2582225855-r4" x="24.4" y="752" textLength="817.4" clip-path="url(#terminal-2582225855-line-30)">sdlc.py&#160;pr-review&#160;12&#160;--report&#160;&lt;scratch&gt;/scratch/codex-12-0/codex.md</text><text class="terminal-2582225855-r1" x="1464" y="752" textLength="12.2" clip-path="url(#terminal-2582225855-line-30)">
+</text><text class="terminal-2582225855-r1" x="0" y="776.4" textLength="878.4" clip-path="url(#terminal-2582225855-line-31)">PR&#160;#12&#160;round&#160;1:&#160;approve&#160;&#160;https://github.com/o/r/pull/12#issuecomment-906</text><text class="terminal-2582225855-r1" x="1464" y="776.4" textLength="12.2" clip-path="url(#terminal-2582225855-line-31)">
+</text><text class="terminal-2582225855-r1" x="1464" y="800.8" textLength="12.2" clip-path="url(#terminal-2582225855-line-32)">
+</text><text class="terminal-2582225855-r3" x="0" y="825.2" textLength="12.2" clip-path="url(#terminal-2582225855-line-33)">$</text><text class="terminal-2582225855-r4" x="24.4" y="825.2" textLength="256.2" clip-path="url(#terminal-2582225855-line-33)">sdlc.py&#160;quick-gate&#160;12</text><text class="terminal-2582225855-r1" x="1464" y="825.2" textLength="12.2" clip-path="url(#terminal-2582225855-line-33)">
+</text><text class="terminal-2582225855-r1" x="0" y="849.6" textLength="24.4" clip-path="url(#terminal-2582225855-line-34)">ok</text><text class="terminal-2582225855-r1" x="1464" y="849.6" textLength="12.2" clip-path="url(#terminal-2582225855-line-34)">
+</text><text class="terminal-2582225855-r1" x="1464" y="874" textLength="12.2" clip-path="url(#terminal-2582225855-line-35)">
+</text><text class="terminal-2582225855-r3" x="0" y="898.4" textLength="12.2" clip-path="url(#terminal-2582225855-line-36)">$</text><text class="terminal-2582225855-r4" x="24.4" y="898.4" textLength="195.2" clip-path="url(#terminal-2582225855-line-36)">sdlc.py&#160;merge&#160;12</text><text class="terminal-2582225855-r1" x="1464" y="898.4" textLength="12.2" clip-path="url(#terminal-2582225855-line-36)">
+</text><text class="terminal-2582225855-r1" x="0" y="922.8" textLength="597.8" clip-path="url(#terminal-2582225855-line-37)">merged&#160;PR&#160;#12&#160;into&#160;main;&#160;#11&#160;closed&#160;and&#160;sdlc:done</text><text class="terminal-2582225855-r1" x="1464" y="922.8" textLength="12.2" clip-path="url(#terminal-2582225855-line-37)">
+</text><text class="terminal-2582225855-r1" x="0" y="947.2" textLength="622.2" clip-path="url(#terminal-2582225855-line-38)">next:&#160;nothing&#160;for&#160;#11&#160;(`state&#160;11`&#160;reads&#160;it&#160;as&#160;done)</text><text class="terminal-2582225855-r1" x="1464" y="947.2" textLength="12.2" clip-path="url(#terminal-2582225855-line-38)">
+</text><text class="terminal-2582225855-r1" x="1464" y="971.6" textLength="12.2" clip-path="url(#terminal-2582225855-line-39)">
+</text><text class="terminal-2582225855-r2" x="0" y="996" textLength="658.8" clip-path="url(#terminal-2582225855-line-40)">#&#160;on&#160;main:&#160;one&#160;squash&#160;commit&#160;holding&#160;exactly&#160;that&#160;file</text><text class="terminal-2582225855-r1" x="1464" y="996" textLength="12.2" clip-path="url(#terminal-2582225855-line-40)">
+</text><text class="terminal-2582225855-r1" x="0" y="1020.4" textLength="817.4" clip-path="url(#terminal-2582225855-line-41)">Add&#160;Psyched&#160;FM&#160;(#12)&#160;&#160;-&gt;&#160;&#160;src/twiddle/stations/catalog/psyched.toml</text><text class="terminal-2582225855-r1" x="1464" y="1020.4" textLength="12.2" clip-path="url(#terminal-2582225855-line-41)">
+</text><text class="terminal-2582225855-r1" x="1464" y="1044.8" textLength="12.2" clip-path="url(#terminal-2582225855-line-42)">
+</text><text class="terminal-2582225855-r3" x="0" y="1069.2" textLength="12.2" clip-path="url(#terminal-2582225855-line-43)">$</text><text class="terminal-2582225855-r4" x="24.4" y="1069.2" textLength="195.2" clip-path="url(#terminal-2582225855-line-43)">sdlc.py&#160;state&#160;11</text><text class="terminal-2582225855-r1" x="1464" y="1069.2" textLength="12.2" clip-path="url(#terminal-2582225855-line-43)">
+</text><text class="terminal-2582225855-r1" x="0" y="1093.6" textLength="219.6" clip-path="url(#terminal-2582225855-line-44)">#11&#160;Add&#160;Psyched&#160;FM</text><text class="terminal-2582225855-r1" x="1464" y="1093.6" textLength="12.2" clip-path="url(#terminal-2582225855-line-44)">
+</text><text class="terminal-2582225855-r1" x="0" y="1118" textLength="793" clip-path="url(#terminal-2582225855-line-45)">&#160;&#160;state:&#160;done&#160;&#160;&#160;lane:&#160;quick&#160;&#160;&#160;turn:&#160;none&#160;&#160;&#160;action:&#160;none&#160;&#160;&#160;type:&#160;?</text><text class="terminal-2582225855-r1" x="1464" y="1118" textLength="12.2" clip-path="url(#terminal-2582225855-line-45)">
+</text><text class="terminal-2582225855-r1" x="0" y="1142.4" textLength="854" clip-path="url(#terminal-2582225855-line-46)">&#160;&#160;latest&#160;revision:&#160;prd&#160;rev&#160;1&#160;&#160;&#160;approved:&#160;1&#160;(comment&#160;901)&#160;&#160;&#160;rounds:&#160;1/5</text><text class="terminal-2582225855-r1" x="1464" y="1142.4" textLength="12.2" clip-path="url(#terminal-2582225855-line-46)">
+</text><text class="terminal-2582225855-r1" x="0" y="1166.8" textLength="341.6" clip-path="url(#terminal-2582225855-line-47)">&#160;&#160;next:&#160;nothing:&#160;#11&#160;is&#160;done</text><text class="terminal-2582225855-r1" x="1464" y="1166.8" textLength="12.2" clip-path="url(#terminal-2582225855-line-47)">
+</text>
+    </g>
+    </g>
+</svg>
