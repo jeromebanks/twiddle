@@ -17,6 +17,8 @@ by `fetch`. Most stations are on a platform we already read, so adding them is
 data only. A station with its own one-off feed needs a fetcher written.
 That's the only part needing judgement, and it is Section 4.
 
+**Under the SDLC, the build runs inside `work-slice` (`/work-slice N --quick` for a data-only station with an approved brief): do not open your own PR. A quick change may not touch `CLAUDE.md`, so its test-count update is left out.**
+
 Two read-only commands do the legwork. **Use them, don't hand-roll curl
 calls**:
 

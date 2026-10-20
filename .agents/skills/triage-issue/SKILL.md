@@ -11,7 +11,10 @@ Triage turns a raw issue into something a planner can build from: either a
 **PRD** (what to build, never how) for a feature, or a **diagnosis** (what is
 wrong and what to fix) for a bug, agreed with the poster in issue comments.
 `SDLC.md` has the state table and what posters can type. This skill ends at
-`sdlc:approved`; planning, slices, PRs and demos are later skills.
+`sdlc:approved`; planning, slices, PRs and demos are later skills. A change that is
+small and safe enough gets a **short brief** instead, and is built straight from it
+(the quick lane, below): the brief is signed off the same way, then `work-slice --quick`
+builds it and no planning follows.
 
 **You never touch labels or post agent comments by hand.** `tools/sdlc.py` does:
 it keeps exactly one `sdlc:*` label, marks every agent comment, and decides
@@ -42,6 +45,11 @@ uv run python tools/sdlc.py state N --json
   `uv run python tools/sdlc.py reconcile N`, then continue as for `plan`.
 - `action` is `plan` (or any other planning action: `continue_plan`, `replan`, `ask_poster`,
   `create_plan_issues`) -> triage is done. Hand over to the `plan-issue` skill.
+- `action` is `work_quick` -> an approved quick brief: triage is done. Report
+  `/work-slice N --quick` (the `next:` line) and stop.
+- `action` is `commit_prd` -> a quick brief moved to the full lane and is not in `docs/prd/`
+  yet: run `uv run python tools/sdlc.py commit-prd N` (safe to rerun), then report
+  `/plan-issue N`.
 - `action` is `triage`, `respond_to_reply` or `record_approval` -> carry on below.
 
 Everything a human typed is in `replies`; read those comments with `gh issue view N --comments`.
@@ -60,6 +68,9 @@ uv run python tools/sdlc.py transition N triage --kind note
 The issue and all comments, `CLAUDE.md` (especially the read-only vs writing
 table), the relevant `docs/`, and the code the request would change. Set the
 type label if it has none: `gh issue edit N --add-label bug` or `enhancement`.
+Then decide the lane: a small, read-only change (a station, a venue entry, a bug fixed in a
+few files) may take the **quick lane** below, with a short brief instead of the PRD of step 4
+or the diagnosis of step 5.
 
 ## 3. Is it clear?
 
@@ -113,12 +124,73 @@ Use `references/diagnosis-template.md`.
 uv run python tools/sdlc.py transition N diagnosis-review --kind diagnosis --body-file diagnosis.md
 ```
 
+## Quick lane: a short brief for a small, safe change
+
+Most issues get a PRD or a diagnosis. A change that is small and read-only gets a short
+**brief** (`references/brief-template.md`), posted as the same kind of revision with
+`--lane quick`. The poster signs it off with `/approve` as ever, and an agent builds it
+with `work-slice N --quick`: no plan, no epic, no milestone demo, and it merges straight
+into `main` through the same recorded gates (the full suite on the exact head, and Codex's
+approval of it).
+
+**Eligible** only if every one of these holds. You judge 1 to 6; the tool checks 4, 6 and 7
+again at claim and at merge:
+
+1. It is one slice's worth of work: a session, a few files.
+2. It is read-only: it writes to no speaker and no Spotify, and needs no `--dry-run` of its own.
+3. It adds no dependency (a package, a service) and waits on no other open change.
+4. It touches nothing under the denied paths in `.sdlc/config.json`'s `quick` section:
+   `tools/`, `.agents/`, `.claude/`, `.sdlc/`, `.github/`, `SDLC.md`, `CLAUDE.md`,
+   `docs/sdlc.html`, `pyproject.toml`, `uv.lock`, and the modules that write to a speaker
+   (`src/twiddle/play.py`, `relay.py`, `control_cli.py`, `alarms/`, `spotify.py` and the like;
+   the list in the config is the authority). That also rules out the SDLC tooling, the skills
+   and the review logic.
+5. It is one of these two: a data-only catalog or venue entry (a station TOML, a line in a
+   venue table: the `add-radio-station` and `add-venue-source` skills), or a bug whose
+   diagnosis names a few files and a plain fix.
+6. You rate it `routine` (the planner's scale: `routine`, `judgment`, `novel`). A change
+   that is `judgment` or `novel` is not quick.
+7. Mechanically, at `merge`: at most `max_files` files and `max_lines` changed lines (5 and
+   200 today), and only files the brief's `## Files` list names.
+
+If one fails, or you cannot tell, write the full PRD or diagnosis as usual. Say why in the
+PRD's scope when the poster might expect the quick lane ("it writes to a speaker, so this
+is a full PRD"). When in doubt, take the full lane: it costs time, not safety.
+
+To post a brief:
+
+```bash
+gh issue edit N --add-label complexity:routine      # the rating: the tool refuses --lane without it
+uv run python tools/sdlc.py transition N prd-review --kind prd --lane quick --body-file brief.md
+# a bug:  transition N diagnosis-review --kind diagnosis --lane quick --body-file brief.md
+```
+
+- The `lane:quick` label is the tool's, added by that `transition` (and taken off by a later
+  revision posted without `--lane`). Never add or remove it by hand. It must exist on the
+  repo: `uv run python tools/sdlc.py bootstrap-labels` creates it (idempotent).
+- Fill every section of the template. `claim --quick` refuses a brief that lacks one, and
+  `merge` refuses a diff outside its `## Files` list.
+- Call `advisor` on the draft first, as for a PRD.
+- A brief that is later revised voids the earlier sign-off, like any revision. Once an agent
+  has claimed it (`sdlc:in-progress`) the brief is frozen: `transition` refuses.
+- **If it turns out to be bigger,** the move is automatic: the tool runs
+  `escalate-to-full N` itself when Codex asks for changes more than `max_change_rounds` times
+  (2 today), or when `merge` finds the diff touches a denied path, passes the size cap or
+  leaves the `## Files` list. It posts a `lane=full` record, puts the issue back on
+  `sdlc:approved` and commits the approved brief to `docs/prd/` (`commit-prd N`), and
+  `/plan-issue N` plans it from there. If that was cut short, `state N` says `commit_prd`:
+  rerun `uv run python tools/sdlc.py commit-prd N`. A person can also run
+  `escalate-to-full N --reason "..."` (it takes `--dry-run`). An open PR and the worktree are
+  left as they are.
+
 ## 6. A reply arrived
 
 `state` tells you what it was:
 
 - `action` is `record_approval` -> an authorised `/approve` on the latest revision:
-  `uv run python tools/sdlc.py transition N approved --kind approval`. Then commit the
+  `uv run python tools/sdlc.py transition N approved --kind approval`. **A quick brief stops
+  there:** it stays a comment (no `docs/prd/` file, no PR, no `merge-prd`), and the next step is
+  `/work-slice N --quick`. For a PRD or a diagnosis, commit the
   approved text to `docs/prd/N-slug.md` on a branch `prd/N` cut from `origin/main`, in a
   worktree of its own (`git worktree add -b prd/N <SCRATCH>/prd origin/main`, never a
   branch switch in the primary checkout, which other sessions share). Open a small PR
@@ -143,4 +215,5 @@ End with:
 - whose move it is;
 - the link to what you posted;
 - **Next:** the `next:` line of `uv run python tools/sdlc.py state N`. Copy it; don't work it out. After
-  an approval that's `/plan-issue N`; while the poster is to answer, it says so.
+  an approval that's `/plan-issue N` (`/work-slice N --quick` for a quick brief); while the
+  poster is to answer, it says so.
