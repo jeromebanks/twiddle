@@ -816,6 +816,20 @@ def test_a_denied_path_is_refused_even_with_a_pass_and_an_approval():
         assert len(errs) == 1 and path in errs[0] and errs[0].endswith("`escalate-to-full 12`"), errs
 
 
+@pytest.mark.parametrize("path", [
+    "src/twiddle/spotify.py", "src/twiddle/devices.py", "src/twiddle/play.py", "src/twiddle/alarms/clock.py",
+    "src/twiddle/scene/app.py", "src/twiddle/dial/app.py",
+])
+def test_each_speaker_writing_module_is_denied_to_a_quick_change(path):
+    # the gate reads the real .sdlc/config.json (CONFIG), so dropping one of these from `quick.denied_paths` fails here;
+    # alarms/clock.py is denied by its directory entry
+    brief = GATE_BRIEF.replace("- tests/test_stations.py", f"- tests/test_stations.py\n- `{path}`")
+    b = gate_bundle(comments=ready_quick(brief) + [CLAIM], files=[changed(STATION), changed(path, status="modified")])
+    errs = gate(b)
+    assert len(errs) == 1 and path in errs[0] and errs[0].endswith("`escalate-to-full 12`"), errs
+    assert sdlc_quick.path_denied(path, QUICK_RULES)
+
+
 @pytest.mark.parametrize("files,ok", [
     ([changed(f"src/twiddle/stations/catalog/s{i}.toml", 40) for i in range(5)], True),            # 5 files, 200 lines
     ([changed(f"src/twiddle/stations/catalog/s{i}.toml", 20, 20) for i in range(5)], True),        # deletions count too
