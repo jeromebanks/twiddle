@@ -133,8 +133,9 @@ with `work-slice N --quick`: no plan, no epic, no milestone demo, and it merges 
 into `main` through the same recorded gates (the full suite on the exact head, and Codex's
 approval of it).
 
-**Eligible** only if every one of these holds. You judge 1 to 6; the tool checks 4, 6 and 7
-again at claim and at merge:
+**Eligible** only if every one of these holds. You judge 1 to 6. The tool checks 6 (the rating)
+when you post the brief with `--lane`, at `claim` and again at `merge`, and 4 and 7 (the diff)
+at `merge` and `quick-gate`, not before:
 
 1. It is one slice's worth of work: a session, a few files.
 2. It is read-only: it writes to no speaker and no Spotify, and needs no `--dry-run` of its own.

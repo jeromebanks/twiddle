@@ -178,7 +178,8 @@ on its head.** The full lane is unchanged for everything else.
    - a data-only catalog or venue entry, or a bug whose diagnosis names a few files.
 
    It adds `complexity:routine` and posts the brief (`references/brief-template.md`: Outcome,
-   Scope, Files, Acceptance criteria, Validation, Non-goals, Context, Safety class) with
+   Scope, Files, Acceptance criteria, Validation, Non-goals, Context, Safety class; see
+   `.agents/skills/triage-issue/references/brief-template.md`) with
    `transition N prd-review --kind prd --lane quick` (a bug: `diagnosis-review --kind diagnosis`).
    The `lane:quick` label is added by that `transition`, as a non-state label for filtering: the
    one-`sdlc:*`-label rule is untouched. `/approve` works as for a PRD, and `state N` then shows

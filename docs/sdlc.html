@@ -376,13 +376,13 @@ and no review. The <strong>quick lane</strong> is the third option: it drops the
   <path class="edge" d="M350,68 H386"/><text class="label" x="352" y="32">claim --quick</text>
   <path class="edge" d="M540,68 H576"/>
   <path class="edge" d="M730,68 H766"/><text class="label" x="732" y="32">merge</text>
-  <rect class="box human" x="390" y="150" width="340" height="56" rx="10"/>
+  <rect class="box agent" x="390" y="150" width="340" height="56" rx="10"/>
   <text class="title" x="560" y="175" text-anchor="middle">the full lane: approved, brief in docs/prd/</text>
   <text class="small" x="560" y="194" text-anchor="middle">escalate-to-full · commit-prd · /plan-issue</text>
   <path class="edge back" d="M465,96 V146"/>
   <text class="label" x="475" y="125">too big</text>
 </svg>
-<figcaption>The orange box is the poster's, blue the agent's. The red box is the exit into the planned road.</figcaption>
+<figcaption>Orange is the poster's move, blue the agent's. The lower box is the exit into the planned road, which carries the approved brief with it.</figcaption>
 </figure>
 
 <h3>Who qualifies</h3>
@@ -395,7 +395,8 @@ and no review. The <strong>quick lane</strong> is the third option: it drops the
 and the modules that write to a speaker (the list is the <code>quick</code> section of <code>.sdlc/config.json</code>);</li>
 <li>a data-only catalog or venue entry, or a bug whose diagnosis names a few files.</li>
 </ul>
-<p>Anything else gets a full PRD. The judgement is triage's; the mechanical rules are checked again by the tool, at claim and at merge.
+<p>Anything else gets a full PRD. The judgement is triage's. The tool checks the <span class="chip">complexity:routine</span> rating when the
+brief is posted, at claim and at merge, and the diff rules (denied paths, size, the files listed) at merge and in <code>quick-gate</code>.
 For example, "make <code>alarm try</code> skip the confirmation" writes to a speaker, so it never gets a quick brief.</p>
 
 <h3>Step by step</h3>

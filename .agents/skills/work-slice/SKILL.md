@@ -381,8 +381,10 @@ approved brief; the head not behind `main` (rebase onto `origin/main`, push with
 mergeable PR; and a diff that stays inside the quick rules. It squash-merges into `main`, makes
 sure the issue is closed as completed, moves it to `sdlc:done`, and posts a record on the issue
 (the PR, the head, the test and review records). `merge` and `claim` do those label moves; you
-never touch a label. File what you leave behind as in §9 (`file-issue N --debt --source ...`, with
-the quick issue's number).
+never touch a label. File what you leave behind as in §9, but without `--debt`
+(`file-issue N --source review|advisor|adjacent ...`, with the quick issue's number): a cleanup pass
+belongs to an epic, and a quick change has none, so a debt issue filed against it would wait for
+nobody. The issues go to triage instead.
 
 **10. Report** as §10, with the PR and the test count; there is no milestone, and `next:` is
 "nothing for #N".
