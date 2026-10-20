@@ -24,6 +24,19 @@ issue ─► sdlc:triage ─► sdlc:needs-info ◄─► (poster answers)
    any stage ─► sdlc:escalated  (a human is needed: no consensus, or the agent is stuck)
 ```
 
+A small, safe change takes a second road, the **quick lane** (see "The quick lane" below):
+
+```
+issue ─► sdlc:triage ─► sdlc:prd-review / sdlc:diagnosis-review   (a short brief, posted with --lane quick)
+                        │  poster: /approve      (the brief stays a comment on the issue)
+                        ▼
+                  sdlc:approved ─► claim --quick ─► sdlc:in-progress ─► PR into main ─► merge ─► sdlc:done
+                   (action work_quick)               (work-slice N --quick:     (tests + Codex on the head,
+                        ▲                             no plan, no epic)          issue closed, record posted)
+                        └── escalate-to-full N ◄── too big: change rounds, files or size
+                              (then commit-prd N puts the brief in docs/prd/, and /plan-issue N plans it)
+```
+
 The skills: `triage-issue` (to `approved`), `plan-issue` (to `planned`), `work-slice`
 (builds the slices; the epic is `in-progress` from the first claim) and `milestone-demo`
 (shows the poster each finished milestone, then ships each accepted one to `main`; the last ship is `done`).
@@ -76,6 +89,8 @@ ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every sk
 | none, `sdlc:triage` | the agent |
 | `sdlc:needs-info`, `sdlc:prd-review`, `sdlc:diagnosis-review` | the poster, until they reply; then the agent |
 | `sdlc:approved` | the agent: `plan-issue` (the poster is not asked to review the plan) |
+| `sdlc:approved` / `sdlc:in-progress` with `lane:quick` | the agent: `work-slice N --quick` (state's action `work_quick`); no plan |
+| `sdlc:approved`, a quick brief moved to the full lane | the agent: `commit-prd N` (state's action `commit_prd`), then `plan-issue` |
 | `sdlc:needs-info` after a PRD approval | the poster, answering a planning question; then the agent replans |
 | `sdlc:planned`, `sdlc:in-progress` | the agent: `/work-slice <ready slice>`, `/milestone-demo N` once a milestone's units are all merged or an accepted one is due to ship, or `sync N` when `epic/N` is behind `main` and nothing else is going on (state's `next:`) |
 | `sdlc:demo-review` | the poster, until they reply to the demo; then the agent (`/milestone-demo N`) |
@@ -136,10 +151,73 @@ earliest milestone first, so fix slices go before later work.
   from accounts that can't write to the repo are ignored. Anyone with write access can
   forge one: this is an audit trail, not a security boundary.
 - One `sdlc:*` label per issue, changed only by `tools/sdlc.py`. Two at once is a
-  conflict and needs a human.
+  conflict and needs a human. (`lane:quick` and `complexity:*` are not state labels.)
+- A quick change merges into `main` only through `merge`'s quick gate (the quick lane, above): a
+  recorded passing suite and Codex's approval on the head, never a review deferred to a milestone,
+  and a diff that stays inside `.sdlc/config.json`'s `quick` rules.
 - Each PRD/diagnosis revision is a new comment; the previous one is collapsed and
   linked to its successor. After `max_rounds` (`.sdlc/config.json`) the agent escalates.
 - Reproducing a bug uses read-only commands and `--dry-run` only (see `CLAUDE.md`).
+
+## The quick lane
+
+An issue whose change is small and read-only (a station or venue entry, a bug fixed in a few
+files) does not need a PRD, a plan, an epic, a milestone demo and a ship. Six sessions and three
+sign-offs for one file is a reason to skip the process, so the quick lane keeps the gates and
+drops the ceremony: **one short brief, signed off with `/approve`; one build with
+`work-slice N --quick`; one PR into `main`, with the full suite and Codex's approval recorded
+on its head.** The full lane is unchanged for everything else.
+
+1. **Triage** (`triage-issue`) decides it is eligible and rates it `routine`:
+   - one slice's worth of work;
+   - read-only: no speaker or Spotify write;
+   - no dependency;
+   - nothing under a denied path (`.sdlc/config.json`'s `quick` section: `tools/`, `.agents/`,
+     `.claude/`, `.sdlc/`, `.github/`, `SDLC.md`, `CLAUDE.md`, `docs/sdlc.html`, `pyproject.toml`,
+     `uv.lock` and the speaker-writing modules);
+   - a data-only catalog or venue entry, or a bug whose diagnosis names a few files.
+
+   It adds `complexity:routine` and posts the brief (`references/brief-template.md`: Outcome,
+   Scope, Files, Acceptance criteria, Validation, Non-goals, Context, Safety class; see
+   `.agents/skills/triage-issue/references/brief-template.md`) with
+   `transition N prd-review --kind prd --lane quick` (a bug: `diagnosis-review --kind diagnosis`).
+   The `lane:quick` label is added by that `transition`, as a non-state label for filtering: the
+   one-`sdlc:*`-label rule is untouched. `/approve` works as for a PRD, and `state N` then shows
+   `lane: quick` with action `work_quick` and `next: /work-slice N --quick`. The approved brief
+   stays a comment: no `docs/prd/` file, no PR.
+2. **Build.** `claim N --quick` makes `.worktrees/slice-N` on `slice/N` from `origin/main` and moves
+   the issue from `approved` to `in-progress`, which freezes the brief. It refuses an unapproved,
+   non-quick, escalated, unrated or already-claimed issue, and a brief that lacks a section. The
+   brief (not the poster's request) is what is built, checked and reviewed.
+3. **Evidence** goes in the PR body in place of a demo: the read-only commands run and their
+   output. The PR targets `main` and closes exactly that one issue.
+4. **Review.** `test-record` records the full suite on the head. `codex-review --pr PR` reviews the
+   head against the approved brief, stamps the report `Brief: <approved comment id>` under
+   `HEAD:`, and `pr-review` records it as `brief=`. A quick PR's review is **never deferred to a
+   milestone** (there is none), so `review-defer` is refused; if Codex can't run, the PR stays open
+   and a person chooses between waiting and `escalate-to-full N`.
+5. **Merge.** `quick-gate PR` (read-only) lists every refusal; `merge PR` squash-merges when there
+   are none: base `main`; the PR closes exactly that open quick issue; a passing run and Codex's
+   approval of the current head, the latter recorded against the current approved brief; the head
+   up to date with `main`; mergeable; and the diff inside the quick rules (no denied path, at most
+   `max_files` files and `max_lines` lines, only files the brief's `## Files` list names). The
+   issue is then closed as completed (read back), moved to `sdlc:done`, and a record of the PR,
+   head, test run and review is posted on it. A change found wrong later is undone with an
+   ordinary revert PR.
+6. **Escalation.** A change that outgrows the lane goes to the full lane **with its approved
+   brief**, no new PRD: `escalate-to-full N` posts a `lane=full` record, returns the issue to
+   `sdlc:approved` (without `lane:quick`) and runs `commit-prd N`, which commits the brief to
+   `docs/prd/N-*.md` through a docs-only PR and `merge-prd`, since planning reads the PRD there.
+   Until the file is merged `state` offers `commit_prd`; `commit-prd N` is safe to rerun. Then
+   `/plan-issue N`. The tool runs `escalate-to-full` itself when `pr-review` records one Codex round
+   asking for changes beyond `max_change_rounds`, or when `merge` finds a denied path, the size cap
+   or a file outside the brief; never from `quick-gate`, a dry run or an offline `--from-file`.
+   A person can run it any time before the merge. It leaves an open PR and the worktree alone.
+
+The numbers (`max_files` 5, `max_lines` 200, `max_change_rounds` 2) and the denied paths are in
+`.sdlc/config.json`'s `quick` section, so they can be tuned without code. `lane:quick` is created
+by `bootstrap-labels`. A quick change is never an epic's slice: `next` lists it as
+`/work-slice N --quick`, and the epic-only commands (`demo-status`, `demo-post`, `ship` and the milestone review) refuse it.
 
 ## Planning (`plan-issue`)
 
@@ -192,7 +270,8 @@ escalation, keeps the branch and PR, and gives the retry a fresh Codex budget.
 ## Building (`work-slice`)
 
 One slice per session, in its own git worktree (`.worktrees/slice-N`, branch `slice/N`), so
-several can run at once. A slice's state is read off GitHub:
+several can run at once. (A quick change is built the same way, from `origin/main`: see the
+quick lane above.) A slice's state is read off GitHub:
 
 `blocked → ready → claimed → in-review → merged`, plus `escalated`.
 
@@ -297,7 +376,7 @@ makes it work in the worktree by writing every path out in full (`work-slice` §
 
 | Worktree | Made by | For | Removed by |
 |---|---|---|---|
-| `.worktrees/slice-S`, on `slice/S` from `origin/epic/N` | `claim S` | building one slice | `cleanup S` |
+| `.worktrees/slice-S`, on `slice/S` from `origin/epic/N` (a quick change: `origin/main`, `claim S --quick`) | `claim S` | building one slice | `cleanup S` |
 | `.worktrees/epic-N`, detached at `origin/epic/N` | `sync N`, `revert-slice S` | merging `main` in, reverting a slice, Codex's milestone review (`codex-review --milestone N` reads it as `sync` left it: it never resets it, and refuses it dirty or behind `epic/N`) | nobody: `sync` and `revert-slice` reset it to `origin/epic/N` before each use |
 | `.worktrees/sdlc-demos`, on `sdlc-demos` | `demo-post` | committing a demo's pictures | nobody: kept |
 | `.worktrees/verify-main-N`, detached at `origin/main` | `verify-main N` | the suite on `main` after an untested release | `verify-main N`, when it's done |

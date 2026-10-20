@@ -12,6 +12,8 @@ The List gives bands, age and advance/door price for ~150 rooms. A venue's
 own page adds **flyers, ticket links, and nights The List skips** (DJ nights,
 karaoke), or covers a room The List lacks entirely (Yoshi's).
 
+**Under the SDLC, the build runs inside `work-slice` (`/work-slice N --quick` for a one-line `VENUES` entry with an approved brief): do not open your own PR.**
+
 Read `docs/SCENE.md` → *Sources* and *Extending it* first. Existing sources are
 the worked examples:
 
