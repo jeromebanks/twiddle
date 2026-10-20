@@ -496,8 +496,12 @@ def test_claim_quick_makes_the_worktree_posts_one_claim_and_moves_the_label(repo
     assert not wt.exists() and not _git("branch", "--list", "slice/12", cwd=repo)
 
 
+RESUME_BRIEF = BRIEF.replace("## Files\nfiles of the change", "## Files\n- `station.toml`")
+
+
 def test_claim_quick_resume_reattaches_a_pushed_branch(repo, monkeypatch, capsys):
-    FakeClaim(monkeypatch, quick_bundle())
+    # its brief lists the file the branch adds: a resume checks the pushed work against the brief (F4)
+    FakeClaim(monkeypatch, quick_bundle(comments=ready_quick(RESUME_BRIEF)))
     sdlc.main(["claim", "12", "--quick"])
     wt = repo / ".worktrees" / "slice-12"
     (wt / "station.toml").write_text("key = 'x'\n")
@@ -508,7 +512,7 @@ def test_claim_quick_resume_reattaches_a_pushed_branch(repo, monkeypatch, capsys
     _git("worktree", "remove", "--force", str(wt), cwd=repo)
     _git("branch", "-D", "slice/12", cwd=repo)
     # a claim cut short before its label moved: resuming finishes the move
-    fake = FakeClaim(monkeypatch, quick_bundle([ROUTINE, "sdlc:approved"], ready_quick() + [CLAIM]))
+    fake = FakeClaim(monkeypatch, quick_bundle([ROUTINE, "sdlc:approved"], ready_quick(RESUME_BRIEF) + [CLAIM]))
     capsys.readouterr()
     assert sdlc.main(["claim", "12", "--quick", "--resume"]) == 0
     assert _git("rev-parse", "HEAD", cwd=wt) == pushed
@@ -525,6 +529,189 @@ def test_the_wrong_flag_is_refused_either_way(repo, monkeypatch, capsys, argv, b
     assert sdlc.main(argv) == 1
     assert needle in capsys.readouterr().err
     assert fake.posted == [] and fake.edits == [] and not (repo / ".worktrees").exists()
+
+
+# --- claim --quick applies the quick rules too: the brief's Files, and on resume the work resumed (F4) ---
+
+def files_brief(*entries):
+    return BRIEF.replace("## Files\nfiles of the change", "## Files\n" + "\n".join(f"- `{e}`" for e in entries))
+
+
+def claim_refused(monkeypatch, capsys, brief, *flags, comments=()):
+    fake = FakeClaim(monkeypatch, quick_bundle(comments=ready_quick(brief) + list(comments)))
+    code = sdlc.main(["claim", "12", "--quick", *flags])
+    return code, capsys.readouterr(), fake
+
+
+@pytest.mark.parametrize("entry,reaches", [
+    ("tools/sdlc.py", "tools/sdlc.py"),
+    ("src/twiddle/play.py", "src/twiddle/play.py"),
+    ("src/twiddle/a*/clock.py", "src/twiddle/alarms/"),   # its literal prefix `src/twiddle/a` overlaps two denied
+    ("*.py", "tools/"),                                    # no literal prefix: it reaches every denied path
+    ("tool?/x.py", "tools/"),
+])
+@pytest.mark.parametrize("dry", [False, True])
+def test_a_brief_naming_a_denied_path_is_refused_at_claim(repo, monkeypatch, capsys, entry, reaches, dry):
+    code, out, fake = claim_refused(monkeypatch, capsys, files_brief(entry, "tests/test_stations.py"),
+                                    *(["--dry-run"] if dry else []))
+    assert code == 1, out
+    assert "the brief's `## Files` names a path a quick change may not" in out.err and reaches in out.err
+    assert out.err.rstrip().endswith("`escalate-to-full 12`")
+    assert fake.posted == [] and fake.edits == [] and not (repo / ".worktrees").exists()   # and nothing escalated
+
+
+def test_a_brief_whose_patterns_stay_clear_of_denied_paths_claims(repo, monkeypatch, capsys):
+    assert claim_refused(monkeypatch, capsys, GATE_BRIEF, "--dry-run")[0] == 0     # src/twiddle/stations/catalog/*.toml
+    for e in ("src/twiddle/stations/catalog/*.toml", "tests/test_*.py", "docs/STATIONS.md", "toolsx/a.py"):
+        assert sdlc_quick.entry_reaches(e, [], QUICK_RULES) == [], e
+
+
+def test_a_pattern_names_the_denied_files_on_main_it_matches():
+    tracked = ["src/twiddle/alarms/clock.py", "src/twiddle/alarms/model.py", "src/twiddle/stations/model.py"]
+    assert sdlc_quick.entry_reaches("src/twiddle/a*/clock.py", tracked, QUICK_RULES) == ["src/twiddle/alarms/clock.py"]
+    # nothing on main matches it today, but the prefix still could: refused all the same
+    assert sdlc_quick.entry_reaches("src/twiddle/alarms/n*.py", tracked, QUICK_RULES) == ["src/twiddle/alarms/"]
+
+
+def test_too_many_files_in_the_brief_is_refused_at_claim(repo, monkeypatch, capsys):
+    six = [f"tests/test_{i}.py" for i in range(6)]
+    code, out, fake = claim_refused(monkeypatch, capsys, files_brief(*six), "--dry-run")
+    assert code == 1 and "the brief's `## Files` lists 6 files, more than the quick lane's 5" in out.err
+    assert "`escalate-to-full 12`" in out.err and fake.posted == []
+    assert claim_refused(monkeypatch, capsys, files_brief(*six[:5]), "--dry-run")[0] == 0
+
+
+def test_an_exact_path_brief_is_checked_with_no_git(monkeypatch, capsys):
+    monkeypatch.setattr(sdlc, "git", lambda *a, **k: pytest.fail(f"no git for an exact-path brief: {a}"))
+    code, out, _ = claim_refused(monkeypatch, capsys, files_brief("src/twiddle/play.py"), "--dry-run")
+    assert code == 1 and "src/twiddle/play.py" in out.err
+
+
+def test_tracked_files_are_main_s_not_the_index_s(repo):
+    (repo / "src").mkdir()
+    (repo / "src" / "on_main.py").write_text("x\n")
+    _git("add", ".", cwd=repo)
+    _git("commit", "-q", "-m", "on main", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("rm", "-q", "--cached", "src/on_main.py", cwd=repo)          # the index lacks a file main has
+    (repo / "staged_only.py").write_text("y\n")
+    _git("add", "staged_only.py", cwd=repo)                            # and holds one main lacks
+    tracked = sdlc.tracked_on("origin/main", repo)
+    assert "src/on_main.py" in tracked and "staged_only.py" not in tracked
+    assert "src/on_main.py" not in _git("ls-files", cwd=repo)          # what `git ls-files` would have missed
+
+
+def test_the_demo_claim_fixture(monkeypatch, capsys):
+    # the milestone demo runs `claim 12 --quick --dry-run --from-file tests/fixtures/quick_claim/denied_path.json`
+    for name in ("gh", "gh_json", "post_comment", "git"):
+        monkeypatch.setattr(sdlc, name, lambda *a, **k: pytest.fail(f"--from-file --dry-run reads nothing else: {a}"))
+    f = str(Path(__file__).resolve().parent / "fixtures" / "quick_claim" / "denied_path.json")
+    assert sdlc.main(["claim", "12", "--quick", "--dry-run", "--from-file", f]) == 1
+    err = capsys.readouterr().err
+    assert "may not (src/twiddle/play.py)" in err and "`escalate-to-full 12`" in err
+    assert sdlc.main(["claim", "12", "--quick", "--from-file", f]) == 1               # never for real
+    assert "--quick --dry-run only" in capsys.readouterr().err
+
+
+# a resumed claim: the work it carries on, read with the merge gate's diff rules
+
+SAFE = "src/twiddle/stations/catalog/x.toml"
+
+
+def resumable(repo, monkeypatch, brief):
+    """A quick change claimed in the scratch repo; the claim on record, so `--resume` carries it on."""
+    fake = FakeClaim(monkeypatch, quick_bundle(comments=ready_quick(brief)))
+    assert sdlc.main(["claim", "12", "--quick"]) == 0
+    fake.bundle = quick_bundle([ROUTINE, "sdlc:in-progress"], ready_quick(brief) + [CLAIM])
+    fake.posted.clear(), fake.edits.clear()
+    return repo / ".worktrees" / "slice-12", fake
+
+
+def commit(wt, path, lines=1, push=False):
+    (wt / path).parent.mkdir(parents=True, exist_ok=True)
+    (wt / path).write_text("".join(f"{i}\n" for i in range(lines)))
+    _git("add", "-A", cwd=wt)
+    _git("commit", "-q", "-m", path, cwd=wt)
+    if push:
+        _git("push", "-q", "origin", "slice/12", cwd=wt)
+
+
+def resume(capsys, *flags):
+    code = sdlc.main(["claim", "12", "--quick", "--resume", *flags])
+    return code, capsys.readouterr()
+
+
+@pytest.mark.parametrize("dry", [False, True])
+def test_a_local_commit_on_a_safe_pushed_branch_is_refused(repo, monkeypatch, capsys, dry):
+    wt, fake = resumable(repo, monkeypatch, files_brief(SAFE))
+    commit(wt, SAFE, push=True)
+    commit(wt, "src/twiddle/play.py")                                   # local only, on top of the pushed one
+    capsys.readouterr()
+    code, out = resume(capsys, *(["--dry-run"] if dry else []))
+    assert code == 1
+    assert "the local branch slice/12: the diff touches a path a quick change may not (src/twiddle/play.py)" in out.err
+    assert "origin/slice/12" not in out.err                             # the pushed branch alone is safe
+    assert out.err.rstrip().endswith("`escalate-to-full 12`") and fake.posted == [] and fake.edits == []
+
+
+def test_a_local_only_branch_touching_a_denied_path_is_refused(repo, monkeypatch, capsys):
+    wt, _ = resumable(repo, monkeypatch, files_brief(SAFE))
+    commit(wt, "tools/sdlc.py")
+    _git("worktree", "remove", "--force", str(wt), cwd=repo)            # the branch alone, never pushed
+    capsys.readouterr()
+    code, out = resume(capsys)
+    assert code == 1 and "the local branch slice/12: the diff touches a path a quick change may not (tools/sdlc.py)" \
+        in out.err
+    assert not wt.exists()                                              # refused before the worktree is reattached
+
+
+@pytest.mark.parametrize("change", ["modified", "untracked", "renamed"])
+def test_an_uncommitted_change_in_the_worktree_is_refused(repo, monkeypatch, capsys, change):
+    wt, _ = resumable(repo, monkeypatch, files_brief(SAFE, "code.py"))
+    if change == "modified":
+        (wt / ".gitignore").write_text(".worktrees/\nmore\n")             # tracked, and outside the brief
+    elif change == "untracked":
+        (wt / "tools").mkdir()
+        (wt / "tools" / "new.py").write_text("x\n")
+    else:
+        _git("mv", "code.py", "uv.lock", cwd=wt)                        # moved into a denied name, not committed
+    index = _git("ls-files", "-s", cwd=wt)
+    capsys.readouterr()
+    code, out = resume(capsys)
+    want = {"modified": "outside the brief's `## Files` list (.gitignore)",
+            "untracked": "may not (tools/new.py)", "renamed": "may not (uv.lock)"}[change]
+    assert code == 1 and f"the worktree {wt}: the diff" in out.err and want in out.err, out.err
+    assert _git("ls-files", "-s", cwd=wt) == index                     # the worktree's own index never moved
+    assert _git("status", "--porcelain", cwd=wt)                        # and its change is still there
+
+
+def test_a_pushed_branch_over_the_size_cap_is_refused(repo, monkeypatch, capsys):
+    wt, _ = resumable(repo, monkeypatch, files_brief(SAFE))
+    commit(wt, SAFE, lines=QUICK_RULES.max_lines + 1, push=True)
+    _git("worktree", "remove", "--force", str(wt), cwd=repo)
+    _git("branch", "-D", "slice/12", cwd=repo)                          # only the pushed branch is left
+    capsys.readouterr()
+    code, out = resume(capsys)
+    assert code == 1 and f"origin/slice/12: the diff changes {QUICK_RULES.max_lines + 1} lines, more than" in out.err
+
+
+def test_a_safe_resume_carries_on(repo, monkeypatch, capsys):
+    wt, fake = resumable(repo, monkeypatch, files_brief(SAFE, "notes/*.md"))
+    commit(wt, SAFE, push=True)
+    commit(wt, "notes/a.md")
+    (wt / "notes" / "b.md").write_text("new\n")
+    capsys.readouterr()
+    code, out = resume(capsys)
+    assert code == 0 and f"WORKTREE={wt}" in out.out and fake.posted == []
+
+
+def test_numstat_rows_read_like_github_s():
+    out = "3\t1\tsrc/a.py\0-\t-\tpic.png\0" + "0\t0\t\0old/x.py\0new/x.py\0"
+    assert sdlc_quick.numstat_files(out) == [
+        {"filename": "src/a.py", "additions": 3, "deletions": 1},
+        {"filename": "pic.png", "additions": 0, "deletions": 0},
+        {"filename": "new/x.py", "previous_filename": "old/x.py", "additions": 0, "deletions": 0}]
+    assert sdlc_quick.numstat_files("") == []
 
 
 # --- slice-status and slice-check read a quick change -------------------------------

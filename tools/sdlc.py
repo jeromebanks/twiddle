@@ -55,6 +55,7 @@ import contextlib
 import fcntl
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -2732,9 +2733,11 @@ def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[di
             "open": sum(1 for l in leaves if l.get("state") == "open"), "milestones": milestones}
 
 
-def git(args: list[str], cwd: Path | None = None, check: bool = True, timeout: float | None = None) -> str:
+def git(args: list[str], cwd: Path | None = None, check: bool = True, timeout: float | None = None,
+        env: dict[str, str] | None = None) -> str:
     try:
-        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                              env={**os.environ, **env} if env else None)
     except subprocess.TimeoutExpired:
         raise SdlcError(f"git {' '.join(args[:3])} timed out after {timeout}s") from None
     if check and proc.returncode != 0:
@@ -2983,6 +2986,60 @@ def add_slice_worktree(n: int, base: str, resume: bool, config: dict[str, Any]) 
         git(["worktree", "add", "-b", branch, str(wt), f"origin/{base}"], cwd=root)
 
 
+CLAIM_GIT_SECONDS = 60   # how long a quick claim's checks wait for one `git fetch`, `diff` or `add` before refusing
+
+
+def tracked_on(ref: str, root: Path) -> list[str]:
+    """Every file tracked on `ref` (a commit, not the checkout's index, which may differ from it)."""
+    out = git(["ls-tree", "-r", "-z", "--name-only", ref], cwd=root, timeout=CLAIM_GIT_SECONDS)
+    return [p for p in out.split("\0") if p]
+
+
+def ref_changes(ref: str, base: str, root: Path) -> list[dict[str, Any]]:
+    """What `ref` changes since it left `base` (`base...ref`), as the gate reads a PR's files, renames' sources too."""
+    return sdlc_quick.numstat_files(git(["diff", "--numstat", "-z", "-M", f"{base}...{ref}"], cwd=root,
+                                        timeout=CLAIM_GIT_SECONDS))
+
+
+def worktree_changes(wt: Path, base: str) -> list[dict[str, Any]]:
+    """What a worktree changes since its branch left `base`: its commits and its uncommitted and untracked files
+    (not ignored ones), read through a scratch index outside the tree, so neither its index nor its files move."""
+    since = git(["merge-base", base, "HEAD"], cwd=wt, timeout=CLAIM_GIT_SECONDS)
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        git(["read-tree", "HEAD"], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
+        git(["add", "-A"], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
+        out = git(["diff", "--cached", "--numstat", "-z", "-M", since], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
+    return sdlc_quick.numstat_files(out)
+
+
+def quick_claim_errors(n: int, brief: str, resume: bool, config: dict[str, Any]) -> list[str]:
+    """The quick lane's mechanical rules at claim, as `merge` will apply them: the brief's `## Files` (a denied
+    path, or a pattern that could reach one; more than `max_files`), and, resuming, the work actually resumed
+    (the local branch, its worktree, and `origin/slice/N` if pushed) read with the gate's diff rules. Never
+    escalates: each refusal says `escalate-to-full N`. An exact-path brief is checked with no git at all."""
+    rules, base = load_quick(config), config.get("default_branch", "main")
+    entries = sdlc_quick.brief_files(brief)
+    if not resume and not any(sdlc_quick.is_glob(e) for e in entries):
+        return sdlc_quick.brief_errors(n, brief, [], rules)
+    root, wt, branch = primary_root(), worktree_path(n, config), slice_branch(n)
+    git(["fetch", "-q", "origin", base], cwd=root, timeout=CLAIM_GIT_SECONDS)
+    main = f"origin/{base}"
+    errs = sdlc_quick.brief_errors(n, brief, tracked_on(main, root), rules)
+    if not resume:
+        return errs
+    sources = []
+    if git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root, check=False):
+        sources.append((f"the local branch {branch}", ref_changes(f"refs/heads/{branch}", main, root)))
+    if wt.exists():
+        sources.append((f"the worktree {wt}", worktree_changes(wt, main)))
+    if remote_has(branch, root):
+        git(["fetch", "-q", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"], cwd=root,
+            timeout=CLAIM_GIT_SECONDS)
+        sources.append((f"origin/{branch}", ref_changes(f"refs/remotes/origin/{branch}", main, root)))
+    return errs + sdlc_quick.resume_errors(n, sources, brief, rules)
+
+
 def claim_quick(args: argparse.Namespace, config: dict[str, Any], b: dict[str, Any],
                 claim: dict[str, Any] | None) -> int:
     """Claim an approved quick change: its own worktree on slice/N from origin/main, the issue to in-progress."""
@@ -2993,6 +3050,8 @@ def claim_quick(args: argparse.Namespace, config: dict[str, Any], b: dict[str, A
     st = bundle_issue_state(b, config) or {}
     errs = sdlc_quick.quick_check_errors(b["issue"], st, approved_brief(st), claim, args.resume, is_slice)
     if errs:
+        raise SdlcError("; ".join(errs))
+    if errs := quick_claim_errors(n, approved_brief(st) or "", args.resume, config):
         raise SdlcError("; ".join(errs))
     root, wt, branch = primary_root(), worktree_path(n, config), slice_branch(n)
     base = config.get("default_branch", "main")
@@ -3021,7 +3080,9 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Claim a ready slice and give it its own worktree on branch slice/N, from origin/epic/E
     (`--quick`: an approved quick change, from origin/main)."""
     n = args.number
-    b = slice_bundle(n, config)
+    if args.from_file and not (args.dry_run and args.quick):
+        raise SdlcError("--from-file reads an offline copy: it goes with --quick --dry-run only, never claims")
+    b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(n, config)
     claim = claim_status(b["comments"], set(b["trusted"]))
     if args.quick:
         return claim_quick(args, config, b, claim)
@@ -4955,6 +5016,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--retry", action="store_true",
                    help="once: an escalated slice taken over by a stronger --model, keeping its branch and PR")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--from-file", help="a quick change's issue bundle (issue, comments, trusted), with --quick "
+                   "--dry-run only")
     p.set_defaults(fn=command_claim)
 
     p = sub.add_parser("release", help="give up a claim (the slice becomes ready again)")

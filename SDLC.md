@@ -191,8 +191,15 @@ on its head.** The full lane is unchanged for everything else.
    stays a comment: no `docs/prd/` file, no PR.
 2. **Build.** `claim N --quick` makes `.worktrees/slice-N` on `slice/N` from `origin/main` and moves
    the issue from `approved` to `in-progress`, which freezes the brief. It refuses an unapproved,
-   non-quick, escalated, unrated or already-claimed issue, and a brief that lacks a section. The
-   brief (not the poster's request) is what is built, checked and reviewed.
+   non-quick, escalated, unrated or already-claimed issue, and a brief that lacks a section. It
+   also applies the merge gate's mechanical rules before anything is built: a brief whose `## Files`
+   names a denied path, or a pattern that could reach one (its literal prefix overlaps a denied entry,
+   so `src/twiddle/a*/clock.py` and `*.py` are refused), or lists more than `quick.max_files`; and on
+   `--resume`, the work it carries on (the local branch, its worktree's uncommitted and untracked
+   changes, and `origin/slice/N`) read with the gate's diff rules. Each refusal ends with
+   `escalate-to-full N`; `claim` never escalates by itself. `claim N --quick --dry-run --from-file
+   <bundle>` checks a saved issue bundle offline. The brief (not the poster's request) is what is
+   built, checked and reviewed.
 3. **Evidence** goes in the PR body in place of a demo: the read-only commands run and their
    output. The PR targets `main` and closes exactly that one issue.
 4. **Review.** `test-record` records the full suite on the head. `codex-review --pr PR` reviews the

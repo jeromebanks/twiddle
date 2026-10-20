@@ -114,6 +114,71 @@ def diff_rule_broken(files: list[dict[str, Any]] | None, brief: str, rules: Quic
     return bool(files) and bool(diff_errors(0, files, brief, rules))
 
 
+WILDCARDS = "*?["   # what makes a `## Files` entry an fnmatch pattern rather than an exact path
+
+
+def is_glob(entry: str) -> bool:
+    return any(c in entry for c in WILDCARDS)
+
+
+def entry_reaches(entry: str, tracked: list[str], rules: QuickRules) -> list[str]:
+    """The denied paths a `## Files` entry could reach (empty list = none). An exact path is itself; a pattern
+    reaches the denied files tracked on main that it matches, and a denied entry its literal prefix (up to the
+    first wildcard) overlaps, either a prefix of the other: `src/twiddle/a*/clock.py` (`src/twiddle/a`) reaches
+    `src/twiddle/alarms/`, and `*.py` (``) every one. Anything a pattern can match starts with its literal prefix,
+    so the overlap alone never misses a denied path, whatever main holds today; `tracked` names the files."""
+    if not is_glob(entry):
+        return [entry] if path_denied(entry, rules) else []
+    if hits := sorted(p for p in tracked if path_denied(p, rules) and fnmatch.fnmatchcase(p, entry)):
+        return hits
+    prefix = re.split(r"[*?\[]", entry, maxsplit=1)[0]
+    return [d for d in rules.denied_paths if d.rstrip("/").startswith(prefix) or prefix.startswith(d.rstrip("/"))]
+
+
+def brief_errors(n: int, brief: str, tracked: list[str], rules: QuickRules) -> list[str]:
+    """Why the approved brief's `## Files` is not a quick change, checked at claim before anything is built:
+    an entry that names, or could reach, a denied path, and more entries than `max_files` (a pattern is one)."""
+    to_full = f": `escalate-to-full {n}`"
+    listed = brief_files(brief)
+    errs = []
+    if bad := [f"{e} (reaches {', '.join(r[:3])}{', ...' if len(r) > 3 else ''})" if is_glob(e) else e
+               for e in listed if (r := entry_reaches(e, tracked, rules))]:
+        errs.append("the brief's `## Files` names a path a quick change may not (" + "; ".join(bad[:5])
+                    + ("; ..." if len(bad) > 5 else "") + ")" + to_full)
+    if len(listed) > rules.max_files:
+        errs.append(f"the brief's `## Files` lists {len(listed)} files, more than the quick lane's {rules.max_files}"
+                    + to_full)
+    return errs
+
+
+def numstat_files(out: str) -> list[dict[str, Any]]:
+    """`git diff --numstat -z -M` as GitHub's `pulls/N/files` rows (filename, previous_filename, additions,
+    deletions), so the gate's rules read it unchanged. A binary file's `-` counts as 0, as GitHub's does."""
+    parts, files = out.split("\0"), []
+    i = 0
+    while i < len(parts):
+        head = parts[i]
+        i += 1
+        if not head.strip():
+            continue
+        adds, dels, path = head.split("\t", 2)
+        row = {"additions": 0 if adds == "-" else int(adds), "deletions": 0 if dels == "-" else int(dels)}
+        if path:                                    # a plain change: its path on the same record
+            row["filename"] = path
+        else:                                       # a rename or copy: the source, then the destination
+            row["previous_filename"], row["filename"] = parts[i], parts[i + 1]
+            i += 2
+        files.append(row)
+    return files
+
+
+def resume_errors(n: int, sources: list[tuple[str, list[dict[str, Any]]]], brief: str, rules: QuickRules) -> list[str]:
+    """Why the work a resumed claim carries on is no longer a quick change: each source (the local branch, its
+    worktree, the pushed branch) and its changed files against main, read with the merge gate's own rules and
+    messages. A source with no changes yet is nothing to refuse."""
+    return [f"{where}: {e}" for where, files in sources if files for e in diff_errors(n, files, brief, rules)]
+
+
 def rounds_error(n: int, rounds: int, rules: QuickRules) -> str | None:
     """More Codex rounds asked for changes than a quick change gets."""
     if rounds > rules.max_change_rounds:
