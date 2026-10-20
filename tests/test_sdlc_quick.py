@@ -1371,6 +1371,7 @@ def test_commit_prd_then_planning_starts_with_no_fast_forward(repo, monkeypatch,
     assert "ok" in capsys.readouterr().out
     assert sdlc.main(["plan-post", "12", str(plan), "--dry-run"]) == 0       # plan-post finds it the same way
     assert "plan rev 1" in capsys.readouterr().out
+    assert sdlc.plan_criteria(plan_for_12(), "origin/main")[0] == {1, 2}    # the entry points pass the ref down
     assert not (repo / "docs").exists() and _git("status", "--porcelain", cwd=repo) == ""   # nothing pulled
 
 
@@ -1414,6 +1415,53 @@ def test_a_failed_fetch_is_said_and_the_last_fetched_main_is_read(repo, monkeypa
     assert sdlc.main(["plan-validate", str(plan)]) == 0
     assert "git fetch -q origin failed" in (err := capsys.readouterr().err)
     assert "reading docs/prd/12-*.md from the last fetched origin/main" in err
+
+
+def test_a_fetch_that_hangs_is_bounded_and_the_last_fetched_main_is_read(repo, monkeypatch, capsys, tmp_path):
+    fake = PrdGitHub(monkeypatch, repo, [], labels=["sdlc:approved"])
+    _merge_on_origin(fake, {"docs/prd/12-add-a-station.md": PRD_12})
+    _git("fetch", "-q", "origin", "main", cwd=repo)
+    monkeypatch.setattr(sdlc, "ROOT", repo)
+    run, waits = subprocess.run, []
+
+    def hanging_fetch(cmd, *a, **k):
+        if cmd[:2] == ["git", "fetch"]:
+            waits.append(k.get("timeout"))
+            raise subprocess.TimeoutExpired(cmd, k.get("timeout"))
+        return run(cmd, *a, **k)
+    monkeypatch.setattr(sdlc.subprocess, "run", hanging_fetch)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(plan_for_12()))
+    assert sdlc.main(["plan-validate", str(plan)]) == 0
+    assert waits == [sdlc.PRD_FETCH_SECONDS] and 0 < sdlc.PRD_FETCH_SECONDS < float("inf")
+    err = capsys.readouterr().err
+    assert f"timed out after {sdlc.PRD_FETCH_SECONDS}s" in err and "from the last fetched origin/main" in err
+    monkeypatch.setattr(sdlc, "PRD_FETCH_SECONDS", 0)
+    assert sdlc.main(["plan-validate", str(plan)]) == 1 and "must be positive" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("local", [False, True])
+def test_plan_create_links_the_prd_it_found(repo, monkeypatch, capsys, tmp_path, local):
+    prd = agent("prd", 1, 1)
+    plan_c = comment(OWNER, sdlc.render_comment("plan", 1, sdlc.render_plan(plan_for_12()), CONFIG), 3)
+    fake = PrdGitHub(monkeypatch, repo, [prd, agent("approval", 1, 2, by=POSTER, via="comment"), plan_c,
+                                         agent("plan-review", 1, 4, verdict="approve", round="1")], labels=["sdlc:approved"])
+    linked = PRD_12.replace("comment-1)", f"comment-{anchor(prd)})")
+    _merge_on_origin(fake, {"docs/prd/12-a-first.md": PRD_12, "docs/prd/12-b-approved.md": linked})
+    if local:   # a checkout that has a PRD: its link is what it always was
+        (repo / "docs" / "prd").mkdir(parents=True)
+        (repo / "docs" / "prd" / "12-local.md").write_text(PRD_12)
+    monkeypatch.setattr(sdlc, "ROOT", repo)
+    monkeypatch.setattr(sdlc, "fetch_plan_issues", lambda *a: [])
+    monkeypatch.setattr(sdlc, "fetch_links", lambda *a: ({}, {}))
+    monkeypatch.setattr(sdlc, "gh_pages", lambda path: [])
+    urls, render = [], sdlc.render_leaf_body
+    monkeypatch.setattr(sdlc, "render_leaf_body", lambda *a: urls.append(a[-1]) or render(*a))
+    calls = _recording_git(monkeypatch)
+    assert sdlc.main(["plan-create", "12", "--dry-run"]) == 0
+    name = "12-local.md" if local else "12-b-approved.md"    # at the ref, the one whose header links the approval
+    assert urls == [f"https://github.com/o/r/blob/main/docs/prd/{name}"]
+    assert [c for c in calls if c[0] == "fetch"] == ([] if local else [["fetch", "-q", "origin", "main"]])
 
 
 def test_a_feature_with_no_prd_anywhere_still_fails_and_says_where_it_looked(repo, monkeypatch, capsys, tmp_path):

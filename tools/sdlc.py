@@ -1787,6 +1787,9 @@ def find_prd(n: int, ref: str | None = None, comment_id: str | None = None) -> t
     return prd_at(n, ref, ROOT, comment_id) if ref else None
 
 
+PRD_FETCH_SECONDS = 60   # how long planning waits for `git fetch` of the default branch before reading the last one
+
+
 def planning_ref(n: Any, config: dict[str, Any], offline: bool) -> str | None:
     """Where planning also looks for issue N's PRD: `origin/<default_branch>`, fetched once here, but only when
     the working tree has no docs/prd/N-*.md (a PRD merged on GitHub that this checkout hasn't pulled). None
@@ -1795,8 +1798,10 @@ def planning_ref(n: Any, config: dict[str, Any], offline: bool) -> str | None:
     if offline or not isinstance(n, int) or prd_path(n):
         return None
     main = config.get("default_branch", "main")
+    if not PRD_FETCH_SECONDS > 0:
+        raise SdlcError(f"PRD_FETCH_SECONDS must be positive (got {PRD_FETCH_SECONDS})")
     try:
-        git(["fetch", "-q", "origin", main], cwd=ROOT)
+        git(["fetch", "-q", "origin", main], cwd=ROOT, timeout=PRD_FETCH_SECONDS)
     except SdlcError as exc:
         print(f"{exc}: reading docs/prd/{n}-*.md from the last fetched origin/{main}", file=sys.stderr)
     return f"origin/{main}"
@@ -2720,8 +2725,11 @@ def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[di
             "open": sum(1 for l in leaves if l.get("state") == "open"), "milestones": milestones}
 
 
-def git(args: list[str], cwd: Path | None = None, check: bool = True) -> str:
-    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+def git(args: list[str], cwd: Path | None = None, check: bool = True, timeout: float | None = None) -> str:
+    try:
+        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise SdlcError(f"git {' '.join(args[:3])} timed out after {timeout}s") from None
     if check and proc.returncode != 0:
         raise SdlcError(f"git {' '.join(args[:3])} failed: {proc.stderr.strip()}")
     return proc.stdout.strip()
