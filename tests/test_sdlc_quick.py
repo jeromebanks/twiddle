@@ -562,8 +562,12 @@ def test_a_brief_naming_a_denied_path_is_refused_at_claim(repo, monkeypatch, cap
 
 def test_a_brief_whose_patterns_stay_clear_of_denied_paths_claims(repo, monkeypatch, capsys):
     assert claim_refused(monkeypatch, capsys, GATE_BRIEF, "--dry-run")[0] == 0     # src/twiddle/stations/catalog/*.toml
-    for e in ("src/twiddle/stations/catalog/*.toml", "tests/test_*.py", "docs/STATIONS.md", "toolsx/a.py"):
+    for e in ("src/twiddle/stations/catalog/*.toml", "tests/test_*.py", "docs/STATIONS.md", "toolsx/a.py",
+              "toolsx/*.py", "src/twiddle/alarms_notes/*.md", "uv.lock.d/*"):   # a sibling is never under it
         assert sdlc_quick.entry_reaches(e, [], QUICK_RULES) == [], e
+    for e, d in (("tools*", "tools/"), ("tools/x*", "tools/"), ("src/twiddle/alarms/*", "src/twiddle/alarms/"),
+                 ("uv.lo?k", "uv.lock")):
+        assert d in sdlc_quick.entry_reaches(e, [], QUICK_RULES), e
 
 
 def test_a_pattern_names_the_denied_files_on_main_it_matches():
@@ -701,7 +705,9 @@ def test_an_uncommitted_change_in_the_worktree_is_refused(repo, monkeypatch, cap
     elif change == "staged-then-reverted":
         (wt / "tools" / "x.py").write_text("staged\n")
         _git("add", "tools/x.py", cwd=wt)                               # the index holds the denied edit
-        _git("restore", "--worktree", "tools/x.py", cwd=wt)             # and the working copy is back as it was
+        _git("restore", "--source=HEAD", "--worktree", "tools/x.py", cwd=wt)   # and the working copy is HEAD's
+        assert (wt / "tools" / "x.py").read_text() == _git("show", "HEAD:tools/x.py", cwd=wt) + "\n"
+        assert _git("diff", "--cached", "--name-only", cwd=wt) == "tools/x.py"
     elif change == "untracked":
         (wt / "tools" / "new.py").write_text("x\n")
     else:

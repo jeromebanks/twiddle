@@ -125,7 +125,7 @@ def is_glob(entry: str) -> bool:
 def entry_reaches(entry: str, tracked: list[str], rules: QuickRules) -> list[str]:
     """The denied paths a `## Files` entry could reach (empty list = none). An exact path is itself; a pattern
     reaches the denied files tracked on main that it matches, and a denied entry its literal prefix (up to the
-    first wildcard) overlaps, either a prefix of the other: `src/twiddle/a*/clock.py` (`src/twiddle/a`) reaches
+    first wildcard) overlaps (the entry starts with the prefix, or the prefix is under the entry): `src/twiddle/a*/clock.py` (`src/twiddle/a`) reaches
     `src/twiddle/alarms/`, and `*.py` (``) every one. Anything a pattern can match starts with its literal prefix,
     so the overlap alone never misses a denied path, whatever main holds today; `tracked` names the files.
     An unnormalised spelling (`./tools/x`, `/tools/x`, `tools\\x`) is read as the path it spells."""
@@ -136,7 +136,10 @@ def entry_reaches(entry: str, tracked: list[str], rules: QuickRules) -> list[str
     if hits := sorted(p for p in tracked if path_denied(p, rules) and fnmatch.fnmatchcase(p, entry)):
         return hits
     prefix = re.split(r"[*?\[]", entry, maxsplit=1)[0]
-    return [d for d in rules.denied_paths if d.rstrip("/").startswith(prefix) or prefix.startswith(d.rstrip("/"))]
+    # a match starts with the prefix: it can be the denied entry itself, or under it (a directory boundary, as
+    # `path_denied` keeps one: `toolsx/` is never under `tools`)
+    return [d for d in rules.denied_paths
+            if d.rstrip("/").startswith(prefix) or prefix.startswith(d.rstrip("/") + "/")]
 
 
 def brief_errors(n: int, brief: str, tracked: list[str], rules: QuickRules) -> list[str]:
