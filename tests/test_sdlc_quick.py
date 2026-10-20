@@ -623,6 +623,15 @@ def test_a_pattern_brief_from_a_file_is_checked_offline(tmp_path, monkeypatch, c
     assert "src/twiddle/a*/clock.py (reaches src/twiddle/alarm_cli.py, src/twiddle/alarms/)" in capsys.readouterr().err
 
 
+def test_an_eligible_brief_from_a_file_is_checked_offline(tmp_path, monkeypatch, capsys):
+    for name in ("git", "gh", "gh_json", "post_comment"):
+        monkeypatch.setattr(sdlc, name, lambda *a, **k: pytest.fail(f"--from-file reads nothing else: {a}"))
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps(quick_bundle(comments=ready_quick(GATE_BRIEF))))
+    assert sdlc.main(["claim", "12", "--quick", "--dry-run", "--from-file", str(f)]) == 0
+    assert "would claim #12" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("entry", ["./tools/sdlc.py", "/tools/sdlc.py", "tools\\sdlc.py", "src/../tools/x.py", "./*.py"])
 def test_an_unnormalised_entry_is_read_as_the_path_it_spells(entry):
     assert sdlc_quick.entry_reaches(entry, [], QUICK_RULES)
@@ -680,7 +689,7 @@ def test_a_local_only_branch_touching_a_denied_path_is_refused(repo, monkeypatch
     assert not wt.exists()                                              # refused before the worktree is reattached
 
 
-@pytest.mark.parametrize("change", ["modified", "outside", "untracked", "renamed"])
+@pytest.mark.parametrize("change", ["modified", "outside", "untracked", "renamed", "staged-then-reverted"])
 def test_an_uncommitted_change_in_the_worktree_is_refused(repo, monkeypatch, capsys, change):
     commit(repo, "tools/x.py")                                          # a denied file on main
     _git("push", "-q", "origin", "main", cwd=repo)
@@ -689,6 +698,10 @@ def test_an_uncommitted_change_in_the_worktree_is_refused(repo, monkeypatch, cap
         (wt / "tools" / "x.py").write_text("changed\n")                 # unstaged
     elif change == "outside":
         (wt / ".gitignore").write_text(".worktrees/\nmore\n")             # tracked, and outside the brief
+    elif change == "staged-then-reverted":
+        (wt / "tools" / "x.py").write_text("staged\n")
+        _git("add", "tools/x.py", cwd=wt)                               # the index holds the denied edit
+        _git("restore", "--worktree", "tools/x.py", cwd=wt)             # and the working copy is back as it was
     elif change == "untracked":
         (wt / "tools" / "new.py").write_text("x\n")
     else:
@@ -697,8 +710,10 @@ def test_an_uncommitted_change_in_the_worktree_is_refused(repo, monkeypatch, cap
     capsys.readouterr()
     code, out = resume(capsys)
     want = {"modified": "may not (tools/x.py)", "outside": "outside the brief's `## Files` list (.gitignore)",
-            "untracked": "may not (tools/new.py)", "renamed": "may not (uv.lock)"}[change]
-    assert code == 1 and f"the worktree {wt}: the diff" in out.err and want in out.err, out.err
+            "untracked": "may not (tools/new.py)", "renamed": "may not (uv.lock)",
+            "staged-then-reverted": "may not (tools/x.py)"}[change]
+    where = f"the worktree {wt}'s index" if change == "staged-then-reverted" else f"the worktree {wt}"
+    assert code == 1 and f"{where}: the diff" in out.err and want in out.err, out.err
     assert _git("ls-files", "-s", cwd=wt) == index                     # the worktree's own index never moved
     assert _git("status", "--porcelain", cwd=wt)                        # and its change is still there
 

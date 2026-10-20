@@ -3037,6 +3037,10 @@ def quick_claim_errors(n: int, brief: str, resume: bool, config: dict[str, Any],
         sources.append((f"the local branch {branch}", ref_changes(f"refs/heads/{branch}", main, root)))
     if wt.exists():
         sources.append((f"the worktree {wt}", worktree_changes(wt, main)))
+        # its own index too: a staged edit the working copy reverts is still what the next commit carries
+        since = git(["merge-base", main, "HEAD"], cwd=wt, timeout=CLAIM_GIT_SECONDS)
+        sources.append((f"the worktree {wt}'s index", sdlc_quick.numstat_files(
+            git(["diff", "--cached", "--numstat", "-z", "-M", since], cwd=wt, timeout=CLAIM_GIT_SECONDS))))
     if remote_has(branch, root):
         git(["fetch", "-q", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"], cwd=root,
             timeout=CLAIM_GIT_SECONDS)
@@ -3057,6 +3061,10 @@ def claim_quick(args: argparse.Namespace, config: dict[str, Any], b: dict[str, A
         raise SdlcError("; ".join(errs))
     if errs := quick_claim_errors(n, approved_brief(st) or "", args.resume, config, offline=bool(args.from_file)):
         raise SdlcError("; ".join(errs))
+    if args.from_file:   # offline: the bundle's brief is all that was read (no worktree, branch or origin)
+        print(f"would claim #{n}: a quick change, its brief inside the quick rules; from {args.from_file}, "
+              f"so the worktree, slice/{n} and origin were not read")
+        return 0
     root, wt, branch = primary_root(), worktree_path(n, config), slice_branch(n)
     base = config.get("default_branch", "main")
     if not remote_has(base, root):
