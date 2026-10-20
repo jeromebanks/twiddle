@@ -248,7 +248,7 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <td><code>commit_prd</code> → <code>commit-prd N</code>, then <code>plan</code> → <code>/plan-issue N</code></td></tr>
 </tbody></table></div>
 <p class="note">The slices themselves (<span class="chip">plan:slice</span>, <span class="chip">plan:subtask</span>) and filed
-<span class="chip">tech-debt</span> are never triaged on their own. They move with their epic.</p>
+<span class="chip">tech-debt</span> are never triaged on their own. They move with their epic (a quick change's debt, which has no epic, waits in the open tech-debt list).</p>
 
 <h2 id="skills">4. The four skills</h2>
 <p>Each skill does one stage and ends by printing the <code>next:</code> line, so the next session (or an
@@ -558,7 +558,9 @@ no Codex review: nothing of it is on the branch, so a review would judge a later
 reproduces it), and the demo runs again.</td></tr>
 <tr><td><strong>Non-blocking.</strong> A cosmetic problem, an edge case, a review suggestion, or an adjacent issue.</td>
 <td><code>file-issue N --debt</code> files it as <span class="chip">tech-debt</span>, linked to the epic. A budgeted cleanup pass picks it up
-after the milestone is accepted, and <code>merge</code> closes it with the slice that pays it down.</td></tr>
+after the milestone is accepted, and <code>merge</code> closes it with the slice that pays it down.
+A follow-up is debt by what it is, not by its lane: <code>file-issue N --debt</code> on a quick change files work the change needed to support itself, and,
+since a quick change has no epic and no cleanup pass, it waits in the open <span class="chip">tech-debt</span> list (<code>state</code> on it says so).</td></tr>
 <tr><td><strong>Out of scope.</strong> A bug that already existed, or one in another feature.</td>
 <td><code>file-issue N</code> makes a new issue, which starts its own journey at triage.</td></tr>
 <tr><td><strong>The poster wants something different.</strong></td>
