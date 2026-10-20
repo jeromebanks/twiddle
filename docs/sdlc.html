@@ -268,7 +268,13 @@ orchestrator) knows exactly what to run.</p>
 <td><span class="chip">in-progress</span> ⇄ <span class="chip">demo-review</span>. The last ship makes it <span class="chip">done</span>.</td>
 <td><code>demo-status</code>, <code>demo-request</code>, <code>demo-post</code>, <code>demo-accept</code>, <code>demo-changes</code>, <code>sync</code>, <code>ship-review</code>, <code>ship</code>, <code>verify-main</code>, <code>revert-slice</code>, <code>file-issue</code></td></tr>
 </tbody></table></div>
-<p class="note">Also: <code>commit-prd N</code> (<code>--dry-run</code>, safe to rerun) puts a quick brief that moved to the
+<p class="note">Also: <code>escalate-to-full N --reason ...</code> (<code>--dry-run</code>) moves an approved or in-progress
+quick change to the full lane: it posts a <code>kind=lane lane=full</code> record, puts the issue back on
+<span class="chip">sdlc:approved</span> without <span class="chip">lane:quick</span>, and runs <code>commit-prd N</code>; any open PR
+and worktree are left for a person to close or clean up. The tool runs it itself when <code>pr-review</code> records one Codex
+change round more than the <code>quick</code> section's <code>max_change_rounds</code>, and when <code>merge</code> finds a quick
+PR's diff touches a denied path, passes the size cap or changes a file outside the brief's <code>## Files</code>; never on
+<code>quick-gate</code>, a dry run, <code>--from-file</code> or any other refusal. <code>commit-prd N</code> (<code>--dry-run</code>, safe to rerun) puts a quick brief that moved to the
 full lane into <code>docs/prd/</code> before it is planned; <code>epic-branch N</code> gives an older epic its branch, <code>next</code> lists every issue where it's the
 agent's move, and <code>state N</code> explains one. <code>quick-gate PR</code> (read-only) says why a quick PR may not
 merge into main yet: a denied path, more than the size cap in <code>.sdlc/config.json</code>'s <code>quick</code> section, a file

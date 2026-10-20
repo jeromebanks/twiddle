@@ -1440,3 +1440,366 @@ def test_a_revision_posted_while_the_pr_is_made_stops_the_merge(repo, monkeypatc
     assert sdlc.main(["commit-prd", "12"]) == 1
     assert "changed while PR" in capsys.readouterr().err
     assert not any(c[:2] == ["pr", "merge"] for c in fake.calls) and fake.posted == [] and fake.on_main() == []
+
+
+# --- escalate-to-full: a quick change that outgrew the lane, by hand or on a trigger ------------------------
+
+class EscalateGitHub:
+    """`gh` for an escalation: the issue's labels follow `issue edit`, posts land on the issue (12) or the PR (50),
+    and `commit-prd` (T5.2's, tested above) is recorded rather than run. `drop` loses the next post on the issue."""
+
+    def __init__(self, monkeypatch, b):
+        self.b, self.issue = b, {**b["issue"], "labels": list(b["issue"]["labels"]), "body": ""}
+        self.comments, self.pr, self.pr_comments = list(b["comments"]), b["pr"], list(b["pr_comments"])
+        self.calls, self.posted, self.committed, self.drop, self.meanwhile = [], [], [], False, None
+        monkeypatch.setattr(sdlc, "repo_of", lambda cfg: "o/r")
+        monkeypatch.setattr(sdlc, "fetch_trusted", lambda cfg: set(b["trusted"]))
+        monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted=None: self.bundle())
+        monkeypatch.setattr(sdlc, "fetch_slice", lambda n, cfg: (dict(self.issue, labels=list(self.issue["labels"])),
+                                                                 list(self.comments)))
+        monkeypatch.setattr(sdlc, "fetch_pr", lambda n, cfg: (self.pr, list(self.pr_comments)))
+        monkeypatch.setattr(sdlc, "quick_gate_bundle", lambda n, cfg: {**self.b, **self.bundle(),
+                                                                        "pr_comments": list(self.pr_comments)})
+        monkeypatch.setattr(sdlc, "gh", self.gh)
+        monkeypatch.setattr(sdlc, "gh_json", lambda args: self.calls.append(args) or {"behind_by": 0})
+        monkeypatch.setattr(sdlc, "post_comment", self.post)
+        monkeypatch.setattr(sdlc, "commit_prd", lambda n, cfg, dry_run=False, root=None: self.committed.append(n) or 0)
+
+    def bundle(self):
+        return {"issue": dict(self.issue, labels=list(self.issue["labels"])), "comments": list(self.comments),
+                "trusted": list(self.b["trusted"])}
+
+    def post(self, n, body, cfg):
+        self.posted.append((n, body))
+        if n == 12 and self.drop:
+            return {}
+        (self.comments if n == 12 else self.pr_comments).append(comment(OWNER, body, 50 + len(self.posted)))
+        if n == 12 and self.meanwhile:   # what a person does on the issue while the record is being posted
+            self.meanwhile(self)
+        return {"html_url": "u"}
+
+    def gh(self, args, check=True):
+        self.calls.append(args)
+        if args[:2] == ["issue", "edit"]:
+            gone = {args[i + 1] for i, a in enumerate(args) if a == "--remove-label"}
+            added = [args[i + 1] for i, a in enumerate(args) if a == "--add-label"]
+            kept = [l for l in self.issue["labels"] if l not in gone]
+            self.issue["labels"] = kept + [l for l in added if l not in kept]
+        return ""
+
+    def state(self):
+        return sdlc.bundle_state(self.bundle(), CONFIG)
+
+    def lane_records(self):
+        return [body for n, body in self.posted if n == 12 and "kind=lane" in body.splitlines()[0]]
+
+    def merged(self):
+        return any(c[:2] == ["pr", "merge"] for c in self.calls)
+
+    def assert_escalated(self, trigger):
+        assert sorted(self.issue["labels"]) == [ROUTINE, "sdlc:approved"]          # one state label, no lane:quick
+        (record,) = self.lane_records()
+        assert record.splitlines()[0] == f"<!-- sdlc:v1 kind=lane lane=full trigger={trigger} -->"
+        st = self.state()
+        assert (st["state"], st["lane"], st["action"], st["conflicts"]) == ("approved", None, "commit_prd", [])
+        assert self.committed == [12] and not self.merged()
+        return record
+
+    def assert_untouched(self):
+        assert self.lane_records() == [] and self.committed == [] and not self.merged()
+        assert not any(c[:2] == ["issue", "edit"] for c in self.calls)
+
+
+ESC_LABELS = [ROUTINE, "sdlc:in-progress", "lane:quick"]
+
+
+@pytest.mark.parametrize("labels", [ESC_LABELS, [ROUTINE, "sdlc:approved", "lane:quick"]])
+def test_escalate_to_full_records_moves_the_label_and_commits_the_brief(monkeypatch, capsys, labels):
+    fake = EscalateGitHub(monkeypatch, gate_bundle(labels=labels))
+    assert sdlc.main(["escalate-to-full", "12", "--reason", "it needs a new fetcher"]) == 0
+    record = fake.assert_escalated("manual")
+    assert "it needs a new fetcher" in record
+    # once the brief is merged (`prd-merged`, which commit-prd posts), planning is next
+    fake.comments.append(agent("prd-merged", None, 90, comment="1"))
+    st = fake.state()
+    assert (st["action"], sdlc.next_command(st)) == ("plan", "/plan-issue 12")
+
+
+def test_escalate_to_full_dry_run_posts_nothing(monkeypatch, capsys):
+    fake = EscalateGitHub(monkeypatch, gate_bundle(labels=ESC_LABELS))
+    assert sdlc.main(["escalate-to-full", "12", "--reason", "bigger", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert fake.posted == [] and fake.calls == [] and fake.committed == []
+    assert "kind=lane lane=full trigger=manual" in out and "then: commit-prd 12" in out
+    assert "remove ['sdlc:in-progress', 'lane:quick']" in out
+
+
+def test_escalate_to_full_dry_run_on_the_demo_fixture(monkeypatch, capsys):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("--from-file --dry-run reads nothing else"))
+    monkeypatch.setattr(sdlc, "post_comment", lambda *a, **k: pytest.fail("a dry run posts nothing"))
+    f = str(FIXTURES / "denied_path.json")
+    assert sdlc.main(["escalate-to-full", "12", "--reason", "touches play.py", "--dry-run", "--from-file", f]) == 0
+    assert "kind=lane lane=full trigger=manual" in capsys.readouterr().out
+    assert sdlc.main(["escalate-to-full", "12", "--reason", "x", "--from-file", f]) == 1     # never for real
+    assert "with --dry-run only" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("case,needle", [
+    ("closed", "is closed"),
+    ("slice", "is a plan:slice issue"),
+    ("already", "already in the full lane"),
+    ("full-lane", "is not a quick change"),
+    ("human", "escalated to a human"),
+    ("in-review", "the latest is rev 2"),
+    ("needs-info", "is needs-info, not approved or in-progress"),
+])
+def test_escalate_to_full_refuses(monkeypatch, capsys, case, needle):
+    moved = ready_quick(GATE_BRIEF) + [CLAIM, agent("lane", None, 9, "moved", lane="full")]
+    b = {"closed": lambda: gate_bundle(labels=ESC_LABELS, state="closed"),
+         "slice": lambda: gate_bundle(labels=["plan:slice", ROUTINE]),
+         "already": lambda: gate_bundle(labels=[ROUTINE, "sdlc:approved"], comments=moved),
+         "full-lane": lambda: gate_bundle(labels=[ROUTINE, "sdlc:approved"],
+                                          comments=[agent("prd", 1, 1, GATE_BRIEF), agent("approval", 1, 2, by=POSTER)]),
+         "human": lambda: gate_bundle(labels=[ROUTINE, "sdlc:escalated", "lane:quick"]),
+         "in-review": lambda: gate_bundle(labels=[ROUTINE, "sdlc:prd-review", "lane:quick"],
+                                          comments=ready_quick(GATE_BRIEF) + [quick_brief(ts=9, rev=2, body=GATE_BRIEF)]),
+         "needs-info": lambda: gate_bundle(labels=[ROUTINE, "sdlc:needs-info", "lane:quick"],
+                                           comments=ready_quick(GATE_BRIEF) + [agent("question", None, 9)]),
+         }[case]()
+    fake = EscalateGitHub(monkeypatch, b)
+    for dry in ([], ["--dry-run"]):
+        assert sdlc.main(["escalate-to-full", "12", "--reason", "x", *dry]) == 1
+        assert needle in capsys.readouterr().err
+        assert fake.posted == [] and fake.calls == [] and fake.committed == []
+
+
+def test_a_half_done_escalation_is_finished_not_refused(monkeypatch, capsys):
+    # the record was posted but the label move failed: derive_state calls that a conflict; a rerun clears it
+    moved = ready_quick(GATE_BRIEF) + [CLAIM, agent("lane", None, 9, "moved", lane="full", trigger="rounds")]
+    fake = EscalateGitHub(monkeypatch, gate_bundle(labels=ESC_LABELS, comments=moved))
+    assert fake.state()["action"] == "fix_conflict"
+    assert sdlc.main(["escalate-to-full", "12", "--reason", "rerun"]) == 0
+    assert fake.posted == [] and sorted(fake.issue["labels"]) == [ROUTINE, "sdlc:approved"]
+    assert fake.state()["action"] == "commit_prd" and fake.committed == [12]
+
+
+def test_a_half_done_escalation_finishes_without_a_new_reason(monkeypatch, capsys):
+    moved = ready_quick(GATE_BRIEF) + [CLAIM, agent("lane", None, 9, "moved", lane="full", trigger="diff")]
+    fake = EscalateGitHub(monkeypatch, gate_bundle(labels=ESC_LABELS, comments=moved))
+    assert sdlc.main(["escalate-to-full", "12"]) == 0          # exactly what the recovery message says to run
+    assert sorted(fake.issue["labels"]) == [ROUTINE, "sdlc:approved"] and fake.committed == [12]
+    fresh = EscalateGitHub(monkeypatch, gate_bundle(labels=ESC_LABELS))
+    assert sdlc.main(["escalate-to-full", "12"]) == 1           # a new escalation still needs its reason
+    assert "--reason is required" in capsys.readouterr().err and fresh.posted == []
+
+
+def handed_to_a_human(fake):
+    fake.issue["labels"] = [l for l in fake.issue["labels"] if l != "sdlc:in-progress"] + ["sdlc:escalated"]
+
+
+def handed_alongside(fake):
+    fake.issue["labels"] = fake.issue["labels"] + ["sdlc:escalated"]
+
+
+def approved_meanwhile(fake):   # rev 2 posted and approved just before the record lands: the record counts on it
+    record = fake.comments.pop()
+    fake.comments += [quick_brief(ts=40, rev=2, body=GATE_BRIEF), agent("approval", 2, 41, by=POSTER, via="comment"),
+                      record]
+
+
+@pytest.mark.parametrize("meanwhile,needle", [(handed_to_a_human, "is now escalated"),
+                                              (handed_alongside, "multiple sdlc:* labels"),
+                                              (approved_meanwhile, "the approved brief changed")])
+def test_what_changes_while_the_record_is_posted_stops_the_label_move(monkeypatch, capsys, meanwhile, needle):
+    fake = EscalateGitHub(monkeypatch, gate_bundle(labels=ESC_LABELS))
+    fake.meanwhile = meanwhile
+    assert sdlc.main(["escalate-to-full", "12", "--reason", "x"]) == 1
+    err = capsys.readouterr().err
+    assert needle in err and "No label moved" in err, err
+    assert len(fake.lane_records()) == 1 and fake.committed == []
+    assert not any(c[:2] == ["issue", "edit"] for c in fake.calls)
+
+
+def test_a_record_the_ledger_ignores_moves_no_label(monkeypatch, capsys):
+    fake = EscalateGitHub(monkeypatch, gate_bundle(labels=ESC_LABELS))
+    fake.drop = True   # e.g. posted by an account that isn't trusted: derive_state never counts it
+    assert sdlc.main(["escalate-to-full", "12", "--reason", "x"]) == 1
+    assert "doesn't count it" in capsys.readouterr().err
+    assert len(fake.posted) == 1 and fake.committed == [] and fake.issue["labels"] == ESC_LABELS
+
+
+def test_a_commit_prd_failure_leaves_the_escalation_and_says_how_to_finish(monkeypatch, capsys):
+    fake = EscalateGitHub(monkeypatch, gate_bundle(labels=ESC_LABELS))
+    monkeypatch.setattr(sdlc, "commit_prd", lambda *a, **k: (_ for _ in ()).throw(sdlc.SdlcError("push failed")))
+    assert sdlc.main(["escalate-to-full", "12", "--reason", "x"]) == 1
+    err = capsys.readouterr().err
+    assert "push failed" in err and "`commit-prd 12` is safe to rerun" in err
+    assert sorted(fake.issue["labels"]) == [ROUTINE, "sdlc:approved"] and fake.state()["action"] == "commit_prd"
+
+
+def test_a_failed_label_move_says_to_rerun(monkeypatch, capsys):
+    fake = EscalateGitHub(monkeypatch, gate_bundle(labels=ESC_LABELS))
+    edit = fake.gh
+
+    def failing(args, check=True):
+        if args[:2] == ["issue", "edit"]:
+            raise sdlc.SdlcError("gh issue edit failed: boom")
+        return edit(args, check)
+    monkeypatch.setattr(sdlc, "gh", failing)
+    assert sdlc.main(["escalate-to-full", "12", "--reason", "x"]) == 1
+    assert "Rerun `escalate-to-full 12` to finish it" in capsys.readouterr().err
+    assert len(fake.posted) == 1 and fake.committed == [] and fake.issue["labels"] == ESC_LABELS
+    st = fake.state()   # what `state 12` shows meanwhile names the way out
+    assert st["action"] == "fix_conflict" and any("escalate-to-full 12" in c for c in st["conflicts"])
+
+
+class EscalatePrd(PrdGitHub):
+    """PrdGitHub (a real `commit-prd` over a scratch origin) that also applies `issue edit` to the labels."""
+
+    def gh(self, args, **k):
+        if args[:2] == ["issue", "edit"]:
+            self.calls.append(args)
+            gone = {args[i + 1] for i, a in enumerate(args) if a == "--remove-label"}
+            added = [args[i + 1] for i, a in enumerate(args) if a == "--add-label"]
+            kept = [l for l in self.issue["labels"] if l not in gone]
+            self.issue = {**self.issue, "labels": kept + [l for l in added if l not in kept]}
+            return ""
+        return super().gh(args, **k)
+
+
+def test_escalate_to_full_runs_commit_prd_and_planning_starts(repo, monkeypatch, capsys):
+    fake = EscalatePrd(monkeypatch, repo, escalated(lane=False), labels=ESC_LABELS)
+    assert sdlc.main(["escalate-to-full", "12", "--reason", "it needs a new fetcher"]) == 0
+    assert sorted(fake.issue["labels"]) == [ROUTINE, "sdlc:approved"]
+    assert [p.splitlines()[0].split()[2] for p in fake.posted] == ["kind=lane", "kind=prd-merged"]
+    assert fake.on_main() == ["docs/prd/12-add-a-station.md"]
+    capsys.readouterr()
+    assert sdlc.main(["state", "12", "--json"]) == 0
+    st = json.loads(capsys.readouterr().out)
+    assert (st["state"], st["lane"], st["action"], st["next"]) == ("approved", None, "plan", "/plan-issue 12")
+
+
+# the triggers: `pr-review` on one change round too many, `merge` on a diff that broke a quick rule
+
+def review_report(tmp_path, verdict, brief):
+    r = tmp_path / f"codex-{verdict}.md"
+    r.write_text(f"HEAD: {HEAD}\nBrief: {brief}\n\n1. **blocking** — something.\n\nVERDICT: {verdict}\n")
+    return str(r)
+
+
+def changes_rounds_before(n):
+    return [marked("tests", 6, sha=HEAD, result="pass", passed="1300")] + [
+        marked("pr-review", 7 + i, sha="c" * 40, verdict="changes", round=str(i + 1)) for i in range(n)]
+
+
+def review_fake(monkeypatch, before):
+    b = gate_bundle(records=changes_rounds_before(before))
+    fake = EscalateGitHub(monkeypatch, b)
+    return fake, sdlc.approved_brief_id(fake.state())
+
+
+def test_a_third_change_round_escalates(tmp_path, monkeypatch, capsys):
+    fake, brief = review_fake(monkeypatch, 2)
+    assert sdlc.main(["pr-review", "50", "--report", review_report(tmp_path, "changes", brief)]) == 1
+    assert [n for n, _ in fake.posted] == [50, 12]                   # the round is recorded first, then the move
+    record = fake.assert_escalated("rounds")
+    assert "Codex asked for changes in 3 rounds, more than the quick lane's 2" in record
+
+
+def test_a_tight_slice_round_budget_never_blocks_the_quick_trigger(tmp_path, monkeypatch, capsys):
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({**CONFIG, "max_pr_rounds": 2}))
+    fake, brief = review_fake(monkeypatch, 2)
+    assert sdlc.main(["--config", str(cfg), "pr-review", "50", "--report", review_report(tmp_path, "changes", brief)]) == 1
+    assert [n for n, _ in fake.posted] == [50, 12]
+    fake.assert_escalated("rounds")
+
+
+@pytest.mark.parametrize("before,verdict", [(1, "changes"), (2, "approve"), (0, "changes")])
+def test_a_round_within_the_limit_does_not_escalate(tmp_path, monkeypatch, capsys, before, verdict):
+    fake, brief = review_fake(monkeypatch, before)
+    assert sdlc.main(["pr-review", "50", "--report", review_report(tmp_path, verdict, brief)]) == 0
+    assert [n for n, _ in fake.posted] == [50]
+    fake.assert_untouched()
+    assert "sdlc:in-progress" in fake.issue["labels"]
+
+
+def test_a_third_change_round_in_a_dry_run_or_offline_escalates_nothing(tmp_path, monkeypatch, capsys):
+    fake, brief = review_fake(monkeypatch, 2)
+    report = review_report(tmp_path, "changes", brief)
+    assert sdlc.main(["pr-review", "50", "--report", report, "--dry-run"]) == 1
+    assert "a dry run escalates nothing" in capsys.readouterr().err and fake.posted == []
+    f = tmp_path / "offline.json"
+    f.write_text(json.dumps({"pr": fake.pr, "pr_comments": fake.pr_comments, "trusted": [OWNER],
+                             "slice": fake.issue, "comments": fake.comments}))
+    assert sdlc.main(["pr-review", "50", "--report", report, "--from-file", str(f)]) == 1
+    assert "nothing escalated" in capsys.readouterr().err
+    assert [n for n, _ in fake.posted] == [50]
+    fake.assert_untouched()
+
+
+def test_a_slice_pr_s_rounds_never_escalate(tmp_path, monkeypatch, capsys):
+    fake, _ = review_fake(monkeypatch, 2)
+    fake.issue["labels"] = ["plan:slice", "complexity:judgment"]
+    r = tmp_path / "slice.md"
+    r.write_text(f"HEAD: {HEAD}\n\n1. x\n\nVERDICT: changes\n")
+    assert sdlc.main(["pr-review", "50", "--report", str(r)]) == 0
+    fake.assert_untouched()
+
+
+BROKEN = {
+    "denied": [changed(STATION), changed("src/twiddle/play.py", status="modified")],
+    "sixth": [changed(f"src/twiddle/stations/catalog/s{i}.toml", 1) for i in range(6)],
+    "unlisted": [changed(STATION), changed("src/twiddle/stations/model.py", status="modified")],
+}
+
+
+@pytest.mark.parametrize("rule,needle", [("denied", "may not (src/twiddle/play.py)"),
+                                         ("sixth", "changes 6 files, more than the quick lane's 5"),
+                                         ("unlisted", "outside the brief's `## Files` list")])
+def test_a_merge_refused_for_a_diff_rule_escalates(monkeypatch, capsys, rule, needle):
+    brief = GATE_BRIEF.replace("- tests/test_stations.py", "- tests/test_stations.py\n- `src/twiddle/play.py`")
+    fake = EscalateGitHub(monkeypatch, gate_bundle(comments=ready_quick(brief) + [CLAIM], files=BROKEN[rule]))
+    code, _, err = run_merge(capsys)
+    assert code == 1 and needle in err
+    record = fake.assert_escalated("diff")
+    assert needle in record
+    # the same PR merged again is now no quick change: the slice gate refuses it, and main is never touched
+    code, _, err = run_merge(capsys)
+    assert code == 1 and "not an open plan:slice issue" in err and not fake.merged()
+
+
+@pytest.mark.parametrize("rule", list(BROKEN))
+def test_a_dry_run_or_the_gate_reports_a_diff_rule_and_changes_nothing(tmp_path, monkeypatch, capsys, rule):
+    brief = GATE_BRIEF.replace("- tests/test_stations.py", "- tests/test_stations.py\n- `src/twiddle/play.py`")
+    b = gate_bundle(comments=ready_quick(brief) + [CLAIM], files=BROKEN[rule])
+    fake = EscalateGitHub(monkeypatch, b)
+    code, _, err = run_merge(capsys, "--dry-run")
+    assert code == 1 and "escalate-to-full 12" in err
+    fake.assert_untouched()
+    assert fake.posted == []
+    assert sdlc.main(["quick-gate", "50"]) == 1                 # read-only, always
+    assert "refused: " in capsys.readouterr().out
+    fake.assert_untouched()
+    assert fake.posted == []
+
+
+@pytest.mark.parametrize("case,needle", [
+    ("no-tests", "no recorded test run"),
+    ("behind", "behind main"),
+    ("unread", "could not read the PR's changed files"),
+    ("rounds", "Codex asked for changes in 3 rounds"),     # pr-review's trigger, not merge's
+])
+def test_a_merge_refused_for_another_reason_does_not_escalate(monkeypatch, capsys, case, needle):
+    b = {"no-tests": lambda: gate_bundle(records=lambda brief: [marked("pr-review", 8, sha=HEAD, verdict="approve",
+                                                                       round="1", brief=brief)]),
+         "behind": lambda: gate_bundle(behind_by=2),
+         "unread": lambda: gate_bundle(files=[]),
+         "rounds": lambda: gate_bundle(records=lambda brief: changes_rounds_before(3) + [
+             marked("pr-review", 20, sha=HEAD, verdict="approve", round="4", brief=brief)]),
+         }[case]()
+    fake = EscalateGitHub(monkeypatch, b)
+    code, _, err = run_merge(capsys)
+    assert code == 1 and needle in err
+    fake.assert_untouched()
+    assert fake.posted == []

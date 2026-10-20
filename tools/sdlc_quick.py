@@ -108,6 +108,12 @@ def diff_errors(n: int, files: list[dict[str, Any]] | None, brief: str, rules: Q
     return errs
 
 
+def diff_rule_broken(files: list[dict[str, Any]] | None, brief: str, rules: QuickRules) -> bool:
+    """A diff that was read breaks a rule (a denied path, the size cap, a file outside the brief): the change has
+    outgrown the lane, so `merge` escalates it. A diff that couldn't be read is a refusal, never an escalation."""
+    return bool(files) and bool(diff_errors(0, files, brief, rules))
+
+
 def rounds_error(n: int, rounds: int, rules: QuickRules) -> str | None:
     """More Codex rounds asked for changes than a quick change gets."""
     if rounds > rules.max_change_rounds:
@@ -134,6 +140,46 @@ def eligibility_errors(issue: dict[str, Any], st: dict[str, Any]) -> list[str]:
         errs.append(f"#{n} is escalated to a human")
     elif st.get("state") != "in-progress":
         errs.append(f"#{n} is {st.get('state')}, not in-progress (a quick change merges once it is claimed)")
+    if st.get("conflicts"):
+        errs.append(f"#{n} needs a human first: " + "; ".join(st["conflicts"]))
+    return errs
+
+
+TO_FULL_FROM = ("approved", "in-progress")   # an approved quick change, or one being built
+TRIGGERS = ("manual", "rounds", "diff")       # who escalated it: a person, too many change rounds, the merge gate
+
+
+def escalation_errors(issue: dict[str, Any], st: dict[str, Any], labels_moved: bool) -> list[str]:
+    """Why the quick change can't be moved to the full lane now (empty list = go). `labels_moved`: its labels
+    already read `sdlc:approved` without `lane:quick`. An escalation recorded but left half done (the label
+    still in-progress, or still `lane:quick`) is not refused: `escalate-to-full` finishes it.
+    Not `eligibility_errors`: a change re-rated after its claim is exactly one that may need the full lane."""
+    n = issue["number"]
+    if issue.get("state", "open").lower() != "open":
+        return [f"#{n} is closed"]
+    if "plan:slice" in issue.get("labels", []):
+        return [f"#{n} is a plan:slice issue, not a quick change (`escalate-slice {n}` hands a slice to a human)"]
+    if st.get("to_full"):
+        if labels_moved:
+            return [f"#{n} is already in the full lane ({st['to_full'].get('url')}): next, "
+                    + (f"`commit-prd {n}`" if not st.get("prd_merged") else f"`/plan-issue {n}`")]
+        # half done: the label move (and commit-prd) still to come, unless something else happened since
+        others = [c for c in st.get("conflicts") or [] if "moved to the full lane" not in c]
+        if st.get("state") not in TO_FULL_FROM or others:
+            return [f"#{n} was moved to the full lane, but is now {st.get('state')}"
+                    + (f" ({'; '.join(others)})" if others else "") + ": a human decides"]
+        return []
+    errs = []
+    doc = st.get("approved_doc")
+    if not doc or doc.get("lane") != QUICK:
+        return [f"#{n} is not a quick change (its approved revision is not a quick brief)"]
+    if not st.get("doc_approved"):
+        errs.append(f"#{n}'s approved revision is rev {doc.get('rev')} but the latest is rev "
+                    f"{(st.get('latest_doc') or {}).get('rev')}: a brief in review is changed by triage, not escalated")
+    if ESCALATED in issue.get("labels", []) or st.get("state") == "escalated":
+        errs.append(f"#{n} is escalated to a human: they decide, not the tool")
+    elif st.get("state") not in TO_FULL_FROM:
+        errs.append(f"#{n} is {st.get('state')}, not approved or in-progress")
     if st.get("conflicts"):
         errs.append(f"#{n} needs a human first: " + "; ".join(st["conflicts"]))
     return errs

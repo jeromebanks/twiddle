@@ -10,6 +10,7 @@ and every label change and agent comment. Config is `.sdlc/config.json`.
     uv run python tools/sdlc.py next
     uv run python tools/sdlc.py transition 12 prd-review --kind prd --body-file prd.md --dry-run
     uv run python tools/sdlc.py reconcile 12
+    uv run python tools/sdlc.py escalate-to-full 12 --reason "needs a new fetcher" --dry-run   # quick -> full lane
     uv run python tools/sdlc.py commit-prd 12 --dry-run   # a quick brief moved to the full lane -> docs/prd/
     uv run python tools/sdlc.py plan-validate plan.json
     uv run python tools/sdlc.py plan-post 12 plan.json --dry-run
@@ -472,7 +473,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     commit_due = bool(L.to_full and not L.prd_merged)   # the escalated brief isn't in docs/prd/ yet
     if commit_due and state in BUILD_STATES:
         conflicts.append(f"{PREFIX}{state}, but its quick brief moved to the full lane: it goes back to "
-                         f"{PREFIX}approved, and its brief to docs/prd/, before it is planned")
+                         f"{PREFIX}approved, and its brief to docs/prd/, before it is planned "
+                         f"(`escalate-to-full {issue.get('number')}` finishes it)")
     try:
         latest_plan_json = extract_plan(plan_body) if plan_body else {}
     except SdlcError:
@@ -3088,8 +3090,9 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     limit = config.get("max_pr_rounds", 5)
     if pr.get("state") != "OPEN":
         raise SdlcError(f"PR #{pr['number']} is {pr.get('state')}")
-    # only rounds that asked for changes spend the budget: re-reviewing a rebased head is routine
-    if (spent := changes_rounds(reviews)) >= limit:
+    # only rounds that asked for changes spend the budget: re-reviewing a rebased head is routine. A quick PR's
+    # budget is `quick.max_change_rounds` instead: the round past it is recorded, and escalates (below)
+    if not quick and (spent := changes_rounds(reviews)) >= limit:
         raise SdlcError(f"Codex rounds spent ({spent}/{limit} asked for changes): `escalate-slice N --reason ...`")
     report = Path(args.report).read_text()
     verdict = parse_verdict(report)
@@ -3118,11 +3121,21 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     comment = render_comment("pr-review", None, body, config, sha=pr["headRefOid"], verdict=verdict, round=str(rnd), **extra)
     if len(comment) > COMMENT_LIMIT:
         raise SdlcError(f"the review comment is {len(comment)} characters, over GitHub's limit")
+    # a quick change gets `max_change_rounds` rounds asking for changes: the one past it moves it to the full lane
+    over = (sdlc_quick.rounds_error(quick["number"], changes_rounds(reviews) + 1, load_quick(config))
+            if quick and verdict == "changes" else None)
     if args.dry_run:
         print(comment)
-        return 0
+        if over:
+            print(f"refused: {over} (a dry run escalates nothing)", file=sys.stderr)
+        return 1 if over else 0
     posted = post_comment(pr["number"], comment, config)
     print(f"PR #{pr['number']} round {rnd}: {verdict}  {posted.get('html_url', '')}")
+    if over and args.from_file:
+        print(f"refused: {over} (read offline from --from-file: nothing escalated)", file=sys.stderr)
+        return 1
+    if over:
+        return escalate_on_trigger(quick["number"], over, "rounds", config)
     return 0
 
 
@@ -3500,7 +3513,18 @@ def merge_quick(args: argparse.Namespace, config: dict[str, Any]) -> int:
     repo, base = repo_of(config), config.get("default_branch", "main")
     b = quick_gate_bundle(args.pr, config)
     if errs := quick_gate_errors(b, config):
-        raise SdlcError("; ".join(errs))
+        st = quick_issue_state(b, config) if b.get("issue") else None
+        brief, rules = (approved_brief(st) or "") if st else "", load_quick(config)
+        if args.dry_run or not st or not is_quick(st) or not sdlc_quick.diff_rule_broken(b.get("files"), brief, rules):
+            raise SdlcError("; ".join(errs))
+        # the diff has outgrown the lane (a denied path, the size cap, a file outside the brief): no fix within
+        # the quick lane makes it mergeable, so the tool escalates it, after saying every refusal
+        n = b["issue"]["number"]
+        diff = sdlc_quick.diff_errors(n, b["files"], brief, rules)
+        for e in errs:
+            if e not in diff:
+                print(f"refused: {e}", file=sys.stderr)
+        return escalate_on_trigger(n, "; ".join(diff), "diff", config)
     pr, issue = b["pr"], b["issue"]
     n, head = issue["number"], pr["headRefOid"]   # the head the gate checked: GitHub merges only that one
     t, r = head_records(pr, *pr_records(b["pr_comments"], set(b["trusted"])))
@@ -3553,6 +3577,91 @@ def command_escalate_slice(args: argparse.Namespace, config: dict[str, Any]) -> 
         gh(["issue", "edit", str(args.number), "--repo", repo_of(config), "--add-label", ESCALATED_LABEL])
     print(f"#{args.number}: escalated")
     return 0
+
+
+# --- a quick change that outgrew the lane: back to approved, its brief to docs/prd/, then planning ----------
+#
+# `escalate-to-full N` is run by a person, or by the tool itself on a trigger: `pr-review` recording one change
+# round too many, or `merge` finding the diff breaks a quick rule. Never by `quick-gate`, a dry run or an offline
+# `--from-file`. It leaves the PR and the worktree alone: closing or cleaning them up is the person's call.
+
+TRIGGER_WHY = {"manual": "by hand", "rounds": "Codex asked for changes in too many rounds",
+               "diff": "the diff breaks a quick-lane rule"}
+
+
+def escalate_to_full(n: int, reason: str | None, trigger: str, config: dict[str, Any], dry_run: bool = False,
+                     bundle: dict[str, Any] | None = None) -> int:
+    """Move quick change #n to the full lane: a `kind=lane lane=full` record, read back (only a trusted record on
+    the approved latest brief counts), the label to `sdlc:approved` without `lane:quick`, then `commit-prd N`.
+    A rerun finishes a half-done one (record posted, labels not moved); a finished one is refused.
+    `bundle` (an offline `--from-file`) is for a dry run only."""
+    if trigger not in sdlc_quick.TRIGGERS:
+        raise SdlcError(f"unknown trigger {trigger!r} (one of {', '.join(sdlc_quick.TRIGGERS)})")
+    if bundle is not None and not dry_run:
+        raise SdlcError("--from-file reads an offline copy: it goes with --dry-run only, never escalates")
+    bundle = bundle if bundle is not None else fetch_bundle(n, config)
+    issue, st = bundle["issue"], bundle_state(bundle, config)
+    labels = issue.get("labels", [])
+    moved = QUICK_LABEL not in labels and state_labels_on(issue, config) == [f"{PREFIX}approved"]
+    if errs := sdlc_quick.escalation_errors(issue, st, moved):
+        raise SdlcError("; ".join(errs))
+    if not st.get("to_full") and not (reason or "").strip():   # finishing a half-done one needs no new reason
+        raise SdlcError("--reason is required: why the change leaves the quick lane")
+    brief_id = approved_brief_id(st)
+    record = None if st.get("to_full") else render_comment(
+        "lane", None, f"Moved to the full lane ({TRIGGER_WHY[trigger]}): {(reason or '').strip()}\n\n"
+        f"The approved brief goes to `docs/prd/` (`commit-prd {n}`), then it is planned (`/plan-issue {n}`). "
+        "Any open PR and worktree are left as they are.", config, lane=FULL, trigger=trigger)
+    stale = [l for l in labels if l in state_labels(config) and l != f"{PREFIX}approved"] \
+        + ([QUICK_LABEL] if QUICK_LABEL in labels else [])
+    if dry_run:
+        print(f"DRY RUN #{n}: {st['state']} -> approved, out of the quick lane")
+        print(f"labels: add {PREFIX}approved, remove {stale}")
+        print("----- comment -----\n" + record if record else f"the lane record is already posted ({st['to_full']['url']})")
+        print(f"then: commit-prd {n}")
+        return 0
+    if record:
+        post_comment(n, record, config)
+        st = bundle_state(bundle := fetch_bundle(n, config), config)
+        if not st.get("to_full"):   # the ledger ignored it: a revision posted meanwhile, or an untrusted author
+            raise SdlcError(f"posted the lane record on #{n}, but its state doesn't count it "
+                            f"(state {st['state']}, latest rev {(st.get('latest_doc') or {}).get('rev')}): "
+                            "nothing else changed; a human decides")
+        # read again before any label write: a human's escalation, or a brief approved meanwhile, stops it here
+        issue = bundle["issue"]
+        errs = sdlc_quick.escalation_errors(issue, st, False)
+        if approved_brief_id(st) != brief_id:
+            errs.append(f"the approved brief changed while the record was posted ({brief_id} -> {approved_brief_id(st)})")
+        if errs:
+            raise SdlcError(f"posted the lane record on #{n}, then: " + "; ".join(errs)
+                            + ". No label moved; a human decides")
+    try:   # the record is posted: whatever fails from here, say how to finish
+        set_state_label(n, bundle["issue"].get("labels", []), "approved", config, remove=(QUICK_LABEL,))
+    except Exception as exc:
+        raise SdlcError(f"#{n}'s lane record is posted, but its labels didn't move: {exc}. "
+                        f"Rerun `escalate-to-full {n}` to finish it")
+    print(f"#{n}: moved to the full lane, {PREFIX}approved")
+    try:
+        return commit_prd(n, config)
+    except Exception as exc:
+        raise SdlcError(f"#{n} is in the full lane, but its brief isn't in docs/prd/ yet: {exc}. "
+                        f"`commit-prd {n}` is safe to rerun")
+
+
+def command_escalate_to_full(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    bundle = json.loads(Path(args.from_file).read_text()) if args.from_file else None
+    return escalate_to_full(args.number, args.reason, "manual", config, args.dry_run, bundle)
+
+
+def escalate_on_trigger(n: int, refusal: str, trigger: str, config: dict[str, Any]) -> int:
+    """A trigger fired: print why, escalate, and exit 1 (the command that tripped it did not do its job)."""
+    print(f"refused: {refusal}", file=sys.stderr)
+    print(f"#{n} has outgrown the quick lane: escalating it to the full lane", file=sys.stderr)
+    try:
+        escalate_to_full(n, refusal, trigger, config)
+    except SdlcError as exc:
+        raise SdlcError(f"{refusal}; and escalate-to-full {n} failed: {exc}")
+    return 1
 
 
 def slice_bundle_for_escalation(n: int, config: dict[str, Any]) -> dict[str, Any]:
@@ -4824,6 +4933,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--reason", required=True)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_escalate_slice)
+
+    p = sub.add_parser("escalate-to-full", help="a quick change that outgrew the lane: back to approved, its brief to "
+                                                "docs/prd/ (`commit-prd`), then planned")
+    p.add_argument("number", type=int, help="the quick issue")
+    p.add_argument("--reason", help="why it leaves the quick lane (not needed to finish a half-done escalation)")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--from-file", help="an issue bundle (issue, comments, trusted), with --dry-run only")
+    p.set_defaults(fn=command_escalate_to_full)
 
     p = sub.add_parser("cleanup", help="remove a merged slice's worktree and local branch")
     p.add_argument("number", type=int)
