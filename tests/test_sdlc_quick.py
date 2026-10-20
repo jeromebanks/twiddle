@@ -1706,6 +1706,15 @@ def test_a_third_change_round_escalates(tmp_path, monkeypatch, capsys):
     assert "Codex asked for changes in 3 rounds, more than the quick lane's 2" in record
 
 
+def test_a_tight_slice_round_budget_never_blocks_the_quick_trigger(tmp_path, monkeypatch, capsys):
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({**CONFIG, "max_pr_rounds": 2}))
+    fake, brief = review_fake(monkeypatch, 2)
+    assert sdlc.main(["--config", str(cfg), "pr-review", "50", "--report", review_report(tmp_path, "changes", brief)]) == 1
+    assert [n for n, _ in fake.posted] == [50, 12]
+    fake.assert_escalated("rounds")
+
+
 @pytest.mark.parametrize("before,verdict", [(1, "changes"), (2, "approve"), (0, "changes")])
 def test_a_round_within_the_limit_does_not_escalate(tmp_path, monkeypatch, capsys, before, verdict):
     fake, brief = review_fake(monkeypatch, before)

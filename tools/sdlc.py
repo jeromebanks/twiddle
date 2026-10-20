@@ -3090,8 +3090,9 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     limit = config.get("max_pr_rounds", 5)
     if pr.get("state") != "OPEN":
         raise SdlcError(f"PR #{pr['number']} is {pr.get('state')}")
-    # only rounds that asked for changes spend the budget: re-reviewing a rebased head is routine
-    if (spent := changes_rounds(reviews)) >= limit:
+    # only rounds that asked for changes spend the budget: re-reviewing a rebased head is routine. A quick PR's
+    # budget is `quick.max_change_rounds` instead: the round past it is recorded, and escalates (below)
+    if not quick and (spent := changes_rounds(reviews)) >= limit:
         raise SdlcError(f"Codex rounds spent ({spent}/{limit} asked for changes): `escalate-slice N --reason ...`")
     report = Path(args.report).read_text()
     verdict = parse_verdict(report)
