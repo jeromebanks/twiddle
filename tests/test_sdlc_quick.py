@@ -1451,7 +1451,7 @@ class EscalateGitHub:
     def __init__(self, monkeypatch, b):
         self.b, self.issue = b, {**b["issue"], "labels": list(b["issue"]["labels"]), "body": ""}
         self.comments, self.pr, self.pr_comments = list(b["comments"]), b["pr"], list(b["pr_comments"])
-        self.calls, self.posted, self.committed, self.drop = [], [], [], False
+        self.calls, self.posted, self.committed, self.drop, self.meanwhile = [], [], [], False, None
         monkeypatch.setattr(sdlc, "repo_of", lambda cfg: "o/r")
         monkeypatch.setattr(sdlc, "fetch_trusted", lambda cfg: set(b["trusted"]))
         monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted=None: self.bundle())
@@ -1474,6 +1474,8 @@ class EscalateGitHub:
         if n == 12 and self.drop:
             return {}
         (self.comments if n == 12 else self.pr_comments).append(comment(OWNER, body, 50 + len(self.posted)))
+        if n == 12 and self.meanwhile:   # what a person does on the issue while the record is being posted
+            self.meanwhile(self)
         return {"html_url": "u"}
 
     def gh(self, args, check=True):
@@ -1579,6 +1581,43 @@ def test_a_half_done_escalation_is_finished_not_refused(monkeypatch, capsys):
     assert sdlc.main(["escalate-to-full", "12", "--reason", "rerun"]) == 0
     assert fake.posted == [] and sorted(fake.issue["labels"]) == [ROUTINE, "sdlc:approved"]
     assert fake.state()["action"] == "commit_prd" and fake.committed == [12]
+
+
+def test_a_half_done_escalation_finishes_without_a_new_reason(monkeypatch, capsys):
+    moved = ready_quick(GATE_BRIEF) + [CLAIM, agent("lane", None, 9, "moved", lane="full", trigger="diff")]
+    fake = EscalateGitHub(monkeypatch, gate_bundle(labels=ESC_LABELS, comments=moved))
+    assert sdlc.main(["escalate-to-full", "12"]) == 0          # exactly what the recovery message says to run
+    assert sorted(fake.issue["labels"]) == [ROUTINE, "sdlc:approved"] and fake.committed == [12]
+    fresh = EscalateGitHub(monkeypatch, gate_bundle(labels=ESC_LABELS))
+    assert sdlc.main(["escalate-to-full", "12"]) == 1           # a new escalation still needs its reason
+    assert "--reason is required" in capsys.readouterr().err and fresh.posted == []
+
+
+def handed_to_a_human(fake):
+    fake.issue["labels"] = [l for l in fake.issue["labels"] if l != "sdlc:in-progress"] + ["sdlc:escalated"]
+
+
+def handed_alongside(fake):
+    fake.issue["labels"] = fake.issue["labels"] + ["sdlc:escalated"]
+
+
+def approved_meanwhile(fake):   # rev 2 posted and approved just before the record lands: the record counts on it
+    record = fake.comments.pop()
+    fake.comments += [quick_brief(ts=40, rev=2, body=GATE_BRIEF), agent("approval", 2, 41, by=POSTER, via="comment"),
+                      record]
+
+
+@pytest.mark.parametrize("meanwhile,needle", [(handed_to_a_human, "is now escalated"),
+                                              (handed_alongside, "multiple sdlc:* labels"),
+                                              (approved_meanwhile, "the approved brief changed")])
+def test_what_changes_while_the_record_is_posted_stops_the_label_move(monkeypatch, capsys, meanwhile, needle):
+    fake = EscalateGitHub(monkeypatch, gate_bundle(labels=ESC_LABELS))
+    fake.meanwhile = meanwhile
+    assert sdlc.main(["escalate-to-full", "12", "--reason", "x"]) == 1
+    err = capsys.readouterr().err
+    assert needle in err and "No label moved" in err, err
+    assert len(fake.lane_records()) == 1 and fake.committed == []
+    assert not any(c[:2] == ["issue", "edit"] for c in fake.calls)
 
 
 def test_a_record_the_ledger_ignores_moves_no_label(monkeypatch, capsys):

@@ -3588,7 +3588,7 @@ TRIGGER_WHY = {"manual": "by hand", "rounds": "Codex asked for changes in too ma
                "diff": "the diff breaks a quick-lane rule"}
 
 
-def escalate_to_full(n: int, reason: str, trigger: str, config: dict[str, Any], dry_run: bool = False,
+def escalate_to_full(n: int, reason: str | None, trigger: str, config: dict[str, Any], dry_run: bool = False,
                      bundle: dict[str, Any] | None = None) -> int:
     """Move quick change #n to the full lane: a `kind=lane lane=full` record, read back (only a trusted record on
     the approved latest brief counts), the label to `sdlc:approved` without `lane:quick`, then `commit-prd N`.
@@ -3596,8 +3596,6 @@ def escalate_to_full(n: int, reason: str, trigger: str, config: dict[str, Any], 
     `bundle` (an offline `--from-file`) is for a dry run only."""
     if trigger not in sdlc_quick.TRIGGERS:
         raise SdlcError(f"unknown trigger {trigger!r} (one of {', '.join(sdlc_quick.TRIGGERS)})")
-    if not reason.strip():
-        raise SdlcError("--reason is required: why the change leaves the quick lane")
     if bundle is not None and not dry_run:
         raise SdlcError("--from-file reads an offline copy: it goes with --dry-run only, never escalates")
     bundle = bundle if bundle is not None else fetch_bundle(n, config)
@@ -3606,8 +3604,11 @@ def escalate_to_full(n: int, reason: str, trigger: str, config: dict[str, Any], 
     moved = QUICK_LABEL not in labels and state_labels_on(issue, config) == [f"{PREFIX}approved"]
     if errs := sdlc_quick.escalation_errors(issue, st, moved):
         raise SdlcError("; ".join(errs))
+    if not st.get("to_full") and not (reason or "").strip():   # finishing a half-done one needs no new reason
+        raise SdlcError("--reason is required: why the change leaves the quick lane")
+    brief_id = approved_brief_id(st)
     record = None if st.get("to_full") else render_comment(
-        "lane", None, f"Moved to the full lane ({TRIGGER_WHY[trigger]}): {reason.strip()}\n\n"
+        "lane", None, f"Moved to the full lane ({TRIGGER_WHY[trigger]}): {(reason or '').strip()}\n\n"
         f"The approved brief goes to `docs/prd/` (`commit-prd {n}`), then it is planned (`/plan-issue {n}`). "
         "Any open PR and worktree are left as they are.", config, lane=FULL, trigger=trigger)
     stale = [l for l in labels if l in state_labels(config) and l != f"{PREFIX}approved"] \
@@ -3625,6 +3626,14 @@ def escalate_to_full(n: int, reason: str, trigger: str, config: dict[str, Any], 
             raise SdlcError(f"posted the lane record on #{n}, but its state doesn't count it "
                             f"(state {st['state']}, latest rev {(st.get('latest_doc') or {}).get('rev')}): "
                             "nothing else changed; a human decides")
+        # read again before any label write: a human's escalation, or a brief approved meanwhile, stops it here
+        issue = bundle["issue"]
+        errs = sdlc_quick.escalation_errors(issue, st, False)
+        if approved_brief_id(st) != brief_id:
+            errs.append(f"the approved brief changed while the record was posted ({brief_id} -> {approved_brief_id(st)})")
+        if errs:
+            raise SdlcError(f"posted the lane record on #{n}, then: " + "; ".join(errs)
+                            + ". No label moved; a human decides")
     try:   # the record is posted: whatever fails from here, say how to finish
         set_state_label(n, bundle["issue"].get("labels", []), "approved", config, remove=(QUICK_LABEL,))
     except Exception as exc:
@@ -4927,7 +4936,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("escalate-to-full", help="a quick change that outgrew the lane: back to approved, its brief to "
                                                 "docs/prd/ (`commit-prd`), then planned")
     p.add_argument("number", type=int, help="the quick issue")
-    p.add_argument("--reason", required=True, help="why it leaves the quick lane")
+    p.add_argument("--reason", help="why it leaves the quick lane (not needed to finish a half-done escalation)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--from-file", help="an issue bundle (issue, comments, trusted), with --dry-run only")
     p.set_defaults(fn=command_escalate_to_full)
