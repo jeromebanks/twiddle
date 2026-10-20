@@ -359,6 +359,10 @@ def test_the_agents_own_findings_send_the_milestone_to_fix_slices(tmp_path, caps
 
 def test_file_issue_dry_run(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    # --debt reads issue 12's ledger (an epic here) for its lane; nothing else may reach gh
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, config, trusted=None: {
+        "issue": {"number": n, "title": "an epic", "state": "open", "author": "owner", "labels": ["sdlc:in-progress"]},
+        "comments": [], "trusted": ["owner"]})
     f = tmp_path / "debt.md"
     f.write_text("`alarm list` sorts rooms case-sensitively.")
     assert sdlc.main(["file-issue", "12", "--title", "alarm list: room order", "--body-file", str(f), "--debt",

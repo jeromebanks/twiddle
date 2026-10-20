@@ -396,8 +396,12 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
                       if l in issue.get("labels", [])), None)
     if plan_kind:
         # made by plan-create: built by work-slice (`slice-status`), never triaged
-        return {"number": issue.get("number"), "title": issue.get("title"), "state": plan_kind, "turn": "none",
-                "action": "none", "plan_kind": plan_kind, "conflicts": []}
+        st = {"number": issue.get("number"), "title": issue.get("title"), "state": plan_kind, "turn": "none",
+              "action": "none", "plan_kind": plan_kind, "conflicts": []}
+        if plan_kind == "debt":   # where it came from, from its own marker: issue N is never looked up (it may be closed)
+            mk = parse_marker(issue.get("body", "")) or {}
+            st.update(debt_of=mk.get("epic"), debt_lane=mk.get("lane"))
+        return st
     all_labels = state_labels(config)
     found = [l for l in issue.get("labels", []) if l in all_labels]
     conflicts: list[str] = []
@@ -593,6 +597,9 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
     `progress` (from epic_progress) is needed for an epic whose slices are being built.
     """
     n, a = st["number"], st["action"]
+    if st.get("plan_kind") == "debt" and st.get("debt_lane") == QUICK:
+        return (f"nothing: #{n} is tech debt from quick change #{st.get('debt_of')}, waiting in the open `{DEBT_LABEL}` "
+                f"list (a quick change has no epic and no cleanup pass; remove `{DEBT_LABEL}` to triage it alone)")
     if st.get("plan_kind") == "debt":
         return f"nothing: #{n} is tech debt, planned by its epic's cleanup pass (remove `{DEBT_LABEL}` to triage it alone)"
     if st.get("plan_kind"):
@@ -993,7 +1000,7 @@ def fetch_trusted(config: dict[str, Any]) -> set[str]:
 def norm_issue(raw: dict[str, Any]) -> dict[str, Any]:
     return {"number": raw["number"], "title": raw.get("title", ""), "state": raw.get("state", "open"),
             "author": (raw.get("author") or {}).get("login", ""), "createdAt": raw.get("createdAt", ""),
-            "labels": [l["name"] for l in raw.get("labels", [])]}
+            "labels": [l["name"] for l in raw.get("labels", [])], "body": raw.get("body") or ""}
 
 
 def norm_comment(raw: dict[str, Any]) -> dict[str, Any]:
@@ -1004,7 +1011,7 @@ def norm_comment(raw: dict[str, Any]) -> dict[str, Any]:
 def fetch_bundle(n: int, config: dict[str, Any], trusted: set[str] | None = None) -> dict[str, Any]:
     repo = repo_of(config)
     issue = norm_issue(gh_json(["issue", "view", str(n), "--repo", repo, "--json",
-                                "number,title,state,author,labels,createdAt"]))
+                                "number,title,state,author,labels,createdAt,body"]))
     comments = [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{n}/comments")]
     return {"issue": issue, "comments": comments,
             "trusted": sorted(trusted if trusted is not None else fetch_trusted(config))}
@@ -4806,14 +4813,25 @@ def command_demo_request(args: argparse.Namespace, config: dict[str, Any]) -> in
 
 
 def command_file_issue(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """File something found while building or demoing an epic as its own issue: tech debt, or new for triage."""
+    """File something found while building or demoing an epic or a quick change as its own issue: tech debt, or
+    new for triage. Debt from a quick change (by its current lane in the ledger: one escalated to the full lane is
+    an epic) has no cleanup pass to wait for, so it says it waits in the open tech-debt list, and its marker says
+    `lane=quick`."""
     title, body = args.title.strip(), Path(args.body_file).read_text().strip()
     if hits := identifier_hits(title + "\n" + body):
         raise SdlcError("the issue would contain " + ", ".join(hits) + ": the repo is public")
     kind = "debt" if args.debt else "finding"
-    lead = (f"Tech debt from #{args.number} ({args.source}): not blocking, budgeted into a cleanup pass after a "
-            "milestone is accepted." if args.debt else f"Found while working on #{args.number} ({args.source}).")
-    full = f"{marker(kind, None, epic=str(args.number), source=args.source)}\n{lead}\n\n{body}\n"
+    quick = args.debt and bundle_state(load_bundle(args, config), config).get("lane") == QUICK
+    extra = {"epic": str(args.number), "source": args.source, **({"lane": QUICK} if quick else {})}
+    if quick:
+        lead = (f"Tech debt from quick change #{args.number} ({args.source}): not blocking. A quick change has no epic "
+                f"and no cleanup pass, so it waits in the open `{DEBT_LABEL}` list (`gh issue list --label {DEBT_LABEL}`).")
+    elif args.debt:
+        lead = (f"Tech debt from #{args.number} ({args.source}): not blocking, budgeted into a cleanup pass after a "
+                "milestone is accepted.")
+    else:
+        lead = f"Found while working on #{args.number} ({args.source})."
+    full = f"{marker(kind, None, **extra)}\n{lead}\n\n{body}\n"
     cmd = ["issue", "create", "--repo", repo_of(config), "--title", title]
     if args.debt:
         cmd += ["--label", DEBT_LABEL]
@@ -5062,13 +5080,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_demo_request)
 
-    p = sub.add_parser("file-issue", help="file a finding as its own issue: tech debt of an epic, or new for triage")
-    p.add_argument("number", type=int, help="the epic it was found in")
+    p = sub.add_parser("file-issue", help="file a finding as its own issue: tech debt of an epic or a quick change, "
+                                          "or new for triage")
+    p.add_argument("number", type=int, help="the epic, or the quick change, it was found in")
     p.add_argument("--title", required=True)
     p.add_argument("--body-file", required=True)
-    p.add_argument("--debt", action="store_true", help="non-blocking work on this epic (label tech-debt), not a new problem")
+    p.add_argument("--debt", action="store_true",
+                   help="work this epic or quick change needed to support itself (label tech-debt), not a new problem")
     p.add_argument("--source", choices=["demo", "review", "advisor", "adjacent"], default="demo")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--from-file", help="a saved {issue, comments, trusted} bundle of N, for --debt, instead of GitHub")
     p.set_defaults(fn=command_file_issue)
 
     p = sub.add_parser("demo-accept", help="record the poster's /approve of a demo (then `ship` releases it)")

@@ -381,10 +381,13 @@ approved brief; the head not behind `main` (rebase onto `origin/main`, push with
 mergeable PR; and a diff that stays inside the quick rules. It squash-merges into `main`, makes
 sure the issue is closed as completed, moves it to `sdlc:done`, and posts a record on the issue
 (the PR, the head, the test and review records). `merge` and `claim` do those label moves; you
-never touch a label. File what you leave behind as in §9, but without `--debt`
-(`file-issue N --source review|advisor|adjacent ...`, with the quick issue's number): a cleanup pass
-belongs to an epic, and a quick change has none, so a debt issue filed against it would wait for
-nobody. The issues go to triage instead.
+never touch a label. File what you leave behind as in §9, with the quick issue's number, and by
+the same rule: a follow-up is tech debt because of what it is, not because of the lane it came
+from. Work the change should have included to support itself is tech debt
+(`file-issue N --debt --source review|advisor|adjacent ...`); anything else is an ordinary issue,
+filed without `--debt`, for triage. A quick change has no epic and so no cleanup pass: its debt
+waits, labelled `tech-debt`, in the open tech-debt list (`gh issue list --label tech-debt`), and
+`file-issue` and `state` on the debt issue say so.
 
 **10. Report** as §10, with the PR and the test count; there is no milestone, and `next:` is
 "nothing for #N".
