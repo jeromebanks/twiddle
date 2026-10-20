@@ -410,7 +410,12 @@ still holds. The poster replies <code>/approve</code> exactly as for a PRD. The 
 where a full-lane issue would say <code>/plan-issue N</code>.</li>
 <li><strong>Claim.</strong> <code>claim N --quick</code> makes <code>.worktrees/slice-N</code> on <code>slice/N</code> from
 <code>origin/main</code> and moves the issue to <span class="chip">in-progress</span>. From here the brief is frozen. It refuses an
-unapproved issue, one that isn't quick, one escalated to a human, one that is already claimed, and a brief that lacks a section.</li>
+unapproved issue, one that isn't quick, one escalated to a human, one that is already claimed, and a brief that lacks a section.
+It also applies the merge gate's rules before anything is built: a brief whose <code>## Files</code> names a denied path, or a
+pattern that could reach one (<code>src/twiddle/a*/clock.py</code>, <code>*.py</code>), or lists more than
+<code>quick.max_files</code> files; and on <code>--resume</code>, the work it carries on (the local branch, its worktree's
+uncommitted and untracked changes, and <code>origin/slice/N</code>), read with the gate's diff rules. Each refusal ends with
+<code>escalate-to-full N</code>; the claim never escalates by itself.</li>
 <li><strong>Build.</strong> Only what the brief says, in the files it lists, with offline tests. There is no demo: the pull request
 body carries the evidence instead (the read-only commands run, and what they printed). The PR targets <code>main</code> and closes
 exactly that one issue.</li>
