@@ -7,6 +7,7 @@ returns and the approved brief's text, so the rules can be tested without GitHub
 from __future__ import annotations
 
 import fnmatch
+import posixpath
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -126,7 +127,10 @@ def entry_reaches(entry: str, tracked: list[str], rules: QuickRules) -> list[str
     reaches the denied files tracked on main that it matches, and a denied entry its literal prefix (up to the
     first wildcard) overlaps, either a prefix of the other: `src/twiddle/a*/clock.py` (`src/twiddle/a`) reaches
     `src/twiddle/alarms/`, and `*.py` (``) every one. Anything a pattern can match starts with its literal prefix,
-    so the overlap alone never misses a denied path, whatever main holds today; `tracked` names the files."""
+    so the overlap alone never misses a denied path, whatever main holds today; `tracked` names the files.
+    An unnormalised spelling (`./tools/x`, `/tools/x`, `tools\\x`) is read as the path it spells."""
+    entry = posixpath.normpath(entry.replace("\\", "/")).lstrip("/")
+    entry = "" if entry == "." else entry
     if not is_glob(entry):
         return [entry] if path_denied(entry, rules) else []
     if hits := sorted(p for p in tracked if path_denied(p, rules) and fnmatch.fnmatchcase(p, entry)):

@@ -3013,14 +3013,18 @@ def worktree_changes(wt: Path, base: str) -> list[dict[str, Any]]:
     return sdlc_quick.numstat_files(out)
 
 
-def quick_claim_errors(n: int, brief: str, resume: bool, config: dict[str, Any]) -> list[str]:
+def quick_claim_errors(n: int, brief: str, resume: bool, config: dict[str, Any], offline: bool = False) -> list[str]:
     """The quick lane's mechanical rules at claim, as `merge` will apply them: the brief's `## Files` (a denied
     path, or a pattern that could reach one; more than `max_files`), and, resuming, the work actually resumed
     (the local branch, its worktree, and `origin/slice/N` if pushed) read with the gate's diff rules. Never
-    escalates: each refusal says `escalate-to-full N`. An exact-path brief is checked with no git at all."""
+    escalates: each refusal says `escalate-to-full N`. An exact-path brief is checked with no git at all, and so
+    is any brief `offline` (`--from-file`): a pattern's literal prefix alone decides it, main's files only name
+    what it reaches."""
+    if not CLAIM_GIT_SECONDS > 0:
+        raise SdlcError(f"CLAIM_GIT_SECONDS must be positive (got {CLAIM_GIT_SECONDS})")
     rules, base = load_quick(config), config.get("default_branch", "main")
     entries = sdlc_quick.brief_files(brief)
-    if not resume and not any(sdlc_quick.is_glob(e) for e in entries):
+    if offline or (not resume and not any(sdlc_quick.is_glob(e) for e in entries)):
         return sdlc_quick.brief_errors(n, brief, [], rules)
     root, wt, branch = primary_root(), worktree_path(n, config), slice_branch(n)
     git(["fetch", "-q", "origin", base], cwd=root, timeout=CLAIM_GIT_SECONDS)
@@ -3051,7 +3055,7 @@ def claim_quick(args: argparse.Namespace, config: dict[str, Any], b: dict[str, A
     errs = sdlc_quick.quick_check_errors(b["issue"], st, approved_brief(st), claim, args.resume, is_slice)
     if errs:
         raise SdlcError("; ".join(errs))
-    if errs := quick_claim_errors(n, approved_brief(st) or "", args.resume, config):
+    if errs := quick_claim_errors(n, approved_brief(st) or "", args.resume, config, offline=bool(args.from_file)):
         raise SdlcError("; ".join(errs))
     root, wt, branch = primary_root(), worktree_path(n, config), slice_branch(n)
     base = config.get("default_branch", "main")
@@ -3080,8 +3084,9 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Claim a ready slice and give it its own worktree on branch slice/N, from origin/epic/E
     (`--quick`: an approved quick change, from origin/main)."""
     n = args.number
-    if args.from_file and not (args.dry_run and args.quick):
-        raise SdlcError("--from-file reads an offline copy: it goes with --quick --dry-run only, never claims")
+    if args.from_file and not (args.dry_run and args.quick) or args.from_file and args.resume:
+        raise SdlcError("--from-file reads an offline copy: it goes with --quick --dry-run only (no --resume: "
+                        "the work resumed is in git, not the bundle), never claims")
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(n, config)
     claim = claim_status(b["comments"], set(b["trusted"]))
     if args.quick:

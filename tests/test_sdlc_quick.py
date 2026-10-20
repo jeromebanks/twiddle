@@ -611,6 +611,21 @@ def test_the_demo_claim_fixture(monkeypatch, capsys):
     assert "may not (src/twiddle/play.py)" in err and "`escalate-to-full 12`" in err
     assert sdlc.main(["claim", "12", "--quick", "--from-file", f]) == 1               # never for real
     assert "--quick --dry-run only" in capsys.readouterr().err
+    assert sdlc.main(["claim", "12", "--quick", "--dry-run", "--resume", "--from-file", f]) == 1
+    assert "no --resume" in capsys.readouterr().err
+
+
+def test_a_pattern_brief_from_a_file_is_checked_offline(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sdlc, "git", lambda *a, **k: pytest.fail(f"--from-file runs no git: {a}"))
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps(quick_bundle(comments=ready_quick(files_brief("src/twiddle/a*/clock.py")))))
+    assert sdlc.main(["claim", "12", "--quick", "--dry-run", "--from-file", str(f)]) == 1
+    assert "src/twiddle/a*/clock.py (reaches src/twiddle/alarm_cli.py, src/twiddle/alarms/)" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("entry", ["./tools/sdlc.py", "/tools/sdlc.py", "tools\\sdlc.py", "src/../tools/x.py", "./*.py"])
+def test_an_unnormalised_entry_is_read_as_the_path_it_spells(entry):
+    assert sdlc_quick.entry_reaches(entry, [], QUICK_RULES)
 
 
 # a resumed claim: the work it carries on, read with the merge gate's diff rules
@@ -665,20 +680,23 @@ def test_a_local_only_branch_touching_a_denied_path_is_refused(repo, monkeypatch
     assert not wt.exists()                                              # refused before the worktree is reattached
 
 
-@pytest.mark.parametrize("change", ["modified", "untracked", "renamed"])
+@pytest.mark.parametrize("change", ["modified", "outside", "untracked", "renamed"])
 def test_an_uncommitted_change_in_the_worktree_is_refused(repo, monkeypatch, capsys, change):
+    commit(repo, "tools/x.py")                                          # a denied file on main
+    _git("push", "-q", "origin", "main", cwd=repo)
     wt, _ = resumable(repo, monkeypatch, files_brief(SAFE, "code.py"))
     if change == "modified":
+        (wt / "tools" / "x.py").write_text("changed\n")                 # unstaged
+    elif change == "outside":
         (wt / ".gitignore").write_text(".worktrees/\nmore\n")             # tracked, and outside the brief
     elif change == "untracked":
-        (wt / "tools").mkdir()
         (wt / "tools" / "new.py").write_text("x\n")
     else:
         _git("mv", "code.py", "uv.lock", cwd=wt)                        # moved into a denied name, not committed
     index = _git("ls-files", "-s", cwd=wt)
     capsys.readouterr()
     code, out = resume(capsys)
-    want = {"modified": "outside the brief's `## Files` list (.gitignore)",
+    want = {"modified": "may not (tools/x.py)", "outside": "outside the brief's `## Files` list (.gitignore)",
             "untracked": "may not (tools/new.py)", "renamed": "may not (uv.lock)"}[change]
     assert code == 1 and f"the worktree {wt}: the diff" in out.err and want in out.err, out.err
     assert _git("ls-files", "-s", cwd=wt) == index                     # the worktree's own index never moved
