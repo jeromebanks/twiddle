@@ -689,8 +689,12 @@ def finished_escalation(lane, n, pr, trigger, base):
     assert f"next: /plan-issue {n}" in lane.ok("state", n)
     # the implementation never reached main, and the quick PR can no longer merge as one
     assert not lane.on_main(STATION) and gh.prs[pr]["state"] == "OPEN"
+    calls = len(gh.calls)
     code, _, err = lane.run("merge", pr)
     assert code == 1 and "not an open plan:slice issue" in err and gh.prs[pr]["state"] == "OPEN"
+    # #213: one reason, no epic branch: no compare against `epic/?`, no base or behind-by noise beside it
+    assert not any("compare/" in " ".join(c) for c in gh.calls[calls:])
+    assert err.count(";") == 0 and "epic/?" not in err and "PR targets" not in err and "could not tell" not in err
 
 
 def test_a_third_change_round_moves_the_change_to_the_full_lane_and_planning_starts(lane):

@@ -3595,6 +3595,18 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
                            f"ship-review {n} --report {out / 'codex.md'} --response <your answers>")
 
 
+def no_epic_error(pr: dict[str, Any], refs: list[int], slice_issue: dict[str, Any] | None) -> str:
+    """The one reason `merge` can't take a PR that closes no slice of an epic (and no quick change): which issue
+    it closes, and what that issue is not."""
+    if len(refs) != 1:
+        return f"PR #{pr['number']} must close exactly one slice or quick change (`Closes #N`); it closes {refs or 'none'}"
+    if not slice_issue:
+        return f"#{refs[0]} could not be read"
+    if LEAF_LABEL not in slice_issue.get("labels", []) or slice_issue.get("state") != "open":
+        return f"#{refs[0]} is not an open plan:slice issue, nor a quick change: PR #{pr['number']} has nothing to merge into"
+    return f"#{refs[0]} is a plan:slice issue with no epic in its marker: PR #{pr['number']} has no epic branch to merge into"
+
+
 def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """The merge gate: Codex approved this head, the tests passed on it, it closes one slice. Then squash-merge."""
     repo = repo_of(config)
@@ -3607,7 +3619,9 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if slice_issue and bundle_quick({"issue": slice_issue, "comments": issue_comments, "trusted": trusted}, config):
         return merge_quick(args, config)   # onto main: no epic, no milestone hold, no review owed
     epic = slice_epic(slice_issue) if slice_issue else None
-    branch = epic_branch(epic) if epic else "epic/?"
+    if not epic:   # no slice of an epic (an escalated quick change's PR, say): no branch to compare or target
+        raise SdlcError(no_epic_error(pr, refs, slice_issue))
+    branch = epic_branch(epic)
     try:
         behind = gh_json(["api", f"repos/{repo}/compare/{branch}...{pr['headRefOid']}"]).get("behind_by")
     except SdlcError:
@@ -3615,11 +3629,8 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     mode = review_mode(complexity_of((slice_issue or {}).get("labels", [])), config)
     errs = merge_gate_errors(pr, slice_issue, tests, reviews, branch, behind, deferrals, mode)
     why = owed_why(pr, reviews, deferrals, mode)
-    if why and not epic:
-        errs.append("this slice has no epic to owe its Codex review to")
-    if epic:
-        est = bundle_state(fetch_bundle(epic, config, trusted), config)
-        errs += milestone_hold_errors(est, epic_progress(epic, config, trusted), slice_issue.get("milestone"))
+    est = bundle_state(fetch_bundle(epic, config, trusted), config)
+    errs += milestone_hold_errors(est, epic_progress(epic, config, trusted), slice_issue.get("milestone"))
     if errs:
         raise SdlcError("; ".join(errs))
     n = refs[0]
@@ -3651,13 +3662,12 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
         gh(["issue", "close", d, "--repo", repo, "--reason", "completed", "--comment",
             f"Paid down by #{n} (PR #{args.pr})."], check=False)
         print(f"#{d} (tech debt) closed")
-    if epic:
-        st = with_next(bundle_state(fetch_bundle(epic, config, trusted), config), config, trusted=trusted)
-        for m in (st.get("progress") or {}).get("milestones", []):
-            if m["done"] == m["total"] and m["key"] not in (st.get("shipped") or {}):
-                print(f"milestone {m['title']} is complete" + (": it ships to main next" if (st.get("demos") or {}).get(m["key"], {}).get("accepted")
-                                                              else ": its demo comes before any new slice"))
-        print(f"next: {st['next']}")
+    st = with_next(bundle_state(fetch_bundle(epic, config, trusted), config), config, trusted=trusted)
+    for m in (st.get("progress") or {}).get("milestones", []):
+        if m["done"] == m["total"] and m["key"] not in (st.get("shipped") or {}):
+            print(f"milestone {m['title']} is complete" + (": it ships to main next" if (st.get("demos") or {}).get(m["key"], {}).get("accepted")
+                                                          else ": its demo comes before any new slice"))
+    print(f"next: {st['next']}")
     return 0
 
 
