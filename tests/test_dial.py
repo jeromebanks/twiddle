@@ -7,6 +7,7 @@ journal.
 """
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -660,6 +661,27 @@ class HeldTimer:
         self.callback()
 
 
+class FrozenClock:
+    """`time` as `dial.app` sees it, with `monotonic` standing still until the test moves it (everything else, the
+    wall clock included, is the real module's)."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def freeze_clock(monkeypatch):
+    from twiddle.dial import app as app_mod
+    clock = FrozenClock()
+    monkeypatch.setattr(app_mod, "time", clock)
+    return clock
+
+
 def hold_timers(app, *names):
     """Take over `app.set_timer` for the callbacks called `names` (the debounces: a volume's trailing write, the
     sleep timer's settle) and hand back the list they land in. A timer's delay is wall-clock time, and a test that
@@ -715,9 +737,9 @@ def test_enter_tunes_and_relay_needs_a_second_press():
     run(go())
 
 
-def test_a_burst_of_volume_keys_is_a_leading_write_and_a_trailing_one():
+def test_a_burst_of_volume_keys_is_a_leading_write_and_a_trailing_one(monkeypatch):
     out = FakeOutput(tuned="kexp")
-    out.volume_interval_s = 3600        # no press can come late enough for the window to have closed on its own
+    freeze_clock(monkeypatch)           # the pacing window is measured on this clock: it can't close by itself
 
     async def go():
         app = make_app(out)

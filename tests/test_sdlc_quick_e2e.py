@@ -833,9 +833,12 @@ def test_the_child_guard_refuses_a_socket_off_the_box_by_either_call(tmp_path, c
     plugin.mkdir()
     (plugin / "offline_guard.py").write_text(PLUGIN)
     env = {**os.environ, "OFFLINE_GUARD_LOG": str(log), "PYTHONPATH": str(plugin)}
-    code = ("import socket, offline_guard\n"
+    code = ("import socket, sys\n"
+            # the real calls are replaced first, so a guard that lets this through reaches a sentinel, not a network
+            "def sentinel(sock, address):\n    print('reached the real socket call'); sys.exit(3)\n"
+            "socket.socket.connect = socket.socket.connect_ex = sentinel\n"
+            "import offline_guard\n"
             "s = socket.socket()\n"
-            "s.settimeout(0.5)\n"        # if a call got past the guard it fails fast instead of hanging
             f"try:\n    s.{call}(('192.0.2.1', 9))\nexcept RuntimeError as e:\n    print('refused', e)\n"
             "else:\n    print('connected')\n")
     proc = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30)

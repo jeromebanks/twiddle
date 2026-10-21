@@ -8,7 +8,7 @@ import pytest
 from twiddle import play
 from twiddle.dial.output import LocalOutput
 
-from .test_dial import FakeOutput, hold_timers, make_app
+from .test_dial import FakeOutput, freeze_clock, hold_timers, make_app
 
 
 @pytest.mark.parametrize("text,seconds", [
@@ -87,7 +87,8 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_z_steps_through_presets_and_sends_once():
+def test_z_steps_through_presets_and_sends_once(monkeypatch):
+    freeze_clock(monkeypatch)                  # the header's countdown is read off this clock
     out = SleepyOutput(tuned="dronezone")
 
     async def go():
@@ -104,7 +105,7 @@ def test_z_steps_through_presets_and_sends_once():
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert out.timers == [45 * 60]                      # three presses, one write
-            assert "☾ sleep in 45:00" in app.sub_title or "44:5" in app.sub_title
+            assert "☾ sleep in 45:00" in app.sub_title
             await pilot.press("z")                              # 45 left: next is 60
             assert "60 min" in app.sub_title
             await pilot.press("Z")
