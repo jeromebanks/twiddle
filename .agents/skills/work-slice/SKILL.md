@@ -31,6 +31,13 @@ Context) are the whole brief. `SDLC.md` explains how the epic got here.
 rating maps to, e.g. `/work-slice 29 (sonnet: routine)`: a coordinator runs the
 slice on that model.
 
+**`/work-slice N --quick` is a different lane:** an approved *quick change* (a small, read-only
+change with a short brief and no epic), built from `origin/main` and merged into `main`. For
+it, the rest of this file applies only where "A quick change" (after §10) points back to it:
+that section says what differs, and its commands win over §2's `claim N`, §7's `--base epic/E`
+and §8's rule that a review may be owed to a milestone. `state N` says `lane: quick` and
+`next: /work-slice N --quick` for one; `slice-status N` says `lane: quick` too.
+
 ## 1. Check
 
 ```bash
@@ -283,3 +290,117 @@ End with:
   It names the next `/work-slice N`, or `/milestone-demo <epic>` once a milestone's units are all
   merged: new slices of that epic wait (`claim` refuses) until the poster accepts its demo.
   If it says "in progress", another session holds that slice.
+
+## A quick change (`--quick`)
+
+A quick change is an issue whose approved brief was posted with `--lane quick` (`triage-issue`
+says which changes qualify). Its unit of work is the *issue*, there is no epic and no milestone,
+and the brief (a comment on the issue, not the poster's request in the issue body) is the slice's
+brief: Outcome, Scope, Files, Acceptance criteria, Validation, Non-goals, Context. Everything in
+§1 to §10 holds except as follows.
+
+**1. Check.** `slice-status N` prints `lane: quick`, and `Codex review: on the PR (mandatory ...)`.
+`slice-check N` lists what stops a claim: no approved brief or a newer revision not yet approved,
+a missing section, a rating other than `complexity:routine`, an escalation, a claim already
+held (then `--resume`). If the brief can't be built as written, don't guess: report it.
+An `escalated` change means stop and report, as in §1.
+
+**2. Claim.**
+
+```bash
+uv run python tools/sdlc.py claim N --quick --model <the model you are>   # or: claim N --quick --resume
+```
+
+It prints the same `WORKTREE=`, `PRIMARY=`, `BRANCH=slice/N` lines, with `BASE=origin/main`, and
+moves the issue from `sdlc:approved` to `sdlc:in-progress` (and the brief is now frozen). Work
+only in `WORKTREE`, as in §2. `claim` without `--quick` refuses a quick change, and `--retry` is
+never allowed on one. Read the brief you are building from the approved revision's text:
+`uv run python tools/sdlc.py state N --json`, its `approved_doc.body`.
+
+**3-5. Plan, build, test.** As §3 to §5, from the brief. Its **Files** list bounds the diff: touch
+no file it doesn't name (a renamed file counts by both paths), nothing under a denied path
+(`.sdlc/config.json`'s `quick` section), and stay within `max_files` and `max_lines` there
+(5 and 200 today). If the honest change needs more, don't squeeze it in: stop and go to
+*Escalating* below.
+
+**6. Self-review.** As §6, against the brief's Acceptance criteria.
+
+**7. The PR targets `main`,** not an epic branch, and carries **evidence in place of a demo**
+(there is none for a quick change):
+
+```bash
+gh pr create --base main --head slice/N --title "<the issue's title>" --body-file <SCRATCH>/pr.md
+```
+
+The body has exactly one `Closes #N` (and no other `Closes`, `Fixes` or `Resolves` of another
+issue), the brief's acceptance criteria ticked where proved, and the evidence: the read-only
+commands you ran and what they printed (for a station, `stations probe` and `np`; for a bug,
+the failing case before and the passing one after). The repo is public: no IP, MAC, device ID
+or secret. Then `test-record PR` from `WORKTREE`, with `timeout: 600000`, exactly as in §7.
+
+**8. Codex reviews the PR itself,** never with a milestone: a routine rating doesn't defer it.
+
+```bash
+cd <WORKTREE> && uv run python tools/sdlc.py codex-review --pr PR --out <SCRATCH>
+```
+
+Run it in the background and wait, as §8 says. It reviews `git diff origin/main...HEAD` against the
+approved brief (the `<QUICK>` parts of `references/codex-pr-prompt.md`: the Files list bounds the
+change, and nobody looks at it after this review), and stamps the report with `Brief: <the approved
+comment's id>` under `HEAD:`. Answer each finding in `<SCRATCH>/response.md`, then record the round
+**before pushing any fix**:
+
+```bash
+uv run python tools/sdlc.py pr-review PR --report <SCRATCH>/codex.md --response <SCRATCH>/response.md
+```
+
+`pr-review` refuses a report that has no `Brief:` line, or one for a brief that has since been
+revised. The round budget is the `quick` section's `max_change_rounds` (2 today), not
+`max_pr_rounds`: recording a round that asks for changes beyond it makes the tool escalate the
+change to the full lane itself (it prints that and exits 1). Fixing is commit, push,
+`test-record`, `codex-review` again on the new head; a re-approval of a rebased head spends nothing.
+
+**If Codex can't run** (the cases §8 lists), `review-defer` is refused for a quick PR: there is
+no milestone to owe the review to, and `merge` would refuse anyway. Leave the PR open, report the
+failure from `<SCRATCH>/codex.err` verbatim and the PR number, and stop. Don't escalate and
+don't merge: a person decides between waiting for Codex and `escalate-to-full N`.
+
+**9. Merge.** `uv run python tools/sdlc.py quick-gate PR` (read-only) prints every reason the PR
+may not merge yet, or `ok`; `merge PR --dry-run` shows the squash. Then:
+
+```bash
+uv run python tools/sdlc.py merge PR
+cd <PRIMARY> && uv run python tools/sdlc.py cleanup N
+```
+
+`merge` requires: the base is `main`; the PR closes exactly this one open quick issue, still
+`sdlc:in-progress` with its brief unchanged and rated `routine`; a passing full-suite record on
+the current head; Codex's approval of the current head, recorded against the issue's current
+approved brief; the head not behind `main` (rebase onto `origin/main`, push with
+`--force-with-lease`, then `test-record` and a new Codex round: a rebase voids both); a
+mergeable PR; and a diff that stays inside the quick rules. It squash-merges into `main`, makes
+sure the issue is closed as completed, moves it to `sdlc:done`, and posts a record on the issue
+(the PR, the head, the test and review records). `merge` and `claim` do those label moves; you
+never touch a label. File what you leave behind as in §9, with the quick issue's number, and by
+the same rule: a follow-up is tech debt because of what it is, not because of the lane it came
+from. Work the change should have included to support itself is tech debt
+(`file-issue N --debt --source review|advisor|adjacent ...`); anything else is an ordinary issue,
+filed without `--debt`, for triage. A quick change has no epic and so no cleanup pass: its debt
+waits, labelled `tech-debt`, in the open tech-debt list (`gh issue list --label tech-debt`), and
+`file-issue` and `state` on the debt issue say so.
+
+**10. Report** as §10, with the PR and the test count; there is no milestone, and `next:` is
+"nothing for #N".
+
+### Escalating to the full lane
+
+If the change is bigger than its brief, it leaves the quick lane with its approved brief
+(no new PRD). Most of the time the tool does it: recording a Codex round past `max_change_rounds`,
+or `merge` finding a denied path, the size cap or a file outside the brief's Files list, runs
+`escalate-to-full N` itself. It prints the reasons, posts a `lane=full` record, puts the issue
+back on `sdlc:approved`, and commits the brief to `docs/prd/N-*.md` with `commit-prd N`. Then
+stop and report: the PR and the worktree are left as they are, and closing them is a person's
+call (`/plan-issue N` plans the work afresh, and `cleanup N --force` discards the worktree). If
+you see the change growing before a trigger fires, you may run it yourself, with
+`escalate-to-full N --reason "<what grew>" --dry-run` first. `commit-prd N` is safe to rerun
+when an escalation was cut short (`state N` says `commit_prd`).

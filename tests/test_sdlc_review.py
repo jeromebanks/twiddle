@@ -758,3 +758,144 @@ def test_a_refresh_cut_short_never_reaches_the_users_file(tmp_path, monkeypatch,
     assert c.run() == codex_review.UNAVAILABLE
     assert c.auth.read_text() == SIGNED_IN and "half-written" in capsys.readouterr().out
     assert not (c.out / "codex-home" / "auth.json").exists()
+
+
+# --- a quick change's PR: reviewed against its approved brief, merged into main -------------------
+
+from tests import test_sdlc_quick as q   # noqa: E402
+
+GOLDEN = ROOT / "tests" / "fixtures" / "codex_pr_prompt"
+
+
+@pytest.mark.parametrize("response,name", [(None, "slice-round1.txt"), (Path("/scratch/response-round-1.md"), "slice-round2.txt")])
+def test_a_slice_prompt_is_byte_identical_to_before(response, name):
+    prompt = codex_review.fill_pr_prompt(codex_review.PR_PROMPT.read_text(), Path("/scratch/slice.md"),
+                                         "origin/epic/12", 12, response)
+    assert prompt == (GOLDEN / name).read_text()
+
+
+def test_a_slice_pr_review_record_is_byte_identical_to_before(capsys):
+    assert sdlc.main(["pr-review", "50", "--report", str(GOLDEN / "slice-report.md"), "--response",
+                      str(GOLDEN / "slice-response.md"), "--from-file", str(GOLDEN / "slice-pr.json"), "--dry-run"]) == 0
+    assert capsys.readouterr().out == (GOLDEN / "slice-record.txt").read_text()
+
+
+QUICK_REQUEST = "Please add Psyched FM, it's great."
+
+
+class QuickCodex(Codex):
+    """The same harness, with the PR closing an in-progress quick change (#12) and an origin/main to diff against."""
+
+    def __init__(self, tmp_path, monkeypatch, comments=None, **kw):
+        super().__init__(tmp_path, monkeypatch, **kw)
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD~1")
+        self.issue = {**q.issue([q.ROUTINE, "sdlc:in-progress"]), "body": QUICK_REQUEST}
+        self.comments = q.ready_quick(q.GATE_BRIEF) + [q.CLAIM] if comments is None else comments
+        st = sdlc.derive_state(self.issue, self.comments, TRUSTED, CONFIG)
+        self.brief_id = sdlc.approved_brief_id(st)
+
+    def bundle(self, comments=(), **pr_kw):
+        f = self.tmp / "bundle.json"
+        f.write_text(json.dumps({"pr": pr(headRefOid=self.head, **{"baseRefName": "main", "body": "Closes #12",
+                                                                   "headRefName": "slice/12", **pr_kw}),
+                                 "pr_comments": list(comments), "trusted": [OWNER],
+                                 "slice": self.issue, "comments": self.comments}))
+        return str(f)
+
+    def record(self, capsys, report=None, comments=None):
+        """`pr-review --dry-run` of the saved report: the comment it would post."""
+        f = self.tmp / "rec.json"
+        f.write_text(json.dumps({"pr": pr(headRefOid=self.head, baseRefName="main", body="Closes #12"),
+                                 "pr_comments": [], "trusted": [OWNER], "slice": self.issue,
+                                 "comments": self.comments if comments is None else comments}))
+        code = sdlc.main(["pr-review", "50", "--report", str(report or self.report()), "--from-file", str(f), "--dry-run"])
+        out = capsys.readouterr()
+        return code, out.out, out.err
+
+
+def test_a_quick_dry_run_names_main_and_shows_the_approved_brief(tmp_path, monkeypatch, capsys):
+    c = QuickCodex(tmp_path, monkeypatch)
+    assert c.run("--dry-run") == 0 and c.calls() == []
+    out = capsys.readouterr().out
+    prompt = (c.out / "prompt.md").read_text()
+    assert "git diff origin/main...HEAD" in prompt and "merges straight into main" in prompt
+    assert "Its Files section bounds the change" in prompt
+    assert "<EPIC>" not in prompt and "epic #" not in prompt and "QUICK>" not in prompt
+    assert f"Brief: {c.brief_id}" in out and "src/twiddle/stations/catalog/*.toml" in out   # the brief's text
+    brief = (c.out / "slice.md").read_text()
+    assert "## Files" in brief and QUICK_REQUEST not in brief and "sdlc:v1" not in brief
+
+
+def test_a_quick_report_carries_its_brief_and_pr_review_records_it(tmp_path, monkeypatch, capsys):
+    c = QuickCodex(tmp_path, monkeypatch)
+    assert c.run() == 0
+    capsys.readouterr()
+    lines = c.report().read_text().splitlines()
+    assert lines[0] == f"HEAD: {c.head}" and lines[1] == f"Brief: {c.brief_id}" and lines[2].startswith("Model: ")
+    code, out, err = c.record(capsys)
+    assert code == 0, err
+    assert f"kind=pr-review sha={c.head} verdict=approve round=1 response=0 brief={c.brief_id} model=" in out
+    # and T3.1's gate accepts that record as a review against the approved brief
+    posted = q.comment(OWNER, out, 20)
+    b = q.gate_bundle(comments=c.comments, records=[q.marked("tests", 7, sha=q.HEAD, result="pass"),
+                                                    {**posted, "body": posted["body"].replace(c.head, q.HEAD)}])
+    assert sdlc.quick_gate_errors(b, CONFIG) == []
+
+
+def test_pr_review_refuses_a_quick_report_without_its_brief(tmp_path, monkeypatch, capsys):
+    c = QuickCodex(tmp_path, monkeypatch)
+    assert c.run() == 0
+    stripped = tmp_path / "nobrief.md"
+    stripped.write_text("\n".join(l for l in c.report().read_text().splitlines() if not l.startswith("Brief:")) + "\n")
+    code, _, err = c.record(capsys, report=stripped)
+    assert code == 1 and "no `Brief:` line" in err
+
+
+def test_pr_review_refuses_a_brief_reapproved_since_the_review(tmp_path, monkeypatch, capsys):
+    c = QuickCodex(tmp_path, monkeypatch)
+    assert c.run() == 0
+    # the brief is revised and re-approved between the review and the recording
+    later = c.comments + [q.quick_brief(ts=40, rev=2, body=q.GATE_BRIEF), q.agent("approval", 2, 41, by=q.POSTER)]
+    new_id = sdlc.approved_brief_id(sdlc.derive_state(c.issue, later, TRUSTED, CONFIG))
+    code, _, err = c.record(capsys, comments=later)
+    assert code == 1 and f"against brief {c.brief_id}" in err and f"approved brief is now {new_id}" in err
+
+
+def test_a_slice_report_naming_a_brief_is_refused(tmp_path, capsys):
+    report = tmp_path / "r.md"
+    report.write_text((GOLDEN / "slice-report.md").read_text().replace("\nModel:", "\nBrief: 123\nModel:", 1))
+    assert sdlc.main(["pr-review", "50", "--report", str(report), "--from-file", str(GOLDEN / "slice-pr.json"),
+                      "--dry-run"]) == 1
+    assert "closes no quick change" in capsys.readouterr().err
+
+
+def test_the_wrong_base_is_refused_and_names_the_expected_one(tmp_path, monkeypatch, capsys):
+    c = QuickCodex(tmp_path, monkeypatch)
+    assert sdlc.main(["--config", str(c.config), "codex-review", "--pr", "50", "--out", str(c.out),
+                      "--from-file", c.bundle(baseRefName="epic/12"), "--dry-run"]) == 1
+    assert "targets epic/12, not main: a quick change merges straight into main" in capsys.readouterr().err
+    (tmp_path / "s").mkdir()
+    s = Codex(tmp_path / "s", monkeypatch)
+    assert sdlc.main(["--config", str(s.config), "codex-review", "--pr", "50", "--out", str(s.out),
+                      "--from-file", s.bundle(baseRefName="main"), "--dry-run"]) == 1
+    assert "targets main, not epic/12: a slice merges into its epic's branch" in capsys.readouterr().err
+
+
+def test_a_slice_round_end_to_end_is_unchanged(tmp_path, monkeypatch, capsys):
+    # through the routing that tells a quick change from a slice: a real slice issue takes the slice path
+    c = Codex(tmp_path, monkeypatch)
+    assert c.run("--dry-run") == 0
+    capsys.readouterr()
+    prompt = (c.out / "prompt.md").read_text().replace(str(c.out), "/scratch")
+    assert prompt == (GOLDEN / "slice-round1.txt").read_text()
+    b = json.loads(Path(c.bundle()).read_text())
+    assert (c.out / "slice.md").read_text() == f"{b['slice']['title']}\n\n{b['slice']['body']}\n"
+
+
+def test_a_slice_record_with_its_issue_is_unchanged(tmp_path, capsys):
+    b = json.loads((GOLDEN / "slice-pr.json").read_text())
+    f = tmp_path / "with-issue.json"
+    f.write_text(json.dumps({**b, "slice": slice_issue(JUDGMENT), "comments": []}))
+    assert sdlc.main(["pr-review", "50", "--report", str(GOLDEN / "slice-report.md"), "--response",
+                      str(GOLDEN / "slice-response.md"), "--from-file", str(f), "--dry-run"]) == 0
+    assert capsys.readouterr().out == (GOLDEN / "slice-record.txt").read_text()

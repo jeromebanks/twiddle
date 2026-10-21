@@ -3,6 +3,8 @@ import json
 import plistlib
 from datetime import date, timedelta
 
+import pytest
+
 from twiddle import cli
 from twiddle.scenespec import dataset
 from twiddle.scenedata import builder
@@ -144,3 +146,27 @@ def test_scene_venue_with_a_dataset_that_lists_no_venues_says_so_instead_of_cras
     _publish([], venues=[])
     assert cli.main(["scene", "venue"]) == 1
     assert "no venues" in capsys.readouterr().err
+
+
+def _recording(monkeypatch, made, *where):
+    """Replace each (module, class) with one that records its keyword arguments in `made` and does nothing."""
+    import importlib
+    for module, name in where:
+        def build(self, *args, _name=name, **kw):
+            made[_name] = kw
+        monkeypatch.setattr(importlib.import_module(module), name,
+                            type(name, (), {"__init__": build, "run": lambda self: None}))
+
+
+@pytest.mark.parametrize("site", ["SpotifyConnectPlayer", "Outputs", "SceneApp"])
+@pytest.mark.parametrize("flags,want", [(["--dry-run"], True), ([], False)])
+def test_scene_passes_dry_run_on_to_its_player_outputs_and_app(monkeypatch, site, flags, want):
+    # `scene` plays through Spotify and, on the relay or a station, a real speaker: its --dry-run has to reach
+    # all three that write (cmd_scene), or "nothing is changed" quietly stops being true
+    made = {}
+    _recording(monkeypatch, made, ("twiddle.scene.app", "SceneApp"), ("twiddle.scene.local", "LocalSpeaker"),
+               ("twiddle.scene.players", "SpotifyConnectPlayer"), ("twiddle.dial.output", "Outputs"))
+    _dead_network(monkeypatch)
+    assert cli.main(["scene", *flags]) == 0
+    assert set(made) == {"SceneApp", "LocalSpeaker", "SpotifyConnectPlayer", "Outputs"}
+    assert made[site]["dry_run"] is want

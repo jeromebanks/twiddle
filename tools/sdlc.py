@@ -10,6 +10,8 @@ and every label change and agent comment. Config is `.sdlc/config.json`.
     uv run python tools/sdlc.py next
     uv run python tools/sdlc.py transition 12 prd-review --kind prd --body-file prd.md --dry-run
     uv run python tools/sdlc.py reconcile 12
+    uv run python tools/sdlc.py escalate-to-full 12 --reason "needs a new fetcher" --dry-run   # quick -> full lane
+    uv run python tools/sdlc.py commit-prd 12 --dry-run   # a quick brief moved to the full lane -> docs/prd/
     uv run python tools/sdlc.py plan-validate plan.json
     uv run python tools/sdlc.py plan-post 12 plan.json --dry-run
     uv run python tools/sdlc.py codex-review --plan 12 --out review       # Codex on the posted plan revision
@@ -53,6 +55,7 @@ import contextlib
 import fcntl
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -64,9 +67,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 try:
-    from tools import codex_review          # imported as tools.sdlc (the tests)
+    from tools import codex_review, sdlc_quick   # imported as tools.sdlc (the tests)
 except ModuleNotFoundError:
     import codex_review                     # run as tools/sdlc.py
+    import sdlc_quick
 # how a review runs and what counts as one live there; sdlc.py reads GitHub, posts and gates
 HEAD_RE, VERDICT_RE, parse_verdict = codex_review.HEAD_RE, codex_review.VERDICT_RE, codex_review.parse_verdict
 
@@ -90,6 +94,9 @@ REVIEW_STATES = {"needs-info", "prd-review", "diagnosis-review"}
 REVIEW_DOC = {"prd-review": "prd", "diagnosis-review": "diagnosis"}
 LATER_STATES = {"done"}
 BUILD_STATES = {"planned", "in-progress"}     # the epic's slices are being built (`work-slice`)
+QUICK = sdlc_quick.QUICK                        # the lane of a small, safe change: one brief, no epic
+QUICK_LABEL = f"lane:{QUICK}"
+FULL = "full"            # a `kind=lane lane=full` record: an approved quick brief moved to the full lane
 TRIAGE_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label"}
 PLAN_ACTIONS = {"plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone",
                 "escalate_plan"}
@@ -102,7 +109,7 @@ DEMO_ACTIONS = {"record_demo_acceptance", "demo_reply", "demo_heard"}
 ALL_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label",
                "plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone", "escalate_plan",
                "record_demo_acceptance", "demo_reply", "demo_heard",
-               "work_slices", "wait_for_poster", "human", "fix_conflict", "none"}
+               "work_slices", "work_quick", "commit_prd", "wait_for_poster", "human", "fix_conflict", "none"}
 NO_MILESTONE = "all"     # an epic planned without milestones has one demo, for all of it
 # from-state -> states the triage skill may move to. `escalated` is open from anywhere.
 TRANSITIONS = {
@@ -169,6 +176,8 @@ def keyword_lines(body: str) -> list[tuple[str, str]]:
 class Ledger:
     latest_doc: dict[str, Any] | None = None
     approved_rev: int | None = None
+    approved_doc: dict[str, Any] | None = None   # the latest approved revision, kept when a newer one is posted
+    lane: str | None = None              # the latest revision's lane: `quick`, or None for the full lane
     approval_by: str | None = None
     rounds: int = 0                      # triage rounds (questions and PRD/diagnosis revisions)
     latest_plan: dict[str, Any] | None = None
@@ -191,6 +200,11 @@ class Ledger:
     # milestone -> its slices that merged without their own Codex approval (routine, or Codex unavailable),
     # until an approving milestone review after them
     review_owed: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    doc_body: str = ""                   # the latest revision's comment, as read
+    # the `lane=full` record that moved the approved quick brief to the full lane, and the `prd-merged` record
+    # after it: until that one, the brief is committed to docs/prd/ (`commit-prd`) before anything is planned
+    to_full: dict[str, Any] | None = None
+    prd_merged: dict[str, Any] | None = None
 
 
 def _rev(mk: dict[str, str]) -> int | None:
@@ -224,13 +238,33 @@ def _on_question(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> No
 def _on_doc(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     L.rounds += 1
     if (rev := _rev(mk)) is not None:
-        L.latest_doc = {"kind": mk["kind"], "rev": rev, "id": c.get("id"), "url": c.get("url")}
+        L.lane = mk.get("lane") if mk.get("lane") == QUICK else None
+        L.latest_doc = {"kind": mk["kind"], "rev": rev, "id": c.get("id"), "url": c.get("url"), "lane": L.lane}
         L.approved_rev = None
+        L.doc_body = c.get("body", "")
+        L.to_full = L.prd_merged = None   # a new revision is what gets approved, and committed, next
 
 
 def _on_approval(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     if L.latest_doc and _rev(mk) == L.latest_doc["rev"]:
         L.approved_rev, L.approval_by = _rev(mk), mk.get("by")
+        L.approved_doc = {**L.latest_doc, "body": L.doc_body}
+
+
+def _on_lane(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    """`lane=full`: the approved quick brief leaves the quick lane (counted only while it is the approved latest)."""
+    doc = L.approved_doc
+    if (mk.get("lane") == FULL and doc and doc.get("lane") == QUICK and L.latest_doc
+            and doc["rev"] == L.latest_doc["rev"] == L.approved_rev):
+        L.lane = None
+        L.latest_doc = {**L.latest_doc, "lane": None}
+        L.approved_doc = {**doc, "lane": None}
+        L.to_full, L.prd_merged = {"id": c.get("id"), "url": c.get("url")}, None
+
+
+def _on_prd_merged(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    if L.to_full:
+        L.prd_merged = {"id": c.get("id"), "url": c.get("url"), "pr": mk.get("pr"), "comment": mk.get("comment")}
 
 
 def _on_plan(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
@@ -334,6 +368,7 @@ MARKERS = {
     "demo-void": _on_demo_void, "demo-request": _on_demo_request,
     "shipped": _on_shipped, "ship-review": _on_ship_review, "epic-tests": _on_epic_tests,
     "main-tests": _on_main_tests, "review-owed": _on_review_owed,
+    "lane": _on_lane, "prd-merged": _on_prd_merged,
 }
 
 
@@ -362,8 +397,12 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
                       if l in issue.get("labels", [])), None)
     if plan_kind:
         # made by plan-create: built by work-slice (`slice-status`), never triaged
-        return {"number": issue.get("number"), "title": issue.get("title"), "state": plan_kind, "turn": "none",
-                "action": "none", "plan_kind": plan_kind, "conflicts": []}
+        st = {"number": issue.get("number"), "title": issue.get("title"), "state": plan_kind, "turn": "none",
+              "action": "none", "plan_kind": plan_kind, "conflicts": []}
+        if plan_kind == "debt":   # where it came from, from its own marker: issue N is never looked up (it may be closed)
+            mk = parse_marker(issue.get("body", "")) or {}
+            st.update(debt_of=mk.get("epic"), debt_lane=mk.get("lane"))
+        return st
     all_labels = state_labels(config)
     found = [l for l in issue.get("labels", []) if l in all_labels]
     conflicts: list[str] = []
@@ -429,7 +468,18 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         conflicts.append(f"rev {approved_rev} is approved on record but the label is {PREFIX}{state}")
     if state == "demo-review" and not latest_demo:
         conflicts.append(f"{PREFIX}demo-review but no milestone demo has been posted")
+    quick = is_quick({"lane": L.lane, "approved_doc": L.approved_doc})
+    if state in BUILD_STATES and quick and not (state == "in-progress" and doc_approved and L.lane == QUICK):
+        # a quick change is built from its approved brief alone: never let it fall through to an epic's slices
+        conflicts.append(f"{PREFIX}{state} on a quick change, but " + (
+            "a quick change has no plan" if state == "planned" else
+            f"its latest revision (rev {latest_doc['rev']}) is " + ("not approved" if L.lane == QUICK else "not quick")))
 
+    commit_due = bool(L.to_full and not L.prd_merged)   # the escalated brief isn't in docs/prd/ yet
+    if commit_due and state in BUILD_STATES:
+        conflicts.append(f"{PREFIX}{state}, but its quick brief moved to the full lane: it goes back to "
+                         f"{PREFIX}approved, and its brief to docs/prd/, before it is planned "
+                         f"(`escalate-to-full {issue.get('number')}` finishes it)")
     try:
         latest_plan_json = extract_plan(plan_body) if plan_body else {}
     except SdlcError:
@@ -449,6 +499,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         turn, action = "human", "human"
     elif state in LATER_STATES:
         turn, action = "later", "none"
+    elif state in BUILD_STATES and quick:
+        turn, action = "agent", "work_quick"   # the approved quick brief is being built (`work-slice N --quick`)
     elif state in BUILD_STATES and (feedback or next_due or plan_after_created):
         # the plan is being amended: the poster's changes at a demo, or the next milestone's replan
         turn = "agent"
@@ -482,6 +534,10 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         turn = "agent"
         if reconcile:
             action = "reconcile_label"
+        elif L.lane == QUICK:
+            action = "work_quick"
+        elif commit_due:
+            action = "commit_prd"   # the brief that left the quick lane goes to docs/prd/ first (`commit-prd N`)
         elif latest_plan is None:
             action = "plan"
         elif plan_verdict == "approve":
@@ -492,7 +548,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
             action = "continue_plan"
     elif replies:
         turn = "agent"
-        if state == "needs-info" and doc_approved:
+        if state == "needs-info" and doc_approved and L.lane != QUICK:   # a quick brief is never planned
             action = "replan"
         elif decision and decision["action"] == "approve" and decision.get("valid"):
             action = "record_approval"
@@ -504,7 +560,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     type_label = next((t for t in ("bug", "enhancement") if t in issue.get("labels", [])), None)
     return {
         "number": issue.get("number"), "title": issue.get("title"), "state": state, "turn": turn,
-        "action": action, "type": type_label, "latest_doc": latest_doc, "approved_rev": approved_rev,
+        "action": action, "type": type_label, "lane": L.lane, "latest_doc": latest_doc, "approved_rev": approved_rev,
+        "approved_doc": L.approved_doc, "to_full": L.to_full, "prd_merged": L.prd_merged,
         "approval_by": approval_by, "rounds": rounds, "max_rounds": config.get("max_rounds", 5),
         "replies": [{"id": c.get("id"), "by": c.get("author"), "url": c.get("url")} for c in replies],
         "decision": decision, "ignored_keywords": ignored, "reconcile": reconcile, "stale_labels": stale,
@@ -520,12 +577,30 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     }
 
 
+is_quick = sdlc_quick.is_quick     # a quick change: its latest or its approved revision is in the quick lane
+
+
+def epic_building(st: dict[str, Any]) -> bool:
+    """An epic whose slices are being built: `planned` or `in-progress`, and not a quick change."""
+    return st["state"] in BUILD_STATES and not is_quick(st)
+
+
+def refuse_quick(st: dict[str, Any], what: str) -> None:
+    """Epic-only commands stop here for a quick change, before they look up any plan or progress."""
+    if is_quick(st):
+        raise SdlcError(f"#{st['number']} is a quick change, not an epic: it has no {what} "
+                        f"(`/work-slice {st['number']} --quick` builds it)")
+
+
 def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> str:
     """The one thing to run next for this issue, so no session has to remember the workflow.
 
     `progress` (from epic_progress) is needed for an epic whose slices are being built.
     """
     n, a = st["number"], st["action"]
+    if st.get("plan_kind") == "debt" and st.get("debt_lane") == QUICK:
+        return (f"nothing: #{n} is tech debt from quick change #{st.get('debt_of')}, waiting in the open `{DEBT_LABEL}` "
+                f"list (a quick change has no epic and no cleanup pass; remove `{DEBT_LABEL}` to triage it alone)")
     if st.get("plan_kind") == "debt":
         return f"nothing: #{n} is tech debt, planned by its epic's cleanup pass (remove `{DEBT_LABEL}` to triage it alone)"
     if st.get("plan_kind"):
@@ -547,6 +622,10 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
         return f"nothing: waiting on the poster to reply on #{n}"
     if a in ("human", "fix_conflict"):
         return f"nothing for an agent: #{n} needs a human" + (f" ({'; '.join(st['conflicts'])})" if st["conflicts"] else "")
+    if a == "work_quick":
+        return f"/work-slice {n} --quick"
+    if a == "commit_prd":
+        return f"`uv run python tools/sdlc.py commit-prd {n}`"
     if a == "work_slices":
         if progress is None:
             return f"`uv run python tools/sdlc.py state {n}` (needs the slices' progress)"
@@ -651,6 +730,9 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
     """{phases, current, due, cleanup, offered, next}: due is one of verify, done, plan_next, review, demo, ship,
     cleanup, sync, build."""
     n = st["number"]
+    if is_quick(st):   # no milestones, demos or slices: never offer an epic's next step for it
+        return {"number": n, "phases": [], "current": None, "due": "quick", "cleanup": None, "offered": [],
+                "cleanup_open": [], "cleanup_needs": [], "next": f"/work-slice {n} --quick: a quick change is no epic"}
     phases = milestone_phases(st, progress)
     cur = next((m for m in phases if m["phase"] != "shipped"), None)
     offered = offered_slices(progress, cur)
@@ -777,11 +859,23 @@ def milestone_hold_errors(epic: dict[str, Any], progress: dict[str, Any] | None,
     return merge_errors(epic_view(epic, progress), slice_milestone) if progress else []
 
 
-def check_transition(st: dict[str, Any], to: str, kind: str, config: dict[str, Any]) -> list[str]:
-    """Reasons a transition is not allowed (empty list = fine)."""
+def check_transition(st: dict[str, Any], to: str, kind: str, config: dict[str, Any],
+                     lane: str | None = None, labels: list[str] | tuple[str, ...] = ()) -> list[str]:
+    """Reasons a transition is not allowed (empty list = fine). `lane` is the new revision's (`--lane`)."""
     errs: list[str] = []
+    n = st["number"]
     if st.get("plan_kind"):
-        return [f"#{st['number']} is a plan:{st['plan_kind']} issue: work-slice drives it, not transition"]
+        return [f"#{n} is a plan:{st['plan_kind']} issue: work-slice drives it, not transition"]
+    if is_quick(st) and st["state"] == "in-progress" and to in REVIEW_STATES:
+        # the brief is frozen once building starts: the only change of course is the full lane
+        return [f"#{n} is a quick change being built, so its brief is frozen: "
+                f"`uv run python tools/sdlc.py escalate-to-full {n}` is the way to change course"]
+    if lane is not None:
+        if lane != QUICK:
+            errs.append(f"unknown lane {lane!r} (the only one is {QUICK})")
+        if kind not in DOC_KINDS:
+            errs.append(f"--lane goes on a prd or diagnosis revision, not a {kind}")
+        errs += sdlc_quick.complexity_errors(n, labels)
     if f"{PREFIX}{to}" not in state_labels(config):
         errs.append(f"unknown state {to!r}")
         return errs
@@ -841,6 +935,9 @@ HEADERS = {
     "retry": "retried on a stronger model",
     "review-deferred": "Codex review deferred to the milestone",
     "review-owed": "Codex review owed at the milestone",
+    "quick-merged": "merged to main",
+    "lane": "moved to the full lane",
+    "prd-merged": "PRD merged",
 }
 FOOTERS = {
     "question": "Reply in a comment. Anything you leave unanswered, I will assume the stated default.",
@@ -904,7 +1001,7 @@ def fetch_trusted(config: dict[str, Any]) -> set[str]:
 def norm_issue(raw: dict[str, Any]) -> dict[str, Any]:
     return {"number": raw["number"], "title": raw.get("title", ""), "state": raw.get("state", "open"),
             "author": (raw.get("author") or {}).get("login", ""), "createdAt": raw.get("createdAt", ""),
-            "labels": [l["name"] for l in raw.get("labels", [])]}
+            "labels": [l["name"] for l in raw.get("labels", [])], "body": raw.get("body") or ""}
 
 
 def norm_comment(raw: dict[str, Any]) -> dict[str, Any]:
@@ -915,7 +1012,7 @@ def norm_comment(raw: dict[str, Any]) -> dict[str, Any]:
 def fetch_bundle(n: int, config: dict[str, Any], trusted: set[str] | None = None) -> dict[str, Any]:
     repo = repo_of(config)
     issue = norm_issue(gh_json(["issue", "view", str(n), "--repo", repo, "--json",
-                                "number,title,state,author,labels,createdAt"]))
+                                "number,title,state,author,labels,createdAt,body"]))
     comments = [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{n}/comments")]
     return {"issue": issue, "comments": comments,
             "trusted": sorted(trusted if trusted is not None else fetch_trusted(config))}
@@ -945,10 +1042,14 @@ def patch_comment(comment_id: int, body: str, config: dict[str, Any]) -> None:
         gh(["api", "-X", "PATCH", f"repos/{repo_of(config)}/issues/comments/{comment_id}", "-F", f"body=@{fh.name}"])
 
 
-def set_state_label(n: int, current: list[str], to: str, config: dict[str, Any]) -> None:
+def set_state_label(n: int, current: list[str], to: str, config: dict[str, Any],
+                    add: tuple[str, ...] = (), remove: tuple[str, ...] = ()) -> None:
+    """Move the sdlc:* label to `to`; `add`/`remove` change other labels (the lane's) in the same edit."""
     args = ["issue", "edit", str(n), "--repo", repo_of(config), "--add-label", f"{PREFIX}{to}"]
+    for extra in add:
+        args += ["--add-label", extra]
     for old in current:
-        if old in state_labels(config) and old != f"{PREFIX}{to}":
+        if (old in state_labels(config) and old != f"{PREFIX}{to}") or old in remove:
             args += ["--remove-label", old]
     gh(args)
 
@@ -961,7 +1062,8 @@ def print_state(st: dict[str, Any]) -> None:
         return
     doc = st["latest_doc"]
     print(f"#{st['number']} {st['title']}")
-    print(f"  state: {st['state']}   turn: {st['turn']}   action: {st['action']}   type: {st['type'] or '?'}")
+    print(f"  state: {st['state']}" + (f"   lane: {st['lane']}" if st.get("lane") else "")
+          + f"   turn: {st['turn']}   action: {st['action']}   type: {st['type'] or '?'}")
     print(f"  latest revision: {('%s rev %s' % (doc['kind'], doc['rev'])) if doc else 'none'}"
           f"   approved: {st['approved_rev'] or 'no'}" + (f" (comment {approved_comment(st)})" if st.get("doc_approved") else "")
           + f"   rounds: {st['rounds']}/{st['max_rounds']}")
@@ -1061,7 +1163,8 @@ def command_transition(args: argparse.Namespace, config: dict[str, Any]) -> int:
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
     kind = args.kind
-    errs = check_transition(st, args.to, kind, config)
+    lane = getattr(args, "lane", None)
+    errs = check_transition(st, args.to, kind, config, lane=lane, labels=bundle["issue"]["labels"])
     doc = st["latest_doc"]
     if kind in DOC_KINDS:
         rev = (doc["rev"] if doc else 0) + 1
@@ -1077,7 +1180,8 @@ def command_transition(args: argparse.Namespace, config: dict[str, Any]) -> int:
         body = Path(args.body_file).read_text()
     elif kind == "approval":
         body = (f"{doc['kind'].upper()} rev {rev} approved by @{st['decision']['by']}. "
-                "Next: planning (`plan-issue`).")
+                + (f"Next: building it in the quick lane (`work-slice {st['number']} --quick`)."
+                   if st.get("lane") == QUICK else "Next: planning (`plan-issue`)."))
     elif kind == "note" and args.to == "triage":
         body = "Triaging this now: reading the issue and the code it touches."
     elif kind == "escalation":
@@ -1085,25 +1189,32 @@ def command_transition(args: argparse.Namespace, config: dict[str, Any]) -> int:
     else:
         raise SdlcError("--body-file is required")
     extra = {"by": st["decision"]["by"], "via": "comment"} if kind == "approval" else {}
-    if kind == "question" and st.get("doc_approved"):
+    if kind == "question" and st.get("doc_approved") and st.get("lane") != QUICK:   # a quick brief's is triage
         extra = {"phase": "plan"}
+    if kind in DOC_KINDS and lane:
+        extra = {"lane": lane}
     comment = render_comment(kind, rev, body, config, **extra)
     current = [l for l in bundle["issue"]["labels"]]
+    # a revision's lane is its label too: a quick brief adds it, a full-lane revision takes it off
+    add_lane = (QUICK_LABEL,) if kind in DOC_KINDS and lane else ()
+    drop_lane = (QUICK_LABEL,) if kind in DOC_KINDS and not lane else ()
     if args.dry_run:
         print(f"DRY RUN #{st['number']}: {st['state']} -> {args.to}")
-        print(f"labels: add {PREFIX}{args.to}, remove {[l for l in current if l in state_labels(config) and l != PREFIX + args.to]}")
+        print(f"labels: add {[PREFIX + args.to, *add_lane]}, remove "
+              f"{[l for l in current if (l in state_labels(config) and l != PREFIX + args.to) or l in drop_lane]}")
         print("----- comment -----")
         print(comment)
         return 0
     n = st["number"]
     have = {l["name"] for l in gh_json(["label", "list", "--repo", repo_of(config), "--limit", "200", "--json", "name"])}
-    if f"{PREFIX}{args.to}" not in have:
-        raise SdlcError(f"label {PREFIX}{args.to} does not exist: run `bootstrap-labels` first (nothing was posted)")
+    for want in (f"{PREFIX}{args.to}", *add_lane):
+        if want not in have:
+            raise SdlcError(f"label {want} does not exist: run `bootstrap-labels` first (nothing was posted)")
     posted = post_comment(n, comment, config)
     if kind in DOC_KINDS and doc:
         old = next(c for c in bundle["comments"] if c["id"] == doc["id"])
         patch_comment(old["id"], render_superseded(old["body"], rev, posted.get("html_url", "")), config)
-    set_state_label(n, current, args.to, config)
+    set_state_label(n, current, args.to, config, add=add_lane, remove=drop_lane)
     print(f"#{n}: {st['state']} -> {args.to}  {posted.get('html_url', '')}")
     return 0
 
@@ -1128,6 +1239,8 @@ def command_merge_prd(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Squash-merge the docs-only PR that carries an approved PRD."""
     repo = repo_of(config)
     st = bundle_state(fetch_bundle(args.number, config), config)
+    if st.get("to_full"):   # a quick brief moved to the full lane: its one file is checked, and the merge recorded
+        return merge_escalated_prd(args.number, args.pr, st, config, args.dry_run)
     errs = [] if st["state"] == "approved" else [f"#{args.number} is {st['state']}, not approved"]
     pr = gh_json(["pr", "view", str(args.pr), "--repo", repo, "--json", "state,mergeable,baseRefName,files"])
     errs += prd_pr_errors(pr, config.get("default_branch", "main"))
@@ -1139,6 +1252,257 @@ def command_merge_prd(args: argparse.Namespace, config: dict[str, Any]) -> int:
     gh(["pr", "merge", str(args.pr), "--repo", repo, "--squash", "--delete-branch"])
     print(f"merged PR #{args.pr}")
     return 0
+
+
+# --- a quick brief that moved to the full lane: committed to docs/prd/ ----------
+#
+# Planning reads the PRD from docs/prd/N-*.md (plan-validate, codex-review --plan). A quick brief
+# lives only in its comment, so when it leaves the quick lane (a `kind=lane lane=full` record),
+# `commit-prd` writes it there through a docs-only PR and `merge-prd`, and records `prd-merged`:
+# only then does `state` offer planning. Everything is rerun-safe: what exists is finished.
+
+PRD_FILE_WAIT_SECONDS = 30   # how long `commit-prd` waits for GitHub to say whether a new PR is mergeable
+PRD_FILE_POLL_SECONDS = 2
+SLUG_MAX = 48
+
+
+def prd_branch(n: int) -> str:
+    return f"prd/{n}"
+
+
+def header_links(text: str, comment_id: str) -> bool:
+    """A docs/prd file's header (the text before its first `## ` section) links the comment `comment_id`."""
+    return bool(re.search(rf"#issuecomment-{re.escape(str(comment_id))}(?!\d)", text.split("\n## ", 1)[0]))
+
+
+def prd_slug(title: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")[:SLUG_MAX].rstrip("-") or "prd"
+
+
+def escalated_prd_errors(n: int, st: dict[str, Any], pr: dict[str, Any], text: str | None) -> list[str]:
+    """Why this PR is not the docs/prd file of #n's escalated quick brief (empty list = it is).
+    `text` is its one file at the PR's head (None: unread)."""
+    paths = [f["path"] for f in pr.get("files", [])]
+    if len(paths) != 1 or not re.fullmatch(rf"docs/prd/{n}-[^/]*\.md", paths[0]):
+        return [f"the PRD PR of #{n}'s brief changes exactly one file, docs/prd/{n}-*.md "
+                f"(it changes: {', '.join(paths[:5]) or 'nothing'})"]
+    if not st.get("doc_approved"):
+        return [f"#{n}'s latest revision is not approved: there is no approved brief to commit"]
+    want = approved_brief_id(st)
+    if text is None:
+        return [f"could not read {paths[0]} at the PR's head"]
+    if not header_links(text, want):
+        return [f"{paths[0]}'s header doesn't link #{n}'s approved comment {want} "
+                "(an earlier revision, or another issue's): `commit-prd` writes it"]
+    return []
+
+
+def pr_file_text(pr: dict[str, Any], path: str, root: Path) -> str | None:
+    """`path` at the PR's head commit, fetched from origin (None if that head can't be read)."""
+    git(["fetch", "-q", "origin", pr.get("headRefName", "")], cwd=root, check=False)
+    sha = pr.get("headRefOid") or ""
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return None
+    proc = subprocess.run(["git", "show", f"{sha}:{path}"], cwd=root, capture_output=True, text=True)
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def record_prd_merged(n: int, st: dict[str, Any], path: str, pr: int | None, config: dict[str, Any]) -> None:
+    anchor = approved_brief_id(st)
+    body = (f"The approved brief (rev {st['approved_doc']['rev']}) is `{path}` on "
+            f"`{config.get('default_branch', 'main')}`" + (f", merged in PR #{pr}" if pr else "")
+            + f". Next: planning (`/plan-issue {n}`).")
+    extra = {"comment": anchor, **({"pr": str(pr)} if pr else {})}
+    post_comment(n, render_comment("prd-merged", None, body, config, **extra), config)
+
+
+def merge_escalated_prd(n: int, pr_number: int, st: dict[str, Any], config: dict[str, Any], dry_run: bool,
+                        root: Path | None = None) -> int:
+    """`merge-prd` for an issue whose quick brief moved to the full lane: the PR's one file must be
+    docs/prd/N-*.md with a header linking the approved comment; the merge is bound to the head that was
+    read, and recorded (`prd-merged`), which is what lets planning start."""
+    repo, root = repo_of(config), root or primary_root()
+    errs = [] if st["state"] == "approved" else [f"#{n} is {st['state']}, not approved"]
+    pr = gh_json(["pr", "view", str(pr_number), "--repo", repo, "--json",
+                  "state,mergeable,baseRefName,files,headRefName,headRefOid"])
+    errs += prd_pr_errors(pr, config.get("default_branch", "main"))
+    paths = [f["path"] for f in pr.get("files", [])]
+    text = pr_file_text(pr, paths[0], root) if len(paths) == 1 else None
+    errs += escalated_prd_errors(n, st, pr, text)
+    if errs:
+        raise SdlcError("; ".join(errs))
+    if dry_run:
+        print(f"would squash-merge PR #{pr_number} ({paths[0]}) for #{n} at {pr['headRefOid'][:12]}, "
+              "then record prd-merged")
+        return 0
+    gh(["pr", "merge", str(pr_number), "--repo", repo, "--squash", "--delete-branch",
+        "--match-head-commit", pr["headRefOid"]])
+    print(f"merged PR #{pr_number}")
+    if not st.get("prd_merged"):
+        try:
+            record_prd_merged(n, st, paths[0], pr_number, config)
+        except Exception as exc:   # the PR is merged: a rerun of commit-prd finds the file on main and records it
+            raise SdlcError(f"merged PR #{pr_number} ({paths[0]}), then: {exc}. "
+                            f"Rerun `commit-prd {n}` to record it (planning waits for that record)")
+    print(f"next: /plan-issue {n}")
+    return 0
+
+
+def merged_prd_path(n: int, comment_id: str, ref: str, root: Path) -> str | None:
+    """The docs/prd/N-*.md on `ref` whose header links `comment_id`, if any."""
+    listed = git(["ls-tree", "--name-only", ref, "docs/prd/"], cwd=root, check=False).splitlines()
+    for path in sorted(p for p in listed if re.fullmatch(rf"docs/prd/{n}-[^/]*\.md", p)):
+        if header_links(git(["show", f"{ref}:{path}"], cwd=root, check=False), comment_id):
+            return path
+    return None
+
+
+def approval_links(bundle: dict[str, Any], st: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """(the approval record of the approved revision, the poster's `/approve` it records; None for a label)."""
+    trusted, rev = set(bundle["trusted"]), st["approved_doc"]["rev"]
+    ordered = sorted(bundle["comments"], key=lambda c: (c.get("created_at", ""), c.get("id", 0)))
+    start = next((i for i, c in enumerate(ordered) if c.get("id") == st["approved_doc"]["id"]), 0)
+    record, at = None, None
+    for i, c in enumerate(ordered[start:], start):
+        mk = parse_marker(c.get("body", "")) if c.get("author") in trusted else None
+        if mk and mk.get("kind") == "approval" and _rev(mk) == rev:
+            record, at = c, i
+    if record is None or (parse_marker(record["body"]) or {}).get("via") == "label":
+        return record, None
+    signoff = next((c for c in reversed(ordered[start:at]) if c.get("author") == st.get("approval_by")
+                    and any(a == "approve" for a, _ in keyword_lines(c.get("body", "")))), None)
+    return record, signoff
+
+
+BOT_TITLE_RE = re.compile(r"\A> 🤖 \*\*[^*\n]*\*\* — [^\n]*\n")
+
+
+def render_prd_file(n: int, title: str, bundle: dict[str, Any], st: dict[str, Any], repo: str) -> str:
+    """docs/prd/N-*.md for an escalated brief: a header linking the approved comment, the sign-off and the
+    approval record (what `approved_requirements` and `merge-prd` look for), then the brief as approved."""
+    doc = st["approved_doc"]
+    anchor = approved_brief_id(st)
+    url = lambda c: c.get("url") or f"https://github.com/{repo}/issues/{n}#issuecomment-{c.get('id')}"  # noqa: E731
+    doc_url = doc.get("url") if (doc.get("url") or "").endswith(f"#issuecomment-{anchor}") else \
+        f"https://github.com/{repo}/issues/{n}#issuecomment-{anchor}"
+    record, signoff = approval_links(bundle, st)
+    name = "PRD" if doc["kind"] == "prd" else "diagnosis"
+    links = [f"[{name}]({doc_url})"] + ([f"[sign-off]({url(signoff)})"] if signoff else []) \
+        + ([f"[approval record]({url(record)})"] if record else [])
+    when = f" on {record['created_at'][:10]}" if record and record.get("created_at") else ""
+    how = "" if signoff or not record else " (label)"
+    text = BOT_TITLE_RE.sub("", approved_brief(st) or "", count=1).strip()
+    if (foot := FOOTERS.get(doc["kind"])) and text.endswith(f"---\n{foot}"):
+        text = text[: -len(f"---\n{foot}")].rstrip()
+    moved = f" It was approved as a quick brief and moved to the full lane ([record]({url(st['to_full'])}))."
+    return (f"# {name[0].upper() + name[1:]}: {title} (#{n})\n\n"
+            f"Approved revision {doc['rev']}, signed off by @{st.get('approval_by')}{how}{when} ({', '.join(links)})."
+            f"{moved} The text below is rev {doc['rev']} exactly as approved.\n\n{text}\n")
+
+
+def wait_mergeable(pr_number: int, config: dict[str, Any], wait: float | None = None,
+                   poll: float | None = None) -> str:
+    """The PR's `mergeable` once GitHub has computed it (a new PR reads UNKNOWN for a few seconds)."""
+    wait = PRD_FILE_WAIT_SECONDS if wait is None else wait
+    poll = PRD_FILE_POLL_SECONDS if poll is None else poll
+    if poll <= 0 or wait < 0:
+        raise SdlcError(f"the wait for GitHub needs a positive poll interval and a non-negative timeout (got {poll}, {wait})")
+    waited = 0.0
+    while True:
+        state = (gh_json(["pr", "view", str(pr_number), "--repo", repo_of(config), "--json", "mergeable"])
+                 or {}).get("mergeable")
+        if state != "UNKNOWN" or waited >= wait:
+            return state
+        time.sleep(poll)
+        waited += poll
+
+
+def commit_prd(n: int, config: dict[str, Any], dry_run: bool = False, root: Path | None = None) -> int:
+    """Write an escalated quick brief to docs/prd/N-*.md on `prd/N`, open (or reuse) its docs-only PR and
+    `merge-prd` it. A rerun finishes what exists: a file already on main is only recorded, an open PR is
+    reused, the branch is updated in place, so there is never a second PR or a second file."""
+    bundle = fetch_bundle(n, config)
+    st = bundle_state(bundle, config)
+    if not st.get("to_full"):
+        raise SdlcError(f"#{n} never left the quick lane (no `lane=full` record on its approved brief): "
+                        "commit-prd is only for that; a full-lane PRD is merged by triage (`merge-prd`)")
+    if st.get("prd_merged"):
+        print(f"#{n}: the brief is already in docs/prd/ ({st['prd_merged']['url']})\nnext: /plan-issue {n}")
+        return 0
+    if st["state"] != "approved" or not st.get("doc_approved"):
+        raise SdlcError(f"#{n} is {st['state']}" + ("" if st.get("doc_approved") else " with an unapproved revision")
+                        + f", not approved: {next_command(st)}")
+    repo, root = repo_of(config), root or primary_root()
+    main, branch, anchor = config.get("default_branch", "main"), prd_branch(n), approved_brief_id(st)
+    if not dry_run:
+        git(["fetch", "-q", "origin", main], cwd=root)
+    if found := merged_prd_path(n, anchor, f"origin/{main}", root):   # merged before; only its record is missing
+        if dry_run:
+            print(f"would record prd-merged on #{n}: {found} on {main} links comment {anchor}")
+            return 0
+        record_prd_merged(n, st, found, None, config)
+        print(f"#{n}: {found} was already on {main}; recorded\nnext: /plan-issue {n}")
+        return 0
+    open_prs = gh_json(["pr", "list", "--repo", repo, "--head", branch, "--base", main, "--state", "open",
+                        "--json", "number,url"]) or []
+    if len(open_prs) > 1:
+        raise SdlcError(f"{len(open_prs)} open PRs from {branch}: close all but one, then rerun")
+    remote = git(["ls-remote", "origin", f"refs/heads/{branch}"], cwd=root, check=False).split()
+    # an open PR's branch is updated in place; without one, the branch starts again from main
+    base = f"origin/{branch}" if open_prs and remote else f"origin/{main}"
+    content = render_prd_file(n, bundle["issue"].get("title", ""), bundle, st, repo)
+    title = f"docs: approved PRD for #{n} ({bundle['issue'].get('title', '')})"
+    if dry_run:
+        have = sorted(p for p in git(["ls-tree", "--name-only", f"origin/{main}", "docs/prd/"], cwd=root,
+                                     check=False).splitlines() if re.fullmatch(rf"docs/prd/{n}-[^/]*\.md", p))
+        path = have[0] if have else f"docs/prd/{n}-{prd_slug(bundle['issue'].get('title', ''))}.md"
+        print(f"would write {path} on {branch} (from {base}), push it, "
+              + (f"reuse PR #{open_prs[0]['number']}" if open_prs else f"open a docs-only PR \"{title}\"")
+              + f", and merge-prd it\n----- {path} -----\n{content}")
+        return 0
+    if base != f"origin/{main}":
+        git(["fetch", "-q", "origin", branch], cwd=root)
+    scratch = Path(tempfile.mkdtemp(prefix=f"prd-{n}-"))
+    wt = scratch / "wt"
+    try:
+        git(["worktree", "add", "-q", "--detach", str(wt), base], cwd=root)
+        have = sorted((wt / "docs" / "prd").glob(f"{n}-*.md"))
+        path = (have[0].relative_to(wt).as_posix() if have
+                else f"docs/prd/{n}-{prd_slug(bundle['issue'].get('title', ''))}.md")
+        (wt / path).parent.mkdir(parents=True, exist_ok=True)
+        (wt / path).write_text(content)
+        git(["add", path], cwd=wt)
+        if git(["status", "--porcelain"], cwd=wt):
+            git(["commit", "-q", "-m", title], cwd=wt)
+        lease = f"--force-with-lease=refs/heads/{branch}:{remote[0] if remote else ''}"
+        git(["push", "-q", lease, "origin", f"HEAD:refs/heads/{branch}"], cwd=wt)
+    finally:
+        git(["worktree", "remove", "--force", str(wt)], cwd=root, check=False)
+        shutil.rmtree(scratch, ignore_errors=True)
+    if open_prs:
+        number = int(open_prs[0]["number"])
+    else:
+        with tempfile.NamedTemporaryFile("w", suffix=".md") as fh:
+            fh.write(f"The brief approved for #{n}, which moved from the quick lane to the full lane, as `{path}` "
+                     f"(docs only). Opened and merged by `tools/sdlc.py commit-prd {n}` through `merge-prd`.\n")
+            fh.flush()
+            out = gh(["pr", "create", "--repo", repo, "--base", main, "--head", branch, "--title", title,
+                      "--body-file", fh.name])
+        m = re.search(r"/pull/(\d+)", out)
+        if not m:
+            raise SdlcError(f"opened a PR from {branch} but can't read its number from {out.strip()!r}: rerun")
+        number = int(m.group(1))
+        print(f"opened PR #{number}")
+    wait_mergeable(number, config)
+    st = bundle_state(fetch_bundle(n, config), config)   # read again: a revision posted meanwhile stops the merge
+    if not st.get("to_full"):
+        raise SdlcError(f"#{n} changed while PR #{number} was being made (a new revision?): nothing merged. "
+                        f"{next_command(st)}")
+    return merge_escalated_prd(n, number, st, config, False, root)
+
+
+def command_commit_prd(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    return commit_prd(args.number, config, args.dry_run)
 
 
 def command_reconcile(args: argparse.Namespace, config: dict[str, Any]) -> int:
@@ -1192,7 +1556,7 @@ COMMENT_LIMIT = 65000   # GitHub refuses comments over 65536 characters
 LEAF_LABEL, CONTAINER_LABEL = "plan:slice", "plan:subtask"
 # How hard a unit of work is, rated by the planner; `.sdlc/config.json` maps it to the model that builds it.
 COMPLEXITY = ("routine", "judgment", "novel")
-COMPLEXITY_PREFIX = "complexity:"
+COMPLEXITY_PREFIX = sdlc_quick.COMPLEXITY_PREFIX
 COMPLEXITY_LINE_RE = re.compile(r"^Complexity: (\w+) — .*$", re.MULTILINE)
 
 
@@ -1413,21 +1777,65 @@ def prd_path(n: int) -> Path | None:
     return found[0] if found else None
 
 
-def plan_criteria(plan: dict[str, Any]) -> tuple[set[int] | None, list[str]]:
+def prd_at(n: int, ref: str, root: Path, comment_id: str | None = None) -> tuple[str, str] | None:
+    """(path, text) of the docs/prd/N-*.md on `ref`, read from git with no fetch; the one whose header links
+    `comment_id` when there is one, else the first by name. None when `ref` has none (or doesn't exist)."""
+    listed = git(["ls-tree", "--name-only", ref, "docs/prd/"], cwd=root, check=False).splitlines()
+    found = [(p, git(["show", f"{ref}:{p}"], cwd=root, check=False))
+             for p in sorted(p for p in listed if re.fullmatch(rf"docs/prd/{n}-[^/]*\.md", p))]
+    linked = [f for f in found if comment_id and header_links(f[1], comment_id)]
+    return (linked or found or [None])[0]
+
+
+def find_prd(n: int, ref: str | None = None, comment_id: str | None = None) -> tuple[str, str] | None:
+    """(path relative to the repo, text) of issue N's PRD: the working tree's, as always; only when it has none,
+    the one on `ref` (see `planning_ref`)."""
+    if path := prd_path(n):
+        return path.relative_to(ROOT).as_posix(), path.read_text()
+    return prd_at(n, ref, ROOT, comment_id) if ref else None
+
+
+PRD_FETCH_SECONDS = 60   # how long planning waits for `git fetch` of the default branch before reading the last one
+
+
+def planning_ref(n: Any, config: dict[str, Any], offline: bool) -> str | None:
+    """Where planning also looks for issue N's PRD: `origin/<default_branch>`, fetched once here, but only when
+    the working tree has no docs/prd/N-*.md (a PRD merged on GitHub that this checkout hasn't pulled). None
+    offline (`--from-file` never fetches) or when the working tree has it, so that case is exactly as before.
+    A failed fetch is said on stderr, and the last fetched ref is read instead."""
+    if offline or not isinstance(n, int) or prd_path(n):
+        return None
+    main = config.get("default_branch", "main")
+    if not PRD_FETCH_SECONDS > 0:
+        raise SdlcError(f"PRD_FETCH_SECONDS must be positive (got {PRD_FETCH_SECONDS})")
+    try:
+        git(["fetch", "-q", "origin", main], cwd=ROOT, timeout=PRD_FETCH_SECONDS)
+    except SdlcError as exc:
+        print(f"{exc}: reading docs/prd/{n}-*.md from the last fetched origin/{main}", file=sys.stderr)
+    return f"origin/{main}"
+
+
+def plan_criteria(plan: dict[str, Any], ref: str | None = None,
+                  comment_id: str | None = None) -> tuple[set[int] | None, list[str]]:
     """The criteria a plan must cover. A feature needs its merged PRD; a bug's diagnosis may have none."""
-    path = prd_path(plan.get("issue", 0)) if isinstance(plan.get("issue"), int) else None
-    criteria = parse_criteria(path.read_text()) if path else set()
+    found = find_prd(plan["issue"], ref, comment_id) if isinstance(plan.get("issue"), int) else None
+    criteria = parse_criteria(found[1]) if found else set()
     if plan.get("kind") == "feature" and not criteria:
         return None, [f"no numbered acceptance criteria found in docs/prd/{plan.get('issue')}-*.md "
-                      "(merge the approved PRD first)"]
+                      + (f"(nor on {ref}) " if ref else "") + "(merge the approved PRD first)"]
     return (criteria or None), []
 
 
-def check_plan(plan: Any) -> list[str]:
+def check_plan(plan: Any, ref: str | None = None, comment_id: str | None = None) -> list[str]:
     if not isinstance(plan, dict):
         return ["the plan is not a JSON object"]
-    criteria, errs = plan_criteria(plan)
+    criteria, errs = plan_criteria(plan, ref, comment_id)
     return errs + validate_plan(plan, criteria)
+
+
+def plan_errors(plan: Any, ref: str | None, comment_id: str | None = None) -> list[str]:
+    """`check_plan`, also at `ref` when planning looks there; with no ref, exactly `check_plan(plan)` as before."""
+    return check_plan(plan, ref, comment_id) if ref else check_plan(plan)
 
 
 def _fence(text: str) -> str:
@@ -1662,7 +2070,7 @@ def latest_plan_of(bundle: dict[str, Any], st: dict[str, Any]) -> tuple[dict[str
 
 def command_plan_validate(args: argparse.Namespace, config: dict[str, Any]) -> int:
     plan = json.loads(Path(args.file).read_text())
-    errs = check_plan(plan)
+    errs = plan_errors(plan, planning_ref(plan.get("issue") if isinstance(plan, dict) else None, config, offline=False))
     for e in errs:
         print(f"  - {e}")
     if errs:
@@ -1709,7 +2117,8 @@ def command_plan_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
         raise SdlcError(f"#{st['number']} is {st['state']} (action {st['action']}): not the time to post a plan"
                         + (" — the Codex rounds are spent; ask the poster (`transition N needs-info --kind question`)"
                            if st["action"] == "ask_poster" else ""))
-    errs = check_plan(plan)
+    ref = planning_ref(plan.get("issue"), config, offline=bool(getattr(args, "from_file", None)))
+    errs = plan_errors(plan, ref, st.get("latest_doc") and approved_comment(st))
     if plan.get("issue") != st["number"]:
         errs.append(f"the plan is for #{plan.get('issue')}, not #{st['number']}")
     if st["state"] in BUILD_STATES and st["latest_plan"]:
@@ -1776,7 +2185,9 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
                         "(it needs Codex's `approve` on the latest plan revision)")
     plan_comment, plan = latest_plan_of(bundle, st)
     epic = st["number"]
-    errs = check_plan(plan) + ([] if plan.get("issue") == epic else [f"the plan is for #{plan.get('issue')}"])
+    ref = planning_ref(plan.get("issue"), config, offline=bool(getattr(args, "from_file", None)))
+    cid = st.get("latest_doc") and approved_comment(st)
+    errs = plan_errors(plan, ref, cid) + ([] if plan.get("issue") == epic else [f"the plan is for #{plan.get('issue')}"])
     errs += cleanup_budget_errors(plan, st, config)
     if errs:
         raise SdlcError("the reviewed plan no longer validates: " + "; ".join(errs))
@@ -1803,8 +2214,8 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
     items = {t["key"]: t for t in plan["subtasks"]} | {l["key"]: l for l in plan_leaves(plan)}
     in_scope = (lambda k: True) if target is None else (  # noqa: E731
         lambda k: (items[k].get("milestone") or items[k].get("_milestone")) in target)
-    path = prd_path(epic)
-    prd_url = f"https://github.com/{repo}/blob/{config.get('default_branch', 'main')}/{path.relative_to(ROOT)}" if path else None
+    prd = find_prd(epic, ref, cid)   # the plan is for the epic (checked above), so `ref` was looked up for it
+    prd_url = f"https://github.com/{repo}/blob/{config.get('default_branch', 'main')}/{prd[0]}" if prd else None
     if acts and not offline and not args.dry_run:
         have = {l["name"] for l in gh_json(["label", "list", "--repo", repo, "--limit", "200", "--json", "name"])}
         need = [LEAF_LABEL, CONTAINER_LABEL] + [COMPLEXITY_PREFIX + c for c in COMPLEXITY]
@@ -2043,7 +2454,8 @@ def pr_records(comments: list[dict[str, Any]], trusted: set[str]) -> tuple[list[
         if mk.get("kind") == "tests":
             tests.append({"sha": mk.get("sha"), "result": mk.get("result"), "passed": mk.get("passed"), "url": c.get("url")})
         elif mk.get("kind") == "pr-review":
-            reviews.append({"sha": mk.get("sha"), "verdict": mk.get("verdict"), "round": mk.get("round"), "url": c.get("url")})
+            reviews.append({"sha": mk.get("sha"), "verdict": mk.get("verdict"), "round": mk.get("round"), "url": c.get("url")}
+                           | ({"brief": mk["brief"]} if mk.get("brief") else {}))   # a quick PR's: the brief it read
         elif mk.get("kind") == "retry":
             for r in reviews:
                 r["before_retry"] = True
@@ -2214,6 +2626,73 @@ def merge_gate_errors(pr: dict[str, Any], slice_issue: dict[str, Any] | None, te
     return errs
 
 
+def load_quick(config: dict[str, Any]) -> sdlc_quick.QuickRules:
+    """The quick lane's rules from the config (sdlc_quick.load_quick), a bad section as SdlcError."""
+    try:
+        return sdlc_quick.load_quick(config)
+    except sdlc_quick.QuickConfigError as exc:
+        raise SdlcError(str(exc))
+
+
+def quick_merge_gate_errors(pr: dict[str, Any], issue_state: dict[str, Any] | None, tests: list[dict[str, Any]],
+                            reviews: list[dict[str, Any]], behind_by: int | None, files: list[dict[str, Any]] | None,
+                            brief: str | None, quick: sdlc_quick.QuickRules, base: str = "main") -> list[str]:
+    """Why the agent may not merge this quick PR into main (empty list = merge). `merge_gate_errors`'s sibling.
+
+    `issue_state` is the closed issue's `derive_state`, with the issue itself (number, state, labels) under
+    "issue" (`quick_issue_state`); `brief` is its approved brief's text; `files` is GitHub's `pulls/N/files`.
+    Codex must approve this head having read this brief (its record's `brief` is the approved comment's id),
+    and a `review-defer` never stands in for it: a quick change has no milestone to owe a review to.
+    """
+    errs = []
+    if pr.get("state") != "OPEN":
+        errs.append(f"PR is {pr.get('state')}, not OPEN")
+    if pr.get("isDraft"):
+        errs.append("PR is a draft")
+    if pr.get("baseRefName") != base:
+        errs.append(f"PR targets {pr.get('baseRefName')}, not {base}")
+    refs = closes_refs(pr.get("body", ""))
+    issue = (issue_state or {}).get("issue")
+    n = refs[0] if len(refs) == 1 else None
+    if n is None:
+        errs.append(f"PR must close exactly one quick issue (`Closes #N`); it closes {refs or 'none'}")
+    elif not issue or issue["number"] != n:
+        errs.append(f"#{n} could not be read")
+    elif LEAF_LABEL in issue.get("labels", []):
+        errs.append(f"#{n} is a plan:slice issue, not a quick change")
+    else:
+        errs += sdlc_quick.eligibility_errors(issue, issue_state)
+    t, r = head_records(pr, tests, reviews)
+    head = (pr.get("headRefOid") or "")[:12]
+    want = approved_brief_id(issue_state) if issue_state else None
+    if not r:
+        errs.append(f"no Codex review of the current head {head} (a quick change's review is never deferred)")
+    elif r["verdict"] != "approve":
+        errs.append(f"Codex's latest review of {head} asks for changes")
+    elif not want or r.get("brief") != want:
+        errs.append(f"Codex's approval of {head} was recorded against brief {r.get('brief') or 'none'}, not the "
+                    f"approved brief {want or '(none)'}: a Codex round against the approved brief comes first")
+    if not t:
+        errs.append(f"no recorded test run on the current head {head} (`test-record`)")
+    elif t["result"] != "pass":
+        errs.append(f"the tests failed on {head}")
+    if behind_by is None:
+        errs.append(f"could not tell whether the head is up to date with {base}")
+    elif behind_by:
+        errs.append(f"the head is {behind_by} commit(s) behind {base}: rebase onto origin/{base}, "
+                    "push with --force-with-lease, then `test-record` and a Codex round on the new head")
+    mergeable = pr.get("mergeable")
+    if mergeable == "UNKNOWN":
+        errs.append("GitHub is still computing mergeability (UNKNOWN): wait a few seconds and try again")
+    elif mergeable != "MERGEABLE":
+        errs.append(f"GitHub says the PR conflicts ({mergeable}): rebase onto origin/{base}")
+    if n is not None:
+        errs += sdlc_quick.diff_errors(n, files, brief or "", quick)
+        if err := sdlc_quick.rounds_error(n, changes_rounds(reviews), quick):
+            errs.append(err)
+    return errs
+
+
 def parse_pytest_summary(text: str) -> tuple[int, int]:
     """(passed, failed + errors) from pytest's summary line."""
     tail = "\n".join((text or "").strip().splitlines()[-3:])
@@ -2254,8 +2733,13 @@ def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[di
             "open": sum(1 for l in leaves if l.get("state") == "open"), "milestones": milestones}
 
 
-def git(args: list[str], cwd: Path | None = None, check: bool = True) -> str:
-    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+def git(args: list[str], cwd: Path | None = None, check: bool = True, timeout: float | None = None,
+        env: dict[str, str] | None = None) -> str:
+    try:
+        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                              env={**os.environ, **env} if env else None)
+    except subprocess.TimeoutExpired:
+        raise SdlcError(f"git {' '.join(args[:3])} timed out after {timeout}s") from None
     if check and proc.returncode != 0:
         raise SdlcError(f"git {' '.join(args[:3])} failed: {proc.stderr.strip()}")
     return proc.stdout.strip()
@@ -2274,6 +2758,7 @@ def fetch_slice(n: int, config: dict[str, Any]) -> tuple[dict[str, Any], list[di
     repo = repo_of(config)
     raw = gh_json(["api", f"repos/{repo}/issues/{n}"])
     issue = {"number": raw["number"], "title": raw.get("title", ""), "state": raw.get("state", "open"),
+             "author": (raw.get("user") or {}).get("login", ""),
              "state_reason": raw.get("state_reason"), "body": raw.get("body") or "",
              "labels": [l["name"] for l in raw.get("labels", [])],
              "assignees": [a["login"] for a in raw.get("assignees") or []],
@@ -2338,17 +2823,100 @@ def bundle_slice(b: dict[str, Any]) -> dict[str, Any]:
     return derive_slice(b["issue"], b["comments"], set(b["trusted"]), b["blockers"], b["pr"], b["pr_comments"])
 
 
+def bundle_issue_state(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+    """The issue's triage state, which says whether it is a quick change; None for a plan:slice (never one)."""
+    if LEAF_LABEL in b["issue"].get("labels", []):
+        return None
+    return derive_state(b["issue"], b["comments"], set(b["trusted"]), config)
+
+
+def bundle_quick(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+    """The issue's state if it is a quick change, else None (a slice, or an issue in the full lane)."""
+    st = bundle_issue_state(b, config)
+    return st if st and is_quick(st) else None
+
+
+def derive_quick(b: dict[str, Any], st: dict[str, Any]) -> dict[str, Any]:
+    """A quick change's build state, read like a slice's (claim, PR, records on its head) with no epic or
+    blockers. Its Codex review is always on the PR: it has no milestone to owe one to."""
+    out = derive_slice(b["issue"], b["comments"], set(b["trusted"]), [], b.get("pr"), b.get("pr_comments") or [])
+    n = out["number"]
+    building = out["state"] in ("ready", "claimed", "in-review")
+    # a claimed change is checked as a resume would be: a brief revised since the claim stops the build too
+    refusals = sdlc_quick.quick_check_errors(b["issue"], st, approved_brief(st), out["claim"],
+                                             resume=bool(out["claim"])) if building else []
+    if refusals:     # not claimable, or no longer buildable: what triage says comes next
+        out["state"] = "not-ready" if out["state"] == "ready" else out["state"]
+        out["next"] = next_command(st)
+        if out["next"].startswith("/work-slice"):   # triage can't see these (the brief's sections, the rating)
+            out["next"] = f"/triage-issue {n}: " + "; ".join(refusals)
+    elif building:
+        out["next"] = f"/work-slice {n} --quick"
+    # no milestone to owe a review to: a deferral never counts, Codex reviews the PR
+    return {**out, "deferred_on_head": False, "lane": QUICK, "refusals": refusals,
+            "review": "slice", "review_mandatory": True}
+
+
+def quick_issue_state(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    """An issue bundle's derived state with the issue itself under "issue": what quick_merge_gate_errors reads."""
+    return {**derive_state(b["issue"], b["comments"], set(b["trusted"]), config), "issue": b["issue"]}
+
+
+def quick_gate_bundle(pr_number: int, config: dict[str, Any]) -> dict[str, Any]:
+    """Everything the quick gate reads, fetched (read-only): the PR, its records, its files (with rename
+    sources, which `gh pr view --json files` lacks), how far it is behind main, and the issue it closes."""
+    repo, base = repo_of(config), config.get("default_branch", "main")
+    trusted = fetch_trusted(config)
+    pr, pr_comments = fetch_pr(pr_number, config)
+    files = gh_pages(f"repos/{repo}/pulls/{pr_number}/files?per_page=100")
+    try:
+        behind = gh_json(["api", f"repos/{repo}/compare/{base}...{pr['headRefOid']}"]).get("behind_by")
+    except SdlcError:
+        behind = None
+    refs = closes_refs(pr.get("body", ""))
+    issue = fetch_bundle(refs[0], config, trusted) if len(refs) == 1 else None
+    return {"pr": pr, "pr_comments": pr_comments, "trusted": sorted(trusted), "files": files, "behind_by": behind,
+            "issue": issue and issue["issue"], "comments": issue["comments"] if issue else []}
+
+
+def quick_gate_errors(b: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    """quick_merge_gate_errors over a quick-gate bundle (`quick_gate_bundle`, or `--from-file`)."""
+    quick = load_quick(config)
+    tests, reviews = pr_records(b["pr_comments"], set(b["trusted"]))   # deferrals are never read
+    st = quick_issue_state(b, config) if b.get("issue") else None
+    return quick_merge_gate_errors(b["pr"], st, tests, reviews, b.get("behind_by"), b.get("files"),
+                                   approved_brief(st) if st else None, quick, config.get("default_branch", "main"))
+
+
+def command_quick_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """May this quick PR merge into main? Prints each refusal (or `ok`); reads only, never escalates."""
+    b = json.loads(Path(args.from_file).read_text()) if args.from_file else quick_gate_bundle(args.pr, config)
+    errs = quick_gate_errors(b, config)
+    for e in errs:
+        print(f"refused: {e}")
+    if not errs:
+        print("ok")
+    return 1 if errs else 0
+
+
 def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> int:
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(args.number, config)
-    st = bundle_slice(b)
+    quick = bundle_quick(b, config)
+    st = derive_quick(b, quick) if quick else bundle_slice(b)
     st["model"] = model_for(st["complexity"], config)
-    st["review"] = review_mode(st["complexity"], config)
+    if not quick:
+        st["review"] = review_mode(st["complexity"], config)
     if args.json:
         print(json.dumps(st, indent=2))
         return 0
-    print(f"#{st['number']} {st['title']}\n  state: {st['state']}   epic: #{st['epic']}   key: {st['key']}"
+    where = f"lane: {QUICK}" if quick else f"epic: #{st['epic']}   key: {st['key']}"
+    review = ("on the PR (mandatory: a quick change is never owed to a milestone)" if quick
+              else "with the milestone" if st["review"] == "milestone" else "on the PR")
+    print(f"#{st['number']} {st['title']}\n  state: {st['state']}   {where}"
           + (f"   complexity: {st['complexity']} (model {st['model']})" if st["complexity"] else "")
-          + f"   Codex review: {'with the milestone' if st['review'] == 'milestone' else 'on the PR'}")
+          + f"   Codex review: {review}")
+    for e in st.get("refusals") or []:
+        print(f"  refused: {e}")
     if st["claim"]:
         print(f"  claimed: {st['claim']['url']} (branch {st['claim']['branch']}"
               + (f", model {st['claim']['model']})" if st["claim"].get("model") else ")"))
@@ -2356,7 +2924,8 @@ def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> in
         t, r = st["tests_on_head"], st["review_on_head"]
         print(f"  PR #{st['pr']} ({st['pr_state']}) head {(st['head'] or '')[:12]}: tests {t['result'] if t else 'not run'}, "
               f"Codex {r['verdict'] if r else 'deferred to the milestone' if st['deferred_on_head'] else 'not yet'}, "
-              f"rounds {st['pr_rounds']}/{config.get('max_pr_rounds', 5)}")
+              + (f"change rounds {st['pr_rounds']}/{load_quick(config).max_change_rounds}" if quick
+                 else f"rounds {st['pr_rounds']}/{config.get('max_pr_rounds', 5)}"))
     print(f"  next: {st['next']}")
     return 0
 
@@ -2372,8 +2941,8 @@ def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -
     else:
         trusted = set(b["trusted"])
         st = bundle_state(fetch_bundle(int(epic), config, trusted), config)
-        progress = epic_progress(int(epic), config, trusted) if st["state"] in BUILD_STATES else None
-    if st["state"] not in BUILD_STATES | {"demo-review"}:
+        progress = epic_progress(int(epic), config, trusted) if epic_building(st) else None
+    if not epic_building(st) and st["state"] != "demo-review":
         return [f"epic #{epic} is {st['state']}: no new slices until it's back in progress"]
     if st.get("untested"):
         return [f"main holds a release no recorded run saw ({', '.join(st['untested'])}): `verify-main {epic}` first"]
@@ -2385,19 +2954,153 @@ def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -
 
 def command_slice_check(args: argparse.Namespace, config: dict[str, Any]) -> int:
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(args.number, config)
-    errs = slice_check_errors(b["issue"], b["blockers"], claim_status(b["comments"], set(b["trusted"])), args.resume)
-    errs += epic_pause_errors(b, config, args.resume)
+    claim = claim_status(b["comments"], set(b["trusted"]))
+    if quick := bundle_quick(b, config):   # built from its approved brief, onto main: no epic to pause it
+        errs = sdlc_quick.quick_check_errors(b["issue"], quick, approved_brief(quick), claim, args.resume)
+    else:
+        errs = slice_check_errors(b["issue"], b["blockers"], claim, args.resume)
+        errs += epic_pause_errors(b, config, args.resume)
     for e in errs:
         print(f"  - {e}")
     print(f"#{args.number}: " + ("not workable" if errs else "ok to " + ("resume" if args.resume else "start")))
     return 1 if errs else 0
 
 
-def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """Claim a ready slice and give it its own worktree on branch slice/N, from origin/epic/E."""
+def add_slice_worktree(n: int, base: str, resume: bool, config: dict[str, Any]) -> None:
+    """Make (or, resuming, reattach) worktree `.worktrees/slice-N` on branch slice/N, new branches from origin/<base>."""
+    root, wt, branch = primary_root(), worktree_path(n, config), slice_branch(n)
+    git(["fetch", "origin", base], cwd=root)
+    local = bool(git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root, check=False))
+    remote = bool(git(["ls-remote", "--heads", "origin", branch], cwd=root, check=False))
+    if wt.exists():
+        if not resume:
+            raise SdlcError(f"{wt} already exists: `claim {n} --resume`, or `cleanup {n} --force` to discard it")
+    elif local:
+        if not resume:
+            raise SdlcError(f"branch {branch} already exists: `claim {n} --resume`")
+        git(["worktree", "add", str(wt), branch], cwd=root)
+    elif remote and resume:
+        git(["fetch", "origin", branch], cwd=root)
+        git(["worktree", "add", "-b", branch, str(wt), f"origin/{branch}"], cwd=root)
+    else:
+        git(["worktree", "add", "-b", branch, str(wt), f"origin/{base}"], cwd=root)
+
+
+CLAIM_GIT_SECONDS = 60   # how long a quick claim's checks wait for one `git fetch`, `diff` or `add` before refusing
+
+
+def tracked_on(ref: str, root: Path) -> list[str]:
+    """Every file tracked on `ref` (a commit, not the checkout's index, which may differ from it)."""
+    out = git(["ls-tree", "-r", "-z", "--name-only", ref], cwd=root, timeout=CLAIM_GIT_SECONDS)
+    return [p for p in out.split("\0") if p]
+
+
+def ref_changes(ref: str, base: str, root: Path) -> list[dict[str, Any]]:
+    """What `ref` changes since it left `base` (`base...ref`), as the gate reads a PR's files, renames' sources too."""
+    return sdlc_quick.numstat_files(git(["diff", "--numstat", "-z", "-M", f"{base}...{ref}"], cwd=root,
+                                        timeout=CLAIM_GIT_SECONDS))
+
+
+def worktree_changes(wt: Path, base: str) -> list[dict[str, Any]]:
+    """What a worktree changes since its branch left `base`: its commits and its uncommitted and untracked files
+    (not ignored ones), read through a scratch index outside the tree, so neither its index nor its files move."""
+    since = git(["merge-base", base, "HEAD"], cwd=wt, timeout=CLAIM_GIT_SECONDS)
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        git(["read-tree", "HEAD"], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
+        git(["add", "-A"], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
+        out = git(["diff", "--cached", "--numstat", "-z", "-M", since], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
+    return sdlc_quick.numstat_files(out)
+
+
+def quick_claim_errors(n: int, brief: str, resume: bool, config: dict[str, Any], offline: bool = False) -> list[str]:
+    """The quick lane's mechanical rules at claim, as `merge` will apply them: the brief's `## Files` (a denied
+    path, or a pattern that could reach one; more than `max_files`), and, resuming, the work actually resumed
+    (the local branch, its worktree, and `origin/slice/N` if pushed) read with the gate's diff rules. Never
+    escalates: each refusal says `escalate-to-full N`. An exact-path brief is checked with no git at all, and so
+    is any brief `offline` (`--from-file`): a pattern's literal prefix alone decides it, main's files only name
+    what it reaches."""
+    if not CLAIM_GIT_SECONDS > 0:
+        raise SdlcError(f"CLAIM_GIT_SECONDS must be positive (got {CLAIM_GIT_SECONDS})")
+    rules, base = load_quick(config), config.get("default_branch", "main")
+    entries = sdlc_quick.brief_files(brief)
+    if offline or (not resume and not any(sdlc_quick.is_glob(e) for e in entries)):
+        return sdlc_quick.brief_errors(n, brief, [], rules)
+    root, wt, branch = primary_root(), worktree_path(n, config), slice_branch(n)
+    git(["fetch", "-q", "origin", base], cwd=root, timeout=CLAIM_GIT_SECONDS)
+    main = f"origin/{base}"
+    errs = sdlc_quick.brief_errors(n, brief, tracked_on(main, root), rules)
+    if not resume:
+        return errs
+    sources = []
+    if git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root, check=False):
+        sources.append((f"the local branch {branch}", ref_changes(f"refs/heads/{branch}", main, root)))
+    if wt.exists():
+        sources.append((f"the worktree {wt}", worktree_changes(wt, main)))
+        # its own index too: a staged edit the working copy reverts is still what the next commit carries
+        since = git(["merge-base", main, "HEAD"], cwd=wt, timeout=CLAIM_GIT_SECONDS)
+        sources.append((f"the worktree {wt}'s index", sdlc_quick.numstat_files(
+            git(["diff", "--cached", "--numstat", "-z", "-M", since], cwd=wt, timeout=CLAIM_GIT_SECONDS))))
+    if remote_has(branch, root):
+        git(["fetch", "-q", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"], cwd=root,
+            timeout=CLAIM_GIT_SECONDS)
+        sources.append((f"origin/{branch}", ref_changes(f"refs/remotes/origin/{branch}", main, root)))
+    return errs + sdlc_quick.resume_errors(n, sources, brief, rules)
+
+
+def claim_quick(args: argparse.Namespace, config: dict[str, Any], b: dict[str, Any],
+                claim: dict[str, Any] | None) -> int:
+    """Claim an approved quick change: its own worktree on slice/N from origin/main, the issue to in-progress."""
     n = args.number
-    b = slice_bundle(n, config)
+    if args.retry:
+        raise SdlcError("--retry takes over an escalated slice; a quick change is never retried on another model")
+    is_slice = LEAF_LABEL in b["issue"].get("labels", [])
+    st = bundle_issue_state(b, config) or {}
+    errs = sdlc_quick.quick_check_errors(b["issue"], st, approved_brief(st), claim, args.resume, is_slice)
+    if errs:
+        raise SdlcError("; ".join(errs))
+    if errs := quick_claim_errors(n, approved_brief(st) or "", args.resume, config, offline=bool(args.from_file)):
+        raise SdlcError("; ".join(errs))
+    if args.from_file:   # offline: the bundle's brief is all that was read (no worktree, branch or origin)
+        print(f"would claim #{n}: a quick change, its brief inside the quick rules; from {args.from_file}, "
+              f"so the worktree, slice/{n} and origin were not read")
+        return 0
+    root, wt, branch = primary_root(), worktree_path(n, config), slice_branch(n)
+    base = config.get("default_branch", "main")
+    if not remote_has(base, root):
+        raise SdlcError(f"origin has no {base}")
+    if args.dry_run:
+        print(f"would {'resume' if args.resume else 'claim'} #{n}: worktree {wt} on {branch} from origin/{base}; "
+              "a quick change")
+        return 0
+    add_slice_worktree(n, base, args.resume, config)
+    if not claim:
+        model = {"model": args.model} if args.model else {}
+        post_comment(n, render_comment("claim", None, f"Building this quick change in `{branch}`, from `{base}`"
+                                       + (f", with {args.model}." if model else "."), config,
+                                       branch=branch, base=base, quick="1", **model), config)
+        gh(["issue", "edit", str(n), "--repo", repo_of(config), "--add-assignee", "@me"])
+    labels = b["issue"].get("labels", [])
+    if f"{PREFIX}approved" in labels:   # also on --resume: a claim cut short before the label moved
+        set_state_label(n, labels, "in-progress", config)
+        print(f"#{n}: approved -> in-progress")
+    print(f"WORKTREE={wt}\nPRIMARY={root}\nBRANCH={branch}\nBASE=origin/{base}")
+    return 0
+
+
+def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Claim a ready slice and give it its own worktree on branch slice/N, from origin/epic/E
+    (`--quick`: an approved quick change, from origin/main)."""
+    n = args.number
+    if args.from_file and not (args.dry_run and args.quick) or args.from_file and args.resume:
+        raise SdlcError("--from-file reads an offline copy: it goes with --quick --dry-run only (no --resume: "
+                        "the work resumed is in git, not the bundle), never claims")
+    b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(n, config)
     claim = claim_status(b["comments"], set(b["trusted"]))
+    if args.quick:
+        return claim_quick(args, config, b, claim)
+    if bundle_quick(b, config):
+        raise SdlcError(sdlc_quick.lane_error(n, False, False, True))
     if args.retry:
         if not args.model:
             raise SdlcError("--retry needs --model: the stronger model taking it over")
@@ -2415,21 +3118,7 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if args.dry_run:
         print(f"would {'resume' if args.resume else 'claim'} #{n}: worktree {wt} on {branch} from origin/{base}; epic #{epic}")
         return 0
-    git(["fetch", "origin", base], cwd=root)
-    local = bool(git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root, check=False))
-    remote = bool(git(["ls-remote", "--heads", "origin", branch], cwd=root, check=False))
-    if wt.exists():
-        if not args.resume:
-            raise SdlcError(f"{wt} already exists: `claim {n} --resume`, or `cleanup {n} --force` to discard it")
-    elif local:
-        if not args.resume:
-            raise SdlcError(f"branch {branch} already exists: `claim {n} --resume`")
-        git(["worktree", "add", str(wt), branch], cwd=root)
-    elif remote and args.resume:
-        git(["fetch", "origin", branch], cwd=root)
-        git(["worktree", "add", "-b", branch, str(wt), f"origin/{branch}"], cwd=root)
-    else:
-        git(["worktree", "add", "-b", branch, str(wt), f"origin/{base}"], cwd=root)
+    add_slice_worktree(n, base, args.resume, config)
     if args.retry:
         gh(["issue", "edit", str(n), "--repo", repo_of(config), "--remove-label", ESCALATED_LABEL])
         post_comment(n, render_comment("claim", None, f"Retrying on {args.model}: the slice escalated on a cheaper model. "
@@ -2525,18 +3214,16 @@ def recorded_rounds(comments: list[dict[str, Any]], trusted: set[str], kind: str
 
 
 def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """Record one Codex round on the PR's current head, with Claude's answer to it."""
-    if args.from_file:
-        b = json.loads(Path(args.from_file).read_text())
-        pr, comments, trusted = b["pr"], b["pr_comments"], set(b["trusted"])
-    else:
-        (pr, comments), trusted = fetch_pr(args.pr, config), fetch_trusted(config)
+    """Record one Codex round on the PR's current head, with Claude's answer to it. A quick change's round is
+    also bound to the approved brief it was given (`brief=`, which its merge gate requires)."""
+    pr, comments, trusted, _, quick = pr_issue(args, config)
     _, reviews = pr_records(comments, trusted)
     limit = config.get("max_pr_rounds", 5)
     if pr.get("state") != "OPEN":
         raise SdlcError(f"PR #{pr['number']} is {pr.get('state')}")
-    # only rounds that asked for changes spend the budget: re-reviewing a rebased head is routine
-    if (spent := changes_rounds(reviews)) >= limit:
+    # only rounds that asked for changes spend the budget: re-reviewing a rebased head is routine. A quick PR's
+    # budget is `quick.max_change_rounds` instead: the round past it is recorded, and escalates (below)
+    if not quick and (spent := changes_rounds(reviews)) >= limit:
         raise SdlcError(f"Codex rounds spent ({spent}/{limit} asked for changes): `escalate-slice N --reason ...`")
     report = Path(args.report).read_text()
     verdict = parse_verdict(report)
@@ -2547,6 +3234,16 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if m.group(1) != pr["headRefOid"]:
         raise SdlcError(f"Codex reviewed {m.group(1)[:12]} but the PR head is {pr['headRefOid'][:12]}: "
                         "review the current head (record each round before pushing its fixes)")
+    stamped = codex_review.parse_provenance(report).get("brief")
+    if quick and not stamped:
+        raise SdlcError("the Codex report has no `Brief:` line: a quick change's review is bound to the approved brief "
+                        "it read, so save it with `codex-review --pr`, which stamps it")
+    if quick and stamped != (want := approved_brief_id(quick)):
+        raise SdlcError(f"Codex reviewed against brief {stamped}, but #{quick['number']}'s approved brief is now {want}: "
+                        "run `codex-review --pr` again on the approved brief")
+    if not quick and stamped:
+        raise SdlcError("the Codex report names a `Brief:`, but the PR closes no quick change: save it again with "
+                        "`codex-review --pr`")
     response = Path(args.response).read_text().strip() if args.response else ""
     rnd = len(reviews) + 1
     head = (f"**Review {rnd} — Codex on `{pr['headRefOid'][:12]}`: `{verdict}`** "
@@ -2555,11 +3252,21 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     comment = render_comment("pr-review", None, body, config, sha=pr["headRefOid"], verdict=verdict, round=str(rnd), **extra)
     if len(comment) > COMMENT_LIMIT:
         raise SdlcError(f"the review comment is {len(comment)} characters, over GitHub's limit")
+    # a quick change gets `max_change_rounds` rounds asking for changes: the one past it moves it to the full lane
+    over = (sdlc_quick.rounds_error(quick["number"], changes_rounds(reviews) + 1, load_quick(config))
+            if quick and verdict == "changes" else None)
     if args.dry_run:
         print(comment)
-        return 0
+        if over:
+            print(f"refused: {over} (a dry run escalates nothing)", file=sys.stderr)
+        return 1 if over else 0
     posted = post_comment(pr["number"], comment, config)
     print(f"PR #{pr['number']} round {rnd}: {verdict}  {posted.get('html_url', '')}")
+    if over and args.from_file:
+        print(f"refused: {over} (read offline from --from-file: nothing escalated)", file=sys.stderr)
+        return 1
+    if over:
+        return escalate_on_trigger(quick["number"], over, "rounds", config)
     return 0
 
 
@@ -2569,10 +3276,16 @@ def command_review_defer(args: argparse.Namespace, config: dict[str, Any]) -> in
     if args.from_file:
         b = json.loads(Path(args.from_file).read_text())
         pr, comments, trusted, slice_issue = b["pr"], b["pr_comments"], set(b["trusted"]), b.get("slice")
+        issue_comments = b.get("comments") or []
     else:
         (pr, comments), trusted = fetch_pr(args.pr, config), fetch_trusted(config)
         refs = closes_refs(pr.get("body", ""))
-        slice_issue = fetch_slice(refs[0], config)[0] if len(refs) == 1 else None
+        slice_issue, issue_comments = fetch_slice(refs[0], config) if len(refs) == 1 else (None, [])
+    if slice_issue and bundle_quick({"issue": slice_issue, "comments": issue_comments, "trusted": trusted}, config):
+        n = slice_issue["number"]
+        raise SdlcError(f"PR #{pr['number']} is a quick change's (#{n}): its Codex review is never deferred, since there "
+                        "is no milestone to owe it to. The PR stays open; a person decides between waiting for Codex "
+                        f"and `escalate-to-full {n}`")
     if not args.reason.strip():
         raise SdlcError("--reason is required: what failed when Codex was run (its error, verbatim)")
     _, reviews = pr_records(comments, trusted)
@@ -2620,8 +3333,9 @@ def review_scratch(args: argparse.Namespace, label: str, *inside: Path) -> Path:
 
 
 def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, head: str, out: Path,
-                    settings: dict[str, Any], dry_run: bool, record: str) -> int:
-    """Print what the round runs, then run it (or, with --dry-run, print the prompt)."""
+                    settings: dict[str, Any], dry_run: bool, record: str, brief: str | None = None) -> int:
+    """Print what the round runs, then run it (or, with --dry-run, print the prompt). `brief`: a quick change's
+    approved brief comment id, stamped on the report as its `Brief:` line (and shown, with the brief, in a dry run)."""
     cmd = codex_review.codex_command(settings, prompt)
     print(f"{title}\n"
           + "".join(f"  {k}: {v}\n" for k, v in files.items())
@@ -2630,59 +3344,99 @@ def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, h
           + f"  run (timeout {settings['timeout_seconds']}s): {codex_review.show_command(cmd, wt, files['prompt'])}")
     if dry_run:
         print(f"\n{prompt}")
+        if brief:
+            print(f"Brief: {brief} (the approved brief Codex reads, {files['brief']}):\n\n{files['brief'].read_text()}")
         return 0
-    status, report = codex_review.run_review(cmd, wt, head, out, settings)
+    status, report = codex_review.run_review(cmd, wt, head, out, settings, brief=brief)
     if report:
         print(f"\n{report.read_text()}\nsaved: {report}\nrecord it: uv run python tools/sdlc.py {record}")
     return status
 
 
-def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: dict[str, Any]) -> int:
+def pr_issue(args: argparse.Namespace, config: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], set[str],
+                                                                       dict[str, Any] | None, dict[str, Any] | None]:
+    """(the PR, its comments, the trusted logins, the issue it closes, that issue's quick state or None).
+    `--from-file`: a bundle with `pr`, `pr_comments`, `trusted`, and the issue as `slice` (+ its `comments`)."""
     if args.from_file:
         b = json.loads(Path(args.from_file).read_text())
-        pr, comments, trusted, slice_issue = b["pr"], b["pr_comments"], set(b["trusted"]), b.get("slice")
+        pr, comments, trusted, issue = b["pr"], b["pr_comments"], set(b["trusted"]), b.get("slice")
+        issue_comments = b.get("comments") or []
     else:
         (pr, comments), trusted = fetch_pr(args.pr, config), fetch_trusted(config)
         refs = closes_refs(pr.get("body", ""))
-        slice_issue = fetch_slice(refs[0], config)[0] if len(refs) == 1 else None
+        issue, issue_comments = fetch_slice(refs[0], config) if len(refs) == 1 else (None, [])
+    quick = bundle_quick({"issue": issue, "comments": issue_comments, "trusted": trusted}, config) if issue else None
+    return pr, comments, trusted, issue, quick
+
+
+def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: dict[str, Any]) -> int:
+    pr, comments, trusted, slice_issue, quick = pr_issue(args, config)
     if pr.get("state") != "OPEN":
         raise SdlcError(f"PR #{pr['number']} is {pr.get('state')}")
     refs = closes_refs(pr.get("body", ""))
-    if len(refs) != 1 or not slice_issue or (epic := slice_epic(slice_issue)) is None:
+    if quick:   # held to its approved brief, never the poster's request, and merged into main
+        if len(refs) != 1 or not (brief_text := approved_brief(quick)):
+            raise SdlcError(f"PR #{pr['number']} must close exactly one quick change with an approved brief")
+        brief, brief_id, base = (f"{slice_issue.get('title', '')}\n\n{brief_text}\n", approved_brief_id(quick),
+                                 config.get("default_branch", "main"))
+    elif len(refs) != 1 or not slice_issue or (epic := slice_epic(slice_issue)) is None:
         raise SdlcError(f"PR #{pr['number']} must close exactly one slice of an epic (it closes {refs or 'none'})")
+    else:
+        brief, brief_id, base = (f"{slice_issue.get('title', '')}\n\n{slice_issue.get('body', '')}\n", None,
+                                 epic_branch(epic))
     wt = worktree_path(refs[0], config)
     out = review_scratch(args, str(pr["number"]), wt)
     if not args.from_file and (wt / ".git").exists() and git(["rev-parse", "HEAD"], cwd=wt) != pr["headRefOid"]:
         pr = wait_for_pr_head(pr["number"], git(["rev-parse", "HEAD"], cwd=wt), config)   # a push GitHub hasn't shown yet
     head = codex_review.check_worktree(wt, pr["headRefOid"])
-    base = f"origin/{epic_branch(epic)}"
-    git(["fetch", "origin", epic_branch(epic)], cwd=wt, check=False)
-    if not git(["rev-parse", "--verify", "--quiet", base], cwd=wt, check=False):
-        raise SdlcError(f"the worktree has no {base} to diff against: `git fetch origin {epic_branch(epic)}`")
+    git(["fetch", "origin", base], cwd=wt, check=False)
+    if not git(["rev-parse", "--verify", "--quiet", f"origin/{base}"], cwd=wt, check=False):
+        raise SdlcError(f"the worktree has no origin/{base} to diff against: `git fetch origin {base}`")
     rounds = recorded_rounds(comments, trusted, "pr-review")
-    prompt, files = codex_review.prepare_pr_round(pr, slice_issue, epic, rounds, out)
+    prompt, files = codex_review.prepare_pr_round(pr, brief, base, rounds, out, quick=bool(quick))
     return run_codex_round(f"PR #{pr['number']} round {len(rounds) + 1} on {head[:12]}", prompt, files, wt, head, out,
-                           settings, args.dry_run, f"pr-review {pr['number']} --report {out / 'codex.md'} --response <your answers>")
+                           settings, args.dry_run, f"pr-review {pr['number']} --report {out / 'codex.md'} --response <your answers>",
+                           brief=brief_id)
+
+
+def comment_anchor(doc: dict[str, Any]) -> str:
+    """A revision's comment id, as its `#issuecomment-` anchor (and `merge-prd`'s doc) gives it."""
+    m = re.search(r"#issuecomment-(\d+)$", doc.get("url") or "")
+    return m.group(1) if m else str(doc["id"])
 
 
 def approved_comment(st: dict[str, Any]) -> str:
     """The approved PRD or diagnosis comment's id, as its `#issuecomment-` anchor (and `merge-prd`'s doc) gives it."""
-    doc = st["latest_doc"]
-    m = re.search(r"#issuecomment-(\d+)$", doc.get("url") or "")
-    return m.group(1) if m else str(doc["id"])
+    return comment_anchor(st["latest_doc"])
+
+
+SUPERSEDED_RE = re.compile(r"<details><summary>[^<]*\(superseded\)</summary>\n\n(.*)\n\n</details>\s*\Z", re.DOTALL)
+
+
+def approved_brief(st: dict[str, Any]) -> str | None:
+    """The approved revision's text (the latest one approved, even if a newer one is under review), without its
+    marker; a comment `render_superseded` collapsed is unwrapped. None: nothing approved. The quick lane's brief."""
+    doc = st.get("approved_doc")
+    if not doc:
+        return None
+    body = doc.get("body") or ""
+    if m := SUPERSEDED_RE.search(body):
+        body = m.group(1)
+    return "\n".join(l for l in body.splitlines() if not MARKER_RE.match(l.strip())).strip()
+
+
+def approved_brief_id(st: dict[str, Any]) -> str | None:
+    """The approved revision's comment id (see approved_brief), or None."""
+    doc = st.get("approved_doc")
+    return comment_anchor(doc) if doc else None
 
 
 def approved_requirements(n: int, comment_id: str, comment_body: str, ref: str, root: Path) -> tuple[str, str | Path]:
     """(what was used, the requirements for the plan prompt): the merged `docs/prd/N-*.md` at `ref` whose header
     links the approved comment, as a path relative to a checkout of `ref`; else the approved comment's text.
     A doc of an older revision, or none merged yet, is never what the plan is held to."""
-    listed = git(["ls-tree", "--name-only", ref, "docs/prd/"], cwd=root, check=False).splitlines()
-    anchor = re.compile(rf"#issuecomment-{comment_id}(?!\d)")
-    for path in sorted(p for p in listed if re.fullmatch(rf"docs/prd/{n}-[^/]*\.md", p)):
-        text = git(["show", f"{ref}:{path}"], cwd=root, check=False)
-        header = text.split("\n## ", 1)[0]
-        if anchor.search(header):
-            return f"{path} (its header links comment {comment_id})", Path(path)
+    if path := merged_prd_path(n, comment_id, ref, root):
+        return f"{path} (its header links comment {comment_id})", Path(path)
     body = "\n".join(l for l in comment_body.splitlines() if not MARKER_RE.match(l.strip())).strip()
     return f"the approved comment {comment_id} (no docs/prd/{n}-*.md on {ref} links it)", body
 
@@ -2776,6 +3530,7 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
         already = lambda title: bool(b.get("on_main"))  # noqa: E731
     else:
         bundle = fetch_bundle(n, config)
+        refuse_quick(bundle_state(bundle, config), "milestone to review")
         progress = epic_progress(n, config, set(bundle["trusted"]))
         head = epic_head(n, config)
         gh_ms = {m["title"]: m for m in gh_pages(f"repos/{repo_of(config)}/milestones?state=all&per_page=100")}
@@ -2824,7 +3579,9 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     tests, reviews = pr_records(comments, trusted)
     deferrals = pr_deferrals(comments, trusted)
     refs = closes_refs(pr.get("body", ""))
-    slice_issue = fetch_slice(refs[0], config)[0] if len(refs) == 1 else None
+    slice_issue, issue_comments = fetch_slice(refs[0], config) if len(refs) == 1 else (None, [])
+    if slice_issue and bundle_quick({"issue": slice_issue, "comments": issue_comments, "trusted": trusted}, config):
+        return merge_quick(args, config)   # onto main: no epic, no milestone hold, no review owed
     epic = slice_epic(slice_issue) if slice_issue else None
     branch = epic_branch(epic) if epic else "epic/?"
     try:
@@ -2880,15 +3637,172 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     return 0
 
 
+def merge_quick(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Squash a quick PR into main once T3.1's gate passes, then close its issue as completed, move it to
+    `sdlc:done` and record what merged. Everything that can fail without writing happens before the squash;
+    a failure after it says what is left to do by hand, since a rerun is refused (the PR is merged)."""
+    repo, base = repo_of(config), config.get("default_branch", "main")
+    b = quick_gate_bundle(args.pr, config)
+    if errs := quick_gate_errors(b, config):
+        st = quick_issue_state(b, config) if b.get("issue") else None
+        brief, rules = (approved_brief(st) or "") if st else "", load_quick(config)
+        if args.dry_run or not st or not is_quick(st) or not sdlc_quick.diff_rule_broken(b.get("files"), brief, rules):
+            raise SdlcError("; ".join(errs))
+        # the diff has outgrown the lane (a denied path, the size cap, a file outside the brief): no fix within
+        # the quick lane makes it mergeable, so the tool escalates it, after saying every refusal
+        n = b["issue"]["number"]
+        diff = sdlc_quick.diff_errors(n, b["files"], brief, rules)
+        for e in errs:
+            if e not in diff:
+                print(f"refused: {e}", file=sys.stderr)
+        return escalate_on_trigger(n, "; ".join(diff), "diff", config)
+    pr, issue = b["pr"], b["issue"]
+    n, head = issue["number"], pr["headRefOid"]   # the head the gate checked: GitHub merges only that one
+    t, r = head_records(pr, *pr_records(b["pr_comments"], set(b["trusted"])))
+    record = render_comment(
+        "quick-merged", None, f"Merged PR #{args.pr} into `{base}` at `{head[:12]}`: tests {t['url']}, "
+        f"Codex review {r['url']}.", config, pr=str(args.pr), sha=head,
+        tests=comment_anchor({"id": "?", **t}), review=comment_anchor({"id": "?", **r}))
+    if args.dry_run:
+        print(f"would squash-merge quick PR #{args.pr} (closes #{n}) into {base} at {head[:12]}, then close #{n} "
+              f"as completed, move it to {PREFIX}done and post:\n{record}")
+        return 0
+    gh(["pr", "merge", str(args.pr), "--repo", repo, "--squash", "--match-head-commit", head])
+    gh(["api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{pr['headRefName']}"], check=False)
+    try:
+        issue = fetch_slice(n, config)[0]
+        if issue["state"] != "closed":   # `Closes #N` on main usually closes it already: never close twice
+            gh(["issue", "close", str(n), "--repo", repo, "--reason", "completed", "--comment", f"Merged in #{args.pr}."])
+            issue = fetch_slice(n, config)[0]
+        if not (issue["state"] == "closed" and issue.get("state_reason") == "completed"):
+            raise SdlcError(f"#{n} reads back {issue['state']} ({issue.get('state_reason')}): close it as completed "
+                            f"(`gh issue close {n} --reason completed`)")
+        set_state_label(n, issue["labels"], "done", config)
+        post_comment(n, record, config)
+    except Exception as exc:   # anything (a bad read-back too): the PR is merged, so say what is left by hand
+        with tempfile.NamedTemporaryFile("w", suffix=".md", prefix=f"quick-merged-{n}-", delete=False) as fh:
+            fh.write(record)
+        raise SdlcError(f"merged PR #{args.pr} into {base} at {head[:12]}, then: {exc}. Still to do, by hand: "
+                        f"close #{n} as completed if it isn't (`gh issue close {n} --reason completed`); "
+                        f"`gh issue edit {n} --add-label {PREFIX}done --remove-label {PREFIX}in-progress`; "
+                        f"post the record: `gh issue comment {n} --body-file {fh.name}`")
+    print(f"merged PR #{args.pr} into {base}; #{n} closed and {PREFIX}done")
+    print(f"next: nothing for #{n} (`state {n}` reads it as done)")
+    return 0
+
+
 def command_escalate_slice(args: argparse.Namespace, config: dict[str, Any]) -> int:
     body = "Handing this slice to a human: " + args.reason
+    b = slice_bundle_for_escalation(args.number, config)
+    # a quick change carries an sdlc:* label: swap it, since two state labels at once are a conflict
+    quick = bundle_quick(b, config) if b else None
     if args.dry_run:
         print(render_comment("escalation", None, body, config))
+        if quick:
+            print(f"would move #{args.number} to {ESCALATED_LABEL} (from {', '.join(state_labels_on(b['issue'], config)) or 'none'})")
         return 0
     post_comment(args.number, render_comment("escalation", None, body, config), config)
-    gh(["issue", "edit", str(args.number), "--repo", repo_of(config), "--add-label", ESCALATED_LABEL])
+    if quick:
+        set_state_label(args.number, b["issue"]["labels"], "escalated", config)
+    else:
+        gh(["issue", "edit", str(args.number), "--repo", repo_of(config), "--add-label", ESCALATED_LABEL])
     print(f"#{args.number}: escalated")
     return 0
+
+
+# --- a quick change that outgrew the lane: back to approved, its brief to docs/prd/, then planning ----------
+#
+# `escalate-to-full N` is run by a person, or by the tool itself on a trigger: `pr-review` recording one change
+# round too many, or `merge` finding the diff breaks a quick rule. Never by `quick-gate`, a dry run or an offline
+# `--from-file`. It leaves the PR and the worktree alone: closing or cleaning them up is the person's call.
+
+TRIGGER_WHY = {"manual": "by hand", "rounds": "Codex asked for changes in too many rounds",
+               "diff": "the diff breaks a quick-lane rule"}
+
+
+def escalate_to_full(n: int, reason: str | None, trigger: str, config: dict[str, Any], dry_run: bool = False,
+                     bundle: dict[str, Any] | None = None) -> int:
+    """Move quick change #n to the full lane: a `kind=lane lane=full` record, read back (only a trusted record on
+    the approved latest brief counts), the label to `sdlc:approved` without `lane:quick`, then `commit-prd N`.
+    A rerun finishes a half-done one (record posted, labels not moved); a finished one is refused.
+    `bundle` (an offline `--from-file`) is for a dry run only."""
+    if trigger not in sdlc_quick.TRIGGERS:
+        raise SdlcError(f"unknown trigger {trigger!r} (one of {', '.join(sdlc_quick.TRIGGERS)})")
+    if bundle is not None and not dry_run:
+        raise SdlcError("--from-file reads an offline copy: it goes with --dry-run only, never escalates")
+    bundle = bundle if bundle is not None else fetch_bundle(n, config)
+    issue, st = bundle["issue"], bundle_state(bundle, config)
+    labels = issue.get("labels", [])
+    moved = QUICK_LABEL not in labels and state_labels_on(issue, config) == [f"{PREFIX}approved"]
+    if errs := sdlc_quick.escalation_errors(issue, st, moved):
+        raise SdlcError("; ".join(errs))
+    if not st.get("to_full") and not (reason or "").strip():   # finishing a half-done one needs no new reason
+        raise SdlcError("--reason is required: why the change leaves the quick lane")
+    brief_id = approved_brief_id(st)
+    record = None if st.get("to_full") else render_comment(
+        "lane", None, f"Moved to the full lane ({TRIGGER_WHY[trigger]}): {(reason or '').strip()}\n\n"
+        f"The approved brief goes to `docs/prd/` (`commit-prd {n}`), then it is planned (`/plan-issue {n}`). "
+        "Any open PR and worktree are left as they are.", config, lane=FULL, trigger=trigger)
+    stale = [l for l in labels if l in state_labels(config) and l != f"{PREFIX}approved"] \
+        + ([QUICK_LABEL] if QUICK_LABEL in labels else [])
+    if dry_run:
+        print(f"DRY RUN #{n}: {st['state']} -> approved, out of the quick lane")
+        print(f"labels: add {PREFIX}approved, remove {stale}")
+        print("----- comment -----\n" + record if record else f"the lane record is already posted ({st['to_full']['url']})")
+        print(f"then: commit-prd {n}")
+        return 0
+    if record:
+        post_comment(n, record, config)
+        st = bundle_state(bundle := fetch_bundle(n, config), config)
+        if not st.get("to_full"):   # the ledger ignored it: a revision posted meanwhile, or an untrusted author
+            raise SdlcError(f"posted the lane record on #{n}, but its state doesn't count it "
+                            f"(state {st['state']}, latest rev {(st.get('latest_doc') or {}).get('rev')}): "
+                            "nothing else changed; a human decides")
+        # read again before any label write: a human's escalation, or a brief approved meanwhile, stops it here
+        issue = bundle["issue"]
+        errs = sdlc_quick.escalation_errors(issue, st, False)
+        if approved_brief_id(st) != brief_id:
+            errs.append(f"the approved brief changed while the record was posted ({brief_id} -> {approved_brief_id(st)})")
+        if errs:
+            raise SdlcError(f"posted the lane record on #{n}, then: " + "; ".join(errs)
+                            + ". No label moved; a human decides")
+    try:   # the record is posted: whatever fails from here, say how to finish
+        set_state_label(n, bundle["issue"].get("labels", []), "approved", config, remove=(QUICK_LABEL,))
+    except Exception as exc:
+        raise SdlcError(f"#{n}'s lane record is posted, but its labels didn't move: {exc}. "
+                        f"Rerun `escalate-to-full {n}` to finish it")
+    print(f"#{n}: moved to the full lane, {PREFIX}approved")
+    try:
+        return commit_prd(n, config)
+    except Exception as exc:
+        raise SdlcError(f"#{n} is in the full lane, but its brief isn't in docs/prd/ yet: {exc}. "
+                        f"`commit-prd {n}` is safe to rerun")
+
+
+def command_escalate_to_full(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    bundle = json.loads(Path(args.from_file).read_text()) if args.from_file else None
+    return escalate_to_full(args.number, args.reason, "manual", config, args.dry_run, bundle)
+
+
+def escalate_on_trigger(n: int, refusal: str, trigger: str, config: dict[str, Any]) -> int:
+    """A trigger fired: print why, escalate, and exit 1 (the command that tripped it did not do its job)."""
+    print(f"refused: {refusal}", file=sys.stderr)
+    print(f"#{n} has outgrown the quick lane: escalating it to the full lane", file=sys.stderr)
+    try:
+        escalate_to_full(n, refusal, trigger, config)
+    except SdlcError as exc:
+        raise SdlcError(f"{refusal}; and escalate-to-full {n} failed: {exc}")
+    return 1
+
+
+def slice_bundle_for_escalation(n: int, config: dict[str, Any]) -> dict[str, Any]:
+    """The issue and its comments, enough to tell a quick change (an sdlc:* label to swap) from a slice."""
+    issue, comments = fetch_slice(n, config)
+    return {"issue": issue, "comments": comments, "trusted": sorted(fetch_trusted(config))}
+
+
+def state_labels_on(issue: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    return [l for l in issue.get("labels", []) if l in state_labels(config)]
 
 
 def command_cleanup(args: argparse.Namespace, config: dict[str, Any]) -> int:
@@ -3234,6 +4148,7 @@ def command_ship_review(args: argparse.Namespace, config: dict[str, Any]) -> int
         already = lambda title: bool(b.get("on_main"))  # noqa: E731
     else:
         bundle = fetch_bundle(args.number, config)
+        refuse_quick(bundle_state(bundle, config), "milestone to review")
         progress = epic_progress(args.number, config, set(bundle["trusted"]))
         head = epic_head(args.number, config)
         leaves = [r for r in fetch_plan_issues(args.number, config, set(bundle["trusted"])) if r["kind"] == "slice"]
@@ -3343,8 +4258,9 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
     bundle = fetch_bundle(n, config)
     trusted = set(bundle["trusted"])
     st = bundle_state(bundle, config)
-    if st["conflicts"] or st["state"] not in BUILD_STATES | {"done"}:
-        raise SdlcError(f"#{n} is {st['state']}: nothing to ship")
+    if st["conflicts"] or st["state"] not in BUILD_STATES | {"done"} or is_quick(st):
+        raise SdlcError(f"#{n} is {st['state']}" + (" (a quick change: it merges to main itself)" if is_quick(st) else "")
+                        + ": nothing to ship")
     records = fetch_plan_issues(n, config, trusted)
     leaves = [r for r in records if r["kind"] == "slice"]
     progress = summarise_progress(leaves, {})
@@ -3694,6 +4610,7 @@ def demo_brief(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str
     """Everything milestone-demo needs: each milestone's demo steps, slices, PRs and demo state."""
     repo = repo_of(config)
     st = bundle_state(fetch_bundle(epic, config, trusted), config)
+    refuse_quick(st, "milestones to demo")
     records = fetch_plan_issues(epic, config, trusted)
     leaves = [r for r in records if r["kind"] == "slice"]
     progress = epic_progress(epic, config, trusted)    # the same progress `state` uses, so `next` agrees
@@ -3788,9 +4705,10 @@ def command_demo_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Publish a milestone's demo pictures and post the demo on the epic for the poster."""
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
+    refuse_quick(st, "milestone to demo")
     n, key, offline = st["number"], args.milestone, bool(getattr(args, "from_file", None))
     errs = []
-    if st["conflicts"] or st["state"] not in BUILD_STATES | {"demo-review"} or st.get("feedback"):
+    if st["conflicts"] or not (epic_building(st) or st["state"] == "demo-review") or st.get("feedback"):
         errs.append(f"#{n} is {st['state']} (action {st['action']}): not the time for a demo")
     elif st["state"] == "demo-review" and (st["latest_demo"] or {}).get("milestone") != key:
         errs.append(f"#{n} is already in review for {st['latest_demo']['milestone']}: that comes first")
@@ -3924,7 +4842,7 @@ def record_agent_findings(args: argparse.Namespace, bundle: dict[str, Any], st: 
         raise SdlcError("--found needs --milestone: the milestone the demo found broken")
     if key in (st.get("shipped") or {}):
         raise SdlcError(f"{key} has shipped to main: file what's wrong with `file-issue {n}` instead")
-    if st["conflicts"] or st["state"] not in BUILD_STATES | {"demo-review"}:
+    if st["conflicts"] or not (epic_building(st) or st["state"] == "demo-review"):
         raise SdlcError(f"#{n} is {st['state']}: no milestone is being demoed")
     if st.get("feedback"):
         raise SdlcError(f"#{n} already has changes waiting to be planned: `/plan-issue {n}` first")
@@ -3949,7 +4867,7 @@ def command_demo_request(args: argparse.Namespace, config: dict[str, Any]) -> in
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
     n = st["number"]
-    if st["conflicts"] or st["state"] not in BUILD_STATES:
+    if st["conflicts"] or not epic_building(st):
         raise SdlcError(f"#{n} is {st['state']}: not the time to ask for demo steps")
     if (r := st.get("demo_request")) and not r["replies"]:
         raise SdlcError(f"#{n} already has demo steps waiting for an answer: {r['url']}")
@@ -3969,14 +4887,27 @@ def command_demo_request(args: argparse.Namespace, config: dict[str, Any]) -> in
 
 
 def command_file_issue(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """File something found while building or demoing an epic as its own issue: tech debt, or new for triage."""
+    """File something found while building or demoing an epic or a quick change as its own issue: tech debt, or
+    new for triage. Debt from a quick change (by its current lane in the ledger: one escalated to the full lane is
+    an epic) has no cleanup pass to wait for, so it says it waits in the open tech-debt list, and its marker says
+    `lane=quick`."""
     title, body = args.title.strip(), Path(args.body_file).read_text().strip()
     if hits := identifier_hits(title + "\n" + body):
         raise SdlcError("the issue would contain " + ", ".join(hits) + ": the repo is public")
+    if args.from_file and not args.dry_run:
+        raise SdlcError("--from-file reads a saved bundle, not GitHub: use it with --dry-run")
     kind = "debt" if args.debt else "finding"
-    lead = (f"Tech debt from #{args.number} ({args.source}): not blocking, budgeted into a cleanup pass after a "
-            "milestone is accepted." if args.debt else f"Found while working on #{args.number} ({args.source}).")
-    full = f"{marker(kind, None, epic=str(args.number), source=args.source)}\n{lead}\n\n{body}\n"
+    quick = args.debt and bundle_state(load_bundle(args, config), config).get("lane") == QUICK
+    extra = {"epic": str(args.number), "source": args.source, **({"lane": QUICK} if quick else {})}
+    if quick:
+        lead = (f"Tech debt from quick change #{args.number} ({args.source}): not blocking. A quick change has no epic "
+                f"and no cleanup pass, so it waits in the open `{DEBT_LABEL}` list (`gh issue list --label {DEBT_LABEL}`).")
+    elif args.debt:
+        lead = (f"Tech debt from #{args.number} ({args.source}): not blocking, budgeted into a cleanup pass after a "
+                "milestone is accepted.")
+    else:
+        lead = f"Found while working on #{args.number} ({args.source})."
+    full = f"{marker(kind, None, **extra)}\n{lead}\n\n{body}\n"
     cmd = ["issue", "create", "--repo", repo_of(config), "--title", title]
     if args.debt:
         cmd += ["--label", DEBT_LABEL]
@@ -4017,6 +4948,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--body-file")
     p.add_argument("--rev", type=int)
     p.add_argument("--reason", help="why, for an escalation")
+    p.add_argument("--lane", choices=[QUICK], help="a prd/diagnosis revision is a quick brief (complexity:routine only)")
     p.add_argument("--dry-run", action="store_true", help="print the labels and comment, change nothing")
     p.add_argument("--from-file")
     p.set_defaults(fn=command_transition)
@@ -4033,6 +4965,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("pr", type=int)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_merge_prd)
+
+    p = sub.add_parser("commit-prd", help="a quick brief moved to the full lane: commit it to docs/prd/ and merge it")
+    p.add_argument("number", type=int, help="the issue")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=command_commit_prd)
 
     p = sub.add_parser("plan-validate", help="check a plan file: sections, dependencies, PRD coverage")
     p.add_argument("file")
@@ -4073,19 +5010,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--from-file")
     p.set_defaults(fn=command_slice_status)
 
+    p = sub.add_parser("quick-gate", help="may this quick PR merge into main? (read-only; each refusal, or ok)")
+    p.add_argument("pr", type=int)
+    p.add_argument("--from-file", help="a JSON bundle: pr, pr_comments, files, behind_by, issue, comments, trusted")
+    p.set_defaults(fn=command_quick_gate)
+
     p = sub.add_parser("slice-check", help="may this slice be started (or resumed) now?")
     p.add_argument("number", type=int)
     p.add_argument("--resume", action="store_true")
     p.add_argument("--from-file")
     p.set_defaults(fn=command_slice_check)
 
-    p = sub.add_parser("claim", help="claim a ready slice and make its worktree")
+    p = sub.add_parser("claim", help="claim a ready slice (or an approved quick change) and make its worktree")
     p.add_argument("number", type=int)
+    p.add_argument("--quick", action="store_true", help="an approved quick change: its worktree from origin/main")
     p.add_argument("--resume", action="store_true", help="reattach to this slice's existing claim and branch")
     p.add_argument("--model", help="the model building it (recorded on the claim)")
     p.add_argument("--retry", action="store_true",
                    help="once: an escalated slice taken over by a stronger --model, keeping its branch and PR")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--from-file", help="a quick change's issue bundle (issue, comments, trusted), with --quick "
+                   "--dry-run only")
     p.set_defaults(fn=command_claim)
 
     p = sub.add_parser("release", help="give up a claim (the slice becomes ready again)")
@@ -4134,6 +5079,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--reason", required=True)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_escalate_slice)
+
+    p = sub.add_parser("escalate-to-full", help="a quick change that outgrew the lane: back to approved, its brief to "
+                                                "docs/prd/ (`commit-prd`), then planned")
+    p.add_argument("number", type=int, help="the quick issue")
+    p.add_argument("--reason", help="why it leaves the quick lane (not needed to finish a half-done escalation)")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--from-file", help="an issue bundle (issue, comments, trusted), with --dry-run only")
+    p.set_defaults(fn=command_escalate_to_full)
 
     p = sub.add_parser("cleanup", help="remove a merged slice's worktree and local branch")
     p.add_argument("number", type=int)
@@ -4205,13 +5158,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_demo_request)
 
-    p = sub.add_parser("file-issue", help="file a finding as its own issue: tech debt of an epic, or new for triage")
-    p.add_argument("number", type=int, help="the epic it was found in")
+    p = sub.add_parser("file-issue", help="file a finding as its own issue: tech debt of an epic or a quick change, "
+                                          "or new for triage")
+    p.add_argument("number", type=int, help="the epic, or the quick change, it was found in")
     p.add_argument("--title", required=True)
     p.add_argument("--body-file", required=True)
-    p.add_argument("--debt", action="store_true", help="non-blocking work on this epic (label tech-debt), not a new problem")
+    p.add_argument("--debt", action="store_true",
+                   help="work this epic or quick change needed to support itself (label tech-debt), not a new problem")
     p.add_argument("--source", choices=["demo", "review", "advisor", "adjacent"], default="demo")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--from-file", help="with --dry-run: a saved {issue, comments, trusted} bundle of N, for --debt, "
+                                         "instead of GitHub")
     p.set_defaults(fn=command_file_issue)
 
     p = sub.add_parser("demo-accept", help="record the poster's /approve of a demo (then `ship` releases it)")

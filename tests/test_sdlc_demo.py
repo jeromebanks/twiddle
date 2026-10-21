@@ -359,14 +359,21 @@ def test_the_agents_own_findings_send_the_milestone_to_fix_slices(tmp_path, caps
 
 def test_file_issue_dry_run(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    # --debt reads issue 12's ledger (an epic here) for its lane; nothing else may reach gh
+    fetched = []
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, config, trusted=None: fetched.append(n) or {
+        "issue": {"number": n, "title": "an epic", "state": "open", "author": "owner", "labels": ["sdlc:in-progress"]},
+        "comments": [], "trusted": ["owner"]})
     f = tmp_path / "debt.md"
     f.write_text("`alarm list` sorts rooms case-sensitively.")
     assert sdlc.main(["file-issue", "12", "--title", "alarm list: room order", "--body-file", str(f), "--debt",
                       "--source", "review", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "--label tech-debt" in out and "kind=debt epic=12 source=review" in out
+    assert fetched == [12]
     assert sdlc.main(["file-issue", "12", "--title", "x", "--body-file", str(f), "--dry-run"]) == 0
     out = capsys.readouterr().out
+    assert fetched == [12]   # a finding has no lane to look up
     assert "tech-debt" not in out and "kind=finding epic=12 source=demo" in out
     f.write_text("player RINCON_000E58123456 drops")
     assert sdlc.main(["file-issue", "12", "--title", "x", "--body-file", str(f), "--dry-run"]) == 1

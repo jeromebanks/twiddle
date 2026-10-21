@@ -24,13 +24,26 @@
   ],
   "models": {"routine": "sonnet", "judgment": "opus", "novel": "opus"},
   "slice_review": {"routine": "milestone", "judgment": "slice", "novel": "slice"},
+  "quick": {"max_files": 5, "max_lines": 200, "max_change_rounds": 2,
+            "denied_paths": ["tools/", ".agents/", ".claude/", ".sdlc/", ".github/", "SDLC.md", "CLAUDE.md",
+                             "docs/sdlc.html", "pyproject.toml", "uv.lock",
+                             "src/twiddle/play.py", "src/twiddle/devices.py", "src/twiddle/relay.py",
+                             "src/twiddle/relay_cli.py", "src/twiddle/supervisor.py", "src/twiddle/control_cli.py",
+                             "src/twiddle/household.py", "src/twiddle/alarm_cli.py", "src/twiddle/alarms/",
+                             "src/twiddle/comedy.py", "src/twiddle/comedy_cli.py", "src/twiddle/radio_cli.py",
+                             "src/twiddle/spotify.py", "src/twiddle/spotify_ops.py", "src/twiddle/spotify_cli.py",
+                             "src/twiddle/discover_cli.py", "src/twiddle/cli.py", "src/twiddle/daemon.py",
+                             "src/twiddle/gain.py", "src/twiddle/scene/players.py", "src/twiddle/scene/local.py",
+                             "src/twiddle/scene/app.py", "src/twiddle/dial/output.py", "src/twiddle/dial/bluetooth.py",
+                             "src/twiddle/dial/app.py", "src/twiddle/dial/gauge.py", "src/twiddle/viz/screen.py"]},
   "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high", "sandbox": "read-only", "timeout_seconds": 900,
             "flags": ["--skip-git-repo-check", "--color", "never"]},
   "extra_labels": [
     {"name": "complexity:routine", "color": "C2E0C6", "description": "SDLC plan: a clear pattern to follow, little design"},
     {"name": "complexity:judgment", "color": "FEF2C0", "description": "SDLC plan: real design choices, safety or the evidence path"},
     {"name": "tech-debt", "color": "D4C5F9", "description": "SDLC: non-blocking work found while building an epic (cleanup pass)"},
-    {"name": "complexity:novel", "color": "F9D0C4", "description": "SDLC plan: unknowns that need investigating first"}
+    {"name": "complexity:novel", "color": "F9D0C4", "description": "SDLC plan: unknowns that need investigating first"},
+    {"name": "lane:quick", "color": "C2E0C6", "description": "SDLC: a small, safe change built from one approved brief (work-slice --quick)"}
   ],
   "plan_labels": [
     {"name": "plan:subtask", "color": "C5DEF5", "description": "SDLC plan: a subtask of an epic; its slices are sub-issues"},
