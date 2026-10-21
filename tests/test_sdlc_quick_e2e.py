@@ -708,6 +708,11 @@ def test_a_third_change_round_moves_the_change_to_the_full_lane_and_planning_sta
     assert code == 1 and "round 3: changes" in out
     assert "Codex asked for changes in 3 rounds, more than the quick lane's 2" in err
     assert f"#{n} has outgrown the quick lane: escalating it to the full lane" in err
+    # #208: each round counts against the quick lane's budget (`quick.max_change_rounds`), not `max_pr_rounds`
+    budget = lane.cfg["quick"]["max_change_rounds"]
+    assert budget != lane.cfg.get("max_pr_rounds", 5)
+    used = [re.search(r"\((\d+/\d+) change rounds used\)", c["body"]).group(1) for c in lane.gh.records(pr, "pr-review")]
+    assert used == [f"{k}/{budget}" for k in (1, 2, 3)]
     finished_escalation(lane, n, pr, "rounds", base)
 
 

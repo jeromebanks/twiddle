@@ -3269,8 +3269,9 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
                         "`codex-review --pr`")
     response = Path(args.response).read_text().strip() if args.response else ""
     rnd = len(reviews) + 1
+    budget = load_quick(config).max_change_rounds if quick else limit   # the budget `over` (below) enforces
     head = (f"**Review {rnd} — Codex on `{pr['headRefOid'][:12]}`: `{verdict}`** "
-            f"({changes_rounds(reviews) + (verdict == 'changes')}/{limit} change rounds used)")
+            f"({changes_rounds(reviews) + (verdict == 'changes')}/{budget} change rounds used)")
     body, extra = review_body(head, "Codex's review", report, response)
     comment = render_comment("pr-review", None, body, config, sha=pr["headRefOid"], verdict=verdict, round=str(rnd), **extra)
     if len(comment) > COMMENT_LIMIT:
