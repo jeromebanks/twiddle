@@ -1888,6 +1888,21 @@ def test_a_feature_with_no_prd_anywhere_still_fails_and_says_where_it_looked(rep
     assert sdlc.check_plan(bug, "origin/main") == []                   # a bug with no PRD validates as before
 
 
+def test_a_merged_brief_with_checkbox_criteria_is_asked_to_number_them(repo, monkeypatch, capsys, tmp_path):
+    """#206: a quick brief, merged to docs/prd/ verbatim, whose criteria are `- [ ]` items: it is merged, so the
+    refusal says to number them, not to merge it first."""
+    monkeypatch.setattr(sdlc, "ROOT", repo)
+    (repo / "docs" / "prd").mkdir(parents=True, exist_ok=True)
+    (repo / "docs" / "prd" / "12-add-a-station.md").write_text(
+        "# Add a station\n\n## Acceptance criteria\n- [ ] `stations` lists it.\n- [ ] it plays.\n")
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(plan_for_12()))
+    assert sdlc.main(["plan-validate", str(plan)]) == 1
+    out = capsys.readouterr().out
+    assert "docs/prd/12-add-a-station.md has no numbered acceptance criteria" in out and "number them" in out
+    assert "merge the approved PRD first" not in out
+
+
 def test_from_file_never_fetches_and_reads_only_the_working_tree(repo, monkeypatch, capsys, tmp_path):
     fake = PrdGitHub(monkeypatch, repo, escalated())
     assert sdlc.main(["commit-prd", "12"]) == 0      # origin/main has it (and this checkout fetched it)

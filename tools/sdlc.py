@@ -1825,6 +1825,9 @@ def plan_criteria(plan: dict[str, Any], ref: str | None = None,
     """The criteria a plan must cover. A feature needs its merged PRD; a bug's diagnosis may have none."""
     found = find_prd(plan["issue"], ref, comment_id) if isinstance(plan.get("issue"), int) else None
     criteria = parse_criteria(found[1]) if found else set()
+    if plan.get("kind") == "feature" and not criteria and found:   # merged, but its criteria aren't `1. ` lines
+        return None, [f"{found[0]} has no numbered acceptance criteria (`1. ...` under `## Acceptance criteria`), "
+                      "which a plan's slices cite by number: number them (a quick brief's `- [ ]` items are not counted)"]
     if plan.get("kind") == "feature" and not criteria:
         return None, [f"no numbered acceptance criteria found in docs/prd/{plan.get('issue')}-*.md "
                       + (f"(nor on {ref}) " if ref else "") + "(merge the approved PRD first)"]
