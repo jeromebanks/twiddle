@@ -811,9 +811,9 @@ class Guarded(subprocess.Popen):
         super().__init__(args, *a, **kw)
 
 subprocess.Popen = Guarded
-_connect = socket.socket.connect
+_connect, _connect_ex = socket.socket.connect, socket.socket.connect_ex
 
-def connect(sock, address):
+def check(sock, address):
     if sock.family in (socket.AF_INET, socket.AF_INET6):
         try:
             ok = ipaddress.ip_address(address[0]).is_loopback
@@ -821,10 +821,26 @@ def connect(sock, address):
             ok = address[0] == "localhost"
         if not ok:
             _refuse("socket " + repr(address))
-    return _connect(sock, address)
 
-socket.socket.connect = connect
+socket.socket.connect = lambda sock, address: check(sock, address) or _connect(sock, address)
+socket.socket.connect_ex = lambda sock, address: check(sock, address) or _connect_ex(sock, address)
 '''
+
+
+@pytest.mark.parametrize("call", ["connect", "connect_ex"])
+def test_the_child_guard_refuses_a_socket_off_the_box_by_either_call(tmp_path, call):
+    plugin, log = tmp_path / "plugin", tmp_path / "reached.log"
+    plugin.mkdir()
+    (plugin / "offline_guard.py").write_text(PLUGIN)
+    env = {**os.environ, "OFFLINE_GUARD_LOG": str(log), "PYTHONPATH": str(plugin)}
+    code = ("import socket, offline_guard\n"
+            "s = socket.socket()\n"
+            "s.settimeout(0.5)\n"        # if a call got past the guard it fails fast instead of hanging
+            f"try:\n    s.{call}(('192.0.2.1', 9))\nexcept RuntimeError as e:\n    print('refused', e)\n"
+            "else:\n    print('connected')\n")
+    proc = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30)
+    assert proc.stdout.startswith("refused offline guard: socket ('192.0.2.1', 9)"), proc.stdout + proc.stderr
+    assert "192.0.2.1" in log.read_text()
 
 
 def test_the_quick_lane_unit_tests_run_offline(tmp_path):

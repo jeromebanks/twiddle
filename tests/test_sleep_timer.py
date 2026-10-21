@@ -8,7 +8,7 @@ import pytest
 from twiddle import play
 from twiddle.dial.output import LocalOutput
 
-from .test_dial import FakeOutput, make_app
+from .test_dial import FakeOutput, hold_timers, make_app
 
 
 @pytest.mark.parametrize("text,seconds", [
@@ -87,9 +87,7 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_z_steps_through_presets_and_sends_once(monkeypatch):
-    from twiddle.dial import app as app_mod
-    monkeypatch.setattr(app_mod, "SLEEP_SETTLE_S", 0.2)
+def test_z_steps_through_presets_and_sends_once():
     out = SleepyOutput(tuned="dronezone")
 
     async def go():
@@ -97,10 +95,12 @@ def test_z_steps_through_presets_and_sends_once(monkeypatch):
         async with app.run_test(size=(130, 40)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
+            settle = hold_timers(app, "_push_sleep")        # the settle window closes when the test says so
             for _ in range(3):
                 await pilot.press("z")
             assert "45 min" in app.sub_title and out.timers == []
-            await asyncio.sleep(0.4)
+            assert [t.stopped for t in settle] == [True, True, False]   # each press restarted the one window
+            settle[-1].fire()
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert out.timers == [45 * 60]                      # three presses, one write
@@ -108,7 +108,8 @@ def test_z_steps_through_presets_and_sends_once(monkeypatch):
             await pilot.press("z")                              # 45 left: next is 60
             assert "60 min" in app.sub_title
             await pilot.press("Z")
-            await asyncio.sleep(0.4)
+            assert [t.stopped for t in settle[3:]] == [True, False]
+            settle[-1].fire()
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert out.timers == [45 * 60, 0] and "☾" not in app.sub_title

@@ -645,6 +645,37 @@ def run(coro):
     return asyncio.run(coro)
 
 
+class HeldTimer:
+    """A timer `hold_timers` took instead of starting: it never fires on its own, the test fires it."""
+
+    def __init__(self, delay, callback):
+        self.delay, self.callback, self.stopped, self.fired = delay, callback, False, False
+
+    def stop(self):
+        self.stopped = True
+
+    def fire(self):
+        assert not self.stopped and not self.fired, "a timer that was stopped or already fired"
+        self.fired = True
+        self.callback()
+
+
+def hold_timers(app, *names):
+    """Take over `app.set_timer` for the callbacks called `names` (the debounces: a volume's trailing write, the
+    sleep timer's settle) and hand back the list they land in. A timer's delay is wall-clock time, and a test that
+    races it (presses fast enough to land inside the window) loses on a loaded machine, so these never start: the
+    test says when the window has closed by firing the timer. Every other timer is the real one."""
+    real, held = app.set_timer, []
+
+    def set_timer(delay, callback=None, *a, **kw):
+        if getattr(callback, "__name__", None) not in names:
+            return real(delay, callback, *a, **kw)
+        held.append(HeldTimer(delay, callback))
+        return held[-1]
+    app.set_timer = set_timer
+    return held
+
+
 def test_app_shows_every_station_and_previews_without_tuning():
     out = FakeOutput(tuned="kalx")
 
@@ -686,20 +717,24 @@ def test_enter_tunes_and_relay_needs_a_second_press():
 
 def test_a_burst_of_volume_keys_is_a_leading_write_and_a_trailing_one():
     out = FakeOutput(tuned="kexp")
+    out.volume_interval_s = 3600        # no press can come late enough for the window to have closed on its own
 
     async def go():
         app = make_app(out)
         async with app.run_test(size=(130, 40)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
+            trailing = hold_timers(app, "_push_volume")
             for _ in range(5):
                 await pilot.press("plus")
             assert app.volume == 40
-            await asyncio.sleep(0.6)
+            await app.workers.wait_for_complete()
+            assert out.volumes == [32]                      # the first press, at once; the rest wait
+            assert len(trailing) == 1                       # one trailing write for the whole burst, not one a press
+            trailing[0].fire()                              # the window closes
             await app.workers.wait_for_complete()
             await pilot.pause()
-            assert out.volumes[0] == 32 and out.volumes[-1] == 40   # not one per press
-            assert len(out.volumes) == 2
+            assert out.volumes == [32, 40]                  # not one per press: the leading write, the trailing one
             await pilot.press("m")
             await app.workers.wait_for_complete()
             assert out.mutes == [True] and app.muted

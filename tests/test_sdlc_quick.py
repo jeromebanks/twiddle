@@ -1177,6 +1177,59 @@ def test_quick_gate_prints_every_refusal(tmp_path, capsys, monkeypatch):
     assert any("6 files" in l for l in lines) and any("outside the brief" in l for l in lines)
 
 
+class LiveGate:
+    """`quick-gate` with no --from-file: `gh` is faked, so `gh_pages` and `gh_json` run for real over the answers
+    GitHub gives (`--paginate --slurp` is a list of pages), beside a faked PR, trusted list and issue read."""
+
+    def __init__(self, monkeypatch, pages, **bundle_kw):
+        self.b = gate_bundle(**bundle_kw)
+        self.pages, self.calls = pages, []
+        monkeypatch.setattr(sdlc, "gh", self.gh)
+        monkeypatch.setattr(sdlc, "repo_of", lambda cfg: "o/r")
+        monkeypatch.setattr(sdlc, "fetch_trusted", lambda cfg: set(self.b["trusted"]))
+        monkeypatch.setattr(sdlc, "fetch_pr", lambda n, cfg: (self.b["pr"], self.b["pr_comments"]))
+        monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted: {"issue": self.b["issue"],
+                                                                           "comments": self.b["comments"]})
+
+    def gh(self, args, check=True):
+        self.calls.append(args)
+        if args[:2] == ["api", "repos/o/r/pulls/50/files?per_page=100"]:
+            assert args[2:] == ["--paginate", "--slurp"]    # without --slurp, gh prints pages that aren't one JSON
+            return json.dumps(self.pages)
+        if args == ["api", f"repos/o/r/compare/main...{HEAD}"]:
+            return json.dumps({"behind_by": 0})
+        pytest.fail(f"quick-gate read something unexpected through gh: {args}")
+
+
+def test_the_live_gate_sees_every_file_across_pages(monkeypatch, capsys):
+    pages = [[changed(STATION)], [changed("tests/test_stations.py", 5, 1)]]
+    live = LiveGate(monkeypatch, pages)
+    assert [f["filename"] for f in sdlc.quick_gate_bundle(50, CONFIG)["files"]] == [STATION, "tests/test_stations.py"]
+    assert sdlc.main(["quick-gate", "50"]) == 0
+    assert capsys.readouterr().out == "ok\n"
+    assert ["api", "repos/o/r/pulls/50/files?per_page=100", "--paginate", "--slurp"] in live.calls
+
+
+def test_the_live_gate_counts_the_files_of_a_second_page(monkeypatch, capsys):
+    pages = [[changed(f"src/twiddle/stations/catalog/s{i}.toml") for i in range(3)],
+             [changed(f"src/twiddle/stations/catalog/t{i}.toml") for i in range(3)]]    # 3 + 3: only 6 together
+    LiveGate(monkeypatch, pages)
+    assert sdlc.main(["quick-gate", "50"]) == 1
+    assert "the diff changes 6 files, more than the quick lane's 5" in capsys.readouterr().out
+
+
+def test_the_live_gate_refuses_a_rename_out_of_a_denied_path_on_the_second_page(monkeypatch, capsys):
+    page1 = [changed(STATION), changed("tests/test_stations.py", 5, 1)]
+    moved = changed("docs/STATIONS.md", 0, 0, previous="tools/sdlc.py")     # a rename's destination is in the brief
+    LiveGate(monkeypatch, [page1])
+    assert sdlc.main(["quick-gate", "50"]) == 0                  # the first page alone looks like a good change
+    assert capsys.readouterr().out == "ok\n"
+    LiveGate(monkeypatch, [page1, [moved]])
+    assert sdlc.main(["quick-gate", "50"]) == 1
+    out = capsys.readouterr().out
+    assert "the diff touches a path a quick change may not (tools/sdlc.py)" in out    # the source, not the new name
+
+
 def test_slice_status_shows_a_quick_change_s_rounds(tmp_path, capsys):
     b = quick_bundle([ROUTINE, "sdlc:in-progress"], ready_quick() + [CLAIM], pr=PR,
                      pr_comments=RECORDS + [marked("pr-review", 9, sha="b" * 40, verdict="changes", round="2")])
