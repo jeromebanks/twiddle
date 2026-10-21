@@ -1116,16 +1116,23 @@ def command_bootstrap_labels(args: argparse.Namespace, config: dict[str, Any]) -
 
 
 def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
-              trusted: set[str] | None = None) -> dict[str, Any]:
-    """`state` plus the command to run next (an epic being built looks at its slices on GitHub)."""
+              trusted: set[str] | None = None, bundle: dict[str, Any] | None = None) -> dict[str, Any]:
+    """`state` plus the command to run next (an epic being built looks at its slices on GitHub). With the issue's
+    `bundle`, a quick change is checked as `claim --quick` (or `--resume`, once claimed) would check it."""
     progress = None
     if st["action"] in ("work_slices", "plan_next_milestone") and not offline:
         progress = epic_progress(st["number"], config, trusted if trusted is not None else fetch_trusted(config))
     nxt = next_command(st, progress)
-    # a quick brief whose `## Files` claim refuses is not offered to /work-slice (read offline: no git)
-    if st["action"] == "work_quick" and (errs := quick_claim_errors(st["number"], approved_brief(st) or "", False,
-                                                                     config, offline=True)):
-        nxt = f"/triage-issue {st['number']}: " + "; ".join(errs)
+    # a quick change that claim refuses is not offered to /work-slice (read offline: no git). The bundle gives
+    # claim's issue checks too (the rating, the brief's sections); without one, only the brief's `## Files`
+    if st["action"] == "work_quick":
+        if bundle is not None:
+            claim = claim_status(bundle["comments"], set(bundle["trusted"]))
+            errs = quick_view_errors(bundle["issue"], st, claim, bool(claim), config)
+        else:
+            errs = quick_claim_errors(st["number"], approved_brief(st) or "", False, config, offline=True)
+        if errs:
+            nxt = f"/triage-issue {st['number']}: " + "; ".join(errs)
     return {**st, "progress": progress, "next": nxt}
 
 
@@ -1134,7 +1141,8 @@ def command_state(args: argparse.Namespace, config: dict[str, Any]) -> int:
     st = bundle_state(bundle, config)
     if st.get("plan_kind") == "slice" and not getattr(args, "from_file", None):
         return command_slice_status(argparse.Namespace(number=st["number"], json=args.json, from_file=None), config)
-    st = with_next(st, config, offline=bool(getattr(args, "from_file", None)), trusted=set(bundle["trusted"]))
+    st = with_next(st, config, offline=bool(getattr(args, "from_file", None)), trusted=set(bundle["trusted"]),
+                   bundle=bundle)
     if args.json:
         print(json.dumps(st, indent=2))
     else:
@@ -1151,9 +1159,10 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
     for raw in sorted(issues, key=lambda i: i["number"]):
         if any(l["name"] in ("plan:slice", "plan:subtask", DEBT_LABEL) for l in raw.get("labels", [])):
             continue   # an epic's units of work, or its tech debt: reached through the epic's `next`
-        st = bundle_state(fetch_bundle(raw["number"], config, trusted), config)
+        b = fetch_bundle(raw["number"], config, trusted)
+        st = bundle_state(b, config)
         if st["turn"] == "agent":
-            out.append(with_next(st, config, trusted=trusted))
+            out.append(with_next(st, config, trusted=trusted, bundle=b))
     if args.json:
         print(json.dumps(out, indent=2))
     elif not out:

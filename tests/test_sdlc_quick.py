@@ -135,7 +135,7 @@ def test_state_shows_the_lane(tmp_path, capsys):
     later = derive(["sdlc:prd-review"], approved_quick() + [agent("prd", 2, 3)])
     assert later["lane"] is None
     f = tmp_path / "b.json"
-    f.write_text(json.dumps({"issue": issue([ROUTINE, "sdlc:approved"]), "comments": approved_quick(), "trusted": [OWNER]}))
+    f.write_text(json.dumps({"issue": issue([ROUTINE, "sdlc:approved"]), "comments": ready_quick(), "trusted": [OWNER]}))
     assert sdlc.main(["state", "--from-file", str(f), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["lane"] == "quick"
     assert sdlc.main(["state", "--from-file", str(f)]) == 0
@@ -271,8 +271,9 @@ def test_ship_refuses_a_quick_issue(capsys, monkeypatch):
 
 def test_next_lists_a_quick_issue_only_while_it_needs_an_agent(monkeypatch, capsys):
     bundles = {
-        1: {"issue": issue([ROUTINE, "sdlc:approved"], number=1), "comments": approved_quick(), "trusted": [OWNER]},
-        2: {"issue": issue([ROUTINE, "sdlc:in-progress"], number=2), "comments": approved_quick(), "trusted": [OWNER]},
+        1: {"issue": issue([ROUTINE, "sdlc:approved"], number=1), "comments": ready_quick(), "trusted": [OWNER]},
+        2: {"issue": issue([ROUTINE, "sdlc:in-progress"], number=2), "comments": ready_quick() + [CLAIM],
+            "trusted": [OWNER]},
         3: {"issue": issue([ROUTINE, "sdlc:done"], number=3), "comments": approved_quick(), "trusted": [OWNER]},
         4: {"issue": issue([ROUTINE, "sdlc:prd-review"], number=4), "comments": [quick_brief()], "trusted": [OWNER]},
     }
@@ -284,6 +285,28 @@ def test_next_lists_a_quick_issue_only_while_it_needs_an_agent(monkeypatch, caps
     assert sdlc.main(["next", "--json"]) == 0
     listed = {st["number"]: st["next"] for st in json.loads(capsys.readouterr().out)}
     assert listed == {1: "/work-slice 1 --quick", 2: "/work-slice 2 --quick"}
+
+
+@pytest.mark.parametrize("case", ["sections", "rating"])
+def test_state_and_next_run_claims_issue_checks(tmp_path, capsys, monkeypatch, case):
+    """#240: an approved quick change that `claim --quick` would refuse for its brief's sections or its rating
+    is not offered to /work-slice by `state` or `next`, as `slice-status` already doesn't offer it."""
+    labels, comments = {"sections": ([ROUTINE, "sdlc:approved"], approved_quick()),     # a one-section brief
+                        "rating": (["complexity:judgment", "sdlc:approved"], ready_quick())}[case]
+    b = {"issue": issue(labels), "comments": comments, "trusted": [OWNER]}
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps(b))
+    assert sdlc.main(["state", "--from-file", str(f)]) == 0
+    out = capsys.readouterr().out
+    want = {"sections": "approved brief lacks sections", "rating": "complexity"}[case]
+    assert "next: /triage-issue 12: " in out and want in out and "/work-slice" not in out, out
+    monkeypatch.setattr(sdlc, "repo_of", lambda config: "o/r")
+    monkeypatch.setattr(sdlc, "fetch_trusted", lambda config: TRUSTED)
+    monkeypatch.setattr(sdlc, "gh_json", lambda args: [{"number": 12, "labels": []}])
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, config, trusted=None: b)
+    assert sdlc.main(["next", "--json"]) == 0
+    (listed,) = json.loads(capsys.readouterr().out)
+    assert listed["next"].startswith("/triage-issue 12: ") and want in listed["next"]
 
 
 # --- the brief is frozen once building starts ------------------------------------
