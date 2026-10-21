@@ -842,3 +842,10 @@ def test_an_untrusted_intake_record_does_not_count(gh, capsys):
     gh.intake(t, "not-debt", author=STRANGER)
     st = json.loads(run(capsys, "state", epic, "--json")[1])
     assert st["debt"]["intake_pending"] == [t] and "without a verdict" in st["next"]
+
+
+def test_an_unknown_verdict_counts_as_none(gh, capsys):
+    epic, (t,) = attached(gh)
+    gh.intake(t, "not_debt")   # a hand-made marker with a verdict debt-intake doesn't take
+    st = json.loads(run(capsys, "state", epic, "--json")[1])
+    assert st["debt"]["intake_pending"] == [t] and "without a verdict" in st["next"] and "cut short" not in st["next"]

@@ -1158,8 +1158,9 @@ def print_state(st: dict[str, Any]) -> None:
     for c in st["conflicts"]:
         print(f"  CONFLICT: {c}")
     if (dv := st.get("debt")) is not None:
-        none = [t["number"] for t in dv["tickets"] if not t.get("intake")]
-        short = [f"#{t['number']} ({t['intake']})" for t in dv["tickets"] if t.get("intake") and t["intake"] != "debt"]
+        none = [t["number"] for t in dv["tickets"] if t.get("intake") not in INTAKE_VERDICTS]
+        short = [f"#{t['number']} ({t['intake']})" for t in dv["tickets"]
+                 if t.get("intake") in INTAKE_VERDICTS and t["intake"] != "debt"]
         print(f"  debt epic: {len(dv['tickets'])} open ticket(s)"
               + (f", without an intake verdict: {', '.join(f'#{t}' for t in none)}" if none else "")
               + (f", intake cut short: {', '.join(short)}" if short else ""))
@@ -3056,10 +3057,11 @@ def debt_progress(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[
 def debt_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
     """{action, turn, next, ...}: what the debt epic has due, from its tickets. Later slices add passes."""
     n, tickets = st["number"], progress.get("tickets") or []
-    unjudged = [t["number"] for t in tickets if not t.get("intake")]
+    # a verdict `debt-intake` doesn't know (a hand-made marker) counts as none
+    unjudged = [t["number"] for t in tickets if t.get("intake") not in INTAKE_VERDICTS]
     # a verdict other than `debt` on a ticket still open here was cut short (it should have left or closed it):
     # still intake, so a rerun of `debt-intake` finishes it rather than the ticket being silently dropped
-    unfinished = [t["number"] for t in tickets if t.get("intake") and t["intake"] != "debt"]
+    unfinished = [t["number"] for t in tickets if t.get("intake") in INTAKE_VERDICTS and t["intake"] != "debt"]
     pending = sorted(unjudged + unfinished)
     if pending:
         turn, action = "agent", "debt_intake"
