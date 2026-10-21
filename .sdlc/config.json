@@ -36,6 +36,7 @@
                              "src/twiddle/gain.py", "src/twiddle/scene/players.py", "src/twiddle/scene/local.py",
                              "src/twiddle/scene/app.py", "src/twiddle/dial/output.py", "src/twiddle/dial/bluetooth.py",
                              "src/twiddle/dial/app.py", "src/twiddle/dial/gauge.py", "src/twiddle/viz/screen.py"]},
+  "debt": {"pass_size": 8, "max_generation": 2, "max_per_pr": 4},
   "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high", "sandbox": "read-only", "timeout_seconds": 900,
             "flags": ["--skip-git-repo-check", "--color", "never"]},
   "extra_labels": [
@@ -43,7 +44,8 @@
     {"name": "complexity:judgment", "color": "FEF2C0", "description": "SDLC plan: real design choices, safety or the evidence path"},
     {"name": "tech-debt", "color": "D4C5F9", "description": "SDLC: non-blocking work found while building an epic (cleanup pass)"},
     {"name": "complexity:novel", "color": "F9D0C4", "description": "SDLC plan: unknowns that need investigating first"},
-    {"name": "lane:quick", "color": "C2E0C6", "description": "SDLC: a small, safe change built from one approved brief (work-slice --quick)"}
+    {"name": "lane:quick", "color": "C2E0C6", "description": "SDLC: a small, safe change built from one approved brief (work-slice --quick)"},
+    {"name": "lane:debt", "color": "D4C5F9", "description": "SDLC: the debt epic - every open tech-debt issue is its sub-issue (debt-epic)"}
   ],
   "plan_labels": [
     {"name": "plan:subtask", "color": "C5DEF5", "description": "SDLC plan: a subtask of an epic; its slices are sub-issues"},

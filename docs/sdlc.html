@@ -246,6 +246,9 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <tr><td><span class="chip">sdlc:approved</span>, its quick brief moved to the full lane</td><td class="turn agent">agent</td>
 <td>A <code>kind=lane lane=full</code> record took the approved brief out of the quick lane. Planning reads the PRD from <code>docs/prd/</code>, so <code>commit-prd N</code> first writes the brief there through a docs-only PR and <code>merge-prd</code>, which checks the file links the approved comment and records <code>prd-merged</code>. Then planning starts as usual.</td>
 <td><code>commit_prd</code> → <code>commit-prd N</code>, then <code>plan</code> → <code>/plan-issue N</code></td></tr>
+<tr><td><span class="chip">sdlc:in-progress</span> with <span class="chip">lane:debt</span></td><td class="turn agent">agent</td>
+<td>The debt epic: one open issue holding every open <span class="chip">tech-debt</span> issue as a sub-issue. <code>debt-epic</code> (<code>--dry-run</code>, safe to rerun) opens it when there is open debt and none is open, and attaches any debt it doesn't hold yet; <code>next</code> names <code>debt-epic</code> while some does. It is never triaged and never planned like a feature epic: what is due comes from its tickets.</td>
+<td><code>debt_intake</code> while a ticket has no intake verdict, else <code>none</code></td></tr>
 </tbody></table></div>
 <p class="note">The slices themselves (<span class="chip">plan:slice</span>, <span class="chip">plan:subtask</span>) and filed
 <span class="chip">tech-debt</span> are never triaged on their own. They move with their epic (a quick change's debt, which has no epic, waits in the open tech-debt list).</p>
