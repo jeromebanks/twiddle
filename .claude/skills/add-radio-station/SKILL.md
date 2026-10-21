@@ -236,7 +236,7 @@ modelled on `somafm.py` (JSON) or `spinitron.py` (HTML):
   known tags, a known fetcher, the blurb shape, and a key that works as a
   shell word. You don't need a new test for a data-only station.
 - Run `uv run pytest -q tests/test_catalog.py tests/test_stations.py tests/test_station_finding.py`,
-  then the full suite. Update the test count in `CLAUDE.md`.
+  then the full suite.
 
 ## 6. Check it for real, without touching a speaker
 

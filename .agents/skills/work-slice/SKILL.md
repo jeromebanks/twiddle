@@ -143,8 +143,8 @@ cd <WORKTREE> && uv run python tools/sdlc.py test-record PR    # runs the full s
 `test-record` refuses if the tree is dirty or `HEAD` isn't the PR's head. It runs
 `uv run pytest -q` itself and records the result on the PR, so you never report a
 test run by hand. Run it again after every new commit. **Give the Bash call
-`timeout: 600000`**: a fresh worktree does a first `uv sync`, and the suite takes
-about a minute and a half.
+`timeout: 600000`**: a fresh worktree does a first `uv sync`, and the suite is big,
+so give it all the time the tool allows.
 
 ## 8. Codex rounds
 

@@ -78,9 +78,9 @@ and troubleshooting.
 
 ## Contributing
 
-`uv run pytest` runs about 1220 tests in a minute. None of them touch the
-network, a speaker or Spotify. Adding a radio station, a venue or a visualizer
-each has a written recipe in `.claude/skills/`. Claude Code picks those up
+`uv run pytest` runs the whole suite (it is big: time a run before you set a
+timeout). None of it touches the network, a speaker or Spotify. Adding a radio
+station, a venue or a visualizer each has a written recipe in `.claude/skills/`. Claude Code picks those up
 automatically, and a person can simply read them.
 
 ## License

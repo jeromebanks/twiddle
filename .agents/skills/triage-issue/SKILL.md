@@ -135,7 +135,8 @@ approval of it).
 
 **Eligible** only if every one of these holds. You judge 1 to 6. The tool checks 6 (the rating)
 when you post the brief with `--lane`, at `claim` and again at `merge`, and 4 and 7 (the diff)
-at `merge` and `quick-gate`, not before:
+at `merge` and `quick-gate`, and at `claim` too, from the brief's `## Files` (and on `--resume`
+from the branch's and worktree's diff), but not when the brief is posted:
 
 1. It is one slice's worth of work: a session, a few files.
 2. It is read-only: it writes to no speaker and no Spotify, and needs no `--dry-run` of its own.
@@ -151,7 +152,7 @@ at `merge` and `quick-gate`, not before:
    diagnosis names a few files and a plain fix.
 6. You rate it `routine` (the planner's scale: `routine`, `judgment`, `novel`). A change
    that is `judgment` or `novel` is not quick.
-7. Mechanically, at `merge`: at most `max_files` files and `max_lines` changed lines (5 and
+7. Mechanically, at `merge` (the file count and names at `claim` too): at most `max_files` files and `max_lines` changed lines (5 and
    200 today), and only files the brief's `## Files` list names.
 
 If one fails, or you cannot tell, write the full PRD or diagnosis as usual. Say why in the

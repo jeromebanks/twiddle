@@ -182,14 +182,12 @@ a comment. Add tests to `tests/test_scene_venue_sources.py` for:
 - a merge with a List-style `Show` (`_list(...)` helper), if the spellings
   differ.
 
-Run `uv run pytest -q`. Update the test count in `CLAUDE.md`.
+Run `uv run pytest -q`.
 
 ## 6. Docs
 
 - `docs/SCENE.md` → *Sources*: add a table row and the measured quirks, and
   update the `sources/` tree under *Extending it*.
-- `CLAUDE.md`: the `scene/` row in *Layout* and the `scene list` row in
-  *Read-only vs writing* (sources are read-only; they never touch a speaker).
 - Tell the user what was measured, what failed, and anything that
   overturns an earlier note (say so explicitly).
 
