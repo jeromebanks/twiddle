@@ -361,3 +361,20 @@ def test_next_with_two_open_debt_epics_names_them_and_still_runs(gh, capsys):
     listed = next_listed(capsys)
     assert [(s["number"], s["debt_epics"]) for s in listed] == [(None, [a, b])]
     assert "a person closes all but one" in listed[0]["next"]
+
+
+def test_next_finds_old_debt_behind_a_full_issue_list(gh, monkeypatch, capsys):
+    """Codex on #266: an old debt ticket behind NEXT_LIMIT newer issues is still found (all pages are read)."""
+    old = gh.ticket("old debt")
+    for k in range(sdlc.NEXT_LIMIT):
+        gh.issue(f"slice {k}", ["plan:slice"])
+    full = gh.__call__
+
+    def capped(args, *, check=True):   # `gh issue list` honours --limit, newest first, as GitHub does
+        if list(args[:2]) == ["issue", "list"]:
+            limit = int(args[list(args).index("--limit") + 1])
+            return json.dumps(sorted(json.loads(full(args, check=check)), key=lambda i: -i["number"])[:limit])
+        return full(args, check=check)
+    monkeypatch.setattr(sdlc, "gh", capped)
+    listed = next_listed(capsys)
+    assert [(s["number"], s["unattached"]) for s in listed] == [(None, [old])]

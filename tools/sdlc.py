@@ -1204,7 +1204,7 @@ def command_state(args: argparse.Namespace, config: dict[str, Any]) -> int:
 
 def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
     repo = repo_of(config)
-    issues = gh_json(["issue", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json",
+    issues = gh_json(["issue", "list", "--repo", repo, "--state", "open", "--limit", str(NEXT_LIMIT), "--json",
                       "number,title,state,author,labels,createdAt"])
     trusted = fetch_trusted(config)
     out = []
@@ -3007,11 +3007,19 @@ def ticket_debt_epic(n: int, config: dict[str, Any], trusted: set[str]) -> int |
     return None
 
 
+NEXT_LIMIT = 200   # the open issues `next` lists in one read
+
+
 def unattached_debt(open_issues: list[dict[str, Any]], config: dict[str, Any], trusted: set[str]
                     ) -> tuple[list[int], list[int]]:
-    """(open tech-debt tickets no open debt epic holds, the open debt epics): from an issue list `next` already
-    read, so GitHub is read only when there is debt. Never raises on two epics: `next` names them for a person."""
-    debt = sorted(i["number"] for i in open_issues if DEBT_LABEL in [l["name"] for l in i.get("labels", [])])
+    """(open tech-debt tickets no open debt epic holds, the open debt epics). The issue list `next` already read
+    answers when it is complete, so GitHub is read only when there is debt; a list cut at NEXT_LIMIT may miss
+    older debt, so then every open tech-debt issue is read, all pages. Never raises on two epics: `next` names them
+    for a person."""
+    if len(open_issues) >= NEXT_LIMIT:
+        debt = [t["number"] for t in open_debt_tickets(config)]
+    else:
+        debt = sorted(i["number"] for i in open_issues if DEBT_LABEL in [l["name"] for l in i.get("labels", [])])
     if not debt:
         return [], []
     epics = [e["number"] for e in find_debt_epics(config, trusted)]
