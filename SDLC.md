@@ -226,9 +226,12 @@ on its head.** The full lane is unchanged for everything else.
    A person can run it any time before the merge. It leaves an open PR and the worktree alone.
 
 The numbers (`max_files` 5, `max_lines` 200, `max_change_rounds` 2) and the denied paths are in
-`.sdlc/config.json`'s `quick` section, so they can be tuned without code. `lane:quick` is created
-by `bootstrap-labels`. A quick change is never an epic's slice: `next` lists it as
-`/work-slice N --quick`, and the epic-only commands (`demo-status`, `demo-post`, `ship` and the milestone review) refuse it.
+`.sdlc/config.json`'s `quick` section, so they can be tuned without code. `quick-gate` and `merge`
+read that section from `main`'s copy on GitHub, never the checkout's, so a PR can't loosen its own
+gate. `lane:quick` is created by `bootstrap-labels`. A quick change is never an epic's slice: `next`
+lists it as `/work-slice N --quick` (or, when its brief's `## Files` breaks the rules `claim` checks,
+`/triage-issue N` with why), and the epic-only commands (`epic-branch`, `sync`, `demo-status`,
+`demo-post`, `ship` and the milestone review) refuse it.
 
 ## Planning (`plan-issue`)
 

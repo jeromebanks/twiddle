@@ -689,6 +689,7 @@ def test_a_recovered_release_that_main_moved_under_is_escalated(repo, monkeypatc
 
 def test_sync_dry_run_leaves_the_worktree_alone(repo, monkeypatch, capsys):
     GitHub(monkeypatch, repo)
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted=None: epic_bundle())   # an epic, not quick
     sdlc.ensure_epic_branch(12, CONFIG, repo)
     commit_on_main(repo, "m.py", "m = 1\n")
     assert sdlc.main(["sync", "12", "--dry-run"]) == 0

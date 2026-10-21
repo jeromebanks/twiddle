@@ -239,6 +239,19 @@ def test_milestone_reviews_refuse_a_quick_issue(capsys, monkeypatch, argv):
     assert "quick change" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("argv", [["epic-branch", "12"], ["epic-branch", "12", "--dry-run"],
+                                  ["sync", "12"], ["sync", "12", "--dry-run"]])
+def test_epic_branch_and_sync_refuse_a_quick_issue(capsys, monkeypatch, argv):
+    # #196: refused before any git or GitHub write (`epic-branch` would otherwise push a new epic/N)
+    bundle = {"issue": issue([ROUTINE, "sdlc:in-progress"]), "comments": approved_quick(), "trusted": [OWNER]}
+    monkeypatch.setattr(sdlc, "repo_of", lambda config: "o/r")
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, config, trusted=None: bundle)
+    for name in ("git", "gh", "post_comment", "primary_root", "remote_has", "ensure_epic_branch", "sync_epic"):
+        monkeypatch.setattr(sdlc, name, lambda *a, _name=name, **k: pytest.fail(f"{_name}: a quick issue has no epic"))
+    assert sdlc.main(argv) == 1
+    assert "is a quick change, not an epic: it has no epic branch" in capsys.readouterr().err
+
+
 def test_epic_view_never_offers_an_epic_step_for_a_quick_issue():
     st = derive([ROUTINE, "sdlc:in-progress"], approved_quick())
     empty = sdlc.summarise_progress([], {})
@@ -854,6 +867,52 @@ def test_a_refusal_triage_cannot_see_goes_back_to_triage(tmp_path, capsys, label
     assert "refused: " in out and needle in out and "/work-slice" not in out
 
 
+DENIED_FILES = BRIEF.replace("## Files\nfiles of the change", "## Files\n- `tools/sdlc.py`")
+GLOB_FILES = BRIEF.replace("## Files\nfiles of the change", "## Files\n- `src/twiddle/a*/clock.py`")
+SIX_FILES = BRIEF.replace("## Files\nfiles of the change", "## Files\n" + "\n".join(f"- docs/s{i}.md" for i in range(6)))
+
+
+@pytest.mark.parametrize("brief,needle", [
+    (DENIED_FILES, "names a path a quick change may not (tools/sdlc.py)"),
+    (GLOB_FILES, "names a path a quick change may not "
+                 "(src/twiddle/a*/clock.py (reaches src/twiddle/alarm_cli.py, src/twiddle/alarms/))"),
+    (SIX_FILES, "lists 6 files, more than the quick lane's 5"),
+], ids=["denied", "glob", "six-files"])
+@pytest.mark.parametrize("claimed", [False, True])
+def test_the_views_run_claim_s_brief_check(tmp_path, capsys, monkeypatch, brief, needle, claimed):
+    # #227: slice-check, slice-status and state never offer a claim that `claim --quick` refuses
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("the views read only the bundle"))
+    monkeypatch.setattr(sdlc, "git", lambda *a, **k: pytest.fail("the brief check needs no git"))
+    labels, comments = ([ROUTINE, "sdlc:in-progress"], ready_quick(brief) + [CLAIM]) if claimed else \
+        ([ROUTINE, "sdlc:approved"], ready_quick(brief))
+    b = quick_bundle(labels, comments)
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps(b))
+    if not claimed:   # claim itself refuses it, with the same message
+        assert sdlc.main(["claim", "12", "--quick", "--dry-run", "--from-file", str(f)]) == 1
+        assert needle in capsys.readouterr().err
+    assert sdlc.main(["slice-check", "12", "--from-file", str(f)] + (["--resume"] if claimed else [])) == 1
+    out = capsys.readouterr().out
+    assert needle in out and "not workable" in out
+    st = status(tmp_path, capsys, b, "--json")[1]
+    assert any(needle in e for e in st["refusals"]) and st["next"].startswith("/triage-issue 12: "), st["next"]
+    assert sdlc.main(["state", "12", "--from-file", str(f), "--json"]) == 0
+    nxt = json.loads(capsys.readouterr().out)["next"]
+    assert "/work-slice" not in nxt and needle in nxt, nxt
+
+
+def test_the_views_still_offer_a_brief_inside_the_rules(tmp_path, capsys):
+    ok = BRIEF.replace("## Files\nfiles of the change", "## Files\n- `src/twiddle/stations/catalog/*.toml`")
+    b = quick_bundle(comments=ready_quick(ok))
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps(b))
+    assert sdlc.main(["slice-check", "12", "--from-file", str(f)]) == 0
+    capsys.readouterr()
+    assert status(tmp_path, capsys, b, "--json")[1]["next"] == "/work-slice 12 --quick"
+    assert sdlc.main(["state", "12", "--from-file", str(f), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["next"] == "/work-slice 12 --quick"
+
+
 # --- the quick merge gate: config, denied paths, the diff rules, `quick-gate` ----------------
 
 QUICK_RULES = sdlc.load_quick(CONFIG)
@@ -1181,9 +1240,9 @@ class LiveGate:
     """`quick-gate` with no --from-file: `gh` is faked, so `gh_pages` and `gh_json` run for real over the answers
     GitHub gives (`--paginate --slurp` is a list of pages), beside a faked PR, trusted list and issue read."""
 
-    def __init__(self, monkeypatch, pages, **bundle_kw):
+    def __init__(self, monkeypatch, pages, main_config=CONFIG, **bundle_kw):
         self.b = gate_bundle(**bundle_kw)
-        self.pages, self.calls = pages, []
+        self.pages, self.calls, self.main_config = pages, [], main_config
         monkeypatch.setattr(sdlc, "gh", self.gh)
         monkeypatch.setattr(sdlc, "repo_of", lambda cfg: "o/r")
         monkeypatch.setattr(sdlc, "fetch_trusted", lambda cfg: set(self.b["trusted"]))
@@ -1193,6 +1252,11 @@ class LiveGate:
 
     def gh(self, args, check=True):
         self.calls.append(args)
+        if args == ["api", "-H", "Accept: application/vnd.github.raw+json",
+                    "repos/o/r/contents/.sdlc/config.json?ref=main"]:    # main's rules, never the checkout's
+            if self.main_config is None:
+                raise sdlc.SdlcError("gh api failed: HTTP 404")
+            return json.dumps(self.main_config)
         if args[:2] == ["api", "repos/o/r/pulls/50/files?per_page=100"]:
             assert args[2:] == ["--paginate", "--slurp"]    # without --slurp, gh prints pages that aren't one JSON
             return json.dumps(self.pages)
@@ -1228,6 +1292,41 @@ def test_the_live_gate_refuses_a_rename_out_of_a_denied_path_on_the_second_page(
     assert sdlc.main(["quick-gate", "50"]) == 1
     out = capsys.readouterr().out
     assert "the diff touches a path a quick change may not (tools/sdlc.py)" in out    # the source, not the new name
+
+
+# #201: a PR's own checkout may have loosened `.sdlc/config.json`; the gate reads main's `quick` section
+LOOSE = {**CONFIG, "quick": {**CONFIG["quick"], "denied_paths": ["docs/sdlc.html"], "max_files": 50}}
+SELF_LOOSENED = GATE_BRIEF.replace("- tests/test_stations.py", "- tests/test_stations.py\n- `tools/sdlc.py`")
+
+
+def test_the_live_gate_judges_a_pr_by_main_s_rules_not_its_own(monkeypatch, capsys):
+    files = [changed(STATION), changed("tools/sdlc.py", 3, 1, status="modified")]
+    LiveGate(monkeypatch, [files], comments=ready_quick(SELF_LOOSENED) + [CLAIM])
+    b = sdlc.quick_gate_bundle(50, LOOSE)
+    assert b["main_quick"] == CONFIG["quick"]
+    errs = sdlc.quick_gate_errors(b, LOOSE)
+    assert errs == ["the diff touches a path a quick change may not (tools/sdlc.py): `escalate-to-full 12`"], errs
+    # and the same through the CLI, run from a checkout whose config is the loosened one
+    monkeypatch.setattr(sdlc, "load_config", lambda *a, **k: LOOSE)
+    assert sdlc.main(["quick-gate", "50"]) == 1
+    assert "may not (tools/sdlc.py)" in capsys.readouterr().out
+
+
+def test_an_offline_bundle_carrying_main_s_rules_is_judged_by_them():
+    b = {**gate_bundle(comments=ready_quick(SELF_LOOSENED) + [CLAIM],
+                       files=[changed(STATION), changed("tools/sdlc.py", 3, 1, status="modified")]),
+         "main_quick": CONFIG["quick"]}
+    assert gate(b, LOOSE) == ["the diff touches a path a quick change may not (tools/sdlc.py): `escalate-to-full 12`"]
+    assert gate({**b, "main_quick": LOOSE["quick"]}, CONFIG) == []    # main's section, whatever the checkout's says
+
+
+def test_the_live_gate_refuses_when_main_s_rules_cannot_be_read(monkeypatch):
+    LiveGate(monkeypatch, [[changed(STATION)]], main_config=None)
+    with pytest.raises(sdlc.SdlcError, match="404"):
+        sdlc.quick_gate_bundle(50, LOOSE)
+    LiveGate(monkeypatch, [[changed(STATION)]], main_config={"default_branch": "main"})   # main has no quick section
+    with pytest.raises(sdlc.SdlcError, match="no `quick` section"):
+        sdlc.quick_gate_errors(sdlc.quick_gate_bundle(50, LOOSE), LOOSE)
 
 
 def test_slice_status_shows_a_quick_change_s_rounds(tmp_path, capsys):

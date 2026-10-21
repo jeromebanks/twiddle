@@ -309,6 +309,8 @@ class FakeGitHub:
 
     # -- the REST API --
     def api(self, rest):
+        raw = rest[:2] == ["-H", "Accept: application/vnd.github.raw+json"]   # a file's contents, as they are
+        rest = rest[2:] if raw else rest
         method, path = (rest[1], rest[2]) if rest[0] == "-X" else ("GET", rest[0])
         if method == "GET" and ("--paginate" in rest) != ("--slurp" in rest):
             pytest.fail(f"gh api {rest}: --paginate without --slurp")
@@ -369,6 +371,11 @@ class FakeGitHub:
             return self.page(rest, [self.issue_rest(self.issues[b]) for b in self.blocked_by.get(int(tail[1]), [])])
         if tail[0] == "pulls" and tail[2:] == ["files"]:
             return self.page(rest, self.diff(self.pr(tail[1])))
+        if raw and tail[0] == "contents":
+            text = self.origin_git("show", f"{query['ref'][0]}:{'/'.join(tail[1:])}", check=False)
+            if text is None:
+                raise GhError("HTTP 404: Not Found")
+            return text
         pytest.fail(f"gh api {rest}: the fake doesn't know this call")
 
     @staticmethod
@@ -398,6 +405,11 @@ class Lane:
         self.config = tmp_path / "sdlc-config.json"
         self.config.write_text(json.dumps(cfg))
         self.cfg = cfg
+        (root / ".sdlc").mkdir(exist_ok=True)   # main's own rules: the quick gate reads them from origin, not here
+        (root / ".sdlc" / "config.json").write_text(json.dumps(cfg))
+        _git("add", ".sdlc/config.json", cwd=root)
+        _git("commit", "-q", "-m", "main: the sdlc config", cwd=root)
+        _git("push", "-q", "origin", "main", cwd=root)
         self.gh = FakeGitHub(monkeypatch, root, {l["name"] for k in ("labels", "extra_labels", "plan_labels")
                                                  for l in cfg[k]})
         self.codex_log, self.codex_plan, _ = install(tmp_path, monkeypatch)
