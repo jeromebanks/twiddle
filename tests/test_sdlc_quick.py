@@ -16,6 +16,11 @@ ROUTINE = "complexity:routine"
 
 _ids = iter(range(1, 10_000))
 
+@pytest.fixture(autouse=True)
+def _runs_main_gate_code(monkeypatch):
+    """`merge` first checks it runs origin/main's gate code (a git fetch): tests/test_sdlc_merge_gate.py tests that."""
+    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR": [])
+
 
 def issue(labels=(), state="open", number=12):
     return {"number": number, "title": "Add a station", "state": state, "author": POSTER, "labels": list(labels)}
@@ -282,6 +287,7 @@ def test_next_lists_a_quick_issue_only_while_it_needs_an_agent(monkeypatch, caps
     monkeypatch.setattr(sdlc, "gh_json", lambda args: [{"number": n, "labels": []} for n in bundles])
     monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, config, trusted=None: bundles[n])
     monkeypatch.setattr(sdlc, "epic_progress", lambda *a: pytest.fail("a quick issue is not an epic"))
+    monkeypatch.setattr(sdlc, "find_slice_pr", lambda n, config: None)   # #2 has opened no PR yet
     assert sdlc.main(["next", "--json"]) == 0
     listed = {st["number"]: st["next"] for st in json.loads(capsys.readouterr().out)}
     assert listed == {1: "/work-slice 1 --quick", 2: "/work-slice 2 --quick"}
@@ -855,8 +861,11 @@ def test_slice_status_reads_a_quick_change(tmp_path, capsys, case, want):
     assert (st["review"], st["review_mandatory"]) == ("slice", True)
     if case in ("in-review", "merged"):
         assert st["tests_on_head"]["result"] == "pass" and st["review_on_head"]["verdict"] == "approve"
-    if case != "merged":
+    if case in ("ready", "claimed"):
         assert st["next"] == "/work-slice 12 --quick"
+    if case == "in-review":   # both records on the head: the merge is due (the gate isn't read offline)
+        assert st["merge_due"] and st["gate"] is None
+        assert st["next"].startswith("uv run python tools/sdlc.py merge 50 (from the primary checkout")
     out = status(tmp_path, capsys, b)[1]
     assert f"state: {want}   lane: quick" in out
     assert "Codex review: on the PR (mandatory" in out and "with the milestone" not in out

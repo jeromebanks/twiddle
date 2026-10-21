@@ -1133,6 +1133,17 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
             errs = quick_claim_errors(st["number"], approved_brief(st) or "", False, config, offline=True)
         if errs:
             nxt = f"/triage-issue {st['number']}: " + "; ".join(errs)
+        elif bundle is not None and not offline and st["state"] == "in-progress":
+            # its PR may be due to merge: read its records, then the gate. A failed read leaves `next` as it was
+            try:
+                pr = find_slice_pr(st["number"], config)
+                b = {**bundle, "pr": pr, "pr_comments": fetch_pr(pr["number"], config)[1] if pr else []}
+            except SdlcError as exc:
+                print(f"could not read #{st['number']}'s PR ({exc}): `next` doesn't say whether it may merge",
+                      file=sys.stderr)
+                pr = None
+            if pr and derive_quick(b, st, config)["merge_due"]:
+                nxt = merge_next(pr["number"], merge_due_gate(b, {"pr": pr["number"]}, True, config))
     return {**st, "progress": progress, "next": nxt}
 
 
@@ -2552,8 +2563,12 @@ def slice_check_errors(issue: dict[str, Any], blockers: list[dict[str, Any]], cl
 
 def derive_slice(issue: dict[str, Any], comments: list[dict[str, Any]], trusted: set[str],
                  blockers: list[dict[str, Any]], pr: dict[str, Any] | None,
-                 pr_comments: list[dict[str, Any]]) -> dict[str, Any]:
-    """A slice's build state and the command to run next, from fetched JSON alone."""
+                 pr_comments: list[dict[str, Any]], mode: str = "slice") -> dict[str, Any]:
+    """A slice's build state and the command to run next, from fetched JSON alone.
+
+    `mode` is its review mode (`review_mode`): "milestone" counts a routine slice's review as owed. An open PR
+    with a passing run and an approving (or owed) review on its head is due to merge (`merge_due`): next is
+    `merge PR`, whose gate results the caller adds (`merge_next`)."""
     n = issue["number"]
     mk = parse_marker(issue.get("body", "")) or {}
     claim = claim_status(comments, trusted)
@@ -2574,7 +2589,11 @@ def derive_slice(issue: dict[str, Any], comments: list[dict[str, Any]], trusted:
         state = "blocked"
     else:
         state = "ready"
-    if state in ("ready", "claimed", "in-review"):
+    passed = bool(t) and t.get("result") == "pass"
+    due = state == "in-review" and passed and (r["verdict"] == "approve" if r else deferred or mode == "milestone")
+    if due:
+        nxt = merge_next(pr["number"], None)
+    elif state in ("ready", "claimed", "in-review"):
         nxt = f"/work-slice {n}"
     elif state == "blocked":
         nxt = "nothing yet: waiting on " + ", ".join(f"#{b}" for b in unmet)
@@ -2586,7 +2605,7 @@ def derive_slice(issue: dict[str, Any], comments: list[dict[str, Any]], trusted:
             "complexity": complexity_of(issue.get("labels", [])),
             "claim": claim, "unmet": unmet, "pr": (pr or {}).get("number"), "pr_state": (pr or {}).get("state"),
             "head": (pr or {}).get("headRefOid"), "tests_on_head": t, "review_on_head": r, "deferred_on_head": deferred,
-            "pr_rounds": changes_rounds(reviews), "next": nxt}
+            "pr_rounds": changes_rounds(reviews), "merge_due": due, "next": nxt}
 
 
 def merge_gate_errors(pr: dict[str, Any], slice_issue: dict[str, Any] | None, tests: list[dict[str, Any]],
@@ -2762,9 +2781,9 @@ def git(args: list[str], cwd: Path | None = None, check: bool = True, timeout: f
     return proc.stdout.strip()
 
 
-def primary_root() -> Path:
+def primary_root(cwd: Path | None = None) -> Path:
     """The main checkout, even when run from inside a slice's worktree."""
-    return Path(git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).parent
+    return Path(git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=cwd)).parent
 
 
 def worktree_path(n: int, config: dict[str, Any]) -> Path:
@@ -2836,8 +2855,8 @@ def slice_bundle(n: int, config: dict[str, Any]) -> dict[str, Any]:
             "pr": pr, "pr_comments": pr_comments}
 
 
-def bundle_slice(b: dict[str, Any]) -> dict[str, Any]:
-    return derive_slice(b["issue"], b["comments"], set(b["trusted"]), b["blockers"], b["pr"], b["pr_comments"])
+def bundle_slice(b: dict[str, Any], mode: str = "slice") -> dict[str, Any]:
+    return derive_slice(b["issue"], b["comments"], set(b["trusted"]), b["blockers"], b["pr"], b["pr_comments"], mode)
 
 
 def bundle_issue_state(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
@@ -2875,9 +2894,14 @@ def derive_quick(b: dict[str, Any], st: dict[str, Any], config: dict[str, Any]) 
         out["next"] = next_command(st)
         if out["next"].startswith("/work-slice"):   # triage can't see these (the brief's sections, the rating)
             out["next"] = f"/triage-issue {n}: " + "; ".join(refusals)
-    elif building:
+    # no milestone to owe a review to: a deferral never counts, only Codex's approval of the head
+    r, t = out["review_on_head"], out["tests_on_head"]
+    out["merge_due"] = (not refusals and out["state"] == "in-review" and bool(t) and t.get("result") == "pass"
+                        and bool(r) and r["verdict"] == "approve")
+    if out["merge_due"]:
+        out["next"] = merge_next(out["pr"], None)
+    elif building and not refusals:
         out["next"] = f"/work-slice {n} --quick"
-    # no milestone to owe a review to: a deferral never counts, Codex reviews the PR
     return {**out, "deferred_on_head": False, "lane": QUICK, "refusals": refusals,
             "review": "slice", "review_mandatory": True}
 
@@ -2923,6 +2947,24 @@ def quick_gate_errors(b: dict[str, Any], config: dict[str, Any]) -> list[str]:
                                    approved_brief(st) if st else None, quick, config.get("default_branch", "main"))
 
 
+def merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: dict[str, Any]) -> list[str]:
+    """The gate's refusals of a PR whose records say it may merge, read online and read-only: the quick gate's
+    for a quick change, the slice gate's (with its milestone hold) for a slice. A failed read is one refusal,
+    never an exception: `state` and `next` must still answer."""
+    try:
+        return _merge_due_gate(b, st, quick, config)
+    except SdlcError as exc:
+        return [f"could not read the gate: {exc}"]
+
+
+def _merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: dict[str, Any]) -> list[str]:
+    if quick:
+        return quick_gate_errors(quick_gate_bundle(st["pr"], config), config)
+    if not st.get("epic"):
+        return [no_epic_error(b["pr"], closes_refs(b["pr"].get("body", "")), b["issue"])]
+    return slice_merge_errors(b["pr"], b["pr_comments"], b["issue"], st["epic"], config, set(b["trusted"]))[0]
+
+
 def command_quick_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """May this quick PR merge into main? Prints each refusal (or `ok`); reads only, never escalates."""
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else quick_gate_bundle(args.pr, config)
@@ -2937,10 +2979,13 @@ def command_quick_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
 def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> int:
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(args.number, config)
     quick = bundle_quick(b, config)
-    st = derive_quick(b, quick, config) if quick else bundle_slice(b)
+    st = derive_quick(b, quick, config) if quick else bundle_slice(b, review_mode(complexity_of(b["issue"].get("labels", [])), config))
     st["model"] = model_for(st["complexity"], config)
     if not quick:
         st["review"] = review_mode(st["complexity"], config)
+    if st["merge_due"]:   # the records allow it: what the gate says now (read-only; never offline)
+        st["gate"] = None if args.from_file else merge_due_gate(b, st, bool(quick), config)
+        st["next"] = merge_next(st["pr"], st["gate"])
     if args.json:
         print(json.dumps(st, indent=2))
         return 0
@@ -3625,13 +3670,110 @@ def no_epic_error(pr: dict[str, Any], refs: list[int], slice_issue: dict[str, An
     return f"#{refs[0]} is a plan:slice issue with no epic in its marker: PR #{pr['number']} has no epic branch to merge into"
 
 
+# --- `merge` runs main's gate, never a branch's ------------------------------------------------------------
+#
+# A slice's or quick change's own worktree carries its own tools/sdlc.py: a PR that loosens the gate would
+# otherwise be merged by the loosened gate (#239). So `merge`, for every lane, first compares the running copies
+# of the gate's code with origin/main's, byte for byte, and refuses on any difference or any doubt.
+
+GATE_CODE = {"tools/sdlc.py": Path(__file__).resolve(),           # repo path -> the file this process runs
+             "tools/sdlc_quick.py": Path(sdlc_quick.__file__).resolve()}
+GATE_FETCH_SECONDS = 60   # how long `merge` waits for `git fetch origin main` (and each `git show`) before refusing
+# literally main, never the config's default_branch: the config is the running checkout's own, so a branch could
+# otherwise name the branch its gate code is compared with
+GATE_BRANCH = "main"
+
+
+def gate_code_drift(running: dict[str, bytes | None], on_main: dict[str, bytes | None]) -> list[str]:
+    """The gate's files (GATE_CODE's keys) whose running bytes aren't origin/main's; a missing copy is a difference."""
+    return [p for p in GATE_CODE if running.get(p) is None or on_main.get(p) is None or running[p] != on_main[p]]
+
+
+def git_blob(rev_path: str, cwd: Path, timeout: float) -> bytes:
+    """`git show <rev>:<path>`'s exact bytes (`git()` decodes and strips, which would hide a whitespace change)."""
+    try:
+        proc = subprocess.run(["git", "show", rev_path], cwd=cwd, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise SdlcError(f"git show {rev_path} timed out after {timeout}s") from None
+    if proc.returncode != 0:
+        raise SdlcError(f"git show {rev_path} failed: {proc.stderr.decode(errors='replace').strip()}")
+    return proc.stdout
+
+
+def read_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def gate_code_errors(config: dict[str, Any], pr: Any = "PR") -> list[str]:
+    """Why `merge` may not run from this checkout (empty list = it runs main's gate code). One bounded fetch of
+    origin/main, then the running GATE_CODE files against it; a failed fetch or an unreadable copy refuses."""
+    if not GATE_FETCH_SECONDS > 0:
+        raise SdlcError(f"GATE_FETCH_SECONDS must be positive (got {GATE_FETCH_SECONDS})")
+    main = GATE_BRANCH
+    try:
+        primary: Path | None = primary_root(ROOT).resolve()
+    except SdlcError:
+        primary = None
+    where = primary or "the primary checkout"
+    update = f"`git -C {where} pull --ff-only` (on {main})"
+    rerun = f"`cd {where} && uv run python tools/sdlc.py merge {pr}`"
+    try:
+        git(["fetch", "-q", "origin", main], cwd=ROOT, timeout=GATE_FETCH_SECONDS)
+        on_main: dict[str, bytes | None] = {p: git_blob(f"origin/{main}:{p}", ROOT, GATE_FETCH_SECONDS) for p in GATE_CODE}
+    except SdlcError as exc:
+        return [f"could not read origin/{main}'s gate code ({exc}), so `merge` won't run: nothing was merged. "
+                f"Check the network and origin, update the primary checkout ({where}) with {update}, then {rerun}"]
+    drift = gate_code_drift({p: read_bytes(f) for p, f in GATE_CODE.items()}, on_main)
+    if not drift:
+        return []
+    here = ROOT.resolve()
+    what = f"{' and '.join(drift)} in {here} differ{'s' if len(drift) == 1 else ''} from origin/{main}'s"
+    if primary == here:   # this is the primary checkout, and it is behind (or ahead of) main
+        return [f"{what}: `merge` runs only main's gate code, and nothing was merged. Update this, the primary "
+                f"checkout: {update}, then {rerun}"]
+    stale = primary is not None and gate_code_drift({p: read_bytes(primary / p) for p in GATE_CODE}, on_main)
+    return [f"{what}: `merge` runs only main's gate code, never a branch's, and nothing was merged. Run it from the "
+            f"primary checkout ({where}), not this one: " + (f"update it first with {update}, then " if stale else "")
+            + rerun]
+
+
+def slice_merge_errors(pr: dict[str, Any], comments: list[dict[str, Any]], slice_issue: dict[str, Any], epic: int,
+                       config: dict[str, Any], trusted: set[str]) -> tuple[list[str], str | None]:
+    """Every reason the slice gate refuses this PR now (read-only: GitHub's compare, the epic's milestones), and
+    why its review is owed to the milestone (owed_why), for `merge` and for `slice-status`'s merge-due line."""
+    tests, reviews = pr_records(comments, trusted)
+    deferrals = pr_deferrals(comments, trusted)
+    branch = epic_branch(epic)
+    try:
+        behind = gh_json(["api", f"repos/{repo_of(config)}/compare/{branch}...{pr['headRefOid']}"]).get("behind_by")
+    except SdlcError:
+        behind = None
+    mode = review_mode(complexity_of(slice_issue.get("labels", [])), config)
+    errs = merge_gate_errors(pr, slice_issue, tests, reviews, branch, behind, deferrals, mode)
+    est = bundle_state(fetch_bundle(epic, config, trusted), config)
+    errs += milestone_hold_errors(est, epic_progress(epic, config, trusted), slice_issue.get("milestone"))
+    return errs, owed_why(pr, reviews, deferrals, mode)
+
+
+def merge_next(pr: Any, gate: list[str] | None) -> str:
+    """The `next` line of a PR whose records say it may merge: the command, where to run it, and the gate's results
+    (None: not read, offline)."""
+    said = ("the gate isn't read offline" if gate is None else "gate: ok" if not gate
+            else "gate still refuses: " + "; ".join(gate))
+    return f"uv run python tools/sdlc.py merge {pr} (from the primary checkout, on an up-to-date main; {said})"
+
+
 def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """The merge gate: Codex approved this head, the tests passed on it, it closes one slice. Then squash-merge."""
+    # first, for every lane and under --dry-run too: only main's gate code may judge a PR (#239)
+    if errs := gate_code_errors(config, args.pr):
+        raise SdlcError("; ".join(errs))
     repo = repo_of(config)
     pr, comments = fetch_pr(args.pr, config)
     trusted = fetch_trusted(config)
-    tests, reviews = pr_records(comments, trusted)
-    deferrals = pr_deferrals(comments, trusted)
     refs = closes_refs(pr.get("body", ""))
     slice_issue, issue_comments = fetch_slice(refs[0], config) if len(refs) == 1 else (None, [])
     if slice_issue and bundle_quick({"issue": slice_issue, "comments": issue_comments, "trusted": trusted}, config):
@@ -3640,15 +3782,7 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if not epic:   # no slice of an epic (an escalated quick change's PR, say): no branch to compare or target
         raise SdlcError(no_epic_error(pr, refs, slice_issue))
     branch = epic_branch(epic)
-    try:
-        behind = gh_json(["api", f"repos/{repo}/compare/{branch}...{pr['headRefOid']}"]).get("behind_by")
-    except SdlcError:
-        behind = None
-    mode = review_mode(complexity_of((slice_issue or {}).get("labels", [])), config)
-    errs = merge_gate_errors(pr, slice_issue, tests, reviews, branch, behind, deferrals, mode)
-    why = owed_why(pr, reviews, deferrals, mode)
-    est = bundle_state(fetch_bundle(epic, config, trusted), config)
-    errs += milestone_hold_errors(est, epic_progress(epic, config, trusted), slice_issue.get("milestone"))
+    errs, why = slice_merge_errors(pr, comments, slice_issue, epic, config, trusted)
     if errs:
         raise SdlcError("; ".join(errs))
     n = refs[0]

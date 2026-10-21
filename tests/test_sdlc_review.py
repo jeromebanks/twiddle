@@ -12,6 +12,11 @@ TRUSTED = {OWNER}
 HEAD, OLD = "a" * 40, "b" * 40
 _ids = iter(range(1, 10_000))
 
+@pytest.fixture(autouse=True)
+def _runs_main_gate_code(monkeypatch):
+    """`merge` first checks it runs origin/main's gate code (a git fetch): tests/test_sdlc_merge_gate.py tests that."""
+    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR": [])
+
 
 def comment(author, body, ts):
     return {"id": next(_ids), "author": author, "body": body, "created_at": f"2026-10-06T00:{ts:02d}:00Z",

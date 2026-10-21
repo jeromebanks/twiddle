@@ -227,11 +227,25 @@ budget. A second escalation goes to a human (`--retry` refuses twice).
 ## 9. Merge and clean up
 
 ```bash
-uv run python tools/sdlc.py merge PR               # the gate; --dry-run to see it first
+git -C <PRIMARY> pull --ff-only                    # the primary checkout, on main
+cd <PRIMARY> && uv run python tools/sdlc.py merge PR    # the gate; --dry-run to see it first
 cd <PRIMARY> && uv run python tools/sdlc.py cleanup N
 ```
 
-`merge` refuses unless all of these hold:
+**Run `merge` from the primary checkout, never from `WORKTREE`.** The worktree holds the slice's
+own `tools/sdlc.py`, and a PR must never be judged by a gate it changed. So `merge` first
+compares its running `tools/sdlc.py` and `tools/sdlc_quick.py` with `origin/main`'s, byte for
+byte (after one bounded `git fetch`), and refuses, merging nothing, on any difference, a failed
+fetch or an unreadable copy. The refusal names the primary checkout, and says to update it
+(`git -C <PRIMARY> pull --ff-only`) when it is behind too. `--dry-run` is checked the same way.
+
+**If `merge` itself is refused by a permission check** (not by the gate), don't work around it,
+and never merge with a bare `gh pr merge`. Leave the PR ready and report: once a passing run and
+an approving (or owed) review are recorded on its head, `slice-status N` says
+`next: uv run python tools/sdlc.py merge PR` with the gate's results, and the session that started
+you runs that one command.
+
+Then `merge` refuses unless all of these hold:
 
 - the PR closes exactly this one slice;
 - Codex's latest review of the **current head** approves, or the slice's review is
@@ -366,12 +380,17 @@ failure from `<SCRATCH>/codex.err` verbatim and the PR number, and stop. Don't e
 don't merge: a person decides between waiting for Codex and `escalate-to-full N`.
 
 **9. Merge.** `uv run python tools/sdlc.py quick-gate PR` (read-only) prints every reason the PR
-may not merge yet, or `ok`; `merge PR --dry-run` shows the squash. Then:
+may not merge yet, or `ok`; `merge PR --dry-run`, from `<PRIMARY>` like `merge` itself, shows the squash. Then:
 
 ```bash
-uv run python tools/sdlc.py merge PR
+git -C <PRIMARY> pull --ff-only
+cd <PRIMARY> && uv run python tools/sdlc.py merge PR
 cd <PRIMARY> && uv run python tools/sdlc.py cleanup N
 ```
+
+As for a slice, `merge` runs only from the primary checkout on an up-to-date `main` (it refuses
+from `WORKTREE`, whose gate code is the PR's), and a session refused by a permission check
+leaves the PR ready: `state N` and `slice-status N` then say `merge PR` is due, with the gate's results.
 
 `merge` requires: the base is `main`; the PR closes exactly this one open quick issue, still
 `sdlc:in-progress` with its brief unchanged and rated `routine`; a passing full-suite record on
