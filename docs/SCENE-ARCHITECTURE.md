@@ -117,7 +117,7 @@ order and merges with `model.dedupe`.
 | `gilman` | app.showslinger.com | 924 Gilman: flyers, tickets |
 | `grayarea` | grayarea.org/visit/events | Gray Area |
 | `makeoutroom` | makeoutroom.com + CalendarWiz | Make-Out Room: lineups, flyers |
-| `kalx` | kalx.berkeley.edu weekly "Events" post, via its WordPress REST API | ~75 rooms incl. Sweetwater Music Hall and Hillside Club; no times, prices or links, so it is registered last and only fills gaps |
+| `kalx` | kalx.berkeley.edu weekly "Events" post, via its WordPress REST API | many rooms incl. Sweetwater Music Hall and Hillside Club; no times, prices or links, so it is registered last and only fills gaps |
 | `storkclub`, `gamh`, `chapel`, `hotelutah`, `rickshaw` | each venue's WordPress calendar (See Tickets) | flyers, ticket links |
 | `independent`, `brickandmortar`, `neckofthewoods`, `bimbos`, `augusthall`, `crybaby`, `cafedunord` | each venue's site (TicketWeb) | flyers, ticket links |
 | `ivyroom`, `ashkenaz` | venuepilot.co GraphQL | flyers, tickets, prices |

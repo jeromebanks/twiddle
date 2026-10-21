@@ -8,7 +8,7 @@ description: Add a venue to `twiddle scene`, or give a venue its own listings so
 # Adding a venue, and a venue source with flyers
 
 `scene` lists shows from **The List** (foopee.com) plus a venue's own pages.
-The List gives bands, age and advance/door price for ~150 rooms. A venue's
+The List gives bands, age and advance/door price for most Bay Area rooms. A venue's
 own page adds **flyers, ticket links, and nights The List skips** (DJ nights,
 karaoke), or covers a room The List lacks entirely (Yoshi's).
 
@@ -27,7 +27,7 @@ the worked examples:
 | `scenedata/sources/simplecal.py` | WordPress "Simple Calendar" (a Google Calendar, server-rendered) | **yes: one line in `VENUES`** |
 | `scenedata/sources/makeoutroom.py` | CalendarWiz (cookie session, month grid) + Weebly blog flyers | the CalendarWiz half, with a new `crd` |
 | `scenedata/sources/grayarea.py` | venue's own WordPress cards | no, bespoke |
-| `scenedata/sources/kalx.py` | KALX 90.7's weekly events post (WordPress REST API): ~75 rooms, `Venue: acts` lines, no times or links | no, bespoke; a new room needs a `CITY` entry only if its watched-venue match has a city |
+| `scenedata/sources/kalx.py` | KALX 90.7's weekly events post (WordPress REST API): many rooms, `Venue: acts` lines, no times or links | no, bespoke; a new room needs a `CITY` entry only if its watched-venue match has a city |
 | `scenedata/sources/yoshis.py` | venue's own HTML calendar + detail pages | no, bespoke |
 | `scenedata/sources/thelist.py` | The List | — |
 
