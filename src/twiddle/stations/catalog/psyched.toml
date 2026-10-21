@@ -1,0 +1,7 @@
+# Stream from radio-browser / TuneIn (s323007); the probe found the same
+# path served over plain http, which is what a Sonos fetches.
+name  = "Psyched! Radio"
+url   = "http://us3.internet-radio.com/proxy/psychedradiosf/stream/"
+blurb = "San Francisco -- independent DJ radio: garage, post-punk, electronic, eclectic"
+tags  = ["community", "freeform"]
+logo  = "https://www.psychedradiosf.com/wp-content/uploads/2022/12/prblack-300x300.jpg"
