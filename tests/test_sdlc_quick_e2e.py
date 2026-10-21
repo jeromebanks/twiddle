@@ -77,6 +77,12 @@ def offline(tmp_path, monkeypatch):
     assert not sentinel.exists(), f"a real gh/codex was reached: {sentinel.read_text()}"
 
 
+@pytest.fixture(autouse=True)
+def _runs_main_gate_code(monkeypatch):
+    """`merge` first checks it runs origin/main's gate code (a git fetch): tests/test_sdlc_merge_gate.py tests that."""
+    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR": [])
+
+
 # --- GitHub, as `gh` answers it ------------------------------------------------------------------------------
 
 class GhError(Exception):

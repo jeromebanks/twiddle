@@ -63,7 +63,10 @@ def test_slice_states_in_order():
     assert derive(comments=claimed)["state"] == "claimed"
     st = derive(comments=claimed, the_pr=pr(), pr_comments=[ran_on(HEAD), review_on(HEAD, "approve", 6)])
     assert st["state"] == "in-review" and st["tests_on_head"]["result"] == "pass"
-    assert st["review_on_head"]["verdict"] == "approve" and st["next"] == "/work-slice 28"
+    assert st["review_on_head"]["verdict"] == "approve" and st["merge_due"]
+    assert st["next"].startswith("uv run python tools/sdlc.py merge 50 ")    # both records: the merge is due
+    st = derive(comments=claimed, the_pr=pr(), pr_comments=[ran_on(HEAD), review_on(HEAD, "changes", 6)])
+    assert st["state"] == "in-review" and not st["merge_due"] and st["next"] == "/work-slice 28"
     merged = derive(issue=slice_issue(state="closed", reason="completed"))
     assert merged["state"] == "merged" and "state 12" in merged["next"]
     assert derive(issue=slice_issue(labels=("plan:slice", "sdlc:escalated")))["state"] == "escalated"
