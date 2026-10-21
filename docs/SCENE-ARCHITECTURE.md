@@ -142,7 +142,7 @@ and nothing else.
 Watched venues come from `venues.py` (defaults plus the user's
 `~/.config/twiddle/scene.toml`). Addresses, websites and descriptions are
 hand-kept in `venue_info.py`. The build adds only Wikipedia's summary for the
-~19 venues that have an article (`en.wikipedia.org/api/rest_v1/page/summary`,
+venues that have an article (`en.wikipedia.org/api/rest_v1/page/summary`,
 cached 30 days).
 
 ### 3.3 Bands: identity, genre (and, in the app, song lists)

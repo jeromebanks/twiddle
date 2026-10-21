@@ -1,7 +1,7 @@
 # scene — who's playing locally, and what do they sound like?
 
 A terminal app for deciding whether a show is worth going to. It lists
-upcoming shows at your venues (by default about forty East Bay and SF
+upcoming shows at your venues (by default East Bay and SF
 rooms, from Thee Stork Club and 924 Gilman to Yoshi's, the Fox and the
 Fillmore; see *Your venues*), tells you who each band is, and plays
 their music from Spotify: out of this Mac's own speakers, on your phone, or
@@ -617,7 +617,7 @@ carried it before). They show up whenever The List lists them.
 ### Venue details
 
 Every default venue has an address, a website and a line about what it is
-(`venue_info.py`); 19 also have a Wikipedia article, whose summary is
+(`venue_info.py`); those with a Wikipedia article also get its summary,
 fetched by the build and stored in the dataset (cached 30 days), so
 opening the venue (`i`, or `shows venue <name>`) works offline. The card under the venue list shows the street.
 
@@ -718,7 +718,7 @@ The Stork Club, Gilman and Ivy Room are on The List already; their own pages add
 - **See Tickets venues** share one parser; the Stork Club's quirks below
   are the plugin's. GAMH lists festival passes as events ("4-Day Passes");
   those are dropped.
-- **TicketWeb venues.** Seven sites, one plugin, four themes: the date alone
+- **TicketWeb venues.** Every site in `VENUES`, one plugin, four themes: the date alone
   is written "Sat 9.26", "Sat, Sep 26", "September 28 Mon" or "September 29,
   2026", so fields are found by class, never by position. The image is the
   promoter's upload -- a tour admat as often as a press photo -- and is

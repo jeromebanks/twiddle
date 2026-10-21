@@ -559,7 +559,7 @@ uv run twiddle scene list --venue stork    # plain text, read-only
 ```
 
 A terminal app that lists upcoming shows at your venues (from The List, plus
-21 venues' own pages, most with flyers),
+the venues' own pages, most with flyers),
 says who each band is (MusicBrainz, Wikipedia, Discogs, Bandcamp, Spotify),
 and plays them on any Spotify device: this Mac's own speakers (no Spotify
 app needed), the Roams' relay, or a phone. Every
