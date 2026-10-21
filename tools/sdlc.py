@@ -3046,7 +3046,7 @@ def worktree_changes(wt: Path, base: str) -> list[dict[str, Any]]:
     with tempfile.TemporaryDirectory() as tmp:
         env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
         if real.is_file():
-            shutil.copyfile(real, env["GIT_INDEX_FILE"])
+            shutil.copy2(real, env["GIT_INDEX_FILE"])   # its mtime too: git's racy-entry check reads it
         else:
             git(["read-tree", "HEAD"], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
         git(["add", "-A"], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
@@ -3801,7 +3801,7 @@ def escalate_to_full(n: int, reason: str | None, trigger: str, config: dict[str,
         print(f"DRY RUN #{n}: {st['state']} -> approved, out of the quick lane")
         print(f"labels: add {PREFIX}approved, remove {stale}")
         print("----- comment -----\n" + record if record else f"the lane record is already posted ({st['to_full']['url']})")
-        print(f"then: commit-prd {n}")
+        print(f"then: readdress open `lane={QUICK}` {DEBT_LABEL} filed against #{n} to its cleanup pass; commit-prd {n}")
         return 0
     if record:
         post_comment(n, record, config)

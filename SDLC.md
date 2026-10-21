@@ -218,7 +218,8 @@ on its head.** The full lane is unchanged for everything else.
    ordinary revert PR.
 6. **Escalation.** A change that outgrows the lane goes to the full lane **with its approved
    brief**, no new PRD: `escalate-to-full N` posts a `lane=full` record, returns the issue to
-   `sdlc:approved` (without `lane:quick`) and runs `commit-prd N`, which commits the brief to
+   `sdlc:approved` (without `lane:quick`), readdresses open debt filed against N while it was quick
+   to N's cleanup pass, and runs `commit-prd N`, which commits the brief to
    `docs/prd/N-*.md` through a docs-only PR and `merge-prd`, since planning reads the PRD there.
    Until the file is merged `state` offers `commit_prd`; `commit-prd N` is safe to rerun. Then
    `/plan-issue N`. The tool runs `escalate-to-full` itself when `pr-review` records one Codex round

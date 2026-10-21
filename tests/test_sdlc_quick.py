@@ -2155,7 +2155,7 @@ def test_escalate_to_full_dry_run_posts_nothing(monkeypatch, capsys):
     assert sdlc.main(["escalate-to-full", "12", "--reason", "bigger", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert fake.posted == [] and fake.calls == [] and fake.committed == []
-    assert "kind=lane lane=full trigger=manual" in out and "then: commit-prd 12" in out
+    assert "kind=lane lane=full trigger=manual" in out and "to its cleanup pass; commit-prd 12" in out
     assert "remove ['sdlc:in-progress', 'lane:quick']" in out
 
 
