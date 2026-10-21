@@ -27,7 +27,7 @@ shows                                 # open the app
 1. **Pick a show.** The middle pane lists the next 30 days at your venues.
    Move with `j`/`k` or the arrow keys. `t` changes how far ahead it looks
    (All upcoming reaches about five months). `a` switches to every venue on
-   The List (~150). Both choices are remembered.
+   The List. Both choices are remembered.
 2. **Press `enter`** to jump into the lineup. Each band carries a badge:
    **✓** means this is confirmed to be the right Spotify artist; for the
    others, see [the badges](#the-badges).
@@ -338,7 +338,7 @@ chosen after measuring the alternatives (2026-09-22):
 - Stork Club's own domain is parked, and Stay Gold Deli's redirects to a
   running club.
 - Ivy Room's calendar is a VenuePilot widget, and Eli's site is on Wix.
-- The List covers all four venues, and about 150 others, in plain HTML.
+- The List covers all four venues, and many others, in plain HTML.
 
 Caveats:
 - It can lag the venues.
