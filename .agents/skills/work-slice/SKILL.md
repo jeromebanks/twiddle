@@ -380,7 +380,7 @@ failure from `<SCRATCH>/codex.err` verbatim and the PR number, and stop. Don't e
 don't merge: a person decides between waiting for Codex and `escalate-to-full N`.
 
 **9. Merge.** `uv run python tools/sdlc.py quick-gate PR` (read-only) prints every reason the PR
-may not merge yet, or `ok`; `merge PR --dry-run` shows the squash. Then:
+may not merge yet, or `ok`; `merge PR --dry-run`, from `<PRIMARY>` like `merge` itself, shows the squash. Then:
 
 ```bash
 git -C <PRIMARY> pull --ff-only

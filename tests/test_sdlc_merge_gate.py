@@ -266,3 +266,32 @@ def test_state_of_a_quick_issue_still_in_review_is_built(monkeypatch, capsys):
     stub_quick_gate(monkeypatch, [])
     out = quick_state(monkeypatch, capsys, quick_in_review([RECORDS[0]]))   # tests, no review yet
     assert "next: /work-slice 12 --quick" in out
+
+
+def test_the_gate_s_branch_is_main_whatever_the_running_config_says(primary, monkeypatch):
+    """A branch's own config can't point the check at a branch holding its loosened gate code."""
+    wt = worktree(primary, monkeypatch)
+    loosened = REAL["tools/sdlc.py"] + b"# loosened\n"
+    (wt / "tools/sdlc.py").write_bytes(loosened)
+    _git("commit", "-q", "-am", "loosen", cwd=wt)
+    _git("push", "-q", "origin", "slice/9", cwd=wt)
+    assert "tools/sdlc.py in" in sdlc.gate_code_errors({**CONFIG, "default_branch": "slice/9"}, 50)[0]
+
+
+def test_a_failed_gate_read_is_a_refusal_not_a_crash(monkeypatch, capsys):
+    b = slice_bundle(pr_comments=[ran_on(HEAD), review_on(HEAD, "approve", 6)])
+    monkeypatch.setattr(sdlc, "slice_bundle", lambda n, config: b)
+    monkeypatch.setattr(sdlc, "slice_merge_errors", lambda *a: (_ for _ in ()).throw(sdlc.SdlcError("gh: HTTP 502")))
+    assert sdlc.main(["slice-status", "28"]) == 0
+    assert "gate still refuses: could not read the gate: gh: HTTP 502)" in capsys.readouterr().out
+
+
+def test_state_of_a_quick_issue_survives_failed_reads(monkeypatch, capsys):
+    monkeypatch.setattr(sdlc, "quick_gate_bundle", lambda n, config: (_ for _ in ()).throw(sdlc.SdlcError("HTTP 502")))
+    out = quick_state(monkeypatch, capsys, quick_in_review())
+    assert "gate still refuses: could not read the gate: HTTP 502)" in out
+    monkeypatch.setattr(sdlc, "find_slice_pr", lambda n, config: (_ for _ in ()).throw(sdlc.SdlcError("HTTP 502")))
+    args = argparse.Namespace(number=12, json=False, from_file=None)
+    assert sdlc.command_state(args, CONFIG) == 0
+    cap = capsys.readouterr()
+    assert "next: /work-slice 12 --quick" in cap.out and "could not read #12's PR" in cap.err

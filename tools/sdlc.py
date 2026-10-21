@@ -1133,9 +1133,15 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
             errs = quick_claim_errors(st["number"], approved_brief(st) or "", False, config, offline=True)
         if errs:
             nxt = f"/triage-issue {st['number']}: " + "; ".join(errs)
-        elif bundle is not None and not offline:   # its PR may be due to merge: read its records, then the gate
-            pr = find_slice_pr(st["number"], config)
-            b = {**bundle, "pr": pr, "pr_comments": fetch_pr(pr["number"], config)[1] if pr else []}
+        elif bundle is not None and not offline and st["state"] == "in-progress":
+            # its PR may be due to merge: read its records, then the gate. A failed read leaves `next` as it was
+            try:
+                pr = find_slice_pr(st["number"], config)
+                b = {**bundle, "pr": pr, "pr_comments": fetch_pr(pr["number"], config)[1] if pr else []}
+            except SdlcError as exc:
+                print(f"could not read #{st['number']}'s PR ({exc}): `next` doesn't say whether it may merge",
+                      file=sys.stderr)
+                pr = None
             if pr and derive_quick(b, st, config)["merge_due"]:
                 nxt = merge_next(pr["number"], merge_due_gate(b, {"pr": pr["number"]}, True, config))
     return {**st, "progress": progress, "next": nxt}
@@ -2943,7 +2949,15 @@ def quick_gate_errors(b: dict[str, Any], config: dict[str, Any]) -> list[str]:
 
 def merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: dict[str, Any]) -> list[str]:
     """The gate's refusals of a PR whose records say it may merge, read online and read-only: the quick gate's
-    for a quick change, the slice gate's (with its milestone hold) for a slice."""
+    for a quick change, the slice gate's (with its milestone hold) for a slice. A failed read is one refusal,
+    never an exception: `state` and `next` must still answer."""
+    try:
+        return _merge_due_gate(b, st, quick, config)
+    except SdlcError as exc:
+        return [f"could not read the gate: {exc}"]
+
+
+def _merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: dict[str, Any]) -> list[str]:
     if quick:
         return quick_gate_errors(quick_gate_bundle(st["pr"], config), config)
     if not st.get("epic"):
@@ -3665,6 +3679,9 @@ def no_epic_error(pr: dict[str, Any], refs: list[int], slice_issue: dict[str, An
 GATE_CODE = {"tools/sdlc.py": Path(__file__).resolve(),           # repo path -> the file this process runs
              "tools/sdlc_quick.py": Path(sdlc_quick.__file__).resolve()}
 GATE_FETCH_SECONDS = 60   # how long `merge` waits for `git fetch origin main` (and each `git show`) before refusing
+# literally main, never the config's default_branch: the config is the running checkout's own, so a branch could
+# otherwise name the branch its gate code is compared with
+GATE_BRANCH = "main"
 
 
 def gate_code_drift(running: dict[str, bytes | None], on_main: dict[str, bytes | None]) -> list[str]:
@@ -3695,7 +3712,7 @@ def gate_code_errors(config: dict[str, Any], pr: Any = "PR") -> list[str]:
     origin/main, then the running GATE_CODE files against it; a failed fetch or an unreadable copy refuses."""
     if not GATE_FETCH_SECONDS > 0:
         raise SdlcError(f"GATE_FETCH_SECONDS must be positive (got {GATE_FETCH_SECONDS})")
-    main = config.get("default_branch", "main")
+    main = GATE_BRANCH
     try:
         primary: Path | None = primary_root(ROOT).resolve()
     except SdlcError:
