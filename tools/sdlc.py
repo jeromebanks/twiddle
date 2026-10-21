@@ -1116,16 +1116,23 @@ def command_bootstrap_labels(args: argparse.Namespace, config: dict[str, Any]) -
 
 
 def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
-              trusted: set[str] | None = None) -> dict[str, Any]:
-    """`state` plus the command to run next (an epic being built looks at its slices on GitHub)."""
+              trusted: set[str] | None = None, bundle: dict[str, Any] | None = None) -> dict[str, Any]:
+    """`state` plus the command to run next (an epic being built looks at its slices on GitHub). With the issue's
+    `bundle`, a quick change is checked as `claim --quick` (or `--resume`, once claimed) would check it."""
     progress = None
     if st["action"] in ("work_slices", "plan_next_milestone") and not offline:
         progress = epic_progress(st["number"], config, trusted if trusted is not None else fetch_trusted(config))
     nxt = next_command(st, progress)
-    # a quick brief whose `## Files` claim refuses is not offered to /work-slice (read offline: no git)
-    if st["action"] == "work_quick" and (errs := quick_claim_errors(st["number"], approved_brief(st) or "", False,
-                                                                     config, offline=True)):
-        nxt = f"/triage-issue {st['number']}: " + "; ".join(errs)
+    # a quick change that claim refuses is not offered to /work-slice (read offline: no git). The bundle gives
+    # claim's issue checks too (the rating, the brief's sections); without one, only the brief's `## Files`
+    if st["action"] == "work_quick":
+        if bundle is not None:
+            claim = claim_status(bundle["comments"], set(bundle["trusted"]))
+            errs = quick_view_errors(bundle["issue"], st, claim, bool(claim), config)
+        else:
+            errs = quick_claim_errors(st["number"], approved_brief(st) or "", False, config, offline=True)
+        if errs:
+            nxt = f"/triage-issue {st['number']}: " + "; ".join(errs)
     return {**st, "progress": progress, "next": nxt}
 
 
@@ -1134,7 +1141,8 @@ def command_state(args: argparse.Namespace, config: dict[str, Any]) -> int:
     st = bundle_state(bundle, config)
     if st.get("plan_kind") == "slice" and not getattr(args, "from_file", None):
         return command_slice_status(argparse.Namespace(number=st["number"], json=args.json, from_file=None), config)
-    st = with_next(st, config, offline=bool(getattr(args, "from_file", None)), trusted=set(bundle["trusted"]))
+    st = with_next(st, config, offline=bool(getattr(args, "from_file", None)), trusted=set(bundle["trusted"]),
+                   bundle=bundle)
     if args.json:
         print(json.dumps(st, indent=2))
     else:
@@ -1151,9 +1159,10 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
     for raw in sorted(issues, key=lambda i: i["number"]):
         if any(l["name"] in ("plan:slice", "plan:subtask", DEBT_LABEL) for l in raw.get("labels", [])):
             continue   # an epic's units of work, or its tech debt: reached through the epic's `next`
-        st = bundle_state(fetch_bundle(raw["number"], config, trusted), config)
+        b = fetch_bundle(raw["number"], config, trusted)
+        st = bundle_state(b, config)
         if st["turn"] == "agent":
-            out.append(with_next(st, config, trusted=trusted))
+            out.append(with_next(st, config, trusted=trusted, bundle=b))
     if args.json:
         print(json.dumps(out, indent=2))
     elif not out:
@@ -1825,6 +1834,9 @@ def plan_criteria(plan: dict[str, Any], ref: str | None = None,
     """The criteria a plan must cover. A feature needs its merged PRD; a bug's diagnosis may have none."""
     found = find_prd(plan["issue"], ref, comment_id) if isinstance(plan.get("issue"), int) else None
     criteria = parse_criteria(found[1]) if found else set()
+    if plan.get("kind") == "feature" and not criteria and found:   # merged, but its criteria aren't `1. ` lines
+        return None, [f"{found[0]} has no numbered acceptance criteria (`1. ...` under `## Acceptance criteria`), "
+                      "which a plan's slices cite by number: number them (a quick brief's `- [ ]` items are not counted)"]
     if plan.get("kind") == "feature" and not criteria:
         return None, [f"no numbered acceptance criteria found in docs/prd/{plan.get('issue')}-*.md "
                       + (f"(nor on {ref}) " if ref else "") + "(merge the approved PRD first)"]
@@ -3026,11 +3038,17 @@ def ref_changes(ref: str, base: str, root: Path) -> list[dict[str, Any]]:
 
 def worktree_changes(wt: Path, base: str) -> list[dict[str, Any]]:
     """What a worktree changes since its branch left `base`: its commits and its uncommitted and untracked files
-    (not ignored ones), read through a scratch index outside the tree, so neither its index nor its files move."""
+    (not ignored ones), read through a scratch index outside the tree, so neither its index nor its files move.
+    The scratch index starts as a copy of the worktree's own, so `add -A` reuses its stat cache and hashes only
+    what changed (from `HEAD` when it has none)."""
     since = git(["merge-base", base, "HEAD"], cwd=wt, timeout=CLAIM_GIT_SECONDS)
+    real = Path(git(["rev-parse", "--path-format=absolute", "--git-path", "index"], cwd=wt, timeout=CLAIM_GIT_SECONDS))
     with tempfile.TemporaryDirectory() as tmp:
         env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
-        git(["read-tree", "HEAD"], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
+        if real.is_file():
+            shutil.copy2(real, env["GIT_INDEX_FILE"])   # its mtime too: git's racy-entry check reads it
+        else:
+            git(["read-tree", "HEAD"], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
         git(["add", "-A"], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
         out = git(["diff", "--cached", "--numstat", "-z", "-M", since], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
     return sdlc_quick.numstat_files(out)
@@ -3269,8 +3287,9 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
                         "`codex-review --pr`")
     response = Path(args.response).read_text().strip() if args.response else ""
     rnd = len(reviews) + 1
+    budget = load_quick(config).max_change_rounds if quick else limit   # the budget `over` (below) enforces
     head = (f"**Review {rnd} — Codex on `{pr['headRefOid'][:12]}`: `{verdict}`** "
-            f"({changes_rounds(reviews) + (verdict == 'changes')}/{limit} change rounds used)")
+            f"({changes_rounds(reviews) + (verdict == 'changes')}/{budget} change rounds used)")
     body, extra = review_body(head, "Codex's review", report, response)
     comment = render_comment("pr-review", None, body, config, sha=pr["headRefOid"], verdict=verdict, round=str(rnd), **extra)
     if len(comment) > COMMENT_LIMIT:
@@ -3594,6 +3613,18 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
                            f"ship-review {n} --report {out / 'codex.md'} --response <your answers>")
 
 
+def no_epic_error(pr: dict[str, Any], refs: list[int], slice_issue: dict[str, Any] | None) -> str:
+    """The one reason `merge` can't take a PR that closes no slice of an epic (and no quick change): which issue
+    it closes, and what that issue is not."""
+    if len(refs) != 1:
+        return f"PR #{pr['number']} must close exactly one slice or quick change (`Closes #N`); it closes {refs or 'none'}"
+    if not slice_issue:
+        return f"#{refs[0]} could not be read"
+    if LEAF_LABEL not in slice_issue.get("labels", []) or slice_issue.get("state") != "open":
+        return f"#{refs[0]} is not an open plan:slice issue, nor a quick change: PR #{pr['number']} has nothing to merge into"
+    return f"#{refs[0]} is a plan:slice issue with no epic in its marker: PR #{pr['number']} has no epic branch to merge into"
+
+
 def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """The merge gate: Codex approved this head, the tests passed on it, it closes one slice. Then squash-merge."""
     repo = repo_of(config)
@@ -3606,7 +3637,9 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if slice_issue and bundle_quick({"issue": slice_issue, "comments": issue_comments, "trusted": trusted}, config):
         return merge_quick(args, config)   # onto main: no epic, no milestone hold, no review owed
     epic = slice_epic(slice_issue) if slice_issue else None
-    branch = epic_branch(epic) if epic else "epic/?"
+    if not epic:   # no slice of an epic (an escalated quick change's PR, say): no branch to compare or target
+        raise SdlcError(no_epic_error(pr, refs, slice_issue))
+    branch = epic_branch(epic)
     try:
         behind = gh_json(["api", f"repos/{repo}/compare/{branch}...{pr['headRefOid']}"]).get("behind_by")
     except SdlcError:
@@ -3614,11 +3647,8 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     mode = review_mode(complexity_of((slice_issue or {}).get("labels", [])), config)
     errs = merge_gate_errors(pr, slice_issue, tests, reviews, branch, behind, deferrals, mode)
     why = owed_why(pr, reviews, deferrals, mode)
-    if why and not epic:
-        errs.append("this slice has no epic to owe its Codex review to")
-    if epic:
-        est = bundle_state(fetch_bundle(epic, config, trusted), config)
-        errs += milestone_hold_errors(est, epic_progress(epic, config, trusted), slice_issue.get("milestone"))
+    est = bundle_state(fetch_bundle(epic, config, trusted), config)
+    errs += milestone_hold_errors(est, epic_progress(epic, config, trusted), slice_issue.get("milestone"))
     if errs:
         raise SdlcError("; ".join(errs))
     n = refs[0]
@@ -3650,13 +3680,12 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
         gh(["issue", "close", d, "--repo", repo, "--reason", "completed", "--comment",
             f"Paid down by #{n} (PR #{args.pr})."], check=False)
         print(f"#{d} (tech debt) closed")
-    if epic:
-        st = with_next(bundle_state(fetch_bundle(epic, config, trusted), config), config, trusted=trusted)
-        for m in (st.get("progress") or {}).get("milestones", []):
-            if m["done"] == m["total"] and m["key"] not in (st.get("shipped") or {}):
-                print(f"milestone {m['title']} is complete" + (": it ships to main next" if (st.get("demos") or {}).get(m["key"], {}).get("accepted")
-                                                              else ": its demo comes before any new slice"))
-        print(f"next: {st['next']}")
+    st = with_next(bundle_state(fetch_bundle(epic, config, trusted), config), config, trusted=trusted)
+    for m in (st.get("progress") or {}).get("milestones", []):
+        if m["done"] == m["total"] and m["key"] not in (st.get("shipped") or {}):
+            print(f"milestone {m['title']} is complete" + (": it ships to main next" if (st.get("demos") or {}).get(m["key"], {}).get("accepted")
+                                                          else ": its demo comes before any new slice"))
+    print(f"next: {st['next']}")
     return 0
 
 
@@ -3772,7 +3801,7 @@ def escalate_to_full(n: int, reason: str | None, trigger: str, config: dict[str,
         print(f"DRY RUN #{n}: {st['state']} -> approved, out of the quick lane")
         print(f"labels: add {PREFIX}approved, remove {stale}")
         print("----- comment -----\n" + record if record else f"the lane record is already posted ({st['to_full']['url']})")
-        print(f"then: commit-prd {n}")
+        print(f"then: readdress open `lane={QUICK}` {DEBT_LABEL} filed against #{n} to its cleanup pass; commit-prd {n}")
         return 0
     if record:
         post_comment(n, record, config)
@@ -3795,6 +3824,7 @@ def escalate_to_full(n: int, reason: str | None, trigger: str, config: dict[str,
         raise SdlcError(f"#{n}'s lane record is posted, but its labels didn't move: {exc}. "
                         f"Rerun `escalate-to-full {n}` to finish it")
     print(f"#{n}: moved to the full lane, {PREFIX}approved")
+    readdress_quick_debt(n, config, set(bundle["trusted"]))
     try:
         return commit_prd(n, config)
     except Exception as exc:
@@ -4911,6 +4941,41 @@ def command_demo_request(args: argparse.Namespace, config: dict[str, Any]) -> in
     return 0
 
 
+def debt_head(n: int, source: str, quick: bool) -> str:
+    """A debt issue's first two lines: its marker, and where it waits (a quick change's open list, or #n's cleanup)."""
+    if quick:
+        return (f"{marker('debt', None, epic=str(n), source=source, lane=QUICK)}\n"
+                f"Tech debt from quick change #{n} ({source}): not blocking. A quick change has no epic and no cleanup "
+                f"pass, so it waits in the open `{DEBT_LABEL}` list (`gh issue list --label {DEBT_LABEL}`).")
+    return (f"{marker('debt', None, epic=str(n), source=source)}\n"
+            f"Tech debt from #{n} ({source}): not blocking, budgeted into a cleanup pass after a milestone is accepted.")
+
+
+def readdress_quick_debt(n: int, config: dict[str, Any], trusted: set[str]) -> None:
+    """#n has left the quick lane, so debt filed against it while it was quick waits for its cleanup pass now:
+    rewrite each open one's marker and lead line as an epic's (`debt_head`). Best effort, and safe to rerun: a
+    failure is printed, never raised, since #n's escalation itself is done."""
+    try:
+        raw = gh_pages(f"repos/{repo_of(config)}/issues?labels={DEBT_LABEL.replace(':', '%3A')}&state=open&per_page=100")
+        for r in raw:
+            body, mk = r.get("body") or "", parse_marker(r.get("body") or "") or {}
+            if ("pull_request" in r or (r.get("user") or {}).get("login") not in trusted
+                    or mk.get("kind") != "debt" or mk.get("epic") != str(n) or mk.get("lane") != QUICK):
+                continue
+            old, new = debt_head(n, mk.get("source", "?"), True), debt_head(n, mk.get("source", "?"), False)
+            lines = body.split("\n", 2)
+            fixed = (new + body[len(old):] if body.startswith(old)
+                     else "\n".join([new.split("\n")[0], *lines[1:]]))   # a lead edited by hand: only the marker
+            with tempfile.NamedTemporaryFile("w", suffix=".md") as fh:
+                fh.write(fixed)
+                fh.flush()
+                gh(["issue", "edit", str(r["number"]), "--repo", repo_of(config), "--body-file", fh.name])
+            print(f"#{r['number']} (tech debt from #{n}) now waits for #{n}'s cleanup pass")
+    except Exception as exc:
+        print(f"warning: #{n}'s open quick-lane tech debt may still say it waits in the `{DEBT_LABEL}` list: {exc} "
+              f"(by hand: drop ` lane={QUICK}` from each one's first line, the marker)", file=sys.stderr)
+
+
 def command_file_issue(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """File something found while building or demoing an epic or a quick change as its own issue: tech debt, or
     new for triage. Debt from a quick change (by its current lane in the ledger: one escalated to the full lane is
@@ -4923,16 +4988,12 @@ def command_file_issue(args: argparse.Namespace, config: dict[str, Any]) -> int:
         raise SdlcError("--from-file reads a saved bundle, not GitHub: use it with --dry-run")
     kind = "debt" if args.debt else "finding"
     quick = args.debt and bundle_state(load_bundle(args, config), config).get("lane") == QUICK
-    extra = {"epic": str(args.number), "source": args.source, **({"lane": QUICK} if quick else {})}
-    if quick:
-        lead = (f"Tech debt from quick change #{args.number} ({args.source}): not blocking. A quick change has no epic "
-                f"and no cleanup pass, so it waits in the open `{DEBT_LABEL}` list (`gh issue list --label {DEBT_LABEL}`).")
-    elif args.debt:
-        lead = (f"Tech debt from #{args.number} ({args.source}): not blocking, budgeted into a cleanup pass after a "
-                "milestone is accepted.")
+    if args.debt:
+        head = debt_head(args.number, args.source, quick)
     else:
-        lead = f"Found while working on #{args.number} ({args.source})."
-    full = f"{marker(kind, None, **extra)}\n{lead}\n\n{body}\n"
+        head = (f"{marker(kind, None, epic=str(args.number), source=args.source)}\n"
+                f"Found while working on #{args.number} ({args.source}).")
+    full = f"{head}\n\n{body}\n"
     cmd = ["issue", "create", "--repo", repo_of(config), "--title", title]
     if args.debt:
         cmd += ["--label", DEBT_LABEL]

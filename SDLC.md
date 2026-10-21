@@ -145,8 +145,9 @@ milestone the rest stay filed for triage. Ready slices are always taken from the
 earliest milestone first, so fix slices go before later work.
 A follow-up is tech debt because of what it is, not the lane it came from, so a quick change's
 `file-issue N --debt` files work it needed to support itself too; with no epic and no cleanup
-pass, that debt waits in the open `tech-debt` list (`state` on it says so), and anything else
-goes without `--debt`, to triage.
+pass, that debt waits in the open `tech-debt` list (`state` on it says so); if the change then
+escalates to the full lane, `escalate-to-full` rewrites that debt's first lines as the new epic's,
+for its cleanup pass. Anything else goes without `--debt`, to triage.
 
 ## Rules the tooling enforces
 
@@ -217,7 +218,8 @@ on its head.** The full lane is unchanged for everything else.
    ordinary revert PR.
 6. **Escalation.** A change that outgrows the lane goes to the full lane **with its approved
    brief**, no new PRD: `escalate-to-full N` posts a `lane=full` record, returns the issue to
-   `sdlc:approved` (without `lane:quick`) and runs `commit-prd N`, which commits the brief to
+   `sdlc:approved` (without `lane:quick`), readdresses open debt filed against N while it was quick
+   to N's cleanup pass, and runs `commit-prd N`, which commits the brief to
    `docs/prd/N-*.md` through a docs-only PR and `merge-prd`, since planning reads the PRD there.
    Until the file is merged `state` offers `commit_prd`; `commit-prd N` is safe to rerun. Then
    `/plan-issue N`. The tool runs `escalate-to-full` itself when `pr-review` records one Codex round

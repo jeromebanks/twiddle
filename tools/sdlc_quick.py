@@ -182,8 +182,13 @@ def numstat_files(out: str) -> list[dict[str, Any]]:
 def resume_errors(n: int, sources: list[tuple[str, list[dict[str, Any]]]], brief: str, rules: QuickRules) -> list[str]:
     """Why the work a resumed claim carries on is no longer a quick change: each source (the local branch, its
     worktree, the pushed branch) and its changed files against main, read with the merge gate's own rules and
-    messages. A source with no changes yet is nothing to refuse."""
-    return [f"{where}: {e}" for where, files in sources if files for e in diff_errors(n, files, brief, rules)]
+    messages. A source with no changes yet is nothing to refuse. A refusal several sources share (one bad commit
+    is on the branch, in its worktree and in its index) is said once, under the first source that has it."""
+    found: dict[str, str] = {}
+    for where, files in sources:
+        for e in diff_errors(n, files, brief, rules) if files else []:
+            found.setdefault(e, where)
+    return [f"{where}: {e}" for e, where in found.items()]
 
 
 def rounds_error(n: int, rounds: int, rules: QuickRules) -> str | None:

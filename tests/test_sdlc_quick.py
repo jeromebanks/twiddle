@@ -135,7 +135,7 @@ def test_state_shows_the_lane(tmp_path, capsys):
     later = derive(["sdlc:prd-review"], approved_quick() + [agent("prd", 2, 3)])
     assert later["lane"] is None
     f = tmp_path / "b.json"
-    f.write_text(json.dumps({"issue": issue([ROUTINE, "sdlc:approved"]), "comments": approved_quick(), "trusted": [OWNER]}))
+    f.write_text(json.dumps({"issue": issue([ROUTINE, "sdlc:approved"]), "comments": ready_quick(), "trusted": [OWNER]}))
     assert sdlc.main(["state", "--from-file", str(f), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["lane"] == "quick"
     assert sdlc.main(["state", "--from-file", str(f)]) == 0
@@ -271,8 +271,9 @@ def test_ship_refuses_a_quick_issue(capsys, monkeypatch):
 
 def test_next_lists_a_quick_issue_only_while_it_needs_an_agent(monkeypatch, capsys):
     bundles = {
-        1: {"issue": issue([ROUTINE, "sdlc:approved"], number=1), "comments": approved_quick(), "trusted": [OWNER]},
-        2: {"issue": issue([ROUTINE, "sdlc:in-progress"], number=2), "comments": approved_quick(), "trusted": [OWNER]},
+        1: {"issue": issue([ROUTINE, "sdlc:approved"], number=1), "comments": ready_quick(), "trusted": [OWNER]},
+        2: {"issue": issue([ROUTINE, "sdlc:in-progress"], number=2), "comments": ready_quick() + [CLAIM],
+            "trusted": [OWNER]},
         3: {"issue": issue([ROUTINE, "sdlc:done"], number=3), "comments": approved_quick(), "trusted": [OWNER]},
         4: {"issue": issue([ROUTINE, "sdlc:prd-review"], number=4), "comments": [quick_brief()], "trusted": [OWNER]},
     }
@@ -284,6 +285,28 @@ def test_next_lists_a_quick_issue_only_while_it_needs_an_agent(monkeypatch, caps
     assert sdlc.main(["next", "--json"]) == 0
     listed = {st["number"]: st["next"] for st in json.loads(capsys.readouterr().out)}
     assert listed == {1: "/work-slice 1 --quick", 2: "/work-slice 2 --quick"}
+
+
+@pytest.mark.parametrize("case", ["sections", "rating"])
+def test_state_and_next_run_claims_issue_checks(tmp_path, capsys, monkeypatch, case):
+    """#240: an approved quick change that `claim --quick` would refuse for its brief's sections or its rating
+    is not offered to /work-slice by `state` or `next`, as `slice-status` already doesn't offer it."""
+    labels, comments = {"sections": ([ROUTINE, "sdlc:approved"], approved_quick()),     # a one-section brief
+                        "rating": (["complexity:judgment", "sdlc:approved"], ready_quick())}[case]
+    b = {"issue": issue(labels), "comments": comments, "trusted": [OWNER]}
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps(b))
+    assert sdlc.main(["state", "--from-file", str(f)]) == 0
+    out = capsys.readouterr().out
+    want = {"sections": "approved brief lacks sections", "rating": "complexity"}[case]
+    assert "next: /triage-issue 12: " in out and want in out and "/work-slice" not in out, out
+    monkeypatch.setattr(sdlc, "repo_of", lambda config: "o/r")
+    monkeypatch.setattr(sdlc, "fetch_trusted", lambda config: TRUSTED)
+    monkeypatch.setattr(sdlc, "gh_json", lambda args: [{"number": 12, "labels": []}])
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, config, trusted=None: b)
+    assert sdlc.main(["next", "--json"]) == 0
+    (listed,) = json.loads(capsys.readouterr().out)
+    assert listed["next"].startswith("/triage-issue 12: ") and want in listed["next"]
 
 
 # --- the brief is frozen once building starts ------------------------------------
@@ -693,6 +716,42 @@ def test_a_local_commit_on_a_safe_pushed_branch_is_refused(repo, monkeypatch, ca
     assert "the local branch slice/12: the diff touches a path a quick change may not (src/twiddle/play.py)" in out.err
     assert "origin/slice/12" not in out.err                             # the pushed branch alone is safe
     assert out.err.rstrip().endswith("`escalate-to-full 12`") and fake.posted == [] and fake.edits == []
+
+
+def test_a_bad_commit_in_every_source_is_refused_once(repo, monkeypatch, capsys):
+    """#229: the local branch, its worktree and the pushed branch all carry the same denied commit: one line."""
+    wt, _ = resumable(repo, monkeypatch, files_brief(SAFE))
+    commit(wt, "src/twiddle/play.py", push=True)
+    capsys.readouterr()
+    code, out = resume(capsys)
+    assert code == 1
+    assert out.err.count("may not (src/twiddle/play.py)") == 1, out.err
+    assert "the local branch slice/12: the diff touches a path a quick change may not (src/twiddle/play.py)" in out.err
+
+
+def test_resume_errors_say_a_shared_refusal_once_and_keep_the_others():
+    play, tools = {"filename": "src/twiddle/play.py", "additions": 1, "deletions": 0}, \
+        {"filename": "tools/x.py", "additions": 1, "deletions": 0}
+    brief = files_brief(SAFE)
+    errs = sdlc_quick.resume_errors(12, [("a", [play]), ("b", [play]), ("c", [tools]), ("d", [])], brief, QUICK_RULES)
+    assert [e.split(":")[0] for e in errs if "may not (src/twiddle/play.py)" in e] == ["a"]
+    assert [e.split(":")[0] for e in errs if "may not (tools/x.py)" in e] == ["c"]
+
+
+def test_the_worktree_read_starts_from_its_own_index(repo, monkeypatch, capsys):
+    """#229: the scratch index is a copy of the worktree's (git reuses its stat cache), not `read-tree HEAD`, which
+    rehashes every file. What it reads is the same: a force-added ignored file is what the next commit carries."""
+    wt, _ = resumable(repo, monkeypatch, files_brief(SAFE))
+    exclude = Path(_git("rev-parse", "--path-format=absolute", "--git-path", "info/exclude", cwd=wt))
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text("*.log\n")                                       # ignored, but not by a tracked file
+    (wt / "ignored.log").write_text("x\n")
+    _git("add", "-f", "ignored.log", cwd=wt)                            # staged anyway: the next commit carries it
+    calls, real = [], sdlc.git
+    monkeypatch.setattr(sdlc, "git", lambda args, *a, **k: calls.append(args) or real(args, *a, **k))
+    files = sdlc.worktree_changes(wt, "origin/main")
+    assert not any(c[:1] == ["read-tree"] for c in calls), calls
+    assert "ignored.log" in [f["filename"] for f in files]
 
 
 def test_a_local_only_branch_touching_a_denied_path_is_refused(repo, monkeypatch, capsys):
@@ -1673,6 +1732,8 @@ class PrdGitHub:
             files = _git("diff", "--name-only", f"main...{pr['head']}", cwd=self.origin).split()
             return {"state": pr["state"], "mergeable": "MERGEABLE", "baseRefName": "main", "headRefName": pr["head"],
                     "headRefOid": self.sha(pr["head"]), "files": [{"path": p} for p in files]}
+        if args[0] == "api" and "/issues?labels=tech-debt&state=open" in args[1]:   # an escalation's open debt: none
+            return [[]]
         pytest.fail(f"unexpected gh_json {args}")
 
     def on_main(self):
@@ -1850,6 +1911,21 @@ def test_a_feature_with_no_prd_anywhere_still_fails_and_says_where_it_looked(rep
     assert "docs/prd/12-*.md (nor on origin/main)" in capsys.readouterr().out
     bug = {**plan_for_12(), "kind": "bug"}
     assert sdlc.check_plan(bug, "origin/main") == []                   # a bug with no PRD validates as before
+
+
+def test_a_merged_brief_with_checkbox_criteria_is_asked_to_number_them(repo, monkeypatch, capsys, tmp_path):
+    """#206: a quick brief, merged to docs/prd/ verbatim, whose criteria are `- [ ]` items: it is merged, so the
+    refusal says to number them, not to merge it first."""
+    monkeypatch.setattr(sdlc, "ROOT", repo)
+    (repo / "docs" / "prd").mkdir(parents=True, exist_ok=True)
+    (repo / "docs" / "prd" / "12-add-a-station.md").write_text(
+        "# Add a station\n\n## Acceptance criteria\n- [ ] `stations` lists it.\n- [ ] it plays.\n")
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(plan_for_12()))
+    assert sdlc.main(["plan-validate", str(plan)]) == 1
+    out = capsys.readouterr().out
+    assert "docs/prd/12-add-a-station.md has no numbered acceptance criteria" in out and "number them" in out
+    assert "merge the approved PRD first" not in out
 
 
 def test_from_file_never_fetches_and_reads_only_the_working_tree(repo, monkeypatch, capsys, tmp_path):
@@ -2079,7 +2155,7 @@ def test_escalate_to_full_dry_run_posts_nothing(monkeypatch, capsys):
     assert sdlc.main(["escalate-to-full", "12", "--reason", "bigger", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert fake.posted == [] and fake.calls == [] and fake.committed == []
-    assert "kind=lane lane=full trigger=manual" in out and "then: commit-prd 12" in out
+    assert "kind=lane lane=full trigger=manual" in out and "to its cleanup pass; commit-prd 12" in out
     assert "remove ['sdlc:in-progress', 'lane:quick']" in out
 
 
@@ -2436,3 +2512,14 @@ def test_file_issue_from_a_bundle_only_dry_runs(tmp_path, capsys, monkeypatch):
     f, body = bundle_file(tmp_path, [ROUTINE, "sdlc:in-progress"], approved_quick())
     assert sdlc.main(["file-issue", "12", "--title", "t", "--body-file", body, "--debt", "--from-file", f]) == 1
     assert "use it with --dry-run" in capsys.readouterr().err
+
+
+def test_readdressing_quick_debt_never_fails_the_escalation(monkeypatch, capsys):
+    """#225: the escalation is done by the time its debt is readdressed, so a failed read only warns."""
+    def down(path):
+        raise sdlc.SdlcError("gh api failed: HTTP 502")
+    monkeypatch.setattr(sdlc, "gh_pages", down)
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("nothing is edited when nothing could be read"))
+    sdlc.readdress_quick_debt(12, {**CONFIG, "repository": "o/r"}, {OWNER})
+    err = capsys.readouterr().err
+    assert "warning: #12's open quick-lane tech debt may still say" in err and "HTTP 502" in err
