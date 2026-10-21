@@ -350,3 +350,14 @@ def test_next_reads_no_sub_issues_without_debt(monkeypatch, capsys):
     monkeypatch.setattr(sdlc, "gh", lambda args, **k: calls.append(list(args)) or fake(args, **k))
     next_listed(capsys)
     assert not any("sub_issues" in " ".join(c) or "lane%3Adebt" in " ".join(c) for c in calls)
+
+
+def test_next_with_two_open_debt_epics_names_them_and_still_runs(gh, capsys):
+    a, b = gh.debt_epic(), gh.debt_epic()
+    t1, t2 = gh.ticket(), gh.ticket()
+    gh.subs[a], gh.subs[b] = [t1], [t2]
+    gh.intake(t1)
+    gh.intake(t2)
+    listed = next_listed(capsys)
+    assert [(s["number"], s["debt_epics"]) for s in listed] == [(None, [a, b])]
+    assert "a person closes all but one" in listed[0]["next"]

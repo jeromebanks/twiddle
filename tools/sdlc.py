@@ -1217,7 +1217,12 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
             st = with_next(st, config, trusted=trusted, bundle=b)
             if st["turn"] == "agent":   # the debt epic's turn comes from its tickets, in with_next
                 out.append(st)
-    if loose := unattached_debt(issues, config, trusted):   # debt no epic holds yet: nobody has to remember
+    loose, debt_epics = unattached_debt(issues, config, trusted)
+    if len(debt_epics) > 1:
+        out.append({"number": None, "state": DEBT_LANE, "turn": "human", "debt_epics": debt_epics,
+                    "title": "more than one open debt epic: " + ", ".join(f"#{e}" for e in debt_epics),
+                    "next": "nothing for an agent: a person closes all but one, moving its sub-issues to the one kept"})
+    elif loose:   # debt no epic holds yet: nobody has to remember to run debt-epic
         out.append({"number": None, "state": DEBT_LANE, "turn": "agent", "unattached": loose,
                     "title": "open tech debt in no debt epic: " + ", ".join(f"#{d}" for d in loose),
                     "next": "`uv run python tools/sdlc.py debt-epic`"})
@@ -2950,7 +2955,8 @@ def the_debt_epic(config: dict[str, Any], trusted: set[str]) -> dict[str, Any] |
 
 
 def open_debt_tickets(config: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every open `tech-debt` issue, whoever filed it (the label is the gate: only a maintainer can apply it)."""
+    """Every open `tech-debt` issue, whoever filed it: the label is the gate (no issue template applies it, so only
+    someone with triage access can), and intake judges each one before any is built."""
     raw = gh_pages(f"repos/{repo_of(config)}/issues?labels={_q(DEBT_LABEL)}&state=open&per_page=100")
     return sorted(({"number": r["number"], "id": r["id"], "title": r.get("title", "")} for r in raw
                    if "pull_request" not in r), key=lambda t: t["number"])
@@ -2982,12 +2988,12 @@ def debt_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
     n, tickets = st["number"], progress.get("tickets") or []
     pending = [t["number"] for t in tickets if not t.get("intake")]
     if pending:
-        action, turn = "debt_intake", "agent"
+        turn, action = "agent", "debt_intake"
         nxt = (f"intake on debt epic #{n}: {len(pending)} ticket(s) without a verdict ("
                + ", ".join(f"#{t}" for t in pending) + "): judge each against the definition of debt and "
                "record the verdict on the ticket (`debt-intake T`)")
     else:
-        action, turn = "none", "none"
+        turn, action = "none", "none"
         nxt = (f"nothing: debt epic #{n}'s {len(tickets)} open ticket(s) are all through intake" if tickets
                else f"nothing: debt epic #{n} has no open tickets")
     return {"number": n, "action": action, "turn": turn, "tickets": tickets, "intake_pending": pending, "next": nxt}
@@ -3001,15 +3007,16 @@ def ticket_debt_epic(n: int, config: dict[str, Any], trusted: set[str]) -> int |
     return None
 
 
-def unattached_debt(open_issues: list[dict[str, Any]], config: dict[str, Any], trusted: set[str]) -> list[int]:
-    """Open tech-debt tickets (from an issue list `next` already read) that the open debt epic doesn't hold.
-    Reads GitHub only when there is debt to look for."""
+def unattached_debt(open_issues: list[dict[str, Any]], config: dict[str, Any], trusted: set[str]
+                    ) -> tuple[list[int], list[int]]:
+    """(open tech-debt tickets no open debt epic holds, the open debt epics): from an issue list `next` already
+    read, so GitHub is read only when there is debt. Never raises on two epics: `next` names them for a person."""
     debt = sorted(i["number"] for i in open_issues if DEBT_LABEL in [l["name"] for l in i.get("labels", [])])
     if not debt:
-        return []
-    epic = the_debt_epic(config, trusted)
-    held = {s["number"] for s in sub_issues(epic["number"], config)} if epic else set()
-    return [d for d in debt if d not in held]
+        return [], []
+    epics = [e["number"] for e in find_debt_epics(config, trusted)]
+    held = {s["number"] for e in epics for s in sub_issues(e, config)}
+    return [d for d in debt if d not in held], epics
 
 
 DEBT_EPIC_BODY = ("Tech debt: work a feature needed to support itself, filed with `file-issue --debt`. Every open "
