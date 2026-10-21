@@ -1208,16 +1208,22 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
                       "number,title,state,author,labels,createdAt"])
     trusted = fetch_trusted(config)
     out = []
-    for raw in sorted(issues, key=lambda i: i["number"]):
-        if any(l["name"] in ("plan:slice", "plan:subtask", DEBT_LABEL) for l in raw.get("labels", [])):
-            continue   # an epic's units of work, or its tech debt: reached through the epic's `next`
-        b = fetch_bundle(raw["number"], config, trusted)
+
+    def consider(n: int) -> None:
+        b = fetch_bundle(n, config, trusted)
         st = bundle_state(b, config)
         if st["turn"] == "agent":
             st = with_next(st, config, trusted=trusted, bundle=b)
             if st["turn"] == "agent":   # the debt epic's turn comes from its tickets, in with_next
                 out.append(st)
+
+    for raw in sorted(issues, key=lambda i: i["number"]):
+        if any(l["name"] in ("plan:slice", "plan:subtask", DEBT_LABEL) for l in raw.get("labels", [])):
+            continue   # an epic's units of work, or its tech debt: reached through the epic's `next`
+        consider(raw["number"])
     loose, debt_epics = unattached_debt(issues, config, trusted)
+    for e in sorted(set(debt_epics) - {i["number"] for i in issues}):   # a debt epic behind a list cut at its limit
+        consider(e)
     if len(debt_epics) > 1:
         out.append({"number": None, "state": DEBT_LANE, "turn": "human", "debt_epics": debt_epics,
                     "title": "more than one open debt epic: " + ", ".join(f"#{e}" for e in debt_epics),
@@ -3013,15 +3019,15 @@ NEXT_LIMIT = 200   # the open issues `next` lists in one read
 def unattached_debt(open_issues: list[dict[str, Any]], config: dict[str, Any], trusted: set[str]
                     ) -> tuple[list[int], list[int]]:
     """(open tech-debt tickets no open debt epic holds, the open debt epics). The issue list `next` already read
-    answers when it is complete, so GitHub is read only when there is debt; a list cut at NEXT_LIMIT may miss
-    older debt, so then every open tech-debt issue is read, all pages. Never raises on two epics: `next` names them
+    answers when it is complete, so GitHub is read only when it has debt or a debt epic; a list cut at NEXT_LIMIT
+    may miss older debt or debt epics, so then every open tech-debt issue and debt epic is read, all pages. Never raises on two epics: `next` names them
     for a person."""
-    if len(open_issues) >= NEXT_LIMIT:
+    if len(open_issues) >= NEXT_LIMIT:   # cut: the debt and the debt epics may be behind it
         debt = [t["number"] for t in open_debt_tickets(config)]
     else:
         debt = sorted(i["number"] for i in open_issues if DEBT_LABEL in [l["name"] for l in i.get("labels", [])])
-    if not debt:
-        return [], []
+        if not debt and not any(DEBT_EPIC_LABEL in [l["name"] for l in i.get("labels", [])] for i in open_issues):
+            return [], []
     epics = [e["number"] for e in find_debt_epics(config, trusted)]
     held = {s["number"] for e in epics for s in sub_issues(e, config)}
     return [d for d in debt if d not in held], epics
