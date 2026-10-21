@@ -1121,7 +1121,12 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
     progress = None
     if st["action"] in ("work_slices", "plan_next_milestone") and not offline:
         progress = epic_progress(st["number"], config, trusted if trusted is not None else fetch_trusted(config))
-    return {**st, "progress": progress, "next": next_command(st, progress)}
+    nxt = next_command(st, progress)
+    # a quick brief whose `## Files` claim refuses is not offered to /work-slice (read offline: no git)
+    if st["action"] == "work_quick" and (errs := quick_claim_errors(st["number"], approved_brief(st) or "", False,
+                                                                     config, offline=True)):
+        nxt = f"/triage-issue {st['number']}: " + "; ".join(errs)
+    return {**st, "progress": progress, "next": nxt}
 
 
 def command_state(args: argparse.Namespace, config: dict[str, Any]) -> int:
@@ -2836,15 +2841,23 @@ def bundle_quick(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | 
     return st if st and is_quick(st) else None
 
 
-def derive_quick(b: dict[str, Any], st: dict[str, Any]) -> dict[str, Any]:
+def quick_view_errors(issue: dict[str, Any], st: dict[str, Any], claim: dict[str, Any] | None, resume: bool,
+                      config: dict[str, Any]) -> list[str]:
+    """What `claim N --quick` (or `--resume`) would refuse, read from the bundle alone: its checks of the issue
+    and the brief's sections, then its `## Files` check offline (`quick_claim_errors`), which needs no git."""
+    brief = approved_brief(st)
+    errs = sdlc_quick.quick_check_errors(issue, st, brief, claim, resume)
+    return errs or quick_claim_errors(issue["number"], brief or "", resume, config, offline=True)
+
+
+def derive_quick(b: dict[str, Any], st: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     """A quick change's build state, read like a slice's (claim, PR, records on its head) with no epic or
     blockers. Its Codex review is always on the PR: it has no milestone to owe one to."""
     out = derive_slice(b["issue"], b["comments"], set(b["trusted"]), [], b.get("pr"), b.get("pr_comments") or [])
     n = out["number"]
     building = out["state"] in ("ready", "claimed", "in-review")
     # a claimed change is checked as a resume would be: a brief revised since the claim stops the build too
-    refusals = sdlc_quick.quick_check_errors(b["issue"], st, approved_brief(st), out["claim"],
-                                             resume=bool(out["claim"])) if building else []
+    refusals = quick_view_errors(b["issue"], st, out["claim"], bool(out["claim"]), config) if building else []
     if refusals:     # not claimable, or no longer buildable: what triage says comes next
         out["state"] = "not-ready" if out["state"] == "ready" else out["state"]
         out["next"] = next_command(st)
@@ -2875,13 +2888,23 @@ def quick_gate_bundle(pr_number: int, config: dict[str, Any]) -> dict[str, Any]:
         behind = None
     refs = closes_refs(pr.get("body", ""))
     issue = fetch_bundle(refs[0], config, trusted) if len(refs) == 1 else None
+    # the rules are main's, never this checkout's: a PR's own worktree may have loosened its config
+    main_config = gh_json(["api", "-H", "Accept: application/vnd.github.raw+json",
+                           f"repos/{repo}/contents/{DEFAULT_CONFIG.relative_to(ROOT).as_posix()}?ref={base}"])
     return {"pr": pr, "pr_comments": pr_comments, "trusted": sorted(trusted), "files": files, "behind_by": behind,
-            "issue": issue and issue["issue"], "comments": issue["comments"] if issue else []}
+            "issue": issue and issue["issue"], "comments": issue["comments"] if issue else [],
+            "main_quick": main_config.get("quick") if isinstance(main_config, dict) else None}
+
+
+def gate_rules(b: dict[str, Any], config: dict[str, Any]) -> sdlc_quick.QuickRules:
+    """The quick rules a gate bundle is judged by: main's `quick` section, read with the bundle. Only an offline
+    bundle without one (`--from-file`, read-only) falls back to this checkout's config."""
+    return load_quick({"quick": b["main_quick"]} if "main_quick" in b else config)
 
 
 def quick_gate_errors(b: dict[str, Any], config: dict[str, Any]) -> list[str]:
     """quick_merge_gate_errors over a quick-gate bundle (`quick_gate_bundle`, or `--from-file`)."""
-    quick = load_quick(config)
+    quick = gate_rules(b, config)
     tests, reviews = pr_records(b["pr_comments"], set(b["trusted"]))   # deferrals are never read
     st = quick_issue_state(b, config) if b.get("issue") else None
     return quick_merge_gate_errors(b["pr"], st, tests, reviews, b.get("behind_by"), b.get("files"),
@@ -2902,7 +2925,7 @@ def command_quick_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
 def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> int:
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(args.number, config)
     quick = bundle_quick(b, config)
-    st = derive_quick(b, quick) if quick else bundle_slice(b)
+    st = derive_quick(b, quick, config) if quick else bundle_slice(b)
     st["model"] = model_for(st["complexity"], config)
     if not quick:
         st["review"] = review_mode(st["complexity"], config)
@@ -2956,7 +2979,7 @@ def command_slice_check(args: argparse.Namespace, config: dict[str, Any]) -> int
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(args.number, config)
     claim = claim_status(b["comments"], set(b["trusted"]))
     if quick := bundle_quick(b, config):   # built from its approved brief, onto main: no epic to pause it
-        errs = sdlc_quick.quick_check_errors(b["issue"], quick, approved_brief(quick), claim, args.resume)
+        errs = quick_view_errors(b["issue"], quick, claim, args.resume, config)
     else:
         errs = slice_check_errors(b["issue"], b["blockers"], claim, args.resume)
         errs += epic_pause_errors(b, config, args.resume)
@@ -3645,7 +3668,7 @@ def merge_quick(args: argparse.Namespace, config: dict[str, Any]) -> int:
     b = quick_gate_bundle(args.pr, config)
     if errs := quick_gate_errors(b, config):
         st = quick_issue_state(b, config) if b.get("issue") else None
-        brief, rules = (approved_brief(st) or "") if st else "", load_quick(config)
+        brief, rules = (approved_brief(st) or "") if st else "", gate_rules(b, config)
         if args.dry_run or not st or not is_quick(st) or not sdlc_quick.diff_rule_broken(b.get("files"), brief, rules):
             raise SdlcError("; ".join(errs))
         # the diff has outgrown the lane (a denied path, the size cap, a file outside the brief): no fix within
@@ -4089,12 +4112,13 @@ def epic_head(n: int, config: dict[str, Any]) -> str:
 def command_epic_branch(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Create epic/N from main if it doesn't exist, or adopt the one that does. Idempotent."""
     n = args.number
+    bundle = fetch_bundle(n, config)
+    refuse_quick(bundle_state(bundle, config), "epic branch")   # before anything is pushed
     sha, created = ensure_epic_branch(n, config, dry_run=args.dry_run)
     word = ("would create" if args.dry_run else "created") if created else "adopted"
     print(f"#{n}: {word} {epic_branch(n)} at {sha[:12]}")
     if args.dry_run:
         return 0
-    bundle = fetch_bundle(n, config)
     if not any((parse_marker(c["body"]) or {}).get("kind") == "epic-branch" for c in bundle["comments"]
                if c["author"] in bundle["trusted"]):
         body = (f"Slices of this issue land on `{epic_branch(n)}` (from `{sha[:12]}`), not on main. "
@@ -4111,6 +4135,7 @@ def escalate_epic(n: int, reason: str, config: dict[str, Any]) -> None:
 
 def command_sync(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Merge main into epic/N, run the suite on the result, record it on the epic, push on a pass."""
+    refuse_quick(bundle_state(fetch_bundle(args.number, config), config), "epic branch")
     n, root = args.number, primary_root()
     if not remote_has(epic_branch(n), root):
         raise SdlcError(f"origin has no {epic_branch(n)}: `epic-branch {n}`")
