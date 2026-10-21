@@ -18,8 +18,8 @@ rest of the cast, eventually) in [CHARACTERS.md](CHARACTERS.md).
 
 | | |
 |---|---|
-| **`dial`** | Every station's now-playing on one screen: 85 stations, from college radio (KALX, KEXP, WFMU) to SomaFM, NTS, FIP and Japanese city pop. You get album covers, who the artist is, and what the station just played. Press `enter` to listen and `t` to filter by genre. |
-| **`scene`** | Upcoming shows at about forty Bay Area venues, from 924 Gilman to the Fillmore. For each band it works out who they are (with a badge that says how sure it is), then plays their Bandcamp tracks or Spotify so you can decide whether to go. |
+| **`dial`** | Every station's now-playing on one screen: every station in the catalog, from college radio (KALX, KEXP, WFMU) to SomaFM, NTS, FIP and Japanese city pop. You get album covers, who the artist is, and what the station just played. Press `enter` to listen and `t` to filter by genre. |
+| **`scene`** | Upcoming shows at Bay Area venues, from 924 Gilman to the Fillmore. For each band it works out who they are (with a badge that says how sure it is), then plays their Bandcamp tracks or Spotify so you can decide whether to go. |
 | **`v`** | In either app, turns the whole window into a music visualizer: spectrum, oscilloscope, Doom fire, a starfield, Julia-set fractals, lasers, dancing cartoon pets, and Twiddle himself. |
 | **Sonos** | Control your speakers by room name (`twiddle vol ++3`, `twiddle tune kexp --room kitchen`), and play Spotify through a local relay instead of Sonos's cloud. If your speakers drop out, there are diagnostics that measure whether it's the speaker or the setup. |
 
@@ -78,10 +78,10 @@ and troubleshooting.
 
 ## Contributing
 
-`uv run pytest` runs about 1220 tests in a minute. None of them touch the
-network, a speaker or Spotify. Adding a radio station, a venue or a visualizer
-each has a written recipe in `.claude/skills/`. Claude Code picks those up
-automatically, and a person can simply read them.
+`uv run pytest` runs the whole suite (it is big: time a run before you set a
+timeout). None of it touches the network, a speaker or Spotify. Adding a radio
+station, a venue or a visualizer each has a written recipe in `.claude/skills/`.
+Claude Code picks those up automatically, and a person can simply read them.
 
 ## License
 

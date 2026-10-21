@@ -117,7 +117,7 @@ order and merges with `model.dedupe`.
 | `gilman` | app.showslinger.com | 924 Gilman: flyers, tickets |
 | `grayarea` | grayarea.org/visit/events | Gray Area |
 | `makeoutroom` | makeoutroom.com + CalendarWiz | Make-Out Room: lineups, flyers |
-| `kalx` | kalx.berkeley.edu weekly "Events" post, via its WordPress REST API | ~75 rooms incl. Sweetwater Music Hall and Hillside Club; no times, prices or links, so it is registered last and only fills gaps |
+| `kalx` | kalx.berkeley.edu weekly "Events" post, via its WordPress REST API | many rooms incl. Sweetwater Music Hall and Hillside Club; no times, prices or links, so it is registered last and only fills gaps |
 | `storkclub`, `gamh`, `chapel`, `hotelutah`, `rickshaw` | each venue's WordPress calendar (See Tickets) | flyers, ticket links |
 | `independent`, `brickandmortar`, `neckofthewoods`, `bimbos`, `augusthall`, `crybaby`, `cafedunord` | each venue's site (TicketWeb) | flyers, ticket links |
 | `ivyroom`, `ashkenaz` | venuepilot.co GraphQL | flyers, tickets, prices |
@@ -142,7 +142,7 @@ and nothing else.
 Watched venues come from `venues.py` (defaults plus the user's
 `~/.config/twiddle/scene.toml`). Addresses, websites and descriptions are
 hand-kept in `venue_info.py`. The build adds only Wikipedia's summary for the
-~19 venues that have an article (`en.wikipedia.org/api/rest_v1/page/summary`,
+venues that have an article (`en.wikipedia.org/api/rest_v1/page/summary`,
 cached 30 days).
 
 ### 3.3 Bands: identity, genre (and, in the app, song lists)

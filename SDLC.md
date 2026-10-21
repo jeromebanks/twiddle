@@ -424,7 +424,7 @@ each a different issue or slice: for example `/work-slice 35` in one terminal an
   started meanwhile refuses ("wait for it, then rerun") and doesn't queue.
 - **Only one session touches a speaker at a time.** Slices never touch one (tests are offline).
   A milestone demo writes to the real household with the user present, so run one demo at a time.
-- **The machine is shared.** Each full suite takes about two minutes, and parallel runs slow
+- **The machine is shared.** A full suite takes minutes, and parallel runs slow
   each other down. Give the Bash call `timeout: 600000`, as the skills say.
 
 ## Milestone demos (`milestone-demo`)

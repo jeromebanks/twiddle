@@ -1,7 +1,7 @@
 # scene — who's playing locally, and what do they sound like?
 
 A terminal app for deciding whether a show is worth going to. It lists
-upcoming shows at your venues (by default about forty East Bay and SF
+upcoming shows at your venues (by default East Bay and SF
 rooms, from Thee Stork Club and 924 Gilman to Yoshi's, the Fox and the
 Fillmore; see *Your venues*), tells you who each band is, and plays
 their music from Spotify: out of this Mac's own speakers, on your phone, or
@@ -27,7 +27,7 @@ shows                                 # open the app
 1. **Pick a show.** The middle pane lists the next 30 days at your venues.
    Move with `j`/`k` or the arrow keys. `t` changes how far ahead it looks
    (All upcoming reaches about five months). `a` switches to every venue on
-   The List (~150). Both choices are remembered.
+   The List. Both choices are remembered.
 2. **Press `enter`** to jump into the lineup. Each band carries a badge:
    **✓** means this is confirmed to be the right Spotify artist; for the
    others, see [the badges](#the-badges).
@@ -94,7 +94,7 @@ shows --dry-run               # everything works, but nothing plays
 | `i` | the venue (highlighted in the venue list, else the show's): address, website, what it is, Wikipedia's paragraph; `w` opens the site, `g` a map |
 | `t` | Next 30 days → All upcoming (~5 months) → Tonight → Next 7 days → Next 2 weeks (remembered) |
 | `/` | filter by band, venue or genre (`metal`, `reggae`; `esc` clears) |
-| `a` | your venues only ↔ every venue on The List (~150 rooms; remembered) |
+| `a` | your venues only ↔ every venue on The List (remembered) |
 | `v` | visualize: the whole window becomes the music (GUIDE.md → Visualizer); `←/→` picture, `c` colours, `,`/`.` delay, `v` back |
 | `r` | run `scene build` and reload (a scheduled build appears by itself within ~20s) |
 | `ctrl+t` | next colour theme (remembered) |
@@ -338,7 +338,7 @@ chosen after measuring the alternatives (2026-09-22):
 - Stork Club's own domain is parked, and Stay Gold Deli's redirects to a
   running club.
 - Ivy Room's calendar is a VenuePilot widget, and Eli's site is on Wix.
-- The List covers all four venues, and about 150 others, in plain HTML.
+- The List covers all four venues, and many others, in plain HTML.
 
 Caveats:
 - It can lag the venues.
@@ -617,7 +617,7 @@ carried it before). They show up whenever The List lists them.
 ### Venue details
 
 Every default venue has an address, a website and a line about what it is
-(`venue_info.py`); 19 also have a Wikipedia article, whose summary is
+(`venue_info.py`); those with a Wikipedia article also get its summary,
 fetched by the build and stored in the dataset (cached 30 days), so
 opening the venue (`i`, or `shows venue <name>`) works offline. The card under the venue list shows the street.
 
@@ -670,7 +670,7 @@ A `[[venue]]` list replaces the defaults, so list every venue you want.
 
 | Source | Covers | How |
 |---|---|---|
-| `thelist` | ~150 rooms, not Yoshi's | foopee.com's by-club pages |
+| `thelist` | most Bay Area rooms, not Yoshi's | foopee.com's by-club pages |
 | `yoshis` | Yoshi's, Oakland | yoshis.com/events/calendar, plus each multi-night run's detail page |
 | `storkclub`, `gamh`, `chapel`, `hotelutah`, `rickshaw` | Stork Club, Great American, Chapel, Hotel Utah, Rickshaw Stop | See Tickets' WordPress plugin: each calendar's list view, `?list1page=1..N` (`sources/seetickets.py`, one line per venue) |
 | `independent`, `brickandmortar`, `neckofthewoods`, `bimbos`, `augusthall`, `crybaby`, `cafedunord` | those rooms, plus the Swedish American Hall (on Cafe du Nord's page) | TicketWeb's WordPress plugin, one page each (`sources/ticketweb.py`) |
@@ -680,14 +680,14 @@ A `[[venue]]` list replaces the defaults, so list every venue you want.
 | `deluxe` | The DeLuxe, S.F. | its Google Calendar as rendered by WordPress "Simple Calendar" (`sources/simplecal.py`); no flyers |
 | `grayarea` | Gray Area, S.F. | its events page; courses, workshops, talks and exhibitions dropped |
 | `makeoutroom` | Make-Out Room, S.F. | CalendarWiz (months ahead, needs a cookie session) plus flyers from its blog (next night or two) |
-| `kalx` | ~75 rooms, East Bay and S.F. (incl. Sweetwater Music Hall and Hillside Club, on no other source) | KALX 90.7's weekly "Events" post via the site's WordPress REST API (`sources/kalx.py`); see below. Last in the registry |
+| `kalx` | many rooms, East Bay and S.F. (incl. Sweetwater Music Hall and Hillside Club, on no other source) | KALX 90.7's weekly "Events" post via the site's WordPress REST API (`sources/kalx.py`); see below. Last in the registry |
 
 **KALX** (kalx.berkeley.edu, measured 2026-09-29) posts one page a week,
 "Events: September 28 – October 4, 2026": a day heading with the year, a
 region (East Bay / San Francisco), then a line per room, `Venue: act, act`.
 The site's REST API (`/wp-json/wp/v2/event`) lists the recent posts with their
 HTML in one request, so nothing guesses next week's URL. It is the widest
-calendar here (about 75 rooms across two weeks) and the only one carrying
+calendar here (many rooms across two weeks) and the only one carrying
 Sweetwater Music Hall and the Hillside Club, but it has **no times, prices,
 flyers or links**, and only the current week or two. So it is registered last:
 where another source knows a night its facts win and KALX only confirms it.
@@ -718,7 +718,7 @@ The Stork Club, Gilman and Ivy Room are on The List already; their own pages add
 - **See Tickets venues** share one parser; the Stork Club's quirks below
   are the plugin's. GAMH lists festival passes as events ("4-Day Passes");
   those are dropped.
-- **TicketWeb venues.** Seven sites, one plugin, four themes: the date alone
+- **TicketWeb venues.** Every site in `VENUES`, one plugin, four themes: the date alone
   is written "Sat 9.26", "Sat, Sep 26", "September 28 Mon" or "September 29,
   2026", so fields are found by class, never by position. The image is the
   promoter's upload -- a tour admat as often as a press photo -- and is
@@ -848,7 +848,7 @@ src/twiddle/scenedata/   ONE PRODUCER -- the bespoke part; never imports scene
     simplecal.py     WordPress Simple Calendar pages (The DeLuxe)
     grayarea.py      Gray Area's events page
     makeoutroom.py   Make-Out Room: CalendarWiz + blog flyers
-    kalx.py          KALX 90.7's weekly events post: ~75 rooms, no times/prices/links
+    kalx.py          KALX 90.7's weekly events post: many rooms, no times/prices/links
   builder.py       `scene build`: collect (fetch_all), enrich, publish; the only writer
   bands.py         WHO A BAND IS
                      Enricher protocol; LookupEnricher (MusicBrainz → Wikipedia/Discogs/Bandcamp),
