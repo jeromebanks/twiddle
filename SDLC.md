@@ -145,8 +145,9 @@ milestone the rest stay filed for triage. Ready slices are always taken from the
 earliest milestone first, so fix slices go before later work.
 A follow-up is tech debt because of what it is, not the lane it came from, so a quick change's
 `file-issue N --debt` files work it needed to support itself too; with no epic and no cleanup
-pass, that debt waits in the open `tech-debt` list (`state` on it says so), and anything else
-goes without `--debt`, to triage.
+pass, that debt waits in the open `tech-debt` list (`state` on it says so); if the change then
+escalates to the full lane, `escalate-to-full` rewrites that debt's first lines as the new epic's,
+for its cleanup pass. Anything else goes without `--debt`, to triage.
 
 ## Rules the tooling enforces
 

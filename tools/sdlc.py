@@ -3815,6 +3815,7 @@ def escalate_to_full(n: int, reason: str | None, trigger: str, config: dict[str,
         raise SdlcError(f"#{n}'s lane record is posted, but its labels didn't move: {exc}. "
                         f"Rerun `escalate-to-full {n}` to finish it")
     print(f"#{n}: moved to the full lane, {PREFIX}approved")
+    readdress_quick_debt(n, config, set(bundle["trusted"]))
     try:
         return commit_prd(n, config)
     except Exception as exc:
@@ -4931,6 +4932,41 @@ def command_demo_request(args: argparse.Namespace, config: dict[str, Any]) -> in
     return 0
 
 
+def debt_head(n: int, source: str, quick: bool) -> str:
+    """A debt issue's first two lines: its marker, and where it waits (a quick change's open list, or #n's cleanup)."""
+    if quick:
+        return (f"{marker('debt', None, epic=str(n), source=source, lane=QUICK)}\n"
+                f"Tech debt from quick change #{n} ({source}): not blocking. A quick change has no epic and no cleanup "
+                f"pass, so it waits in the open `{DEBT_LABEL}` list (`gh issue list --label {DEBT_LABEL}`).")
+    return (f"{marker('debt', None, epic=str(n), source=source)}\n"
+            f"Tech debt from #{n} ({source}): not blocking, budgeted into a cleanup pass after a milestone is accepted.")
+
+
+def readdress_quick_debt(n: int, config: dict[str, Any], trusted: set[str]) -> None:
+    """#n has left the quick lane, so debt filed against it while it was quick waits for its cleanup pass now:
+    rewrite each open one's marker and lead line as an epic's (`debt_head`). Best effort, and safe to rerun: a
+    failure is printed, never raised, since #n's escalation itself is done."""
+    try:
+        raw = gh_pages(f"repos/{repo_of(config)}/issues?labels={DEBT_LABEL.replace(':', '%3A')}&state=open&per_page=100")
+        for r in raw:
+            body, mk = r.get("body") or "", parse_marker(r.get("body") or "") or {}
+            if ("pull_request" in r or (r.get("user") or {}).get("login") not in trusted
+                    or mk.get("kind") != "debt" or mk.get("epic") != str(n) or mk.get("lane") != QUICK):
+                continue
+            old, new = debt_head(n, mk.get("source", "?"), True), debt_head(n, mk.get("source", "?"), False)
+            lines = body.split("\n", 2)
+            fixed = (new + body[len(old):] if body.startswith(old)
+                     else "\n".join([new.split("\n")[0], *lines[1:]]))   # a lead edited by hand: only the marker
+            with tempfile.NamedTemporaryFile("w", suffix=".md") as fh:
+                fh.write(fixed)
+                fh.flush()
+                gh(["issue", "edit", str(r["number"]), "--repo", repo_of(config), "--body-file", fh.name])
+            print(f"#{r['number']} (tech debt from #{n}) now waits for #{n}'s cleanup pass")
+    except Exception as exc:
+        print(f"warning: #{n}'s open quick-lane tech debt may still say it waits in the `{DEBT_LABEL}` list: {exc} "
+              f"(by hand: drop ` lane={QUICK}` from each one's first line, the marker)", file=sys.stderr)
+
+
 def command_file_issue(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """File something found while building or demoing an epic or a quick change as its own issue: tech debt, or
     new for triage. Debt from a quick change (by its current lane in the ledger: one escalated to the full lane is
@@ -4943,16 +4979,12 @@ def command_file_issue(args: argparse.Namespace, config: dict[str, Any]) -> int:
         raise SdlcError("--from-file reads a saved bundle, not GitHub: use it with --dry-run")
     kind = "debt" if args.debt else "finding"
     quick = args.debt and bundle_state(load_bundle(args, config), config).get("lane") == QUICK
-    extra = {"epic": str(args.number), "source": args.source, **({"lane": QUICK} if quick else {})}
-    if quick:
-        lead = (f"Tech debt from quick change #{args.number} ({args.source}): not blocking. A quick change has no epic "
-                f"and no cleanup pass, so it waits in the open `{DEBT_LABEL}` list (`gh issue list --label {DEBT_LABEL}`).")
-    elif args.debt:
-        lead = (f"Tech debt from #{args.number} ({args.source}): not blocking, budgeted into a cleanup pass after a "
-                "milestone is accepted.")
+    if args.debt:
+        head = debt_head(args.number, args.source, quick)
     else:
-        lead = f"Found while working on #{args.number} ({args.source})."
-    full = f"{marker(kind, None, **extra)}\n{lead}\n\n{body}\n"
+        head = (f"{marker(kind, None, epic=str(args.number), source=args.source)}\n"
+                f"Found while working on #{args.number} ({args.source}).")
+    full = f"{head}\n\n{body}\n"
     cmd = ["issue", "create", "--repo", repo_of(config), "--title", title]
     if args.debt:
         cmd += ["--label", DEBT_LABEL]

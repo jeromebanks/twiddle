@@ -1709,6 +1709,8 @@ class PrdGitHub:
             files = _git("diff", "--name-only", f"main...{pr['head']}", cwd=self.origin).split()
             return {"state": pr["state"], "mergeable": "MERGEABLE", "baseRefName": "main", "headRefName": pr["head"],
                     "headRefOid": self.sha(pr["head"]), "files": [{"path": p} for p in files]}
+        if args[0] == "api" and "/issues?labels=tech-debt&state=open" in args[1]:   # an escalation's open debt: none
+            return [[]]
         pytest.fail(f"unexpected gh_json {args}")
 
     def on_main(self):
@@ -2487,3 +2489,14 @@ def test_file_issue_from_a_bundle_only_dry_runs(tmp_path, capsys, monkeypatch):
     f, body = bundle_file(tmp_path, [ROUTINE, "sdlc:in-progress"], approved_quick())
     assert sdlc.main(["file-issue", "12", "--title", "t", "--body-file", body, "--debt", "--from-file", f]) == 1
     assert "use it with --dry-run" in capsys.readouterr().err
+
+
+def test_readdressing_quick_debt_never_fails_the_escalation(monkeypatch, capsys):
+    """#225: the escalation is done by the time its debt is readdressed, so a failed read only warns."""
+    def down(path):
+        raise sdlc.SdlcError("gh api failed: HTTP 502")
+    monkeypatch.setattr(sdlc, "gh_pages", down)
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("nothing is edited when nothing could be read"))
+    sdlc.readdress_quick_debt(12, {**CONFIG, "repository": "o/r"}, {OWNER})
+    err = capsys.readouterr().err
+    assert "warning: #12's open quick-lane tech debt may still say" in err and "HTTP 502" in err

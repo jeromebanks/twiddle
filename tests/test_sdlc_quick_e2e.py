@@ -166,6 +166,13 @@ class FakeGitHub:
             return json.dumps({k: self.issue_graphql(self.issue(args[2]))[k] for k in want})
         if verb == ["issue", "edit"]:
             return self.issue_edit(self.issue(args[2]), args)
+        if verb == ["issue", "create"]:
+            for l in flags(args, "--label"):
+                if l not in self.labels:
+                    raise GhError(f"could not add label: '{l}' not found")
+            n = self.new_issue(flag(args, "--title"), Path(flag(args, "--body-file")).read_text(),
+                               flags(args, "--label"), author=OWNER)
+            return f"https://github.com/{REPO}/issues/{n}\n"
         if verb == ["issue", "close"]:
             i = self.issue(args[2])
             if comment := flag(args, "--comment"):
@@ -221,6 +228,8 @@ class FakeGitHub:
         i["assignees"] = [a for a in i["assignees"] if a not in gone]
         i["assignees"] += [a for a in (OWNER if a == "@me" else a for a in flags(args, "--add-assignee"))
                            if a not in i["assignees"]]
+        if "--body-file" in args:
+            i["body"] = Path(flag(args, "--body-file")).read_text()
         return f"https://github.com/{REPO}/issues/{i['number']}\n"
 
     # -- pull requests, over the bare origin --
@@ -754,6 +763,28 @@ def test_when_codex_cannot_run_the_pr_stays_open_until_a_person_escalates_it(lan
     out = lane.ok("escalate-to-full", n, "--reason", "Codex can't run, and this can wait for a plan")
     assert f"#{n}: moved to the full lane" in out
     finished_escalation(lane, n, pr, "manual", base)
+
+
+def test_debt_filed_on_a_quick_change_follows_it_to_the_full_lane(lane):
+    """#225: debt filed while the change was quick says it waits in the open tech-debt list; once the change is
+    escalated it is an epic's debt, picked up by its cleanup pass, and its marker and lead line say so."""
+    gh = lane.gh
+    n = lane.quick_issue()
+    lane.claim(n)
+    other = gh.new_issue("Other debt", sdlc.debt_head(n + 100, "review", True) + "\n\nNot this change's.",
+                         ["tech-debt"], author=OWNER)
+    body = lane.scratch / "debt.md"
+    body.write_text("The station's tags are a guess.")
+    url = lane.ok("file-issue", n, "--debt", "--source", "review", "--title", "Psyched FM: tags", "--body-file", body)
+    debt = int(url.strip().rsplit("/", 1)[1])
+    assert "lane=quick" in gh.issues[debt]["body"].splitlines()[0]
+    assert "waiting in the open `tech-debt` list" in lane.state(debt)["next"]
+    out = lane.ok("escalate-to-full", n, "--reason", "it needs a plan after all")
+    assert f"#{debt} (tech debt from #{n}) now waits for #{n}'s cleanup pass" in out
+    assert gh.issues[debt]["body"] == (sdlc.debt_head(n, "review", False) + "\n\nThe station's tags are a guess.\n")
+    assert lane.state(debt)["next"].startswith(f"nothing: #{debt} is tech debt, planned by its epic's cleanup pass")
+    assert "lane=quick" in gh.issues[other]["body"]                 # another change's debt is left alone
+    assert debt in sdlc.open_debt(n, lane.cfg, {OWNER})            # what the cleanup pass reads
 
 
 # --- the full lane, untouched ----------------------------------------------------------------------------------
