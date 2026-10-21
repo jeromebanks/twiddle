@@ -97,6 +97,8 @@ BUILD_STATES = {"planned", "in-progress"}     # the epic's slices are being buil
 QUICK = sdlc_quick.QUICK                        # the lane of a small, safe change: one brief, no epic
 QUICK_LABEL = f"lane:{QUICK}"
 FULL = "full"            # a `kind=lane lane=full` record: an approved quick brief moved to the full lane
+DEBT_LANE = "debt"                              # the debt lane: one open debt epic holding every open tech-debt ticket
+DEBT_EPIC_LABEL = f"lane:{DEBT_LANE}"           # marks the debt epic (its tickets carry `tech-debt`, DEBT_LABEL)
 TRIAGE_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label"}
 PLAN_ACTIONS = {"plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone",
                 "escalate_plan"}
@@ -109,7 +111,8 @@ DEMO_ACTIONS = {"record_demo_acceptance", "demo_reply", "demo_heard"}
 ALL_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label",
                "plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone", "escalate_plan",
                "record_demo_acceptance", "demo_reply", "demo_heard",
-               "work_slices", "work_quick", "commit_prd", "wait_for_poster", "human", "fix_conflict", "none"}
+               "work_slices", "work_quick", "commit_prd", "wait_for_poster", "human", "fix_conflict", "none",
+               "debt_intake"}
 NO_MILESTONE = "all"     # an epic planned without milestones has one demo, for all of it
 # from-state -> states the triage skill may move to. `escalated` is open from anywhere.
 TRANSITIONS = {
@@ -403,6 +406,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
             mk = parse_marker(issue.get("body", "")) or {}
             st.update(debt_of=mk.get("epic"), debt_lane=mk.get("lane"))
         return st
+    debt_epic = DEBT_EPIC_LABEL in issue.get("labels", [])
     all_labels = state_labels(config)
     found = [l for l in issue.get("labels", []) if l in all_labels]
     conflicts: list[str] = []
@@ -497,6 +501,10 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         turn, action = "human", "fix_conflict"
     elif state == "escalated":
         turn, action = "human", "human"
+    elif debt_epic:
+        # the debt epic is never triaged and never a feature epic: what is due comes from its tickets on
+        # GitHub (debt_view, applied by with_next), so "none" here only until that is read
+        turn, action = "agent", "none"
     elif state in LATER_STATES:
         turn, action = "later", "none"
     elif state in BUILD_STATES and quick:
@@ -560,7 +568,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     type_label = next((t for t in ("bug", "enhancement") if t in issue.get("labels", [])), None)
     return {
         "number": issue.get("number"), "title": issue.get("title"), "state": state, "turn": turn,
-        "action": action, "type": type_label, "lane": L.lane, "latest_doc": latest_doc, "approved_rev": approved_rev,
+        "action": action, "type": type_label, "lane": DEBT_LANE if debt_epic else L.lane, "latest_doc": latest_doc, "approved_rev": approved_rev,
         "approved_doc": L.approved_doc, "to_full": L.to_full, "prd_merged": L.prd_merged,
         "approval_by": approval_by, "rounds": rounds, "max_rounds": config.get("max_rounds", 5),
         "replies": [{"id": c.get("id"), "by": c.get("author"), "url": c.get("url")} for c in replies],
@@ -580,13 +588,21 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
 is_quick = sdlc_quick.is_quick     # a quick change: its latest or its approved revision is in the quick lane
 
 
+def is_debt_epic(st: dict[str, Any]) -> bool:
+    """The debt epic (`lane:debt`): its tickets are worked through passes, never through a feature epic's plan."""
+    return st.get("lane") == DEBT_LANE
+
+
 def epic_building(st: dict[str, Any]) -> bool:
     """An epic whose slices are being built: `planned` or `in-progress`, and not a quick change."""
-    return st["state"] in BUILD_STATES and not is_quick(st)
+    return st["state"] in BUILD_STATES and not is_quick(st) and not is_debt_epic(st)
 
 
 def refuse_quick(st: dict[str, Any], what: str) -> None:
-    """Epic-only commands stop here for a quick change, before they look up any plan or progress."""
+    """Epic-only commands stop here for a quick change (or the debt epic), before they look up any plan or progress."""
+    if is_debt_epic(st):
+        raise SdlcError(f"#{st['number']} is the debt epic, not a feature epic: it has no {what} "
+                        f"(`uv run python tools/sdlc.py state {st['number']}` says what is due)")
     if is_quick(st):
         raise SdlcError(f"#{st['number']} is a quick change, not an epic: it has no {what} "
                         f"(`/work-slice {st['number']} --quick` builds it)")
@@ -598,6 +614,13 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
     `progress` (from epic_progress) is needed for an epic whose slices are being built.
     """
     n, a = st["number"], st["action"]
+    if st.get("plan_kind") == "debt" and st.get("debt_epic"):
+        return (f"nothing for #{n} alone: it is tech debt in debt epic #{st['debt_epic']} "
+                f"(`uv run python tools/sdlc.py state {st['debt_epic']}` says what is due)")
+    if is_debt_epic(st) and st.get("debt") is not None:   # debt_view, applied by with_next
+        return st["debt"]["next"]
+    if is_debt_epic(st) and a == "none" and st["turn"] == "agent":   # debt_view not applied: its tickets are needed
+        return f"`uv run python tools/sdlc.py state {n}` (needs the debt epic's tickets)"
     if st.get("plan_kind") == "debt" and st.get("debt_lane") == QUICK:
         return (f"nothing: #{n} is tech debt from quick change #{st.get('debt_of')}, waiting in the open `{DEBT_LABEL}` "
                 f"list (a quick change has no epic and no cleanup pass; remove `{DEBT_LABEL}` to triage it alone)")
@@ -1058,7 +1081,8 @@ def set_state_label(n: int, current: list[str], to: str, config: dict[str, Any],
 
 def print_state(st: dict[str, Any]) -> None:
     if st.get("plan_kind"):
-        print(f"#{st['number']} {st['title']}\n  a plan:{st['plan_kind']} issue\n  next: {st.get('next')}")
+        print(f"#{st['number']} {st['title']}\n  a plan:{st['plan_kind']} issue"
+              + (f"\n  in debt epic #{st['debt_epic']}" if st.get("debt_epic") else "") + f"\n  next: {st.get('next')}")
         return
     doc = st["latest_doc"]
     print(f"#{st['number']} {st['title']}")
@@ -1077,6 +1101,10 @@ def print_state(st: dict[str, Any]) -> None:
         print(f"  ignored /{ig['action']} from {ig['by']} (not the issue author or a collaborator)")
     for c in st["conflicts"]:
         print(f"  CONFLICT: {c}")
+    if (dv := st.get("debt")) is not None:
+        print(f"  debt epic: {len(dv['tickets'])} open ticket(s)"
+              + (f", without an intake verdict: {', '.join(f'#{t}' for t in dv['intake_pending'])}"
+                 if dv["intake_pending"] else ""))
     if st["reconcile"]:
         print(f"  needs reconcile ({st['reconcile']}): run `reconcile`")
     for d in (st.get("demos") or {}).values():
@@ -1122,6 +1150,19 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
     progress = None
     if st["action"] in ("work_slices", "plan_next_milestone") and not offline:
         progress = epic_progress(st["number"], config, trusted if trusted is not None else fetch_trusted(config))
+    if st.get("plan_kind") == "debt":   # the ticket's debt epic, if one holds it (offline: the bundle's `debt_epic`)
+        held_by = ((bundle or {}).get("debt_epic") if offline else
+                   ticket_debt_epic(st["number"], config, trusted if trusted is not None else fetch_trusted(config)))
+        st = {**st, "debt_epic": held_by}
+    if is_debt_epic(st) and st["action"] == "none" and st["turn"] == "agent":
+        # what the debt epic has due comes from its tickets (offline: the bundle's `debt`, {"tickets": [...]})
+        load_debt(config)
+        dp = ((bundle or {}).get("debt") if offline else
+              debt_progress(st["number"], config, trusted if trusted is not None else fetch_trusted(config)))
+        if dp is not None:
+            view = debt_view(st, dp)
+            st = {**st, "action": view["action"], "turn": view["turn"], "debt": view}
+            progress = dp
     nxt = next_command(st, progress)
     # a quick change that claim refuses is not offered to /work-slice (read offline: no git). The bundle gives
     # claim's issue checks too (the rating, the brief's sections); without one, only the brief's `## Files`
@@ -1173,14 +1214,21 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
         b = fetch_bundle(raw["number"], config, trusted)
         st = bundle_state(b, config)
         if st["turn"] == "agent":
-            out.append(with_next(st, config, trusted=trusted, bundle=b))
+            st = with_next(st, config, trusted=trusted, bundle=b)
+            if st["turn"] == "agent":   # the debt epic's turn comes from its tickets, in with_next
+                out.append(st)
+    if loose := unattached_debt(issues, config, trusted):   # debt no epic holds yet: nobody has to remember
+        out.append({"number": None, "state": DEBT_LANE, "turn": "agent", "unattached": loose,
+                    "title": "open tech debt in no debt epic: " + ", ".join(f"#{d}" for d in loose),
+                    "next": "`uv run python tools/sdlc.py debt-epic`"})
     if args.json:
         print(json.dumps(out, indent=2))
     elif not out:
         print("nothing waiting on the agent")
     else:
         for st in out:
-            print(f"#{st['number']:<4} {st['state']:<17} {st['title']}\n      next: {st['next']}")
+            num = f"#{st['number']}" if st["number"] is not None else "-"
+            print(f"{num:<5} {st['state']:<17} {st['title']}\n      next: {st['next']}")
     return 0
 
 
@@ -2845,6 +2893,183 @@ def open_debt(epic: int, config: dict[str, Any], trusted: set[str]) -> list[int]
                   and (parse_marker(r.get("body") or "") or {}).get("epic") == str(epic))
 
 
+# --- the debt lane: one open debt epic (`lane:debt`) holds every open tech-debt ticket as a sub-issue -------------
+#
+# It is found again by its label and its body's marker (`kind=debt-epic`, by a collaborator), never by its title.
+# What it has due comes from its tickets (debt_view): to begin with, intake for any ticket without a verdict.
+
+DEBT_EPIC_KIND = "debt-epic"     # the debt epic's body marker
+INTAKE_KIND = "intake"           # a ticket's intake verdict, a marked comment on the ticket (`verdict=...`)
+DEBT_DEFAULTS = {"pass_size": 8, "max_generation": 2, "max_per_pr": 4}
+
+
+@dataclass(frozen=True)
+class DebtRules:
+    """The debt lane's numbers: `.sdlc/config.json`'s `debt` section over DEBT_DEFAULTS, checked."""
+    pass_size: int        # tickets a pass plan may take
+    max_generation: int   # debt of debt of ... stops here: `file-issue --debt` refuses past it
+    max_per_pr: int       # tickets one PR may close
+
+
+def load_debt(config: dict[str, Any]) -> DebtRules:
+    """The `debt` section, each missing key at its default; a bad or unknown key is an SdlcError naming it."""
+    d = config.get("debt", {})
+    if not isinstance(d, dict):
+        raise SdlcError(f"config `debt` must be an object, not {d!r}")
+    if unknown := sorted(set(d) - set(DEBT_DEFAULTS)):   # a typo would silently keep the default
+        raise SdlcError(f"config debt has unknown key(s) {unknown}: it takes {sorted(DEBT_DEFAULTS)}")
+    vals = {k: d.get(k, v) for k, v in DEBT_DEFAULTS.items()}
+    for k, v in vals.items():
+        if type(v) is not int or v <= 0:   # not a bool, float or string
+            raise SdlcError(f"config debt.{k} must be a positive whole number, not {v!r}")
+    if vals["max_per_pr"] > vals["pass_size"]:
+        raise SdlcError(f"config debt.max_per_pr ({vals['max_per_pr']}) can't exceed debt.pass_size ({vals['pass_size']})")
+    return DebtRules(**vals)
+
+
+def _q(label: str) -> str:
+    return label.replace(":", "%3A")
+
+
+def find_debt_epics(config: dict[str, Any], trusted: set[str]) -> list[dict[str, Any]]:
+    """Open debt epics (label and marker, by a collaborator), oldest first: there should be at most one."""
+    raw = gh_pages(f"repos/{repo_of(config)}/issues?labels={_q(DEBT_EPIC_LABEL)}&state=open&per_page=100")
+    return sorted(({"number": r["number"], "id": r["id"], "title": r.get("title", "")} for r in raw
+                   if "pull_request" not in r and (r.get("user") or {}).get("login") in trusted
+                   and (parse_marker(r.get("body") or "") or {}).get("kind") == DEBT_EPIC_KIND),
+                  key=lambda e: e["number"])
+
+
+def the_debt_epic(config: dict[str, Any], trusted: set[str]) -> dict[str, Any] | None:
+    """The one open debt epic, or None; two open is a mess for a person to clear, never a choice made here."""
+    epics = find_debt_epics(config, trusted)
+    if len(epics) > 1:
+        raise SdlcError("more than one open debt epic (" + ", ".join(f"#{e['number']}" for e in epics)
+                        + "): close all but one, moving its sub-issues to the one kept")
+    return epics[0] if epics else None
+
+
+def open_debt_tickets(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every open `tech-debt` issue, whoever filed it (the label is the gate: only a maintainer can apply it)."""
+    raw = gh_pages(f"repos/{repo_of(config)}/issues?labels={_q(DEBT_LABEL)}&state=open&per_page=100")
+    return sorted(({"number": r["number"], "id": r["id"], "title": r.get("title", "")} for r in raw
+                   if "pull_request" not in r), key=lambda t: t["number"])
+
+
+def sub_issues(n: int, config: dict[str, Any]) -> list[dict[str, Any]]:
+    return gh_pages(f"repos/{repo_of(config)}/issues/{n}/sub_issues?per_page=100")
+
+
+def intake_of(comments: list[dict[str, Any]], trusted: set[str]) -> str | None:
+    """A ticket's latest intake verdict, from its marked comments (None: not through intake yet)."""
+    verdicts = [mk.get("verdict") for mk, _ in _marked(comments, trusted) if mk.get("kind") == INTAKE_KIND]
+    return verdicts[-1] if verdicts else None
+
+
+def debt_progress(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str, Any]:
+    """The debt epic's open tickets (its open sub-issues) and each one's intake verdict, read from GitHub."""
+    repo, tickets = repo_of(config), []
+    for s in sub_issues(epic, config):
+        if s.get("state", "open") != "open" or "pull_request" in s:
+            continue
+        comments = [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{s['number']}/comments")]
+        tickets.append({"number": s["number"], "title": s.get("title", ""), "intake": intake_of(comments, trusted)})
+    return {"tickets": sorted(tickets, key=lambda t: t["number"])}
+
+
+def debt_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
+    """{action, turn, next, ...}: what the debt epic has due, from its tickets. Later slices add passes."""
+    n, tickets = st["number"], progress.get("tickets") or []
+    pending = [t["number"] for t in tickets if not t.get("intake")]
+    if pending:
+        action, turn = "debt_intake", "agent"
+        nxt = (f"intake on debt epic #{n}: {len(pending)} ticket(s) without a verdict ("
+               + ", ".join(f"#{t}" for t in pending) + "): judge each against the definition of debt and "
+               "record the verdict on the ticket (`debt-intake T`)")
+    else:
+        action, turn = "none", "none"
+        nxt = (f"nothing: debt epic #{n}'s {len(tickets)} open ticket(s) are all through intake" if tickets
+               else f"nothing: debt epic #{n} has no open tickets")
+    return {"number": n, "action": action, "turn": turn, "tickets": tickets, "intake_pending": pending, "next": nxt}
+
+
+def ticket_debt_epic(n: int, config: dict[str, Any], trusted: set[str]) -> int | None:
+    """The open debt epic ticket #n is a sub-issue of, if any."""
+    for e in find_debt_epics(config, trusted):
+        if any(s["number"] == n for s in sub_issues(e["number"], config)):
+            return e["number"]
+    return None
+
+
+def unattached_debt(open_issues: list[dict[str, Any]], config: dict[str, Any], trusted: set[str]) -> list[int]:
+    """Open tech-debt tickets (from an issue list `next` already read) that the open debt epic doesn't hold.
+    Reads GitHub only when there is debt to look for."""
+    debt = sorted(i["number"] for i in open_issues if DEBT_LABEL in [l["name"] for l in i.get("labels", [])])
+    if not debt:
+        return []
+    epic = the_debt_epic(config, trusted)
+    held = {s["number"] for s in sub_issues(epic["number"], config)} if epic else set()
+    return [d for d in debt if d not in held]
+
+
+DEBT_EPIC_BODY = ("Tech debt: work a feature needed to support itself, filed with `file-issue --debt`. Every open "
+                  f"`{DEBT_LABEL}` issue is a sub-issue of this one. An agent runs intake on each, then works them "
+                  "in passes, each a PR into `main` with the full suite and Codex's approval on its head. "
+                  "`uv run python tools/sdlc.py state` on this issue says what is due.")
+
+
+def command_debt_epic(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Open the debt epic if open tech debt exists and none is open, and attach every open tech-debt ticket to it
+    as a sub-issue (read back). Idempotent: a rerun creates and attaches nothing."""
+    load_debt(config)   # a bad `debt` section is refused before anything is written
+    repo, trusted = repo_of(config), fetch_trusted(config)
+    say = (lambda s: print("would " + s)) if args.dry_run else print  # noqa: E731
+    epic = the_debt_epic(config, trusted)
+    tickets = open_debt_tickets(config)
+    if not tickets:
+        print("no open tech-debt issues: nothing to attach" + (f" (debt epic #{epic['number']} is open)" if epic
+                                                               else ", and no debt epic is opened"))
+        return 0
+    if epic is None:
+        if not args.dry_run:
+            have = {l["name"] for l in gh_json(["label", "list", "--repo", repo, "--limit", "200", "--json", "name"])}
+            if missing := [l for l in (DEBT_EPIC_LABEL, f"{PREFIX}in-progress") if l not in have]:
+                # without its label a rerun can't find the epic, and would open a second one
+                raise SdlcError(f"labels {missing} do not exist: run `bootstrap-labels` first (nothing was created)")
+        say(f"open the debt epic 'Tech debt' [{DEBT_EPIC_LABEL}, {PREFIX}in-progress]")
+        if args.dry_run:
+            epic = {"number": "new", "id": None}
+        else:
+            made = post_json(f"repos/{repo}/issues", {
+                "title": "Tech debt", "labels": [DEBT_EPIC_LABEL, f"{PREFIX}in-progress"],
+                "body": f"{marker(DEBT_EPIC_KIND)}\n{DEBT_EPIC_BODY}\n"})
+            epic = {"number": made["number"], "id": made["id"]}
+            print(f"opened debt epic #{epic['number']}")
+    held = set() if epic["id"] is None else {s["number"] for s in sub_issues(epic["number"], config)}
+    todo = [t for t in tickets if t["number"] not in held]
+    failed: list[str] = []
+    for t in todo:
+        say(f"attach #{t['number']} ({t['title']}) to debt epic #{epic['number']}")
+        if args.dry_run:
+            continue
+        try:   # never `replace_parent`: a ticket already under another issue is reported, not moved silently
+            post_json(f"repos/{repo}/issues/{epic['number']}/sub_issues", {"sub_issue_id": t["id"]})
+        except SdlcError as exc:
+            failed.append(f"#{t['number']}: {exc}")
+        time.sleep(0.5)   # GitHub's secondary rate limit on content creation
+    if args.dry_run:
+        return 0
+    if not todo:
+        print(f"debt epic #{epic['number']} already holds all {len(tickets)} open tech-debt ticket(s)")
+        return 0
+    now = {s["number"] for s in sub_issues(epic["number"], config)}
+    if missing_now := [t["number"] for t in tickets if t["number"] not in now]:
+        raise SdlcError(f"read-back: debt epic #{epic['number']} doesn't hold " + ", ".join(f"#{m}" for m in missing_now)
+                        + (" (" + "; ".join(failed) + ")" if failed else "") + ": fix that, then rerun `debt-epic`")
+    print(f"debt epic #{epic['number']}: attached {len(todo)}, holds all {len(tickets)} open tech-debt ticket(s)")
+    return 0
+
+
 def slice_bundle(n: int, config: dict[str, Any]) -> dict[str, Any]:
     trusted = fetch_trusted(config)
     issue, comments = fetch_slice(n, config)
@@ -4447,6 +4672,8 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
     bundle = fetch_bundle(n, config)
     trusted = set(bundle["trusted"])
     st = bundle_state(bundle, config)
+    if is_debt_epic(st):
+        refuse_quick(st, "milestone to ship")
     if st["conflicts"] or st["state"] not in BUILD_STATES | {"done"} or is_quick(st):
         raise SdlcError(f"#{n} is {st['state']}" + (" (a quick change: it merges to main itself)" if is_quick(st) else "")
                         + ": nothing to ship")
@@ -5288,6 +5515,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="print the filled prompt and the exact codex command; run nothing")
     p.add_argument("--from-file")
     p.set_defaults(fn=command_codex_review)
+
+    p = sub.add_parser("debt-epic", help="open the debt epic if there is open tech debt and none is open, and attach "
+                                         "every open tech-debt issue to it (idempotent)")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=command_debt_epic)
 
     p = sub.add_parser("merge", help="the merge gate, then squash-merge a slice's PR")
     p.add_argument("pr", type=int)
