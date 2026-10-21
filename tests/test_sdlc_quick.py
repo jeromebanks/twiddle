@@ -695,6 +695,42 @@ def test_a_local_commit_on_a_safe_pushed_branch_is_refused(repo, monkeypatch, ca
     assert out.err.rstrip().endswith("`escalate-to-full 12`") and fake.posted == [] and fake.edits == []
 
 
+def test_a_bad_commit_in_every_source_is_refused_once(repo, monkeypatch, capsys):
+    """#229: the local branch, its worktree and the pushed branch all carry the same denied commit: one line."""
+    wt, _ = resumable(repo, monkeypatch, files_brief(SAFE))
+    commit(wt, "src/twiddle/play.py", push=True)
+    capsys.readouterr()
+    code, out = resume(capsys)
+    assert code == 1
+    assert out.err.count("may not (src/twiddle/play.py)") == 1, out.err
+    assert "the local branch slice/12: the diff touches a path a quick change may not (src/twiddle/play.py)" in out.err
+
+
+def test_resume_errors_say_a_shared_refusal_once_and_keep_the_others():
+    play, tools = {"filename": "src/twiddle/play.py", "additions": 1, "deletions": 0}, \
+        {"filename": "tools/x.py", "additions": 1, "deletions": 0}
+    brief = files_brief(SAFE)
+    errs = sdlc_quick.resume_errors(12, [("a", [play]), ("b", [play]), ("c", [tools]), ("d", [])], brief, QUICK_RULES)
+    assert [e.split(":")[0] for e in errs if "may not (src/twiddle/play.py)" in e] == ["a"]
+    assert [e.split(":")[0] for e in errs if "may not (tools/x.py)" in e] == ["c"]
+
+
+def test_the_worktree_read_starts_from_its_own_index(repo, monkeypatch, capsys):
+    """#229: the scratch index is a copy of the worktree's (git reuses its stat cache), not `read-tree HEAD`, which
+    rehashes every file. What it reads is the same: a force-added ignored file is what the next commit carries."""
+    wt, _ = resumable(repo, monkeypatch, files_brief(SAFE))
+    exclude = Path(_git("rev-parse", "--path-format=absolute", "--git-path", "info/exclude", cwd=wt))
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text("*.log\n")                                       # ignored, but not by a tracked file
+    (wt / "ignored.log").write_text("x\n")
+    _git("add", "-f", "ignored.log", cwd=wt)                            # staged anyway: the next commit carries it
+    calls, real = [], sdlc.git
+    monkeypatch.setattr(sdlc, "git", lambda args, *a, **k: calls.append(args) or real(args, *a, **k))
+    files = sdlc.worktree_changes(wt, "origin/main")
+    assert not any(c[:1] == ["read-tree"] for c in calls), calls
+    assert "ignored.log" in [f["filename"] for f in files]
+
+
 def test_a_local_only_branch_touching_a_denied_path_is_refused(repo, monkeypatch, capsys):
     wt, _ = resumable(repo, monkeypatch, files_brief(SAFE))
     commit(wt, "tools/sdlc.py")

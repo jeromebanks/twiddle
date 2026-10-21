@@ -3026,11 +3026,17 @@ def ref_changes(ref: str, base: str, root: Path) -> list[dict[str, Any]]:
 
 def worktree_changes(wt: Path, base: str) -> list[dict[str, Any]]:
     """What a worktree changes since its branch left `base`: its commits and its uncommitted and untracked files
-    (not ignored ones), read through a scratch index outside the tree, so neither its index nor its files move."""
+    (not ignored ones), read through a scratch index outside the tree, so neither its index nor its files move.
+    The scratch index starts as a copy of the worktree's own, so `add -A` reuses its stat cache and hashes only
+    what changed (from `HEAD` when it has none)."""
     since = git(["merge-base", base, "HEAD"], cwd=wt, timeout=CLAIM_GIT_SECONDS)
+    real = Path(git(["rev-parse", "--path-format=absolute", "--git-path", "index"], cwd=wt, timeout=CLAIM_GIT_SECONDS))
     with tempfile.TemporaryDirectory() as tmp:
         env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
-        git(["read-tree", "HEAD"], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
+        if real.is_file():
+            shutil.copyfile(real, env["GIT_INDEX_FILE"])
+        else:
+            git(["read-tree", "HEAD"], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
         git(["add", "-A"], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
         out = git(["diff", "--cached", "--numstat", "-z", "-M", since], cwd=wt, timeout=CLAIM_GIT_SECONDS, env=env)
     return sdlc_quick.numstat_files(out)
