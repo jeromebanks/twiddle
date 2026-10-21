@@ -19,8 +19,8 @@ the worked examples:
 
 | File | Platform | Reusable for another venue on it? |
 |---|---|---|
-| `scenedata/sources/seetickets.py` | See Tickets WordPress plugin (HTML list view, `?list1page=N`) | **yes: one line in `VENUES`** (5 venues) |
-| `scenedata/sources/ticketweb.py` | TicketWeb WordPress plugin (`tw-section`, one page, several themes) | **yes: one line in `VENUES`** (7 venues) |
+| `scenedata/sources/seetickets.py` | See Tickets WordPress plugin (HTML list view, `?list1page=N`) | **yes: one line in `VENUES`** |
+| `scenedata/sources/ticketweb.py` | TicketWeb WordPress plugin (`tw-section`, one page, several themes) | **yes: one line in `VENUES`** |
 | `scenedata/sources/gilman.py` | ShowSlinger widget (HTML, public *with* the URL token) | yes: change `WIDGET`/`VENUE` |
 | `scenedata/sources/venuepilot.py` | VenuePilot (public GraphQL, `venuepilot.co/graphql`) | **yes: one line in `VENUES`** (account id from `venuepilotSettings`) |
 | `scenedata/sources/squarespace.py` | Squarespace events collection, `?format=json` | **yes: one line in `VENUES`** (the collection's URL) |
