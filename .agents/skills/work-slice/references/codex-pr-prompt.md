@@ -2,9 +2,9 @@
 
 `uv run python tools/sdlc.py codex-review --pr PR` fills this and runs it: the text
 below the line, `<SLICE_FILE>`, `<BASE>`, `<EPIC>` and `<RESPONSE_FILE>` replaced, the
-`<SLICE>` bullets kept for a slice PR and the `<QUICK>` bullets for a quick change's
-(which has no epic, so no `<EPIC>`), and the `<ROUND2>` bullet kept only from round 2
-on. Don't fill it by hand. The tool checks the worktree's HEAD itself and writes the
+`<SLICE>` bullets kept for a slice PR, the `<QUICK>` bullets for a quick change's and
+the `<DEBT>` bullets for a debt PR's (neither has an epic, so no `<EPIC>`), and the
+`<ROUND2>` bullet kept only from round 2 on. Don't fill it by hand. The tool checks the worktree's HEAD itself and writes the
 report's `HEAD:` line (and, for a quick change, the `Brief:` line naming the approved
 brief it gave Codex), so the prompt asks Codex for neither.
 
@@ -27,6 +27,17 @@ Read:
 - <QUICK>the change: `git diff <BASE>...HEAD` and `git log <BASE>..HEAD` (`<BASE>` is
   main: a quick change merges straight into main, with no epic, milestone or demo
   after it, so this review is the last look anyone takes before it lands);</QUICK>
+- <DEBT>the brief of this debt PR: `<SLICE_FILE>`. Each tech-debt ticket it closes is
+  the spec, and its pass group's scope and files (from the pass plan, at the top)
+  bound the change. A problem inside that scope is fixed in this PR, so it can be
+  blocking; so can anything the diff itself changes or breaks, wherever it is. A
+  problem that was already there outside that scope, which the change neither causes
+  nor touches, is not this ticket's debt: report it as **non-blocking**, never as
+  blocking. It isn't filed as debt either: it is dropped, or filed as an ordinary
+  issue for triage when it matters;</DEBT>
+- <DEBT>the change: `git diff <BASE>...HEAD` and `git log <BASE>..HEAD` (`<BASE>` is
+  main: a debt PR merges straight into main, and no milestone review or demo follows,
+  so this review is the last look anyone takes before it lands);</DEBT>
 - `CLAUDE.md`, especially the read-only vs writing table;
 - the code around the change, as far as you need it;
 - <ROUND2>the implementer's answer to the previous round: `<RESPONSE_FILE>`. Where they
