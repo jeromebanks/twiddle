@@ -947,7 +947,9 @@ def test_a_valid_pass_is_posted_with_no_sign_off_and_state_names_it(gh, git, cap
     assert code == 0, err
     assert gh.writes == [] and len(git.fetches()) == 1   # read-only, apart from the one bounded fetch
     code, out, err = run(capsys, "debt-pass-post", epic, f)
-    assert code == 0, err and f"debt epic #{epic}: pass 1 posted" in out
+    assert code == 0, err
+    assert f"debt epic #{epic}: pass 1 posted" in out
+    assert len(gh.writes) == 1 and len(git.fetches()) == 2   # the comment, and post's own one fetch
     (body,) = pass_comments(gh, epic)
     assert sdlc.parse_marker(body) == {"kind": sdlc.DEBT_PASS_KIND, "pass": "1"}
     assert "/approve" not in body and "plan-review" not in body and "sign off" not in body
@@ -978,6 +980,7 @@ def test_a_pass_posted_twice_is_refused(gh, git, capsys, tmp_path):
     (lambda a, b: [group()], "group 1 is empty"),
     (lambda a, b: [group(a, b, 1001, 1002, 1003)], "group 1 has 5 tickets, over debt.max_per_pr (4)"),
     (lambda a, b: [group(a, scope=" ")], "group 1 has no scope"),
+    (lambda a, b: [group(a, scope="one\ntwo")], "group 1's scope is more than one line"),
     (lambda a, b: [{k: v for k, v in group(a).items() if k != "scope"}], "group 1 has no scope"),
     (lambda a, b: [group(a, files=())], "group 1 has no files"),
     (lambda a, b: [group(a, files=("/etc/x", "tools/*.py"))], "aren't repo-relative paths"),
@@ -1156,5 +1159,7 @@ def test_scope_paths_reads_the_real_scope_texts():
     assert sdlc.scope_paths(t10, tracked) == {"SDLC.md", "docs/sdlc.html", "CLAUDE.md", "tools/sdlc.py",
                                               ".agents/skills/", "tests/test_sdlc_debt_e2e.py",
                                               "tests/test_sdlc_quick_e2e.py"}
+    md = "**tools/sdlc.py** and *SDLC.md*, see [the guide](docs/sdlc.html) and [CLAUDE.md](https://x.org/CLAUDE.md)"
+    assert sdlc.scope_paths(md, tracked) == {"tools/sdlc.py", "SDLC.md", "docs/sdlc.html", "CLAUDE.md"}
     assert sdlc.paths_overlap("tools/", "tools/sdlc.py") and sdlc.paths_overlap("tools/sdlc.py", "tools")
     assert not sdlc.paths_overlap("tools/sdlc.py", "tools/sdlc_quick.py") and not sdlc.paths_overlap("tool", "tools/x")

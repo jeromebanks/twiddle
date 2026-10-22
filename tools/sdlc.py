@@ -3451,6 +3451,8 @@ def pass_shape_errors(plan: Any, epic: int, next_pass: int, rules: DebtRules) ->
                     seen.setdefault(t, []).append(i)
         if not _text(g.get("scope")):
             errs.append(f"{where} has no scope: one line saying what its PR changes")
+        elif "\n" in g["scope"].strip():
+            errs.append(f"{where}'s scope is more than one line: say what its PR changes in one")
         files = g.get("files")
         if not isinstance(files, list) or not files:
             errs.append(f"{where} has no files: the paths its PR may change")
@@ -3488,9 +3490,9 @@ def scope_paths(text: str, tracked: set[str]) -> set[str]:
     A `{a,b}` brace or a `*` keeps the tracked directory before it. Prose words (`docs`, `sdlc.py`) are not paths."""
     dirs = {"/".join(parts[:i]) for f in tracked for parts in [f.split("/")] for i in range(1, len(parts))}
     out = set()
-    for raw in re.split(r"[\s`'\"]+", text or ""):
-        tok = raw.strip("()[]<>,;:!?").rstrip(".")
-        if not tok or "://" in raw:
+    for raw in re.split(r"[\s`'\"()\[\]]+", re.sub(r"[^\s()\[\]]*://[^\s()\[\]]*", " ", text or "")):   # markdown links split too
+        tok = raw.strip("<>,;:!?*").rstrip(".")
+        if not tok:
             continue
         if cut := re.search(r"[{*]", tok):
             tok = tok[:cut.start()].rsplit("/", 1)[0] if "/" in tok[:cut.start()] else ""
