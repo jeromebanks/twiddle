@@ -3505,15 +3505,22 @@ def scope_paths(text: str, tracked: set[str], named: tuple[str, ...] | list[str]
     `docs/`), or a path main lacks yet: one with a directory (`tests/test_new.py`, `tools/new-helper`) or a file
     name with an extension (`NEW_GUIDE.md`). A `{a,b}` brace or a `*` keeps the tracked directory before it. A bare
     word (`docs`) is not a path; prose that looks like one (`sdlc.py`, `epic/N`) is claimed, which only refuses more.
-    Markdown round a token (`**`, `__`, `~~`, `<code>`, a link, a table cell) is taken off it. And each path of
-    `named` (a pass's files, not its directories) is claimed wherever the text holds it whole, whatever markup
+    Markdown round a token (`**`, `__`, `~~`, `<code>`, a link, a table cell, `«»`) is taken off it. And each path of
+    `named` (a pass's files and directories) is claimed wherever the text holds it whole, whatever markup
     surrounds it, as a backstop."""
     dirs = {"/".join(parts[:i]) for f in tracked for parts in [f.split("/")] for i in range(1, len(parts))}
-    text = re.sub(r"[^\s()\[\]<>|]*://[^\s()\[\]<>|]*", " ", text or "")   # URLs: a link's text is kept
-    out = {f for f in named if isinstance(f, str) and f and not f.endswith("/") and ("/" in f or "." in f)
-           and re.search(rf"(?<![A-Za-z0-9./-]){re.escape(f)}(?![A-Za-z0-9/-]|\.[A-Za-z0-9])", text)}
-    for raw in re.split(r"[\s`'\"()\[\]<>|,;]+", text):   # markdown links, HTML tags and table cells split too
-        bare = re.split(r"[:#]", raw.strip("!?:"), maxsplit=1)[0].rstrip(".")   # `tools/sdlc.py:120`, `#L3`
+    text = re.sub(r"\\(?=\S)", "", text or "")   # markdown escapes: `tools/sdlc\_quick.py`
+    # a URL is not a path, but a link to a file in the repo (`.../blob/main/tools/sdlc.py`) names that file
+    text = re.sub(r"[^\s()\[\]<>|]*://[^\s()\[\]<>|]*",
+                  lambda m: " " + (u.group(1) if (u := re.search(r"/(?:blob|tree)/[^/]+/([^?#]+)", m.group(0))) else "")
+                  + " ", text or "")
+    # a file is held whole (no path character either side); a directory `g/` with its slash, so prose `tools` isn't
+    out = {f for f in named if isinstance(f, str) and f and ("/" in f or "." in f) and re.search(
+        rf"(?<![A-Za-z0-9./-]){re.escape(f)}" + ("" if f.endswith("/") else r"(?![A-Za-z0-9/-]|\.[A-Za-z0-9])"), text)}
+    # every run of path characters is a token, whatever surrounds it: backticks, quotes, `«»`, a link, an HTML tag, a
+    # table cell, `:120` or `#L3` after it
+    for raw in re.findall(r"[\w./*{}~+@-]+", text):
+        bare = raw.rstrip(".")
         # `__tools/sdlc.py__` is `tools/sdlc.py`; a tracked `__init__.py` is itself
         out |= ({bare} if bare in tracked else set()) or scope_token(bare.strip("*_~"), tracked, dirs) \
             or scope_token(bare, tracked, dirs)

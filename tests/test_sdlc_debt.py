@@ -1160,13 +1160,16 @@ def test_scope_paths_reads_the_real_scope_texts():
                                               ".agents/skills/", "tests/test_sdlc_debt_e2e.py",
                                               "tests/test_sdlc_quick_e2e.py",
                                               # prose shaped like a path is claimed too: it only refuses more
-                                              "origin/main...origin/epic/N", "sdlc.py", "e.g"}
+                                              "origin/main...origin/epic/N", "sdlc.py", "e.g", "docs/prd/243-x.md"}
     assert sdlc.scope_paths("[helper](./tools/sdlc.py) and /CLAUDE.md", tracked) == {"tools/sdlc.py", "CLAUDE.md"}
     assert sdlc.scope_paths("tools/sdlc.py:120, SDLC.md#lanes", tracked) == {"tools/sdlc.py", "SDLC.md"}
+    assert sdlc.scope_paths("[it](https://github.com/o/r/blob/main/tools/sdlc_quick.py#L3), https://x.org/a/b.py",
+                            tracked) == {"tools/sdlc_quick.py"}
     marked = "__tools/sdlc.py__, ~~SDLC.md~~, <code>CLAUDE.md</code>, |docs/sdlc.html|, tools/sdlc_quick.py;README.md"
     assert sdlc.scope_paths(marked, tracked) == {"tools/sdlc.py", "SDLC.md", "CLAUDE.md", "docs/sdlc.html",
                                                  "tools/sdlc_quick.py", "README.md"}
-    assert "tests/test_sdlc_epic.py" not in sdlc.scope_paths("«tests/test_sdlc_epic.py»", tracked)
+    assert sdlc.scope_paths("«tests/test_sdlc_epic.py» and ‹src/new/x.py›", tracked) == {"tests/test_sdlc_epic.py",
+                                                                                          "src/new/x.py"}
     named = ["tests/test_sdlc_epic.py", "src/x.py", "tools/"]   # the backstop: a pass's files, whatever surrounds them
     got = sdlc.scope_paths("«tests/test_sdlc_epic.py» and xsrc/x.py and tools", tracked, named)
     assert "tests/test_sdlc_epic.py" in got and "src/x.py" not in got and "tools/" not in got
@@ -1234,3 +1237,33 @@ def test_a_scope_path_in_underscore_emphasis_still_overlaps(gh, git, capsys, tmp
     code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, groups))
     assert code == 1 and f"group 1 (#{a}) overlaps epic #{feature}, which is being built: `tools/sdlc.py`" in err
     assert f"group 2 (#{b}) overlaps epic #{feature}, which is being built: `src/twiddle/cli.py`" in err
+    # a group naming a directory that holds them: the Scope's paths are read without the pass's own files
+    groups = [group(a, files=("tools/",)), group(b, files=("src/twiddle/",))]
+    code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, groups))
+    one, two = (l for l in err.splitlines() if "overlaps" in l)
+    assert code == 1 and one.startswith(f"  - group 1 (#{a}) overlaps epic #{feature}") and "`tools/sdlc.py`" in one
+    assert two.startswith(f"  - group 2 (#{b}) overlaps epic #{feature}") and "`src/twiddle/cli.py`" in two
+
+
+DEEP = "src/twiddle/scene_data/builder_x.py"
+SPELLINGS = ["**{p}**", "__{p}__", "~~{p}~~", "`{p}`", "<code>{p}</code>", "«{p}»", '"{p}"', "({p})", "[x]({p})",
+             "[x](./{p})", "[x](https://github.com/o/r/blob/main/{p})", "|{p}|", "{p}:12", "{p}#L3", "{p},", "{p}.",
+             "{p};", "{esc}"]
+
+
+@pytest.mark.parametrize("spelling", SPELLINGS)
+@pytest.mark.parametrize("path, files", [
+    (DEEP, DEEP), (DEEP, "src/twiddle/scene_data/"), (DEEP, "src/twiddle/"), ("CLAUDE.md", "CLAUDE.md")])
+def test_every_spelling_of_a_scope_path_overlaps_its_file_and_its_directories(gh, git, capsys, tmp_path,
+                                                                            spelling, path, files):
+    """However a Scope writes a path, a group naming it, or a directory holding it, is refused as an overlap; the
+    slice has no PR and its epic's branch changes nothing."""
+    git.tracked.append(DEEP)
+    epic, (a,) = ready(gh, 1)
+    feature = gh.feature_epic(created=("M1",))
+    named = spelling.format(p=path, esc=path.replace("_", "\\_"))
+    gh.issue(f"#{feature} T5: a slice", ["plan:slice"], body=(
+        f"<!-- sdlc:v1 kind=slice epic={feature} key=T5 -->\n## Scope\n\nChanges {named} and nothing else\n"))
+    code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, [group(a, files=(files,))]))
+    assert code == 1 and f"group 1 (#{a}) overlaps epic #{feature}, which is being built: " in err, err
+    assert f"`{path}`" in err.split("which is being built: ", 1)[1], err
