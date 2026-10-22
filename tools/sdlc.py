@@ -3511,9 +3511,7 @@ def scope_paths(text: str, tracked: set[str], named: tuple[str, ...] | list[str]
     dirs = {"/".join(parts[:i]) for f in tracked for parts in [f.split("/")] for i in range(1, len(parts))}
     text = re.sub(r"\\(?=\S)", "", text or "")   # markdown escapes: `tools/sdlc\_quick.py`
     # a URL is not a path, but a link to a file in the repo (`.../blob/main/tools/sdlc.py`) names that file
-    text = re.sub(r"[^\s()\[\]<>|]*://[^\s()\[\]<>|]*",
-                  lambda m: " " + (u.group(1) if (u := re.search(r"/(?:blob|tree)/[^/]+/([^?#]+)", m.group(0))) else "")
-                  + " ", text or "")
+    text = re.sub(r"[^\s()\[\]<>|]*://[^\s()\[\]<>|]*", lambda m: f" {link_path(m.group(0), tracked, dirs)} ", text)
     # a file is held whole (no path character either side); a directory `g/` with its slash, so prose `tools` isn't
     out = {f for f in named if isinstance(f, str) and f and ("/" in f or "." in f) and re.search(
         rf"(?<![A-Za-z0-9./-]){re.escape(f)}" + ("" if f.endswith("/") else r"(?![A-Za-z0-9/-]|\.[A-Za-z0-9])"), text)}
@@ -3525,6 +3523,27 @@ def scope_paths(text: str, tracked: set[str], named: tuple[str, ...] | list[str]
         out |= ({bare} if bare in tracked else set()) or scope_token(bare.strip("*_~"), tracked, dirs) \
             or scope_token(bare, tracked, dirs)
     return out
+
+
+def link_path(url: str, tracked: set[str], dirs: set[str]) -> str:
+    """The repo path a link to a file names (`.../blob/<ref>/<path>` or `/tree/`), else "". A ref may hold slashes
+    (`epic/243`), so a known branch shape (`main`, `epic/N`, a commit) is taken off first; otherwise the longest
+    tail that is a file or directory on main, else everything after the first part."""
+    u = re.search(r"/(?:blob|tree)/([^?#]+)", url)
+    if not u:
+        return ""
+    parts = [p for p in u.group(1).split("/") if p]
+    known = re.match(r"(?:main|epic/\d+|[0-9a-f]{7,40})/", "/".join(parts) + "/")
+    if known and len(parts) > known.group(0).count("/"):
+        path = "/".join(parts[known.group(0).count("/"):])
+        return path + "/" if path in dirs else path
+    for i in range(1, len(parts)):
+        tail = "/".join(parts[i:])
+        if tail in tracked:
+            return tail
+        if tail in dirs:
+            return tail + "/"   # a directory keeps its slash, so a bare top-level name still claims it here
+    return "/".join(parts[1:])
 
 
 def scope_token(tok: str, tracked: set[str], dirs: set[str]) -> set[str]:

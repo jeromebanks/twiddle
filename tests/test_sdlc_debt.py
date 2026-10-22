@@ -1165,6 +1165,16 @@ def test_scope_paths_reads_the_real_scope_texts():
     assert sdlc.scope_paths("tools/sdlc.py:120, SDLC.md#lanes", tracked) == {"tools/sdlc.py", "SDLC.md"}
     assert sdlc.scope_paths("[it](https://github.com/o/r/blob/main/tools/sdlc_quick.py#L3), https://x.org/a/b.py",
                             tracked) == {"tools/sdlc_quick.py"}
+    # a ref with a slash: a known branch shape is taken off, else the longest tail that is on main
+    for url, want in [("https://github.com/o/r/blob/epic/243/tools/sdlc.py", "tools/sdlc.py"),
+                      ("https://github.com/o/r/blob/epic/243/tests/test_new_thing.py", "tests/test_new_thing.py"),
+                      ("https://github.com/o/r/blob/0123abcd/SDLC.md", "SDLC.md"),
+                      ("https://github.com/o/r/tree/feature/x/y/tools/", "tools/"),
+                      ("https://github.com/o/r/tree/main/tools", "tools/"),
+                      ("https://github.com/o/r/blob/slice/9/docs/sdlc.html", "docs/sdlc.html")]:
+        assert sdlc.scope_paths(f"see [it]({url})", tracked) == {want}, url
+    # a bare top-level directory word (no slash) claims nothing: prose `tools` or `docs` would claim too much
+    assert sdlc.scope_paths("The scripts in tools and the docs", tracked) == set()
     marked = "__tools/sdlc.py__, ~~SDLC.md~~, <code>CLAUDE.md</code>, |docs/sdlc.html|, tools/sdlc_quick.py;README.md"
     assert sdlc.scope_paths(marked, tracked) == {"tools/sdlc.py", "SDLC.md", "CLAUDE.md", "docs/sdlc.html",
                                                  "tools/sdlc_quick.py", "README.md"}
@@ -1267,3 +1277,15 @@ def test_every_spelling_of_a_scope_path_overlaps_its_file_and_its_directories(gh
     code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, [group(a, files=(files,))]))
     assert code == 1 and f"group 1 (#{a}) overlaps epic #{feature}, which is being built: " in err, err
     assert f"`{path}`" in err.split("which is being built: ", 1)[1], err
+
+
+def test_a_link_to_a_file_on_an_epic_branch_overlaps(gh, git, capsys, tmp_path):
+    epic, (a, b) = ready(gh, 2)
+    feature = gh.feature_epic(created=("M1",))
+    gh.issue(f"#{feature} T6: a slice", ["plan:slice"], body=(
+        f"<!-- sdlc:v1 kind=slice epic={feature} key=T6 -->\n## Scope\n\n"
+        f"[the gate](https://github.com/{REPO}/blob/epic/{feature}/tools/sdlc.py#L10)\n"))
+    groups = [group(a, files=("tools/sdlc.py",)), group(b, files=("tools/",))]
+    code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, groups))
+    hits = [l for l in err.splitlines() if "overlaps" in l]
+    assert code == 1 and len(hits) == 2 and all("`tools/sdlc.py`" in l for l in hits), err
