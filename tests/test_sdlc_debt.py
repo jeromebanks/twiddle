@@ -1152,14 +1152,56 @@ def test_scope_paths_reads_the_real_scope_texts():
           "and test_sdlc_plan.py that assert cleanup behaviour. `.agents/skills/plan-issue/SKILL.md` and its "
           "plan-schema reference.")
     assert sdlc.scope_paths(t9, tracked) == {"tools/sdlc.py", ".sdlc/config.json", "tests/test_sdlc_epic.py",
-                                             ".agents/skills/plan-issue/SKILL.md"}
+                                             "test_sdlc_plan.py", ".agents/skills/plan-issue/SKILL.md"}
     t10 = ("SDLC.md, docs/sdlc.html, CLAUDE.md (tools/sdlc.py row only), .agents/skills/{plan-issue (pass plans), "
            "work-slice}/SKILL.md; a new tests/test_sdlc_debt_e2e.py in the style of tests/test_sdlc_quick_e2e.py. "
            "See https://github.com/o/r/blob/main/docs/prd/243-x.md, e.g. origin/main...origin/epic/N, sdlc.py, docs")
     assert sdlc.scope_paths(t10, tracked) == {"SDLC.md", "docs/sdlc.html", "CLAUDE.md", "tools/sdlc.py",
                                               ".agents/skills/", "tests/test_sdlc_debt_e2e.py",
-                                              "tests/test_sdlc_quick_e2e.py"}
+                                              "tests/test_sdlc_quick_e2e.py",
+                                              # prose shaped like a path is claimed too: it only refuses more
+                                              "origin/main...origin/epic/N", "sdlc.py", "e.g"}
     md = "**tools/sdlc.py** and *SDLC.md*, see [the guide](docs/sdlc.html) and [CLAUDE.md](https://x.org/CLAUDE.md)"
     assert sdlc.scope_paths(md, tracked) == {"tools/sdlc.py", "SDLC.md", "docs/sdlc.html", "CLAUDE.md"}
     assert sdlc.paths_overlap("tools/", "tools/sdlc.py") and sdlc.paths_overlap("tools/sdlc.py", "tools")
     assert not sdlc.paths_overlap("tools/sdlc.py", "tools/sdlc_quick.py") and not sdlc.paths_overlap("tool", "tools/x")
+
+
+def test_a_new_path_named_without_a_directory_or_an_extension_is_still_claimed(gh, git, capsys, tmp_path):
+    epic, (a, b, c) = ready(gh, 3)
+    feature = gh.feature_epic(created=("M1",))
+    gh.issue(f"#{feature} T2: a slice", ["plan:slice"], body=(
+        f"<!-- sdlc:v1 kind=slice epic={feature} key=T2 -->\n## Scope\n\nA new tools/new-helper script and a "
+        "NEW_GUIDE.md beside the README.\n\n## Non-goals\n\nnothing in docs/sdlc.html\n"))
+    groups = [group(a, files=("tools/new-helper",)), group(b, files=("NEW_GUIDE.md",)), group(c, files=("docs/sdlc.html",))]
+    code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, groups))
+    assert code == 1
+    assert f"group 1 (#{a}) overlaps epic #{feature}, which is being built: `tools/new-helper`" in err
+    assert f"group 2 (#{b}) overlaps epic #{feature}, which is being built: `NEW_GUIDE.md`" in err
+    assert "group 3" not in err   # named under Non-goals, not Scope
+
+
+def test_a_malformed_files_or_tickets_value_is_reported_not_raised(gh, git, capsys, tmp_path):
+    epic, (a,) = ready(gh, 1)
+    feature = gh.feature_epic(created=("M1",))
+    git.branches[feature] = ["src/twiddle/cli.py"]
+    groups = [{**group(a), "files": 42}, {**group(), "tickets": "x"}]
+    code, _, err = run(capsys, "debt-pass-post", epic, pass_file(tmp_path, epic, groups))
+    assert code != 0 and "group 1 has no files" in err and "group 2 is empty" in err and gh.writes == []
+
+
+def test_a_ticket_waiting_on_a_person_is_left_out_until_they_reply(gh, git, capsys, tmp_path):
+    epic, (a, b) = ready(gh, 2)
+    gh.comment(a, sdlc.marker(sdlc.DEBT_REQUEST_KIND) + "\nPlease run it.")   # T8b's request on the ticket
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "plan_pass" and st["debt"]["eligible"] == [b]
+    code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, [group(a), group(b)]))
+    assert code == 1 and f"#{a} waits on a person" in err and f"#{b}" not in err
+    gh.comment(b, sdlc.marker(sdlc.DEBT_REQUEST_KIND) + "\nPlease run it.")
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "debt_waiting" and f"#{a} waits on a person; #{b} waits on a person" in st["next"]
+    gh.comment(a, "I ran it: the Roam played, then I restored it.", author=STRANGER)   # not the author: still waits
+    assert ticket_state(capsys, epic)["action"] == "debt_waiting"
+    gh.comment(a, "Done, it works.")   # a collaborator's reply puts it back
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "plan_pass" and st["debt"]["eligible"] == [a]

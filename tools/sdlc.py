@@ -2994,6 +2994,7 @@ def debt_progress(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[
         labels = [l["name"] for l in s.get("labels", [])]
         tickets.append({"number": s["number"], "title": s.get("title", ""), "labels": labels,
                         "intake": intake_of(comments, trusted),
+                        "waits_on_person": waits_on_person(comments, trusted, (s.get("user") or {}).get("login", "")),
                         "waiting_for": ticket_waiting_for(s, labels, config, trusted, sources)})
     epic_comments = [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{epic}/comments")]
     return {"tickets": sorted(tickets, key=lambda t: t["number"]), "passes": debt_passes(epic_comments, trusted)}
@@ -3379,6 +3380,20 @@ def debt_passes(comments: list[dict[str, Any]], trusted: set[str]) -> list[dict[
     return [{**p, "open": p["pass"] not in ended} for _, p in sorted(posted.items())]
 
 
+DEBT_REQUEST_KIND = "debt-request"   # asks a person on the ticket (T8b posts it); the ticket waits for their reply
+
+
+def waits_on_person(comments: list[dict[str, Any]], trusted: set[str], author: str) -> bool:
+    """A ticket's latest `debt-request` has no reply since, from its author or a collaborator (an unmarked comment)."""
+    ordered = sorted(comments, key=lambda c: (c.get("created_at", ""), c.get("id", 0)))
+    last = max((i for i, c in enumerate(ordered) if c.get("author") in trusted
+                and (parse_marker(c.get("body", "")) or {}).get("kind") == DEBT_REQUEST_KIND), default=None)
+    if last is None:
+        return False
+    return not any(c.get("author") in trusted | {author} and not parse_marker(c.get("body", ""))
+                   for c in ordered[last + 1:])
+
+
 def ticket_wait_text(t: dict[str, Any]) -> str:
     w = t.get("waiting_for")
     if w:
@@ -3481,13 +3496,15 @@ def pass_shape_errors(plan: Any, epic: int, next_pass: int, rules: DebtRules) ->
 # --- the overlap check: a pass leaves alone the files an epic being built is working on ---------------------------
 
 SCOPE_RE = re.compile(r"^## Scope[ \t]*\n(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
-NEW_FILE_RE = re.compile(r"(?:[\w.-]+/)+[\w-][\w.-]*\.[A-Za-z0-9]+")   # a path with a directory and an extension
+# a path main may lack yet: one with a directory (`tools/new-helper`), or a file name with an extension (`NEW.md`)
+NEW_PATH_RE = re.compile(r"(?:[\w.-]+/)+[\w.-]+/?|[\w-][\w.-]*\.[A-Za-z][A-Za-z0-9]*")
 
 
 def scope_paths(text: str, tracked: set[str]) -> set[str]:
     """The path-shaped tokens of a slice's Scope: a file or directory tracked on main (`tools/sdlc.py`, `CLAUDE.md`,
-    `docs/`), or a file named with its directory and extension though main lacks it yet (`tests/test_new.py`).
-    A `{a,b}` brace or a `*` keeps the tracked directory before it. Prose words (`docs`, `sdlc.py`) are not paths."""
+    `docs/`), or a path main lacks yet: one with a directory (`tests/test_new.py`, `tools/new-helper`) or a file
+    name with an extension (`NEW_GUIDE.md`). A `{a,b}` brace or a `*` keeps the tracked directory before it. A bare
+    word (`docs`) is not a path; prose that looks like one (`sdlc.py`, `epic/N`) is claimed, which only refuses more."""
     dirs = {"/".join(parts[:i]) for f in tracked for parts in [f.split("/")] for i in range(1, len(parts))}
     out = set()
     for raw in re.split(r"[\s`'\"()\[\]]+", re.sub(r"[^\s()\[\]]*://[^\s()\[\]]*", " ", text or "")):   # markdown links split too
@@ -3503,7 +3520,7 @@ def scope_paths(text: str, tracked: set[str]) -> set[str]:
             out.add(tok)
         elif "/" in tok and tok.rstrip("/") in dirs:
             out.add(tok.rstrip("/") + "/")
-        elif NEW_FILE_RE.fullmatch(tok):
+        elif NEW_PATH_RE.fullmatch(tok):   # named, though main lacks it yet: claimed anyway (too much only refuses more)
             out.add(tok)
     return out
 
@@ -3568,7 +3585,8 @@ def overlap_errors(plan: Any, claims: dict[int, set[str]]) -> list[str]:
     errs = []
     groups = plan.get("groups") if isinstance(plan, dict) else None
     for i, g in enumerate(groups if isinstance(groups, list) else [], 1):
-        files = [f for f in (g.get("files") if isinstance(g, dict) else None) or [] if isinstance(f, str)]
+        raw = g.get("files") if isinstance(g, dict) else None
+        files = [f for f in raw if isinstance(f, str)] if isinstance(raw, list) else []   # a bad shape: reported apart
         for e, paths in sorted(claims.items()):
             hits = sorted({p for f in files for p in paths if paths_overlap(f, p)})
             if hits:
@@ -3612,6 +3630,8 @@ def pass_check(n: int, plan: Any, config: dict[str, Any]) -> tuple[dict[str, Any
         labels = [l["name"] for l in raw.get("labels", [])]
         errs += ticket_refusals({"number": t, "state": raw.get("state", "open"), "labels": labels,
                                  "attached": t in attached, "intake": intake_of(comments, trusted),
+                                 "waits_on_person": waits_on_person(comments, trusted,
+                                                                    (raw.get("user") or {}).get("login", "")),
                                  "waiting_for": ticket_waiting_for(raw, labels, config, trusted, sources)},
                                 n, in_open)
     errs += overlap_errors(plan, epic_work_paths(config, trusted))
