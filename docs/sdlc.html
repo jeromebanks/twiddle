@@ -262,7 +262,7 @@ orchestrator) knows exactly what to run.</p>
 <tr><td><code>triage-issue</code></td><td>new, <code>triage</code>, a reply in review</td>
 <td>untriaged → <span class="chip">triage</span> / <span class="chip">needs-info</span> → <span class="chip">prd-review</span> or <span class="chip">diagnosis-review</span> → <span class="chip">approved</span></td>
 <td><code>state</code>, <code>transition</code> (<code>--lane quick</code> for a short brief), <code>reconcile</code>, <code>merge-prd</code>, <code>commit-prd</code></td></tr>
-<tr><td><code>plan-issue</code></td><td><span class="chip">approved</span>, the next milestone, demo changes, a cleanup pass</td>
+<tr><td><code>plan-issue</code></td><td><span class="chip">approved</span>, the next milestone, demo changes</td>
 <td><span class="chip">approved</span> → <span class="chip">planned</span>, or adds issues while <span class="chip">in-progress</span></td>
 <td><code>plan-validate</code>, <code>plan-post</code>, <code>plan-review</code>, <code>plan-create</code>, <code>plan-annotate</code>, <code>bootstrap-labels</code></td></tr>
 <tr><td><code>work-slice</code></td><td>a slice is ready</td>
@@ -312,7 +312,7 @@ acceptance criteria, how to validate it, the demo, the non-goals and the context
 <ol class="steps">
 <li><strong>Claim.</strong> <code>claim S --model …</code> posts the claim, assigns it, and makes a worktree on
 <code>slice/S</code> from <code>origin/epic/N</code>. It refuses while a demo or release is due, a slice of a
-later milestone is waiting, or the cleanup pass comes first.</li>
+later milestone is waiting.</li>
 <li><strong>Build.</strong> Only what the brief says, with offline tests. No test touches the network, a speaker or Spotify, and
 nothing fires on a real speaker.</li>
 <li><strong>Test.</strong> <code>test-record PR</code> runs the full suite on the pushed head and records the result on the PR.</li>
@@ -563,10 +563,9 @@ no Codex review: nothing of it is on the branch, so a review would judge a later
 <td>No demo is posted. <code>demo-changes N --found</code> records it, <code>plan-issue</code> plans fix slices (each with a test that
 reproduces it), and the demo runs again.</td></tr>
 <tr><td><strong>Non-blocking.</strong> A cosmetic problem, an edge case, a review suggestion, or an adjacent issue.</td>
-<td><code>file-issue N --debt</code> files it as <span class="chip">tech-debt</span>, linked to the epic. A budgeted cleanup pass picks it up
-after the milestone is accepted, and <code>merge</code> closes it with the slice that pays it down.
-A follow-up is debt by what it is, not by its lane: <code>file-issue N --debt</code> on a quick change files work the change needed to support itself, and,
-since a quick change has no epic and no cleanup pass, it waits in the open <span class="chip">tech-debt</span> list (<code>state</code> on it says so).</td></tr>
+<td><code>file-issue N --debt</code> files it as <span class="chip">tech-debt</span>, linked to the epic, and it joins the debt epic, which works it into <code>main</code>.
+A follow-up is debt by what it is, not by its lane: <code>file-issue N --debt</code> on a quick change files work the change needed to support itself, and
+it joins the debt epic the same way (<code>state</code> on it says so).</td></tr>
 <tr><td><strong>Out of scope.</strong> A bug that already existed, or one in another feature.</td>
 <td><code>file-issue N</code> makes a new issue, which starts its own journey at triage.</td></tr>
 <tr><td><strong>The poster wants something different.</strong></td>
@@ -598,7 +597,7 @@ uv run python tools/sdlc.py ready --epic 12 # the slices that can start now</cod
 <li><code>/work-slice 28</code>, <code>29</code>, <code>30</code>: each slice is claimed, built, tested, reviewed by Codex, and squashed into <code>epic/12</code>. The issue is now <span class="chip">sdlc:in-progress</span>.</li>
 <li>M1 is complete, so <code>/milestone-demo 12</code> posts screenshots of <code>alarm list</code>, and the issue becomes <span class="chip">sdlc:demo-review</span>. The poster says <code>/approve</code>.</li>
 <li>The agent runs <code>sync 12</code>, Codex reviews M1's diff, and <code>ship 12</code> merges <code>epic/12</code> into <code>main</code>. M1 is on <code>main</code>.</li>
-<li><code>/plan-issue 12</code> replans M2 with <em>Lessons from M1</em>, plus one tech-debt cleanup slice. Then the loop repeats. One of M2's steps rings a real alarm, so the agent asks on the issue, and the poster replies "it rang at 7:02".</li>
+<li><code>/plan-issue 12</code> replans M2 with <em>Lessons from M1</em>. Then the loop repeats. One of M2's steps rings a real alarm, so the agent asks on the issue, and the poster replies "it rang at 7:02".</li>
 <li>When the last milestone ships, <code>epic/12</code> is deleted, the issue becomes <span class="chip">sdlc:done</span>, and it's closed.</li>
 </ol>
 

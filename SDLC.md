@@ -141,10 +141,9 @@ when it merges.
 next one's slices; open `tech-debt` issues are worked in the debt epic. Ready slices are
 always taken from the earliest milestone first, so fix slices go before later work.
 A follow-up is tech debt because of what it is, not the lane it came from, so a quick change's
-`file-issue N --debt` files work it needed to support itself too; with no epic and no cleanup
-pass, that debt waits in the open `tech-debt` list (`state` on it says so); if the change then
-escalates to the full lane, `escalate-to-full` rewrites that debt's first lines as the new epic's,
-for its cleanup pass. Anything else goes without `--debt`, to triage.
+`file-issue N --debt` files work it needed to support itself too, and it joins the debt epic
+like any other (`state` on it says so); if the change then escalates to the full lane,
+`escalate-to-full` rewrites that debt's first lines as the new epic's. Anything else goes without `--debt`, to triage.
 
 ## Rules the tooling enforces
 
@@ -216,7 +215,7 @@ on its head.** The full lane is unchanged for everything else.
 6. **Escalation.** A change that outgrows the lane goes to the full lane **with its approved
    brief**, no new PRD: `escalate-to-full N` posts a `lane=full` record, returns the issue to
    `sdlc:approved` (without `lane:quick`), readdresses open debt filed against N while it was quick
-   to N's cleanup pass, and runs `commit-prd N`, which commits the brief to
+   as N's epic debt, and runs `commit-prd N`, which commits the brief to
    `docs/prd/N-*.md` through a docs-only PR and `merge-prd`, since planning reads the PRD there.
    Until the file is merged `state` offers `commit_prd`; `commit-prd N` is safe to rerun. Then
    `/plan-issue N`. The tool runs `escalate-to-full` itself when `pr-review` records one Codex round
@@ -265,7 +264,7 @@ the old behaviour, creating everything at once.
 No consensus within `max_plan_rounds` on the first plan means the planner asks the poster
 one plain-language question (`sdlc:needs-info`, marked `phase=plan`). Their answer earns a
 fresh set of rounds. An amendment while the epic is being built (demo changes, the next
-milestone, a cleanup pass) that runs out of rounds is escalated to a human instead
+milestone) that runs out of rounds is escalated to a human instead
 (`escalate_plan`). A plan revision never voids the PRD's sign-off.
 
 `uv run python tools/sdlc.py ready --epic N` lists the units of work whose

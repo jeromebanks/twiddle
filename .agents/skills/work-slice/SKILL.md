@@ -401,9 +401,8 @@ never touch a label. File what you leave behind as in §9, with the quick issue'
 the same rule: a follow-up is tech debt because of what it is, not because of the lane it came
 from. Work the change should have included to support itself is tech debt
 (`file-issue N --debt --source review|advisor|adjacent ...`); anything else is an ordinary issue,
-filed without `--debt`, for triage. A quick change has no epic and so no cleanup pass: its debt
-waits, labelled `tech-debt`, in the open tech-debt list (`gh issue list --label tech-debt`), and
-`file-issue` and `state` on the debt issue say so.
+filed without `--debt`, for triage. Its debt, labelled `tech-debt`, joins the debt epic like any
+other, and `file-issue` and `state` on the debt issue say so.
 
 **10. Report** as §10, with the PR and the test count; there is no milestone, and `next:` is
 "nothing for #N".
