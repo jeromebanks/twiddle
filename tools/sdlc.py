@@ -60,6 +60,7 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.parse
 import sys
 import tempfile
 import time
@@ -3339,7 +3340,7 @@ PASS_FETCH_SECONDS = 60   # the one `git fetch` a pass check makes (main and eve
 
 
 def extract_pass(body: str) -> dict[str, Any]:
-    m = PASS_JSON_RE.search(body or "")
+    m = PASS_JSON_RE.search((body or "").replace("\r\n", "\n"))
     if not m:
         raise SdlcError("the pass comment carries no pass JSON")
     try:
@@ -3466,7 +3467,7 @@ def pass_shape_errors(plan: Any, epic: int, next_pass: int, rules: DebtRules) ->
                     seen.setdefault(t, []).append(i)
         if not _text(g.get("scope")):
             errs.append(f"{where} has no scope: one line saying what its PR changes")
-        elif "\n" in g["scope"].strip():
+        elif re.search(r"[\r\n]", g["scope"].strip()):
             errs.append(f"{where}'s scope is more than one line: say what its PR changes in one")
         files = g.get("files")
         if not isinstance(files, list) or not files:
@@ -3495,9 +3496,36 @@ def pass_shape_errors(plan: Any, epic: int, next_pass: int, rules: DebtRules) ->
 
 # --- the overlap check: a pass leaves alone the files an epic being built is working on ---------------------------
 
-SCOPE_RE = re.compile(r"^## Scope[ \t]*\n(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
 # a path main may lack yet: one with a directory (`tools/new-helper`), or a file name with an extension (`NEW.md`)
 NEW_PATH_RE = re.compile(r"(?:[\w.-]+/)+[\w.-]+/?|[\w-][\w.-]*\.[A-Za-z][A-Za-z0-9]*")
+HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t#]*$")
+FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+
+
+def scope_text(body: str) -> str:
+    """A slice's Scope section(s): a heading `Scope` (any level, any case, any text after the word) up to the next
+    heading outside a code fence that is no deeper than it, so its own subheadings and a `#` line in a fenced
+    block stay in. Line endings are normalised. With no Scope heading at all, the whole body (an issue edited out
+    of shape still claims what it names)."""
+    lines = (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    found, level, fence, seen = [], None, None, False
+    for line in lines:
+        f = FENCE_RE.match(line)
+        if fence:
+            if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence):
+                fence = None
+        elif f:
+            fence = f.group(1)
+        elif h := HEADING_RE.match(line):
+            depth = len(h.group(1))
+            if re.match(r"scope\b", h.group(2), re.IGNORECASE):
+                level, seen = depth, True
+                continue
+            if level is not None and depth <= level:
+                level = None
+        if level is not None:
+            found.append(line)
+    return "\n".join(found if seen else lines)
 
 
 def scope_paths(text: str, tracked: set[str], named: tuple[str, ...] | list[str] = ()) -> set[str]:
@@ -3509,7 +3537,8 @@ def scope_paths(text: str, tracked: set[str], named: tuple[str, ...] | list[str]
     `named` (a pass's files and directories) is claimed wherever the text holds it whole, whatever markup
     surrounds it, as a backstop."""
     dirs = {"/".join(parts[:i]) for f in tracked for parts in [f.split("/")] for i in range(1, len(parts))}
-    text = re.sub(r"\\(?=[\\`*_{}\[\]()#+.!|~<>-])", "", text or "")   # markdown escapes: `tools/sdlc\_quick.py`
+    text = html.unescape(text or "")   # `&#47;`, `&lt;code&gt;`
+    text = re.sub(r"\\(?=[\\`*_{}\[\]()#+.!|~<>-])", "", text)   # markdown escapes: `tools/sdlc\_quick.py`
     text = text.replace("\\", "/")   # any other backslash separates a path: `tools\sdlc.py`
     # a URL is not a path, but a link to a file in the repo (`.../blob/main/tools/sdlc.py`) names that file
     text = re.sub(r"[^\s()\[\]<>|]*://[^\s()\[\]<>|]*", lambda m: f" {link_path(m.group(0), tracked, dirs)} ", text)
@@ -3532,6 +3561,7 @@ def link_path(url: str, tracked: set[str], dirs: set[str]) -> str:
     for any other ref, or any other URL, the split can't be known, so every tail of the URL's path is claimed
     (claiming too much only refuses more)."""
     mark = lambda path: path + "/" if path in dirs else path   # noqa: E731  (a directory keeps its slash)
+    url = urllib.parse.unquote(url)   # `tools%2Fsdlc.py`, `my%20file.md`
     if u := re.search(r"/(?:blob|tree)/([^?#]+)", url):
         parts = [p for p in u.group(1).split("/") if p]
         known = re.match(r"(?:main|(?:epic|slice)/\d+|[0-9a-f]{7,40})/", "/".join(parts) + "/")
@@ -3585,7 +3615,9 @@ def building_epics(config: dict[str, Any], trusted: set[str]) -> list[int]:
             if "pull_request" in r or labels & {DEBT_EPIC_LABEL, DEBT_LABEL, LEAF_LABEL, CONTAINER_LABEL}:
                 continue
             found.add(r["number"])
-    return [n for n in sorted(found) if epic_building(bundle_state(fetch_bundle(n, config, trusted), config))]
+    # labelled planned/in-progress is enough: a label conflict or an escalation still has slices in flight
+    return [n for n in sorted(found)
+            if not is_quick(st := bundle_state(fetch_bundle(n, config, trusted), config)) and not is_debt_epic(st)]
 
 
 def epic_work_paths(config: dict[str, Any], trusted: set[str], named: list[str] | None = None,
@@ -3619,8 +3651,8 @@ def epic_work_paths(config: dict[str, Any], trusted: set[str], named: list[str] 
             for f in gh_pages(f"repos/{repo}/pulls/{pr['number']}/files?per_page=100"):
                 paths |= set(sdlc_quick.changed_paths(f))
         for s in slices:
-            if s["epic"] == e and (m := SCOPE_RE.search(s["body"])):
-                paths |= scope_paths(m.group(1), tracked, named or [])
+            if s["epic"] == e:
+                paths |= scope_paths(scope_text(s["body"]), tracked, named or [])
         out[e] = paths
     return out
 

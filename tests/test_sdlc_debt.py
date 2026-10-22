@@ -1318,3 +1318,35 @@ def test_a_link_to_a_new_file_on_any_branch_overlaps_it_and_its_directory(gh, gi
         f"[new](https://github.com/{REPO}/blob/{ref}/{path})\n"))
     code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, [group(a, files=(files,))]))
     assert code == 1 and f"`{path}`" in err, err
+
+
+@pytest.mark.parametrize("body", [
+    "## Scope\r\n\r\n`tools/sdlc.py` gains a command.\r\n\r\n## Non-goals\r\n\r\nNone.\r\n",   # CRLF
+    "### Scope (what changes)\n\ntools/sdlc.py\n\n### Non-goals\n\nNone.\n",               # another level, more text
+    "## scope\n\ntools/sdlc.py\n",                                                           # lower case
+    "No sections at all: it edits tools/sdlc.py.\n",                                           # no heading: the body
+    "## Scope\n\nA command.\n\n### Files\n\n- tools/sdlc.py\n\n## Non-goals\n\nNone.\n",       # its own subheading
+    "## Scope\n\n```sh\n# a comment\n```\n\nthen tools/sdlc.py\n\n## Context\n\nx\n",            # a fenced `#` line
+    "## Scope\n\n<code>tools&#47;sdlc.py</code>\n",                                             # HTML entities
+    "## Scope\n\n[x](https://github.com/o/r/blob/main/tools%2Fsdlc.py)\n",                      # percent-encoded
+])
+def test_any_shape_of_scope_section_is_read(gh, git, capsys, tmp_path, body):
+    epic, (a,) = ready(gh, 1)
+    feature = gh.feature_epic(created=("M1",))
+    gh.issue(f"#{feature} T8: a slice", ["plan:slice"], body=f"<!-- sdlc:v1 kind=slice epic={feature} key=T8 -->\n{body}")
+    code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, [group(a, files=("tools/sdlc.py",))]))
+    assert code == 1 and f"group 1 (#{a}) overlaps epic #{feature}" in err and "`tools/sdlc.py`" in err, err
+
+
+def test_only_the_scope_section_is_read_when_there_is_one():
+    body = "## Outcome\r\n\r\nCLAUDE.md\r\n\r\n## Scope\r\n\r\ntools/sdlc.py\r\n\r\n## Non-goals\r\n\r\nSDLC.md\r\n"
+    assert sdlc.scope_text(body).strip() == "tools/sdlc.py"
+    assert "CLAUDE.md" not in sdlc.scope_text("## Scope\n\nx\n\n# Context\n\nCLAUDE.md\n")   # a shallower heading ends it
+
+
+def test_a_crlf_pass_comment_still_reads_and_a_cr_scope_is_two_lines():
+    body = sdlc.render_pass({"epic": 250, "pass": 1, "groups": [group(5)]}).replace("\n", "\r\n")
+    assert sdlc.pass_ticket_numbers(sdlc.extract_pass(body)) == [5]
+    assert any("more than one line" in e for e in
+               sdlc.pass_shape_errors({"epic": 250, "pass": 1, "groups": [group(5, scope="a\rb")]}, 250, 1,
+                                      sdlc.load_debt(CONFIG)))
