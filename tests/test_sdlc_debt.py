@@ -1163,6 +1163,13 @@ def test_scope_paths_reads_the_real_scope_texts():
                                               "origin/main...origin/epic/N", "sdlc.py", "e.g"}
     assert sdlc.scope_paths("[helper](./tools/sdlc.py) and /CLAUDE.md", tracked) == {"tools/sdlc.py", "CLAUDE.md"}
     assert sdlc.scope_paths("tools/sdlc.py:120, SDLC.md#lanes", tracked) == {"tools/sdlc.py", "SDLC.md"}
+    marked = "__tools/sdlc.py__, ~~SDLC.md~~, <code>CLAUDE.md</code>, |docs/sdlc.html|, tools/sdlc_quick.py;README.md"
+    assert sdlc.scope_paths(marked, tracked) == {"tools/sdlc.py", "SDLC.md", "CLAUDE.md", "docs/sdlc.html",
+                                                 "tools/sdlc_quick.py", "README.md"}
+    assert "tests/test_sdlc_epic.py" not in sdlc.scope_paths("«tests/test_sdlc_epic.py»", tracked)
+    named = ["tests/test_sdlc_epic.py", "src/x.py", "tools/"]   # the backstop: a pass's files, whatever surrounds them
+    got = sdlc.scope_paths("«tests/test_sdlc_epic.py» and xsrc/x.py and tools", tracked, named)
+    assert "tests/test_sdlc_epic.py" in got and "src/x.py" not in got and "tools/" not in got
     md = "**tools/sdlc.py** and *SDLC.md*, see [the guide](docs/sdlc.html) and [CLAUDE.md](https://x.org/CLAUDE.md)"
     assert sdlc.scope_paths(md, tracked) == {"tools/sdlc.py", "SDLC.md", "docs/sdlc.html", "CLAUDE.md"}
     assert sdlc.paths_overlap("tools/", "tools/sdlc.py") and sdlc.paths_overlap("tools/sdlc.py", "tools")
@@ -1216,3 +1223,14 @@ def test_a_scope_path_written_with_a_leading_dot_slash_still_overlaps(gh, git, c
         f"<!-- sdlc:v1 kind=slice epic={feature} key=T3 -->\n## Scope\n\nThe [helper](./tools/sdlc.py).\n"))
     code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, [group(a, files=("tools/sdlc.py",))]))
     assert code == 1 and f"group 1 (#{a}) overlaps epic #{feature}, which is being built: `tools/sdlc.py`" in err
+
+
+def test_a_scope_path_in_underscore_emphasis_still_overlaps(gh, git, capsys, tmp_path):
+    epic, (a, b) = ready(gh, 2)
+    feature = gh.feature_epic(created=("M1",))
+    gh.issue(f"#{feature} T4: a slice", ["plan:slice"], body=(
+        f"<!-- sdlc:v1 kind=slice epic={feature} key=T4 -->\n## Scope\n\n__tools/sdlc.py__ and «src/twiddle/cli.py».\n"))
+    groups = [group(a, files=("tools/sdlc.py",)), group(b, files=("src/twiddle/cli.py",))]
+    code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, groups))
+    assert code == 1 and f"group 1 (#{a}) overlaps epic #{feature}, which is being built: `tools/sdlc.py`" in err
+    assert f"group 2 (#{b}) overlaps epic #{feature}, which is being built: `src/twiddle/cli.py`" in err

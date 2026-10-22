@@ -3500,30 +3500,48 @@ SCOPE_RE = re.compile(r"^## Scope[ \t]*\n(.*?)(?=^## |\Z)", re.MULTILINE | re.DO
 NEW_PATH_RE = re.compile(r"(?:[\w.-]+/)+[\w.-]+/?|[\w-][\w.-]*\.[A-Za-z][A-Za-z0-9]*")
 
 
-def scope_paths(text: str, tracked: set[str]) -> set[str]:
+def scope_paths(text: str, tracked: set[str], named: tuple[str, ...] | list[str] = ()) -> set[str]:
     """The path-shaped tokens of a slice's Scope: a file or directory tracked on main (`tools/sdlc.py`, `CLAUDE.md`,
     `docs/`), or a path main lacks yet: one with a directory (`tests/test_new.py`, `tools/new-helper`) or a file
     name with an extension (`NEW_GUIDE.md`). A `{a,b}` brace or a `*` keeps the tracked directory before it. A bare
-    word (`docs`) is not a path; prose that looks like one (`sdlc.py`, `epic/N`) is claimed, which only refuses more."""
+    word (`docs`) is not a path; prose that looks like one (`sdlc.py`, `epic/N`) is claimed, which only refuses more.
+    Markdown round a token (`**`, `__`, `~~`, `<code>`, a link, a table cell) is taken off it. And each path of
+    `named` (a pass's files, not its directories) is claimed wherever the text holds it whole, whatever markup
+    surrounds it, as a backstop."""
     dirs = {"/".join(parts[:i]) for f in tracked for parts in [f.split("/")] for i in range(1, len(parts))}
-    out = set()
-    for raw in re.split(r"[\s`'\"()\[\]]+", re.sub(r"[^\s()\[\]]*://[^\s()\[\]]*", " ", text or "")):   # markdown links split too
-        tok = re.split(r"[:#]", raw.strip("<>,;:!?*"), maxsplit=1)[0].rstrip(".")   # `tools/sdlc.py:120`, `#L3`
-        while tok.startswith(("./", "/")):   # `./tools/sdlc.py` is `tools/sdlc.py`
-            tok = tok[1:] if tok.startswith("/") else tok[2:]
-        if not tok:
-            continue
-        if cut := re.search(r"[{*]", tok):
-            tok = tok[:cut.start()].rsplit("/", 1)[0] if "/" in tok[:cut.start()] else ""
-            if tok in dirs:
-                out.add(tok + "/")
-            continue
-        if tok in tracked:
-            out.add(tok)
-        elif "/" in tok and tok.rstrip("/") in dirs:
-            out.add(tok.rstrip("/") + "/")
-        elif NEW_PATH_RE.fullmatch(tok):   # named, though main lacks it yet: claimed anyway (too much only refuses more)
-            out.add(tok)
+    text = re.sub(r"[^\s()\[\]<>|]*://[^\s()\[\]<>|]*", " ", text or "")   # URLs: a link's text is kept
+    out = {f for f in named if isinstance(f, str) and f and not f.endswith("/") and ("/" in f or "." in f)
+           and re.search(rf"(?<![A-Za-z0-9./-]){re.escape(f)}(?![A-Za-z0-9/-]|\.[A-Za-z0-9])", text)}
+    for raw in re.split(r"[\s`'\"()\[\]<>|,;]+", text):   # markdown links, HTML tags and table cells split too
+        bare = re.split(r"[:#]", raw.strip("!?:"), maxsplit=1)[0].rstrip(".")   # `tools/sdlc.py:120`, `#L3`
+        # `__tools/sdlc.py__` is `tools/sdlc.py`; a tracked `__init__.py` is itself
+        out |= ({bare} if bare in tracked else set()) or scope_token(bare.strip("*_~"), tracked, dirs) \
+            or scope_token(bare, tracked, dirs)
+    return out
+
+
+def scope_token(tok: str, tracked: set[str], dirs: set[str]) -> set[str]:
+    """What one Scope token claims (see scope_paths): nothing, a path, or a directory (`dir/`)."""
+    out: set[str] = set()
+    for _ in range(len(tok)):   # `./tools/sdlc.py` is `tools/sdlc.py`
+        if tok.startswith("./"):
+            tok = tok[2:]
+        elif tok.startswith("/"):
+            tok = tok[1:]
+        else:
+            break
+    if not tok:
+        return out
+    if cut := re.search(r"[{*]", tok):
+        tok = tok[:cut.start()].rsplit("/", 1)[0] if "/" in tok[:cut.start()] else ""
+        if tok in dirs:
+            out.add(tok + "/")
+    elif tok in tracked:
+        out.add(tok)
+    elif "/" in tok and tok.rstrip("/") in dirs:
+        out.add(tok.rstrip("/") + "/")
+    elif NEW_PATH_RE.fullmatch(tok):   # named, though main lacks it yet: claimed anyway (too much only refuses more)
+        out.add(tok)
     return out
 
 
@@ -3545,7 +3563,8 @@ def building_epics(config: dict[str, Any], trusted: set[str]) -> list[int]:
     return [n for n in sorted(found) if epic_building(bundle_state(fetch_bundle(n, config, trusted), config))]
 
 
-def epic_work_paths(config: dict[str, Any], trusted: set[str], root: Path = ROOT) -> dict[int, set[str]]:
+def epic_work_paths(config: dict[str, Any], trusted: set[str], named: list[str] | None = None,
+                    root: Path = ROOT) -> dict[int, set[str]]:
     """Each epic being built, and the paths its work touches or names: what `epic/N` changes since main (`git diff
     --name-only origin/main...origin/epic/N`), the files of its open PRs, and the Scope of each of its open slices
     (claimed or not, PR or not). One bounded fetch of main and every epic branch first; a failed one refuses."""
@@ -3576,7 +3595,7 @@ def epic_work_paths(config: dict[str, Any], trusted: set[str], root: Path = ROOT
                 paths |= set(sdlc_quick.changed_paths(f))
         for s in slices:
             if s["epic"] == e and (m := SCOPE_RE.search(s["body"])):
-                paths |= scope_paths(m.group(1), tracked)
+                paths |= scope_paths(m.group(1), tracked, named or [])
         out[e] = paths
     return out
 
@@ -3636,7 +3655,9 @@ def pass_check(n: int, plan: Any, config: dict[str, Any]) -> tuple[dict[str, Any
                                                                     (raw.get("user") or {}).get("login", "")),
                                  "waiting_for": ticket_waiting_for(raw, labels, config, trusted, sources)},
                                 n, in_open)
-    errs += overlap_errors(plan, epic_work_paths(config, trusted))
+    named = [f for g in (plan.get("groups") if isinstance(plan, dict) and isinstance(plan.get("groups"), list) else [])
+             if isinstance(g, dict) and isinstance(g.get("files"), list) for f in g["files"] if isinstance(f, str)]
+    errs += overlap_errors(plan, epic_work_paths(config, trusted, named))
     return bundle, passes, errs
 
 
