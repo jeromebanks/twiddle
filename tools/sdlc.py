@@ -13,6 +13,7 @@ and every label change and agent comment. Config is `.sdlc/config.json`.
     uv run python tools/sdlc.py escalate-to-full 12 --reason "needs a new fetcher" --dry-run   # quick -> full lane
     uv run python tools/sdlc.py commit-prd 12 --dry-run   # a quick brief moved to the full lane -> docs/prd/
     uv run python tools/sdlc.py plan-validate plan.json
+    uv run python tools/sdlc.py debt-pass-validate 250 pass.json && uv run python tools/sdlc.py debt-pass-post 250 pass.json
     uv run python tools/sdlc.py plan-post 12 plan.json --dry-run
     uv run python tools/sdlc.py codex-review --plan 12 --out review       # Codex on the posted plan revision
     uv run python tools/sdlc.py plan-review 12 --plan review/plan.json --report review/codex.md --response response.md
@@ -59,6 +60,7 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.parse
 import sys
 import tempfile
 import time
@@ -112,7 +114,7 @@ ALL_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label
                "plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone", "escalate_plan",
                "record_demo_acceptance", "demo_reply", "demo_heard",
                "work_slices", "work_quick", "commit_prd", "wait_for_poster", "human", "fix_conflict", "none",
-               "debt_intake"}
+               "debt_intake", "plan_pass", "debt_waiting"}
 NO_MILESTONE = "all"     # an epic planned without milestones has one demo, for all of it
 # from-state -> states the triage skill may move to. `escalated` is open from anywhere.
 TRANSITIONS = {
@@ -963,6 +965,8 @@ HEADERS = {
     "lane": "moved to the full lane",
     "prd-merged": "PRD merged",
     "intake": "debt intake",
+    "debt-pass": "debt pass plan",
+    "debt-pass-end": "debt pass ended",
 }
 FOOTERS = {
     "question": "Reply in a comment. Anything you leave unanswered, I will assume the stated default.",
@@ -1115,6 +1119,13 @@ def print_state(st: dict[str, Any]) -> None:
         print(f"  debt epic: {len(dv['tickets'])} open ticket(s)"
               + (f", without an intake verdict: {', '.join(f'#{t}' for t in none)}" if none else "")
               + (f", intake cut short: {', '.join(short)}" if short else ""))
+        for p in dv.get("passes") or []:
+            print(f"  pass {p['pass']}: " + (", ".join(f"#{t}" for t in p["tickets"]) or "no readable tickets")
+                  + ("   (open)" if p["open"] else "   (ended)") + (f"  {p['url']}" if p.get("url") else ""))
+        waits = [f"#{t['number']} {ticket_wait_text(t)}" for t in dv["tickets"]
+                 if t.get("intake") == "debt" and (t.get("waiting_for") or t.get("waits_on_person"))]
+        if waits:
+            print("  waiting: " + "; ".join(waits))
     if st["reconcile"]:
         print(f"  needs reconcile ({st['reconcile']}): run `reconcile`")
     for d in (st.get("demos") or {}).values():
@@ -1170,11 +1181,13 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
         st = {**st, "debt_epic": held_by, "waiting_for": debt_waiting_for(st, src)}
     if is_debt_epic(st) and st["action"] == "none" and st["turn"] == "agent":
         # what the debt epic has due comes from its tickets (offline: the bundle's `debt`, {"tickets": [...]})
-        load_debt(config)
         dp = ((bundle or {}).get("debt") if offline else
               debt_progress(st["number"], config, trusted if trusted is not None else fetch_trusted(config)))
         if dp is not None:
-            view = debt_view(st, dp)
+            if "passes" not in dp:   # offline: the passes posted on the epic, from the bundle's comments
+                dp = {**dp, "passes": debt_passes((bundle or {}).get("comments") or [],
+                                                  set((bundle or {}).get("trusted") or []))}
+            view = debt_view(st, dp, load_debt(config))
             st = {**st, "action": view["action"], "turn": view["turn"], "debt": view}
             progress = dp
     nxt = next_command(st, progress)
@@ -2972,25 +2985,58 @@ def intake_of(comments: list[dict[str, Any]], trusted: set[str]) -> str | None:
 
 
 def debt_progress(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str, Any]:
-    """The debt epic's open tickets (its open sub-issues) and each one's intake verdict, read from GitHub."""
-    repo, tickets = repo_of(config), []
+    """The debt epic's open tickets (its open sub-issues), each one's intake verdict and what it waits for, and the
+    passes posted on the epic, read from GitHub."""
+    repo, tickets, sources = repo_of(config), [], {}
     for s in sub_issues(epic, config):
         if s.get("state", "open") != "open" or "pull_request" in s:
             continue
         comments = [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{s['number']}/comments")]
-        tickets.append({"number": s["number"], "title": s.get("title", ""), "intake": intake_of(comments, trusted)})
-    return {"tickets": sorted(tickets, key=lambda t: t["number"])}
+        labels = [l["name"] for l in s.get("labels", [])]
+        tickets.append({"number": s["number"], "title": s.get("title", ""), "labels": labels,
+                        "intake": intake_of(comments, trusted),
+                        "waits_on_person": waits_on_person(comments, trusted, (s.get("user") or {}).get("login", "")),
+                        "waiting_for": ticket_waiting_for(s, labels, config, trusted, sources)})
+    epic_comments = [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{epic}/comments")]
+    return {"tickets": sorted(tickets, key=lambda t: t["number"]), "passes": debt_passes(epic_comments, trusted)}
 
 
-def debt_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
-    """{action, turn, next, ...}: what the debt epic has due, from its tickets. Later slices add passes."""
+def ticket_waiting_for(raw: dict[str, Any], labels: list[str], config: dict[str, Any], trusted: set[str],
+                       sources: dict[int, dict[str, Any] | None]) -> dict[str, Any] | None:
+    """What a debt ticket (an issue as GitHub's REST API gives it) waits for, as `state T` reads it; `sources`
+    caches each source epic's state across tickets. A source that can't be read leaves an explicit `waits=`
+    waiting (its ship can't be seen)."""
+    if DEBT_LABEL not in labels:
+        return None
+    st = derive_state({"number": raw["number"], "title": raw.get("title", ""), "labels": labels,
+                       "body": raw.get("body") or ""}, [], trusted, config)
+    src = debt_wait_source(st)
+    if src is not None and src not in sources:
+        try:
+            sources[src] = bundle_state(fetch_bundle(src, config, trusted), config)
+        except SdlcError:
+            sources[src] = None
+    return debt_waiting_for(st, sources.get(src) if src is not None else None)
+
+
+def debt_view(st: dict[str, Any], progress: dict[str, Any], rules: "DebtRules | None" = None) -> dict[str, Any]:
+    """{action, turn, next, ...}: what the debt epic has due, from its tickets and its passes: intake first, then
+    nothing new while a pass is open (debt that joins during it waits for the next one), then a pass of the
+    tickets through intake that nothing holds back, or, when every one of them waits, what each waits for."""
+    rules = rules or DebtRules(**DEBT_DEFAULTS)
     n, tickets = st["number"], progress.get("tickets") or []
+    passes = progress.get("passes") or []
+    open_pass = next((p for p in passes if p["open"]), None)
     # a verdict `debt-intake` doesn't know (a hand-made marker) counts as none
     unjudged = [t["number"] for t in tickets if t.get("intake") not in INTAKE_VERDICTS]
     # a verdict other than `debt` on a ticket still open here was cut short (it should have left or closed it):
     # still intake, so a rerun of `debt-intake` finishes it rather than the ticket being silently dropped
     unfinished = [t["number"] for t in tickets if t.get("intake") in INTAKE_VERDICTS and t["intake"] != "debt"]
     pending = sorted(unjudged + unfinished)
+    judged = [t for t in tickets if t.get("intake") == "debt"]
+    # the debt epic's open sub-issues: open and attached by construction (an offline bundle may omit both)
+    eligible = [t for t in judged if not ticket_refusals({"state": "open", "attached": True, **t}, n, {})]
+    waiting = [t for t in judged if t.get("waiting_for") or t.get("waits_on_person")]
     if pending:
         turn, action = "agent", "debt_intake"
         what = []
@@ -3003,11 +3049,29 @@ def debt_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
                         + ", ".join(f"#{t} {next(x['intake'] for x in tickets if x['number'] == t)}" for t in unfinished)
                         + "): rerun `debt-intake T` with the same verdict to finish it")
         nxt = f"intake on debt epic #{n}: " + "; ".join(what)
+    elif open_pass:
+        turn, action = "none", "none"
+        nxt = (f"nothing new: debt epic #{n}'s pass {open_pass['pass']} is open ("
+               + (", ".join(f"#{t}" for t in open_pass["tickets"]) or "no readable tickets")
+               + "); the next pass waits until it ends")
+    elif eligible:
+        k = (passes[-1]["pass"] if passes else 0) + 1
+        turn, action = "agent", "plan_pass"
+        nxt = (f"/plan-issue {n}: plan debt pass {k} from {len(eligible)} eligible ticket(s) ("
+               + ", ".join(f"#{t['number']}" for t in eligible)
+               + f"; at most {rules.pass_size} in a pass, {rules.max_per_pr} in a PR), check it with "
+               f"`uv run python tools/sdlc.py debt-pass-validate {n} pass.json`, then `debt-pass-post {n} pass.json`")
+    elif waiting:
+        turn, action = "none", "debt_waiting"
+        nxt = (f"nothing yet: every ticket of debt epic #{n} through intake waits: "
+               + "; ".join(f"#{t['number']} {ticket_wait_text(t)}" for t in waiting))
     else:
         turn, action = "none", "none"
         nxt = (f"nothing: debt epic #{n}'s {len(tickets)} open ticket(s) are all through intake" if tickets
                else f"nothing: debt epic #{n} has no open tickets")
-    return {"number": n, "action": action, "turn": turn, "tickets": tickets, "intake_pending": pending, "next": nxt}
+    return {"number": n, "action": action, "turn": turn, "tickets": tickets, "intake_pending": pending,
+            "passes": passes, "open_pass": open_pass and open_pass["pass"],
+            "eligible": [t["number"] for t in eligible] if not pending and not open_pass else [], "next": nxt}
 
 
 def ticket_debt_epic(n: int, config: dict[str, Any], trusted: set[str]) -> int | None:
@@ -3255,6 +3319,459 @@ def command_debt_intake(args: argparse.Namespace, config: dict[str, Any]) -> int
         "novel": f"; it left the debt epic and is in {PREFIX}triage (`/triage-issue {n}`)",
         "fixed": f"; closed as completed, fixed by {sha[:12] if sha else '?'}",
         "duplicate": f"; closed as a duplicate of #{args.of}"}[v])
+    return 0
+
+
+# --- passes: a plan of which debt tickets to build, posted on the debt epic once the tool has checked it ----------
+#
+# A pass is a marked comment on the debt epic (DEBT_PASS_KIND, `pass=K`) carrying its JSON: groups of tickets, each
+# one PR, built in list order, with a one-line scope, the files it may change and a `routine`/`judgment` rating.
+# No poster sign-off and no Codex round: the tool checks the list, and Codex reviews every PR that builds it.
+# A pass stays open until a pass-end record (DEBT_PASS_END_KIND, posted when its last ticket is done) ends it;
+# only then is the next one planned, so debt that joins during a pass waits for the next.
+
+DEBT_PASS_KIND = "debt-pass"
+DEBT_PASS_END_KIND = "debt-pass-end"
+PASS_JSON_RE = re.compile(r"<!-- pass-json -->\s*(`{3,})json\n(.*?)\n\1", re.DOTALL)
+PASS_KEYS = ("epic", "pass", "groups")
+GROUP_KEYS = ("tickets", "scope", "files", "complexity", "complexity_reason")
+PASS_COMPLEXITY = ("routine", "judgment")     # `novel` needs design choices: the ticket goes to triage instead
+PASS_FETCH_SECONDS = 60   # the one `git fetch` a pass check makes (main and every epic branch)
+
+
+def extract_pass(body: str) -> dict[str, Any]:
+    m = PASS_JSON_RE.search((body or "").replace("\r\n", "\n"))
+    if not m:
+        raise SdlcError("the pass comment carries no pass JSON")
+    try:
+        return json.loads(m.group(2))
+    except ValueError as exc:
+        raise SdlcError(f"the pass comment's JSON does not parse: {exc}") from None
+
+
+def pass_ticket_numbers(plan: Any) -> list[int]:
+    """Every ticket number a pass lists, in order (each once), whatever else is wrong with it."""
+    out: list[int] = []
+    groups = plan.get("groups") if isinstance(plan, dict) else None
+    for g in groups if isinstance(groups, list) else []:
+        tickets = g.get("tickets") if isinstance(g, dict) else None
+        for t in tickets if isinstance(tickets, list) else []:
+            if type(t) is int and t > 0 and t not in out:
+                out.append(t)
+    return out
+
+
+def debt_passes(comments: list[dict[str, Any]], trusted: set[str]) -> list[dict[str, Any]]:
+    """The passes posted on the debt epic, by number: {pass, url, tickets, open}. Only the tool posts them (by a
+    collaborator, `pass=K`); the first record of each number counts, and a pass-end record closes one."""
+    posted: dict[int, dict[str, Any]] = {}
+    ended: set[int] = set()
+    for mk, c in _marked(comments, trusted):
+        k = mk.get("pass", "")
+        if not k.isdigit():
+            continue
+        if mk.get("kind") == DEBT_PASS_KIND and int(k) not in posted:
+            try:
+                tickets = pass_ticket_numbers(extract_pass(c.get("body", "")))
+            except SdlcError:
+                tickets = []
+            posted[int(k)] = {"pass": int(k), "url": c.get("url", ""), "tickets": tickets}
+        elif mk.get("kind") == DEBT_PASS_END_KIND:
+            ended.add(int(k))
+    return [{**p, "open": p["pass"] not in ended} for _, p in sorted(posted.items())]
+
+
+DEBT_REQUEST_KIND = "debt-request"   # asks a person on the ticket (T8b posts it); the ticket waits for their reply
+
+
+def waits_on_person(comments: list[dict[str, Any]], trusted: set[str], author: str) -> bool:
+    """A ticket's latest `debt-request` has no reply since, from its author or a collaborator (an unmarked comment)."""
+    ordered = sorted(comments, key=lambda c: (c.get("created_at", ""), c.get("id", 0)))
+    last = max((i for i, c in enumerate(ordered) if c.get("author") in trusted
+                and (parse_marker(c.get("body", "")) or {}).get("kind") == DEBT_REQUEST_KIND), default=None)
+    if last is None:
+        return False
+    return not any(c.get("author") in trusted | {author} and not parse_marker(c.get("body", ""))
+                   for c in ordered[last + 1:])
+
+
+def ticket_wait_text(t: dict[str, Any]) -> str:
+    w = t.get("waiting_for")
+    if w:
+        return f"waits for #{w['epic']}'s {w['milestone']} to ship to main"
+    return "waits on a person"
+
+
+def ticket_refusals(t: dict[str, Any], epic: int, in_open_pass: dict[int, int]) -> list[str]:
+    """Why ticket `t` can't be in a pass of debt epic `epic` (none: it can). `t` is {number, state, labels,
+    attached, intake, waiting_for, waits_on_person}; `in_open_pass` maps a ticket to the open pass holding it.
+    One rule for both `state` (which tickets a pass may take) and the pass check, so they never disagree."""
+    n, why = t["number"], []
+    if t.get("missing"):
+        return [f"#{n} can't be read ({t['missing']})"]
+    if t.get("state", "open") != "open":
+        why.append(f"#{n} is closed")
+    if DEBT_LABEL not in t.get("labels", [DEBT_LABEL]):
+        why.append(f"#{n} isn't labelled `{DEBT_LABEL}`")
+    if not t.get("attached", True):
+        why.append(f"#{n} isn't a sub-issue of debt epic #{epic} (`debt-epic` attaches open debt)")
+    if t.get("intake") is None:
+        why.append(f"#{n} has no intake verdict (`debt-intake {n}` first)")
+    elif t["intake"] != "debt":
+        why.append(f"#{n}'s intake verdict is `{t['intake']}`, not `debt`")
+    if n in in_open_pass:
+        why.append(f"#{n} is already in open pass {in_open_pass[n]}")
+    if t.get("waiting_for") or t.get("waits_on_person"):
+        why.append(f"#{n} {ticket_wait_text(t)}")
+    return why
+
+
+def _bad_pass_path(p: Any) -> bool:
+    if not isinstance(p, str) or p != p.strip() or not p or p.startswith("/") or any(c in p for c in "*?["):
+        return True
+    return any(part in ("", ".", "..") for part in p.rstrip("/").split("/"))
+
+
+def pass_shape_errors(plan: Any, epic: int, next_pass: int, rules: DebtRules) -> list[str]:
+    """What is wrong with a pass's JSON itself, every reason listed (none: it is well formed)."""
+    if not isinstance(plan, dict):
+        return ["the pass is not a JSON object"]
+    errs = []
+    if unknown := sorted(set(plan) - set(PASS_KEYS)):
+        errs.append(f"unknown key(s) {unknown}: a pass takes {list(PASS_KEYS)}")
+    if plan.get("epic") != epic:
+        errs.append(f"the pass is for #{plan.get('epic')}, not debt epic #{epic}")
+    if type(plan.get("pass")) is not int or plan["pass"] != next_pass:
+        errs.append(f"`pass` is {plan.get('pass')!r}: debt epic #{epic}'s next pass is {next_pass}")
+    groups = plan.get("groups")
+    if not isinstance(groups, list) or not groups:
+        return errs + ["`groups` lists the pass's PRs in build order: at least one"]
+    seen: dict[int, list[int]] = {}
+    for i, g in enumerate(groups, 1):
+        where = f"group {i}"
+        if not isinstance(g, dict):
+            errs.append(f"{where} is not an object")
+            continue
+        if unknown := sorted(set(g) - set(GROUP_KEYS)):
+            errs.append(f"{where} has unknown key(s) {unknown}: a group takes {list(GROUP_KEYS)}")
+        tickets = g.get("tickets")
+        if not isinstance(tickets, list) or not tickets:
+            errs.append(f"{where} is empty: a group is one PR closing 1 to {rules.max_per_pr} ticket(s)")
+        else:
+            if len(tickets) > rules.max_per_pr:
+                errs.append(f"{where} has {len(tickets)} tickets, over debt.max_per_pr ({rules.max_per_pr}): split it")
+            for t in tickets:
+                if type(t) is not int or t <= 0:
+                    errs.append(f"{where}: {t!r} isn't an issue number")
+                else:
+                    seen.setdefault(t, []).append(i)
+        if not _text(g.get("scope")):
+            errs.append(f"{where} has no scope: one line saying what its PR changes")
+        elif re.search(r"[\r\n]", g["scope"].strip()):
+            errs.append(f"{where}'s scope is more than one line: say what its PR changes in one")
+        files = g.get("files")
+        if not isinstance(files, list) or not files:
+            errs.append(f"{where} has no files: the paths its PR may change")
+        elif bad := [f for f in files if _bad_pass_path(f)]:
+            errs.append(f"{where}: {bad!r} aren't repo-relative paths (a file or a directory; no pattern, "
+                        "no leading `/`, no `.` or `..`)")
+        c = g.get("complexity")
+        if c == "novel":
+            errs.append(f"{where} is rated `novel`: a pass makes no design choices, so its ticket(s) go to triage "
+                        "(`debt-intake T --verdict novel`)")
+        elif c not in PASS_COMPLEXITY:
+            errs.append(f"{where}'s complexity is {c!r}: `routine` or `judgment`")
+        if not _text(g.get("complexity_reason")):
+            errs.append(f"{where} has no complexity_reason: why it is rated so")
+    for t, gs in seen.items():
+        if len(gs) > 1:
+            at = sorted(set(gs))
+            errs.append(f"#{t} is listed {len(gs)} times (" + (f"in group {at[0]}" if len(at) == 1 else
+                        "in groups " + ", ".join(map(str, at))) + "): each ticket is in exactly one group, once")
+    if len(seen) > rules.pass_size:
+        errs.append(f"the pass takes {len(seen)} tickets, over debt.pass_size ({rules.pass_size}): "
+                    "leave the rest for the next pass")
+    return errs
+
+
+# --- the overlap check: a pass leaves alone the files an epic being built is working on ---------------------------
+
+# a path main may lack yet: one with a directory (`tools/new-helper`), or a file name with an extension (`NEW.md`)
+NEW_PATH_RE = re.compile(r"(?:[\w.-]+/)+[\w.-]+/?|[\w-][\w.-]*\.[A-Za-z][A-Za-z0-9]*")
+HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t#]*$")
+FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+
+
+def scope_text(body: str) -> str:
+    """A slice's Scope section(s): a heading `Scope` (any level, any case, any text after the word) up to the next
+    heading outside a code fence that is no deeper than it, so its own subheadings and a `#` line in a fenced
+    block stay in. Line endings are normalised. With no Scope heading at all, the whole body (an issue edited out
+    of shape still claims what it names)."""
+    lines = (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    found, level, fence, seen = [], None, None, False
+    for line in lines:
+        f = FENCE_RE.match(line)
+        if fence:
+            if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence):
+                fence = None
+        elif f:
+            fence = f.group(1)
+        elif h := HEADING_RE.match(line):
+            depth = len(h.group(1))
+            if re.match(r"scope\b", h.group(2), re.IGNORECASE):
+                level, seen = depth, True
+                continue
+            if level is not None and depth <= level:
+                level = None
+        if level is not None:
+            found.append(line)
+    return "\n".join(found if seen else lines)
+
+
+def scope_paths(text: str, tracked: set[str], named: tuple[str, ...] | list[str] = ()) -> set[str]:
+    """The path-shaped tokens of a slice's Scope: a file or directory tracked on main (`tools/sdlc.py`, `CLAUDE.md`,
+    `docs/`), or a path main lacks yet: one with a directory (`tests/test_new.py`, `tools/new-helper`) or a file
+    name with an extension (`NEW_GUIDE.md`). A `{a,b}` brace or a `*` keeps the tracked directory before it. A bare
+    word (`docs`) is not a path; prose that looks like one (`sdlc.py`, `epic/N`) is claimed, which only refuses more.
+    Markdown round a token (`**`, `__`, `~~`, `<code>`, a link, a table cell, `«»`) is taken off it. And each path of
+    `named` (a pass's files and directories) is claimed wherever the text holds it whole, whatever markup
+    surrounds it, as a backstop."""
+    dirs = {"/".join(parts[:i]) for f in tracked for parts in [f.split("/")] for i in range(1, len(parts))}
+    text = html.unescape(text or "")   # `&#47;`, `&lt;code&gt;`
+    text = re.sub(r"\\(?=[\\`*_{}\[\]()#+.!|~<>-])", "", text)   # markdown escapes: `tools/sdlc\_quick.py`
+    text = text.replace("\\", "/")   # any other backslash separates a path: `tools\sdlc.py`
+    # a URL is not a path, but a link to a file in the repo (`.../blob/main/tools/sdlc.py`) names that file
+    text = re.sub(r"[^\s()\[\]<>|]*://[^\s()\[\]<>|]*", lambda m: f" {link_path(m.group(0), tracked, dirs)} ", text)
+    # a file is held whole (no path character either side); a directory `g/` with its slash, so prose `tools` isn't
+    out = {f for f in named if isinstance(f, str) and f and ("/" in f or "." in f) and re.search(
+        rf"(?<![A-Za-z0-9./-]){re.escape(f)}" + ("" if f.endswith("/") else r"(?![A-Za-z0-9/-]|\.[A-Za-z0-9])"), text)}
+    # every run of path characters is a token, whatever surrounds it: backticks, quotes, `«»`, a link, an HTML tag, a
+    # table cell, `:120` or `#L3` after it
+    for raw in re.findall(r"[\w./*{}~+@-]+", text):
+        bare = raw.rstrip(".")
+        # `__tools/sdlc.py__` is `tools/sdlc.py`; a tracked `__init__.py` is itself
+        out |= ({bare} if bare in tracked else set()) or scope_token(bare.strip("*_~"), tracked, dirs) \
+            or scope_token(bare, tracked, dirs)
+    return out
+
+
+def link_path(url: str, tracked: set[str], dirs: set[str]) -> str:
+    """The repo path(s) a link to a file names (`.../blob/<ref>/<path>` or `/tree/`), space-separated, else "". A ref
+    may hold slashes (`epic/243`), so a known branch shape (`main`, `epic/N`, `slice/N`, a commit) is taken off;
+    for any other ref, or any other URL, the split can't be known, so every tail of the URL's path is claimed
+    (claiming too much only refuses more)."""
+    mark = lambda path: path + "/" if path in dirs else path   # noqa: E731  (a directory keeps its slash)
+    url = urllib.parse.unquote(url)   # `tools%2Fsdlc.py`, `my%20file.md`
+    if u := re.search(r"/(?:blob|tree)/([^?#]+)", url):
+        parts = [p for p in u.group(1).split("/") if p]
+        known = re.match(r"(?:main|(?:epic|slice)/\d+|[0-9a-f]{7,40})/", "/".join(parts) + "/")
+        if known and len(parts) > known.group(0).count("/"):
+            return mark("/".join(parts[known.group(0).count("/"):]))
+    # any other ref, or any other URL (raw files, a fork): where the path starts can't be known (a tail on main
+    # proves nothing), so every tail of the URL's path is claimed
+    parts = [p for p in re.sub(r"^[a-z]+://[^/]*", "", url.split("?")[0].split("#")[0]).split("/") if p]
+    return " ".join(mark("/".join(parts[i:])) for i in range(len(parts)))
+
+
+def scope_token(tok: str, tracked: set[str], dirs: set[str]) -> set[str]:
+    """What one Scope token claims (see scope_paths): nothing, a path, or a directory (`dir/`)."""
+    out: set[str] = set()
+    for _ in range(len(tok)):   # `./tools/sdlc.py` and `../tools/sdlc.py` are `tools/sdlc.py`
+        if tok.startswith("../"):
+            tok = tok[3:]
+        elif tok.startswith("./"):
+            tok = tok[2:]
+        elif tok.startswith("/"):
+            tok = tok[1:]
+        else:
+            break
+    if not tok:
+        return out
+    if cut := re.search(r"[{*]", tok):
+        tok = tok[:cut.start()].rsplit("/", 1)[0] if "/" in tok[:cut.start()] else ""
+        if tok in dirs:
+            out.add(tok + "/")
+    elif tok in tracked:
+        out.add(tok)
+    elif "/" in tok and tok.rstrip("/") in dirs:
+        out.add(tok.rstrip("/") + "/")
+    elif NEW_PATH_RE.fullmatch(tok):   # named, though main lacks it yet: claimed anyway (too much only refuses more)
+        out.add(tok)
+    return out
+
+
+def paths_overlap(a: str, b: str) -> bool:
+    """The same file, or one is a directory holding the other."""
+    a, b = a.rstrip("/"), b.rstrip("/")
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def building_epics(config: dict[str, Any], trusted: set[str]) -> list[int]:
+    """Feature epics whose slices are being built (`planned` or `in-progress`): not a quick change, not the debt epic."""
+    repo, found = repo_of(config), set()
+    for state in sorted(BUILD_STATES):
+        for r in gh_pages(f"repos/{repo}/issues?labels={_q(PREFIX + state)}&state=open&per_page=100"):
+            labels = {l["name"] for l in r.get("labels", [])}
+            if "pull_request" in r or labels & {DEBT_EPIC_LABEL, DEBT_LABEL, LEAF_LABEL, CONTAINER_LABEL}:
+                continue
+            found.add(r["number"])
+    # labelled planned/in-progress is enough: a label conflict or an escalation still has slices in flight
+    return [n for n in sorted(found)
+            if not is_quick(st := bundle_state(fetch_bundle(n, config, trusted), config)) and not is_debt_epic(st)]
+
+
+def epic_work_paths(config: dict[str, Any], trusted: set[str], named: list[str] | None = None,
+                    root: Path = ROOT) -> dict[int, set[str]]:
+    """Each epic being built, and the paths its work touches or names: what `epic/N` changes since main (`git diff
+    --name-only origin/main...origin/epic/N`), the files of its open PRs, and the Scope of each of its open slices
+    (claimed or not, PR or not). One bounded fetch of main and every epic branch first; a failed one refuses."""
+    if not PASS_FETCH_SECONDS > 0:
+        raise SdlcError(f"PASS_FETCH_SECONDS must be positive (got {PASS_FETCH_SECONDS})")
+    repo, main = repo_of(config), config.get("default_branch", "main")
+    try:   # a glob refspec: an epic with no branch yet doesn't fail the fetch
+        git(["fetch", "-q", "origin", f"+refs/heads/{main}:refs/remotes/origin/{main}",
+             "+refs/heads/epic/*:refs/remotes/origin/epic/*"], cwd=root, timeout=PASS_FETCH_SECONDS)
+    except SdlcError as exc:
+        raise SdlcError(f"{exc}: the overlap check needs origin's main and epic branches, so nothing was checked "
+                        "or posted") from None
+    epics = building_epics(config, trusted)
+    if not epics:
+        return {}
+    tracked = set(tracked_on(f"origin/{main}", root))
+    slices = [r for r in fetch_plan_issues(None, config, trusted) if r["kind"] == "slice" and r["state"] == "open"]
+    out: dict[int, set[str]] = {}
+    for e in epics:
+        paths: set[str] = set()
+        ref = f"origin/{epic_branch(e)}"
+        if git(["rev-parse", "--verify", "--quiet", f"refs/remotes/{ref}"], cwd=root, check=False):
+            diff = git(["diff", "--name-only", "--no-renames", "-z", f"origin/{main}...{ref}"], cwd=root,
+                       timeout=PASS_FETCH_SECONDS)
+            paths |= {p for p in diff.split("\0") if p}
+        for pr in gh_pages(f"repos/{repo}/pulls?base={epic_branch(e)}&state=open&per_page=100"):
+            for f in gh_pages(f"repos/{repo}/pulls/{pr['number']}/files?per_page=100"):
+                paths |= set(sdlc_quick.changed_paths(f))
+        for s in slices:
+            if s["epic"] == e:
+                paths |= scope_paths(scope_text(s["body"]), tracked, named or [])
+        out[e] = paths
+    return out
+
+
+def overlap_errors(plan: Any, claims: dict[int, set[str]]) -> list[str]:
+    """A group whose files overlap an epic being built: its PR into main would make that epic's next `sync`
+    conflict, so it waits for a later pass."""
+    errs = []
+    groups = plan.get("groups") if isinstance(plan, dict) else None
+    for i, g in enumerate(groups if isinstance(groups, list) else [], 1):
+        raw = g.get("files") if isinstance(g, dict) else None
+        files = [f for f in raw if isinstance(f, str)] if isinstance(raw, list) else []   # a bad shape: reported apart
+        for e, paths in sorted(claims.items()):
+            hits = sorted({p for f in files for p in paths if paths_overlap(f, p)})
+            if hits:
+                tickets = ", ".join(f"#{t}" for t in pass_ticket_numbers({"groups": [g]}))
+                errs.append(f"group {i} ({tickets}) overlaps epic #{e}, which is being built: "
+                            + ", ".join(f"`{h}`" for h in hits) + " (leave it for a pass after that epic ships)")
+    return errs
+
+
+# --- checking and posting a pass ----------------------------------------------------------------------------------
+
+def pass_check(n: int, plan: Any, config: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+    """(the debt epic's bundle, its passes, every reason the pass can't be posted). Read-only, apart from the one
+    bounded `git fetch` of the overlap check."""
+    rules = load_debt(config)
+    trusted = fetch_trusted(config)
+    bundle = fetch_bundle(n, config, trusted)
+    st = bundle_state(bundle, config)
+    if not is_debt_epic(st):
+        raise SdlcError(f"#{n} isn't the debt epic (`{DEBT_EPIC_LABEL}`): a pass is planned on the debt epic only")
+    if bundle["issue"]["state"].lower() != "open" or st["action"] in ("human", "fix_conflict"):
+        raise SdlcError(f"debt epic #{n} is {bundle['issue']['state'].lower()} (action {st['action']}): no pass now")
+    passes = debt_passes(bundle["comments"], trusted)
+    next_pass = (passes[-1]["pass"] if passes else 0) + 1
+    errs = pass_shape_errors(plan, n, next_pass, rules)
+    in_open = {t: p["pass"] for p in passes if p["open"] for t in p["tickets"]}
+    errs += [f"pass {p['pass']} is open: the next pass waits until it ends" for p in passes if p["open"]]
+    numbers = pass_ticket_numbers(plan)
+    attached = {s["number"] for s in sub_issues(n, config)} if numbers else set()
+    sources: dict[int, dict[str, Any] | None] = {}
+    for t in numbers:
+        try:
+            raw = gh_json(["api", f"repos/{repo_of(config)}/issues/{t}"]) or {}
+            comments = [norm_comment(c) for c in gh_pages(f"repos/{repo_of(config)}/issues/{t}/comments")]
+        except SdlcError as exc:
+            errs += ticket_refusals({"number": t, "missing": str(exc)}, n, in_open)
+            continue
+        if "pull_request" in raw:
+            errs.append(f"#{t} is a pull request, not a debt ticket")
+            continue
+        labels = [l["name"] for l in raw.get("labels", [])]
+        errs += ticket_refusals({"number": t, "state": raw.get("state", "open"), "labels": labels,
+                                 "attached": t in attached, "intake": intake_of(comments, trusted),
+                                 "waits_on_person": waits_on_person(comments, trusted,
+                                                                    (raw.get("user") or {}).get("login", "")),
+                                 "waiting_for": ticket_waiting_for(raw, labels, config, trusted, sources)},
+                                n, in_open)
+    named = [f for g in (plan.get("groups") if isinstance(plan, dict) and isinstance(plan.get("groups"), list) else [])
+             if isinstance(g, dict) and isinstance(g.get("files"), list) for f in g["files"] if isinstance(f, str)]
+    errs += overlap_errors(plan, epic_work_paths(config, trusted, named))
+    return bundle, passes, errs
+
+
+def render_pass(plan: dict[str, Any]) -> str:
+    """The pass comment's body: each group in build order, and the JSON the tool reads back."""
+    groups = plan["groups"]
+    out = [f"## Pass {plan['pass']}", "",
+           f"**{len(pass_ticket_numbers(plan))} ticket(s) in {len(groups)} PR(s)**, built in this order. "
+           "The tool checked this list; Codex reviews every PR that builds it.", ""]
+    for i, g in enumerate(groups, 1):
+        out.append(f"{i}. `debt-{plan['pass']}-{i}` · " + ", ".join(f"#{t}" for t in g["tickets"])
+                   + f" · *{g['complexity']}*: {g['scope'].strip()}")
+        out.append("   Files: " + ", ".join(f"`{f}`" for f in g["files"]))
+    blob = json.dumps(plan, indent=1, ensure_ascii=False)
+    fence = _fence(blob)
+    out += ["", "<details><summary>pass.json (what the build reads)</summary>", "",
+            "<!-- pass-json -->", f"{fence}json", blob, fence, "", "</details>"]
+    return "\n".join(out)
+
+
+def load_pass_file(path: str) -> Any:
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:
+        raise SdlcError(f"can't read the pass {path}: {exc}") from None
+
+
+def command_debt_pass_validate(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Check a pass against the debt epic and every epic being built. Read-only, apart from one bounded fetch."""
+    plan = load_pass_file(args.file)
+    _, _, errs = pass_check(args.number, plan, config)
+    if errs:
+        print(f"the pass does not validate ({len(errs)}):\n" + "\n".join(f"  - {e}" for e in errs), file=sys.stderr)
+        return 1
+    print(f"pass {plan['pass']} of debt epic #{args.number}: ok ({len(pass_ticket_numbers(plan))} ticket(s) in "
+          f"{len(plan['groups'])} group(s))")
+    return 0
+
+
+def command_debt_pass_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Post a pass on the debt epic once it validates: no `/approve` and no Codex round is asked for."""
+    plan = load_pass_file(args.file)
+    n = args.number
+    _, _, errs = pass_check(n, plan, config)
+    if errs:
+        raise SdlcError(f"the pass does not validate, so nothing was posted ({len(errs)}):\n"
+                        + "\n".join(f"  - {e}" for e in errs))
+    comment = render_comment(DEBT_PASS_KIND, None, render_pass(plan), config, **{"pass": str(plan["pass"])})
+    if len(comment) > COMMENT_LIMIT:
+        raise SdlcError(f"the pass comment is {len(comment)} characters, over GitHub's limit: tighten the scopes")
+    if args.dry_run:
+        print(f"DRY RUN debt epic #{n}: pass {plan['pass']}")
+        print(comment)
+        return 0
+    posted = post_comment(n, comment, config)
+    print(f"debt epic #{n}: pass {plan['pass']} posted  {posted.get('html_url', '')}\n"
+          f"  `uv run python tools/sdlc.py state {n}` says what is due")
     return 0
 
 
@@ -5783,6 +6300,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--of", type=int, help="with `duplicate`: the issue it duplicates")
     p.add_argument("--dry-run", action="store_true", help="check everything and print the writes, make none")
     p.set_defaults(fn=command_debt_intake)
+
+    p = sub.add_parser("debt-pass-validate", help="check a debt pass plan against the debt epic and the epics being "
+                                                  "built (read-only, apart from one bounded git fetch)")
+    p.add_argument("number", type=int, help="the debt epic")
+    p.add_argument("file", help="the pass JSON")
+    p.set_defaults(fn=command_debt_pass_validate)
+
+    p = sub.add_parser("debt-pass-post", help="post a debt pass plan on the debt epic once it validates "
+                                              "(no sign-off, no Codex round)")
+    p.add_argument("number", type=int, help="the debt epic")
+    p.add_argument("file", help="the pass JSON")
+    p.add_argument("--dry-run", action="store_true", help="check it and print the comment, post nothing")
+    p.set_defaults(fn=command_debt_pass_post)
 
     p = sub.add_parser("merge", help="the merge gate, then squash-merge a slice's PR")
     p.add_argument("pr", type=int)
