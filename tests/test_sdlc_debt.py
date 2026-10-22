@@ -2757,3 +2757,50 @@ def test_the_lowest_numbered_claimer_withdrawn_leaves_the_group_its_branch_and_c
     assert code == 0, err
     assert "GROUP=debt-2-1" in out and f"BRANCH=slice/{a}" in out and "ADOPTED" not in out
     assert claim_of(gh, a)["group"] == "debt-2-1" and wt.exists()
+
+
+def test_tickets_back_from_two_kept_branches_in_one_group_are_refused_not_merged_silently(gh, repo, capsys, ask,
+                                                                                         monkeypatch):
+    """Codex round 1: A and B each kept work on their own branch; regrouped as [A, B], a claim would adopt one and
+    leave the other's work behind."""
+    epic, (a, b) = posted_pass(gh, [((0,), "routine"), ((1,), "routine")], n=2)
+    for t in (a, b):
+        assert run(capsys, "claim", t, "--debt")[0] == 0
+        commit_in(repo / ".worktrees" / f"slice-{t}", monkeypatch, text=f"x = {t}\n")
+        assert run(capsys, "debt-request", t, "--body-file", ask)[0] == 0
+    assert run(capsys, "debt-epic")[0] == 0
+    reply(gh, a)
+    reply(gh, b)
+    post_pass(gh, epic, 2, a, b)
+    writes = len(gh.writes)
+    for t in (a, b):
+        code, _, err = run(capsys, "claim", t, "--debt")
+        assert code == 1 and "work kept on more than one branch" in err
+        assert f"slice/{a} from debt group `debt-1-1`" in err and f"slice/{b} from debt group `debt-1-2`" in err
+    assert len(gh.writes) == writes and claim_of(gh, a) is None and claim_of(gh, b) is None
+
+
+def test_a_kept_branch_claimed_by_a_ticket_outside_its_old_group_is_not_adopted(gh, repo, capsys, ask, monkeypatch):
+    """Codex round 1: [A, B] withdraws; B adopts slice/A with C in pass 2, then withdraws; C escalates and keeps its
+    claim as pass 2 ends. A, back in pass 3, must not adopt the branch C's claim holds."""
+    epic, (a, b, c) = posted_pass(gh, [((0, 1), "routine")], n=3)
+    assert run(capsys, "claim", a, "--debt")[0] == 0
+    commit_in(repo / ".worktrees" / f"slice-{a}", monkeypatch)
+    for t in (b, a):
+        assert run(capsys, "debt-request", t, "--body-file", ask)[0] == 0
+    assert run(capsys, "debt-epic")[0] == 0
+    reply(gh, a)
+    reply(gh, b)
+    post_pass(gh, epic, 2, b, c)
+    code, out, err = run(capsys, "claim", b, "--debt")
+    assert code == 0, err
+    assert "ADOPTED=debt-1-1" in out and claim_of(gh, c)["branch"] == f"slice/{a}"
+    assert run(capsys, "debt-request", b, "--body-file", ask)[0] == 0   # partial: c carries on in slice/a
+    assert run(capsys, "escalate-slice", c, "--reason", "stuck")[0] == 0
+    assert run(capsys, "debt-epic")[0] == 0 and len(ends(gh, epic)) == 2
+    reply(gh, a)
+    post_pass(gh, epic, 3, a)
+    writes = len(gh.writes)
+    code, out, err = run(capsys, "claim", a, "--debt")
+    assert code == 1 and f"slice/{a} (kept by debt group `debt-1-1`) is held by #{c}'s claim" in out
+    assert f"slice/{a} already exists" in err and len(gh.writes) == writes and claim_of(gh, a) is None

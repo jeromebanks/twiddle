@@ -4564,27 +4564,48 @@ def command_debt_request(args: argparse.Namespace, config: dict[str, Any]) -> in
 
 
 def adoptable(b: dict[str, Any], members: list[int], config: dict[str, Any]) -> dict[str, Any] | None:
-    """The kept place (`kept_places`) a fresh claim of `members` adopts: the latest one recorded on any of them whose
-    branch still exists (here or on origin) and that no other open ticket's claim holds; None to start fresh."""
+    """The kept place (`kept_places`) a fresh claim of `members` adopts, or None to start fresh. A place counts while
+    its branch still exists (here or on origin) and no open ticket's claim holds it: every open ticket of the debt
+    epic and of the group that kept it is read, since a branch may have been adopted, and claimed, by tickets that
+    were never in that group. Two places on different branches are refused: one claim never silently leaves a
+    member's saved work behind; a person merges them or discards one first."""
     trusted, have, root = set(b["trusted"]), debt_members(b), primary_root()
     found = sorted((k for t in members if t in have for k in kept_places(have[t][1], trusted)),
                    key=lambda k: k["at"], reverse=True)
+    others: dict[int, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
+
+    def read(t: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if t not in others:
+            others[t] = have[t] if t in have else fetch_slice(t, config)
+        return others[t]
+
+    epic_open = ([s_["number"] for s_ in sub_issues(b["debt_epic"], config)
+                  if s_.get("state", "open") == "open" and "pull_request" not in s_] if b.get("debt_epic") and found
+                 else [])
+    live: dict[str, dict[str, Any]] = {}   # branch -> its latest adoptable kept record
     for k in found:
-        if not branch_exists(k["branch"], root):
+        if k["branch"] in live or not branch_exists(k["branch"], root):
             continue   # merged and deleted, or removed by a person: nothing left to adopt
-        held = False
-        for t in k["tickets"]:
+        holder = None
+        for t in sorted(set(epic_open) | set(k["tickets"])):
             if t in members:
                 continue
-            ti, tc = have[t] if t in have else fetch_slice(t, config)
+            ti, tc = read(t)
             c = claim_status(tc, trusted)
             if ti.get("state", "open") == "open" and (c or {}).get("debt") and c.get("branch") == k["branch"]:
-                held = True
-                print(f"{k['branch']} (kept by debt group `{k['group']}`) is held by #{t}'s claim ({c['url']}): "
-                      "not adopted")
-        if not held:
-            return k
-    return None
+                holder = (t, c)
+                break
+        if holder:
+            print(f"{k['branch']} (kept by debt group `{k['group']}`) is held by #{holder[0]}'s claim "
+                  f"({holder[1]['url']}): not adopted")
+            continue
+        live[k["branch"]] = k
+    if len(live) > 1:
+        raise SdlcError("this group's tickets hold work kept on more than one branch ("
+                        + "; ".join(f"{k['branch']} from debt group `{k['group']}` ({k['url']})" for k in live.values())
+                        + "): a claim adopts one, so a person merges them into one branch, or discards the others (deletes "
+                        "the branch here and on origin, and closes its PR), then claims again. Nothing was claimed")
+    return next(iter(live.values()), None)
 
 
 def debt_pr_context(pr: dict[str, Any], tickets: list[dict[str, Any]], epic_comments: list[dict[str, Any]],
