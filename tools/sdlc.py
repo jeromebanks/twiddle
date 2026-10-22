@@ -114,7 +114,7 @@ ALL_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label
                "plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone", "escalate_plan",
                "record_demo_acceptance", "demo_reply", "demo_heard",
                "work_slices", "work_quick", "commit_prd", "wait_for_poster", "human", "fix_conflict", "none",
-               "debt_intake", "plan_pass", "debt_waiting", "work_debt", "merge_debt"}
+               "debt_intake", "plan_pass", "debt_waiting", "work_debt", "merge_debt", "pass_end"}
 NO_MILESTONE = "all"     # an epic planned without milestones has one demo, for all of it
 # from-state -> states the triage skill may move to. `escalated` is open from anywhere.
 TRANSITIONS = {
@@ -1122,7 +1122,10 @@ def print_state(st: dict[str, Any]) -> None:
               + (f", intake cut short: {', '.join(short)}" if short else ""))
         for p in dv.get("passes") or []:
             print(f"  pass {p['pass']}: " + (", ".join(f"#{t}" for t in p["tickets"]) or "no readable tickets")
-                  + ("   (open)" if p["open"] else "   (ended)") + (f"  {p['url']}" if p.get("url") else ""))
+                  + ("   (open)" if p["open"] else "   (ended" + (f": {p['end']['joined']} joined, {p['end']['closed']} "
+                                                                 "closed" if p.get("end") else "")
+                     + ("; escalated" if p.get("escalated") else "") + ")")
+                  + (f"  {p['url']}" if p.get("url") else ""))
         waits = [f"#{t['number']} {ticket_wait_text(t)}" for t in dv["tickets"]
                  if t.get("intake") == "debt" and (t.get("waiting_for") or t.get("waits_on_person"))]
         if waits:
@@ -2997,11 +3000,15 @@ def intake_of(comments: list[dict[str, Any]], trusted: set[str]) -> str | None:
 
 
 def debt_progress(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str, Any]:
-    """The debt epic's open tickets (its open sub-issues), each one's intake verdict and what it waits for, and the
-    passes posted on the epic, read from GitHub."""
-    repo, tickets, sources = repo_of(config), [], {}
+    """The debt epic's open tickets (its open sub-issues), each one's intake verdict and what it waits for, every
+    sub-issue whatever its state (`members`: {number, state, created_at}, what a pass's end counts), and the passes
+    posted on the epic, read from GitHub."""
+    repo, tickets, sources, members = repo_of(config), [], {}, []
     for s in sub_issues(epic, config):
-        if s.get("state", "open") != "open" or "pull_request" in s:
+        if "pull_request" in s:
+            continue
+        members.append({"number": s["number"], "state": s.get("state", "open"), "created_at": s.get("created_at", "")})
+        if s.get("state", "open") != "open":
             continue
         comments = [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{s['number']}/comments")]
         labels = [l["name"] for l in s.get("labels", [])]
@@ -3012,7 +3019,7 @@ def debt_progress(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[
     epic_comments = [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{epic}/comments")]
     passes = debt_passes(epic_comments, trusted)
     return {"tickets": sorted(tickets, key=lambda t: t["number"]), "passes": passes,
-            "prs": debt_group_prs(passes, tickets, config, trusted)}
+            "members": sorted(members, key=lambda m: m["number"]), "prs": debt_group_prs(passes, tickets, config, trusted)}
 
 
 def debt_group_prs(passes: list[dict[str, Any]], tickets: list[dict[str, Any]], config: dict[str, Any],
@@ -3089,12 +3096,95 @@ def group_text(g: dict[str, Any]) -> str:
     return f"`{g['key']}` (" + ", ".join(f"#{t}" for t in g["open"]) + ")"
 
 
+# --- a pass's end: the next pass, closing the debt epic, or escalating it -----------------------------------------
+#
+# A pass ends once none of its groups has a ticket left to build: each one merged, closed by intake, escalated or
+# waiting on a person. `debt-epic` (which `merge` of a debt PR runs too) then posts one pass-end record on the epic,
+# its counts frozen in the marker (`joined=J closed=C`), and acts on what follows: with no open debt left, the epic
+# is closed as sdlc:done (the next `file-issue --debt` opens a new one); when this pass and the one before each
+# ended with more debt joined than closed, the epic is escalated instead of a pass being planned (once per pass:
+# a person who clears the label lets the next pass be planned); otherwise the next pass is planned as usual
+# (`plan_pass`, or `debt_waiting`). `state` only reports these writes as `pass_end`, due: it never makes them.
+
+def pass_end_due(open_pass: dict[str, Any], tickets: list[dict[str, Any]]) -> bool:
+    """Open pass `open_pass` has nothing left to build: every group's open members are all waiting on a person (a
+    group with a member escalated is pass_work's `escalated`, which never holds a pass open)."""
+    work = pass_work(open_pass, tickets)
+    person = {t["number"] for t in tickets if t.get("waits_on_person")}
+    return not any(set(g["open"]) - person for g in work["todo"] + work["claimed"])
+
+
+def pass_end_counts(p: dict[str, Any], progress: dict[str, Any]) -> dict[str, list[int]]:
+    """{joined, closed} of pass `p`, ending now. `closed`: the pass's tickets now closed. `joined`: the debt epic's
+    sub-issues, in any state and not in the pass, filed (created) at or after the pass was posted. Without
+    `members` (an offline view) its open tickets stand in, and a pass ticket no longer among them counts closed."""
+    tickets, members = progress.get("tickets") or [], progress.get("members")
+    if members is None:
+        members = [{"number": t["number"], "state": "open", "created_at": t.get("created_at", "")} for t in tickets]
+        closed = [t for t in p["tickets"] if t not in {x["number"] for x in tickets}]
+    else:
+        closed = [m["number"] for m in members if m["number"] in p["tickets"] and m.get("state") == "closed"]
+    since = p.get("posted_at") or ""
+    joined = [m["number"] for m in members
+              if m["number"] not in p["tickets"] and since and (m.get("created_at") or "") >= since]
+    return {"joined": joined, "closed": closed}
+
+
+def grew(p: dict[str, Any] | None) -> bool:
+    """Pass `p` ended with more debt joined during it than it closed (by its pass-end record's counts)."""
+    return bool(p and p.get("end")) and p["end"]["joined"] > p["end"]["closed"]
+
+
+def debt_pass_end(n: int, progress: dict[str, Any]) -> dict[str, Any] | None:
+    """What a pass's end has `debt-epic` write on debt epic #n, or None (nothing): {pass, end, close, escalate}.
+    `end` is the open pass's {joined, closed} tickets when its end is due (None: already recorded); `close`, no
+    open ticket is left after it; `escalate`, why the epic goes to a person (two passes in a row grew), or None."""
+    tickets, passes = progress.get("tickets") or [], progress.get("passes") or []
+    open_pass = next((p for p in passes if p["open"]), None)
+    end = None
+    if open_pass:
+        if not pass_end_due(open_pass, tickets):
+            return None
+        end = pass_end_counts(open_pass, progress)
+        last = {**open_pass, "open": False, "end": {k: len(v) for k, v in end.items()}}
+    elif passes:
+        last = passes[-1]
+    else:
+        return None   # no pass yet: nothing has ended
+    close = not tickets
+    prev = next((p for p in passes if p["pass"] == last["pass"] - 1), None)
+    escalate = None
+    if not close and grew(last) and grew(prev) and not last.get("escalated"):
+        escalate = (f"debt passes {prev['pass']} and {last['pass']} each ended with more debt joined than closed "
+                    f"(pass {prev['pass']}: {prev['end']['joined']} joined, {prev['end']['closed']} closed; "
+                    f"pass {last['pass']}: {last['end']['joined']} joined, {last['end']['closed']} closed), so the "
+                    f"lane stops instead of planning pass {last['pass'] + 1}. Open debt: "
+                    + ", ".join(f"#{t['number']}" for t in tickets) + ". A person decides what happens to it; "
+                    f"moving this epic back to {PREFIX}in-progress lets the next pass be planned")
+    if end is None and not close and escalate is None:
+        return None
+    return {"pass": last["pass"], "end": end, "close": close, "escalate": escalate}
+
+
+def pass_end_next(n: int, e: dict[str, Any]) -> str:
+    k, what = e["pass"], []
+    if e["end"]:
+        what.append(f"record the end of pass {k} ({len(e['end']['joined'])} joined, {len(e['end']['closed'])} closed)")
+    if e["close"]:
+        what.append(f"close debt epic #{n} as {PREFIX}done (no open debt is left)")
+    elif e["escalate"]:
+        what.append(f"escalate debt epic #{n} to a human: passes {k - 1} and {k} each ended with more debt joined "
+                    f"than closed, so no pass {k + 1} is planned")
+    return f"`uv run python tools/sdlc.py debt-epic`: pass {k} has ended: " + ", then ".join(what)
+
+
 def debt_view(st: dict[str, Any], progress: dict[str, Any], rules: "DebtRules | None" = None,
               models: dict[str, str] | None = None) -> dict[str, Any]:
-    """{action, turn, next, ...}: what the debt epic has due, from its tickets and its passes: intake first, then,
-    while a pass is open, its groups in build order (`work_debt`; debt that joins during it waits for the next
-    pass), then a pass of the tickets through intake that nothing holds back, or, when every one of them waits,
-    what each waits for. `models` is the config's rating -> model map, named in `/work-slice T --debt (<model>)`."""
+    """{action, turn, next, ...}: what the debt epic has due, from its tickets and its passes: a group's PR to merge;
+    a pass's end (`pass_end`: its record, closing the epic or escalating it, debt_pass_end); intake; while a pass
+    is open, its groups in build order (`work_debt`; debt that joins during it waits for the next pass); then a
+    pass of the tickets through intake that nothing holds back, or, when every one of them waits, what each waits
+    for. `models` is the config's rating -> model map, named in `/work-slice T --debt (<model>)`."""
     rules = rules or DebtRules(**DEBT_DEFAULTS)
     n, tickets = st["number"], progress.get("tickets") or []
     passes = progress.get("passes") or []
@@ -3110,7 +3200,14 @@ def debt_view(st: dict[str, Any], progress: dict[str, Any], rules: "DebtRules | 
     eligible = [t for t in judged if not ticket_refusals({"state": "open", "attached": True, **t}, n, {})]
     waiting = [t for t in judged if t.get("waiting_for") or t.get("waits_on_person")]
     due = [p for p in progress.get("prs") or [] if p.get("due")]
-    if pending:
+    ending = debt_pass_end(n, progress)
+    if ending:
+        turn, action = "agent", "pass_end"
+        nxt = pass_end_next(n, ending)
+        if open_pass and (human := pass_work(open_pass, tickets)["escalated"]):
+            nxt += ("; needs a human: " + ", ".join(group_text(e) for e in human)
+                    + " (escalated: the pass ends without it)")
+    elif pending:
         turn, action = "agent", "debt_intake"
         what = []
         if unjudged:
@@ -3138,15 +3235,9 @@ def debt_view(st: dict[str, Any], progress: dict[str, Any], rules: "DebtRules | 
                    + " resumes one)")
         if human:
             nxt += "; needs a human: " + ", ".join(group_text(e) for e in human) + " (escalated)"
-    elif open_pass:
+    elif open_pass:   # not reached (an open pass is built, or its end is due): never planning another over it
         turn, action = "none", "none"
-        work = pass_work(open_pass, tickets)
-        human = work["escalated"]
-        nxt = (f"nothing new: debt epic #{n}'s pass {open_pass['pass']} is open ("
-               + (", ".join(f"#{t}" for t in open_pass["tickets"]) or "no readable tickets")
-               + "); the next pass waits until it ends"
-               + ("; needs a human: " + ", ".join(group_text(e) for e in human)
-                  + " (escalated: the pass can end without it)" if human else ""))
+        nxt = f"nothing new: debt epic #{n}'s pass {open_pass['pass']} is open; the next pass waits until it ends"
     elif eligible:
         k = (passes[-1]["pass"] if passes else 0) + 1
         turn, action = "agent", "plan_pass"
@@ -3172,7 +3263,7 @@ def debt_view(st: dict[str, Any], progress: dict[str, Any], rules: "DebtRules | 
         nxt = debt_merge_next(due, None, also)
     work = pass_work(open_pass, tickets) if open_pass and not pending else {}
     return {"number": n, "action": action, "turn": turn, "tickets": tickets, "intake_pending": pending,
-            "merge_due": due, "also": also,
+            "merge_due": due, "also": also, "pass_end": ending,
             "passes": passes, "open_pass": open_pass and open_pass["pass"],
             "groups": {k: [g["key"] for g in v] for k, v in work.items()},
             "eligible": [t["number"] for t in eligible] if not pending and not open_pass else [], "next": nxt}
@@ -3231,44 +3322,105 @@ def open_debt_epic(config: dict[str, Any]) -> dict[str, Any]:
 
 def command_debt_epic(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Open the debt epic if open tech debt exists and none is open, and attach every open tech-debt ticket to it
-    as a sub-issue (read back). Idempotent: a rerun creates and attaches nothing."""
+    as a sub-issue (read back); then, on the open one, what a pass's end writes (debt_epic_pass_end). Idempotent:
+    a rerun creates, attaches and posts nothing."""
     load_debt(config)   # a bad `debt` section is refused before anything is written
-    repo, trusted = repo_of(config), fetch_trusted(config)
-    say = (lambda s: print("would " + s)) if args.dry_run else print  # noqa: E731
+    trusted = fetch_trusted(config)
     epic = the_debt_epic(config, trusted)
     tickets = open_debt_tickets(config)
     if not tickets:
         print("no open tech-debt issues: nothing to attach" + (f" (debt epic #{epic['number']} is open)" if epic
                                                                else ", and no debt epic is opened"))
-        return 0
+    else:
+        epic = attach_open_debt(epic, tickets, config, args.dry_run)
+    if epic is not None and epic["id"] is not None:   # a dry run's "new" epic has no pass to end
+        debt_epic_pass_end(epic["number"], config, trusted, args.dry_run)
+    return 0
+
+
+def attach_open_debt(epic: dict[str, Any] | None, tickets: list[dict[str, Any]], config: dict[str, Any],
+                     dry_run: bool) -> dict[str, Any]:
+    """Open the debt epic if none is (`epic` None), and attach every one of `tickets` it doesn't hold, read back:
+    the epic ({number, id}; id None for a dry run's new one)."""
+    repo = repo_of(config)
+    say = (lambda s: print("would " + s)) if dry_run else print  # noqa: E731
     if epic is None:
-        if not args.dry_run:
+        if not dry_run:
             require_debt_epic_labels(config)
         say(f"open the debt epic 'Tech debt' [{DEBT_EPIC_LABEL}, {PREFIX}in-progress]")
-        epic = {"number": "new", "id": None} if args.dry_run else open_debt_epic(config)
+        epic = {"number": "new", "id": None} if dry_run else open_debt_epic(config)
     held = set() if epic["id"] is None else {s["number"] for s in sub_issues(epic["number"], config)}
     todo = [t for t in tickets if t["number"] not in held]
     failed: list[str] = []
     for t in todo:
         say(f"attach #{t['number']} ({t['title']}) to debt epic #{epic['number']}")
-        if args.dry_run:
+        if dry_run:
             continue
         try:   # never `replace_parent`: a ticket already under another issue is reported, not moved silently
             post_json(f"repos/{repo}/issues/{epic['number']}/sub_issues", {"sub_issue_id": t["id"]})
         except SdlcError as exc:
             failed.append(f"#{t['number']}: {exc}")
         time.sleep(0.5)   # GitHub's secondary rate limit on content creation
-    if args.dry_run:
-        return 0
+    if dry_run:
+        return epic
     if not todo:
         print(f"debt epic #{epic['number']} already holds all {len(tickets)} open tech-debt ticket(s)")
-        return 0
+        return epic
     now = {s["number"] for s in sub_issues(epic["number"], config)}
     if missing_now := [t["number"] for t in tickets if t["number"] not in now]:
         raise SdlcError(f"read-back: debt epic #{epic['number']} doesn't hold " + ", ".join(f"#{m}" for m in missing_now)
                         + (" (" + "; ".join(failed) + ")" if failed else "") + ": fix that, then rerun `debt-epic`")
     print(f"debt epic #{epic['number']}: attached {len(todo)}, holds all {len(tickets)} open tech-debt ticket(s)")
-    return 0
+    return epic
+
+
+def debt_epic_pass_end(n: int, config: dict[str, Any], trusted: set[str], dry_run: bool) -> None:
+    """On open debt epic #n, what a pass's end writes (debt_pass_end), each step checked against GitHub first so a
+    rerun (or one after a run cut short) posts nothing twice: the pass-end record; then, with no open debt left,
+    `sdlc:done` and the close (the label first: a closed epic is never found again to label), read back; or the
+    escalation, keyed by its record for that pass. An epic a person holds (escalated) is only given the record."""
+    b = fetch_bundle(n, config, trusted)
+    if not debt_passes(b["comments"], trusted):
+        return   # no pass yet: nothing to end, and no more to read
+    e = debt_pass_end(n, debt_progress(n, config, trusted))
+    if e is None:
+        return
+    k, labels = e["pass"], b["issue"]["labels"]
+    held = ESCALATED_LABEL in labels
+    if e["end"]:
+        j, c = e["end"]["joined"], e["end"]["closed"]
+        nums = lambda xs: ", ".join(f"#{x}" for x in xs) or "none"   # noqa: E731
+        body = (f"Pass {k} has ended: none of its tickets is left to build. Closed in it: {len(c)} ({nums(c)}). "
+                f"Joined during it: {len(j)} ({nums(j)}).")
+        comment = render_comment(DEBT_PASS_END_KIND, None, body, config, **{"pass": str(k)},
+                                 joined=str(len(j)), closed=str(len(c)))
+        if dry_run:
+            print(f"would post on debt epic #{n}:\n{comment}")
+        else:
+            post_comment(n, comment, config)
+            print(f"debt epic #{n}: pass {k} ended ({len(j)} joined, {len(c)} closed)")
+    if held and not e["escalate"]:
+        print(f"debt epic #{n} is {ESCALATED_LABEL}: a person decides what follows pass {k}")
+        return
+    if e["close"]:
+        if dry_run:
+            print(f"would label debt epic #{n} {PREFIX}done and close it as completed (no open debt is left)")
+            return
+        set_state_label(n, labels, "done", config)
+        gh(["issue", "close", str(n), "--repo", repo_of(config), "--reason", "completed", "--comment",
+            f"Pass {k} ended with no open tech debt left: this debt epic is done. The next `file-issue --debt` "
+            "opens a new one."])
+        back = fetch_bundle(n, config, trusted)["issue"]
+        if back["state"].lower() != "closed" or f"{PREFIX}done" not in back["labels"]:
+            raise SdlcError(f"read-back: debt epic #{n} is {back['state'].lower()} with {back['labels']}: close it as "
+                            f"completed with {PREFIX}done, or rerun `debt-epic`")
+        print(f"debt epic #{n}: closed as {PREFIX}done (no open debt is left)")
+    elif e["escalate"]:
+        if dry_run:
+            print(f"would label debt epic #{n} {ESCALATED_LABEL} and post: Needs a human: {e['escalate']}")
+            return
+        escalate_epic(n, e["escalate"], config, **{"pass": str(k)})
+        print(f"debt epic #{n}: escalated to a human ({e['escalate'].split(', so', 1)[0]})")
 
 
 # --- intake: an agent's verdict on each ticket the debt epic holds, applied by the tool and read back ----------
@@ -3486,10 +3638,14 @@ def pass_groups(plan: Any, k: int) -> list[dict[str, Any]]:
 
 
 def debt_passes(comments: list[dict[str, Any]], trusted: set[str]) -> list[dict[str, Any]]:
-    """The passes posted on the debt epic, by number: {pass, url, tickets, groups, open}. Only the tool posts them
-    (by a collaborator, `pass=K`); the first record of each number counts, and a pass-end record closes one."""
+    """The passes posted on the debt epic, by number: {pass, url, posted_at, tickets, groups, open, end, escalated}.
+    Only the tool posts them (by a collaborator, `pass=K`); the first record of each number counts, and a pass-end
+    record closes one: `end` is its frozen {joined, closed} counts (None without them, as on an older record).
+    `escalated`: the epic was escalated at that pass's end (the two-in-a-row rule), so it is never escalated again
+    for it."""
     posted: dict[int, dict[str, Any]] = {}
-    ended: set[int] = set()
+    ended: dict[int, dict[str, int] | None] = {}
+    escalated: set[int] = set()
     for mk, c in _marked(comments, trusted):
         k = mk.get("pass", "")
         if not k.isdigit():
@@ -3499,11 +3655,16 @@ def debt_passes(comments: list[dict[str, Any]], trusted: set[str]) -> list[dict[
                 plan = extract_pass(c.get("body", ""))
             except SdlcError:
                 plan = {}
-            posted[int(k)] = {"pass": int(k), "url": c.get("url", ""), "tickets": pass_ticket_numbers(plan),
-                              "groups": pass_groups(plan, int(k))}
-        elif mk.get("kind") == DEBT_PASS_END_KIND:
-            ended.add(int(k))
-    return [{**p, "open": p["pass"] not in ended} for _, p in sorted(posted.items())]
+            posted[int(k)] = {"pass": int(k), "url": c.get("url", ""), "posted_at": c.get("created_at", ""),
+                              "tickets": pass_ticket_numbers(plan), "groups": pass_groups(plan, int(k))}
+        elif mk.get("kind") == DEBT_PASS_END_KIND and int(k) not in ended:
+            counts = (mk.get("joined", ""), mk.get("closed", ""))
+            ended[int(k)] = ({"joined": int(counts[0]), "closed": int(counts[1])}
+                             if all(x.isdigit() for x in counts) else None)
+        elif mk.get("kind") == "escalation":
+            escalated.add(int(k))
+    return [{**p, "open": p["pass"] not in ended, "end": ended.get(p["pass"]), "escalated": p["pass"] in escalated}
+            for _, p in sorted(posted.items())]
 
 
 DEBT_REQUEST_KIND = "debt-request"   # asks a person on the ticket (T8b posts it); the ticket waits for their reply
@@ -5462,7 +5623,8 @@ def merge_debt(args: argparse.Namespace, config: dict[str, Any], pr: dict[str, A
     if args.dry_run:
         print(f"would squash-merge debt PR #{args.pr} (group `{g['key']}`: {who}) into {base} at {head[:12]}; delete "
               f"{branch} on GitHub; remove {wt} and {branch} here; close {who} as completed if GitHub hasn't; post on "
-              f"{who} and debt epic #{epic}:\n{record({})}")
+              f"{who} and debt epic #{epic}:\n{record({})}\nthen end pass {g['pass']} if this was its last work "
+              f"(`debt-epic`'s pass-end check: `uv run python tools/sdlc.py debt-epic --dry-run` shows it)")
         return 0
     gh(["pr", "merge", str(args.pr), "--repo", repo, "--squash", "--match-head-commit", head])
     left = []   # what is still to do once the merge has counted, said at the end
@@ -5499,6 +5661,10 @@ def merge_debt(args: argparse.Namespace, config: dict[str, Any], pr: dict[str, A
                         f"each of {who} as completed if it isn't (`gh issue close T --reason completed`); post the "
                         f"record on each of {who} and on #{epic}: `gh issue comment N --body-file {fh.name}`"
                         + "".join(f"; {x}" for x in left))
+    try:   # the pass's last work merged: its end, and what follows it (the next pass, the close, or a person)
+        debt_epic_pass_end(epic, config, trusted, dry_run=False)
+    except SdlcError as exc:
+        left.append(f"the pass-end check failed ({exc}): `uv run python tools/sdlc.py debt-epic` finishes it")
     if left:
         raise SdlcError(f"merged PR #{args.pr} into {base} at {head[:12]}; {who} closed and recorded; still to do: "
                         + "; ".join(left))
@@ -5954,10 +6120,14 @@ def command_epic_branch(args: argparse.Namespace, config: dict[str, Any]) -> int
     return 0
 
 
-def escalate_epic(n: int, reason: str, config: dict[str, Any]) -> None:
+def escalate_epic(n: int, reason: str, config: dict[str, Any], **extra: str) -> None:
+    """Label epic #n escalated, then post why (`extra` in its marker). The label first: a run cut short between
+    the two leaves the epic with a person, never a recorded escalation on an epic that carries on (the debt epic's
+    pass end posts it once, keyed by that record)."""
     bundle = fetch_bundle(n, config)
-    post_comment(n, render_comment("escalation", None, f"Needs a human: {reason}", config), config)
-    set_state_label(n, bundle["issue"]["labels"], "escalated", config)
+    if ESCALATED_LABEL not in bundle["issue"]["labels"]:
+        set_state_label(n, bundle["issue"]["labels"], "escalated", config)
+    post_comment(n, render_comment("escalation", None, f"Needs a human: {reason}", config, **extra), config)
 
 
 def command_sync(args: argparse.Namespace, config: dict[str, Any]) -> int:
@@ -7025,8 +7195,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--from-file")
     p.set_defaults(fn=command_codex_review)
 
-    p = sub.add_parser("debt-epic", help="open the debt epic if there is open tech debt and none is open, and attach "
-                                         "every open tech-debt issue to it (idempotent)")
+    p = sub.add_parser("debt-epic", help="open the debt epic if there is open tech debt and none is open, attach "
+                                         "every open tech-debt issue to it, and, when a pass has ended, record it "
+                                         "and close or escalate the epic if due (idempotent)")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_debt_epic)
 
