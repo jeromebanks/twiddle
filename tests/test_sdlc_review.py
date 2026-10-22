@@ -272,7 +272,7 @@ def test_an_epic_without_milestones_owes_and_clears_the_same_way(monkeypatch):
     owed = comment(OWNER, gh.posted[0][1], 20)
     leaves = [{"number": 28, "key": "T1.1", "kind": "slice", "milestone": None, "state": "closed",
                "state_reason": "completed", "assignees": [], "labels": ["plan:slice"], "body": ""}]
-    p = {**sdlc.summarise_progress(leaves, {}), "debt": [], "cleanup_budget": 1}
+    p = sdlc.summarise_progress(leaves, {})
     view = sdlc.epic_view(derive([owed]), p)
     assert view["current"]["key"] == "all" and view["current"]["phase"] == "review" and view["due"] == "review"
     cleared = agent("ship-review", None, 21, milestone="all", sha=HEAD, verdict="approve", round="1")

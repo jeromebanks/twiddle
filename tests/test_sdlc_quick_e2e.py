@@ -809,7 +809,8 @@ def test_debt_filed_on_a_quick_change_follows_it_to_the_full_lane(lane):
     st = lane.state(debt)
     assert (st["debt_lane"], st["debt_generation"], st["waiting_for"]) == (None, 1, None)
     assert "lane=quick" in gh.issues[other]["body"]                 # another change's debt is left alone
-    assert debt in sdlc.open_debt(n, lane.cfg, {OWNER})            # what the cleanup pass reads
+    mk = sdlc.parse_marker(gh.issues[debt]["body"])                 # #n's debt now: no longer a quick change's
+    assert (mk["kind"], mk["epic"], mk.get("lane")) == ("debt", str(n), None)
 
 
 # --- the full lane, untouched ----------------------------------------------------------------------------------

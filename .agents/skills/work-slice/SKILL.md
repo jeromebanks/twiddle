@@ -51,8 +51,8 @@ uv run python tools/sdlc.py slice-check N          # add --resume when it says c
 - `escalated`, and you were started as its retry on a stronger model: `claim N --retry
   --model <you>` below, then pick up where the PR left off. Otherwise:
 - `blocked`, `escalated` or closed: report it and the `next` line, then stop.
-- `slice-check` says a milestone demo or release comes first, a later milestone waits, or the
-  cleanup pass comes first: report it and stop. A slice you already claimed can still be resumed.
+- `slice-check` says a milestone demo or release comes first, or a later milestone waits:
+  report it and stop. A slice you already claimed can still be resumed.
 - `slice-check` complains about missing sections, or the brief can't be built as
   written: don't guess. Report it. Splitting or fixing a slice is a planning job.
 
@@ -281,9 +281,6 @@ uv run python tools/sdlc.py file-issue E --debt --source review --title "..." --
 
 Use `--source advisor` or `--source adjacent` as fits. A problem that isn't this
 epic's work (a bug that already existed elsewhere) goes without `--debt`, to triage.
-After each accepted milestone, a budgeted cleanup pass (`plan-issue --cleanup`) picks
-tech debt up as slices. A slice with a `Pays down` section is one of those: `merge`
-closes the debt issues it names.
 
 `merge` squash-merges into `epic/E` (one commit per slice, so a bad slice is one
 `revert-slice` later), deletes the remote branch, closes the slice itself (GitHub
@@ -404,9 +401,8 @@ never touch a label. File what you leave behind as in §9, with the quick issue'
 the same rule: a follow-up is tech debt because of what it is, not because of the lane it came
 from. Work the change should have included to support itself is tech debt
 (`file-issue N --debt --source review|advisor|adjacent ...`); anything else is an ordinary issue,
-filed without `--debt`, for triage. A quick change has no epic and so no cleanup pass: its debt
-waits, labelled `tech-debt`, in the open tech-debt list (`gh issue list --label tech-debt`), and
-`file-issue` and `state` on the debt issue say so.
+filed without `--debt`, for triage. Its debt, labelled `tech-debt`, joins the debt epic like any
+other, and `file-issue` and `state` on the debt issue say so.
 
 **10. Report** as §10, with the PR and the test count; there is no milestone, and `next:` is
 "nothing for #N".

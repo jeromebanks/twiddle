@@ -190,7 +190,6 @@ class Ledger:
     plan_review: dict[str, Any] | None = None   # the latest round counted in plan_rounds: its response feeds the next
     plan_after_created: bool = False     # a plan revision posted since the last plan-created: an amendment
     created: set[str] | None = field(default_factory=set)   # milestones whose issues exist (None: all, legacy)
-    cleanups: set[str] = field(default_factory=set)         # milestones whose tech-debt cleanup is planned
     feedback: bool = False               # demo changes (the poster's or the agent's) not yet turned into issues
     feedback_plan: bool = False          # a plan revision posted since that feedback
     demos: dict[str, dict[str, Any]] = field(default_factory=dict)   # milestone -> its latest demo
@@ -287,8 +286,6 @@ def _on_plan_review(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) ->
 def _on_plan_created(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     L.feedback = L.feedback_plan = L.plan_after_created = False
     L.plan_rounds, L.plan_review = 0, None   # the next amendment (a milestone's replan, demo changes) gets fresh rounds
-    if mk.get("cleanup"):
-        L.cleanups.add(mk["cleanup"])
     if "created" not in mk:
         L.created = None
     elif L.created is not None:
@@ -429,7 +426,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     latest_plan, plan_verdict, plan_rounds, plan_body = L.latest_plan, L.plan_verdict, L.plan_rounds, L.plan_body
     demos, latest_demo, request = L.demos, L.latest_demo, L.request
     feedback, feedback_plan, plan_after_created = L.feedback, L.feedback_plan, L.plan_after_created
-    created, cleanups = L.created, L.cleanups
+    created = L.created
     shipped, ship_reviews, epic_tests = L.shipped, L.ship_reviews, L.epic_tests
     review_owed = L.review_owed
     untested = L.untested
@@ -580,7 +577,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "demos": demos, "latest_demo": latest_demo, "feedback": feedback,
         "shipped": shipped, "ship_reviews": ship_reviews, "epic_tests": epic_tests, "untested": untested,
         "review_owed": review_owed,
-        "demo_request": request, "cleanups": sorted(cleanups),
+        "demo_request": request,
         "planned_milestones": planned_ms, "created_milestones": sorted(created_ms, key=natural_key),
         "uncreated_milestones": uncreated, "create_mode": latest_plan_json.get("create") or config.get("create", "milestone"),
     }
@@ -721,7 +718,7 @@ def done_phrase(m: dict[str, Any]) -> str:
 # --- the epic view: one answer to "where is this epic, and what may happen now?" ------
 #
 # Every gate (claim, merge, ship) and `next` read this view, so they can't disagree.
-# It joins the ledger (derive_state: demos, releases, cleanup passes) with the
+# It joins the ledger (derive_state: demos, releases) with the
 # slices' progress on GitHub. A milestone moves through MILESTONE_FLOW; the epic
 # works on one milestone at a time, the earliest one not shipped, and what's due
 # for it decides the next command.
@@ -765,51 +762,24 @@ def milestone_phases(st: dict[str, Any], progress: dict[str, Any]) -> list[dict[
     return out
 
 
-def cleanup_owed(st: dict[str, Any], progress: dict[str, Any], phases: list[dict[str, Any]],
-                 cur: dict[str, Any]) -> str | None:
-    """The shipped milestone just before `cur` whose budgeted tech-debt cleanup isn't planned yet.
-
-    Only with open debt and a budget; after the last milestone there's nowhere to put it, so it stays filed.
-    """
-    i = phases.index(cur)
-    prev = phases[i - 1] if i else None
-    if prev and prev["phase"] == "shipped" and progress.get("debt") and progress.get("cleanup_budget") \
-            and prev["key"] not in (st.get("cleanups") or []):
-        return prev["key"]
-    return None
-
-
 def offered_slices(progress: dict[str, Any], cur: dict[str, Any] | None) -> list[int]:
-    """The ready slices the epic may start now: the current milestone's, its cleanup pass first
-    (and whatever open work a cleanup slice itself waits on)."""
+    """The ready slices the epic may start now: the current milestone's."""
     if not cur:
         return []
     units = progress.get("units") or {}
-    mine = [r for r in progress["ready"] if (units.get(r) or {}).get("milestone", cur["key"]) == cur["key"]]
-    cleanup = [n for n in progress.get("cleanup_open") or [] if (units.get(n) or {}).get("milestone", cur["key"]) == cur["key"]]
-    if cleanup:
-        allowed = set(cleanup) | set(progress.get("cleanup_needs") or [])
-        mine = [r for r in mine if r in allowed]
-    return mine
-
-
-def current_cleanup(progress: dict[str, Any], cur: dict[str, Any] | None) -> list[int]:
-    units = progress.get("units") or {}
-    return [n for n in progress.get("cleanup_open") or []
-            if cur and (units.get(n) or {}).get("milestone", cur["key"]) == cur["key"]]
+    return [r for r in progress["ready"] if (units.get(r) or {}).get("milestone", cur["key"]) == cur["key"]]
 
 
 def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
-    """{phases, current, due, cleanup, offered, next}: due is one of verify, done, plan_next, review, demo, ship,
-    cleanup, sync, build."""
+    """{phases, current, due, offered, next}: due is one of verify, done, plan_next, review, demo, ship,
+    sync, build."""
     n = st["number"]
     if is_quick(st):   # no milestones, demos or slices: never offer an epic's next step for it
-        return {"number": n, "phases": [], "current": None, "due": "quick", "cleanup": None, "offered": [],
-                "cleanup_open": [], "cleanup_needs": [], "next": f"/work-slice {n} --quick: a quick change is no epic"}
+        return {"number": n, "phases": [], "current": None, "due": "quick", "offered": [],
+                "next": f"/work-slice {n} --quick: a quick change is no epic"}
     phases = milestone_phases(st, progress)
     cur = next((m for m in phases if m["phase"] != "shipped"), None)
     offered = offered_slices(progress, cur)
-    cleanup = cleanup_owed(st, progress, phases, cur) if cur and cur["phase"] == "building" else None
     behind = progress.get("behind_main")
     units = progress.get("units") or {}
     if st.get("untested"):
@@ -822,10 +792,7 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
                else f"/milestone-demo {n}: every unit of work is merged")
     elif cur["phase"] == "uncreated":
         due = "plan_next"
-        debt = progress.get("debt") or []
-        nxt = (f"/plan-issue {n}: plan {cur['key']} with what earlier milestones taught"
-               + (f" (and up to {progress['cleanup_budget']} of its {len(debt)} tech-debt issue(s))"
-                  if debt and progress.get("cleanup_budget") else ""))
+        nxt = f"/plan-issue {n}: plan {cur['key']} with what earlier milestones taught"
     elif cur["phase"] == "review":
         due = "review"
         owed = (st.get("review_owed") or {}).get(cur["key"]) or []
@@ -840,10 +807,6 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
         later = any(m["phase"] == "uncreated" for m in phases)
         nxt = f"/milestone-demo {n}: {cur['key']} is accepted; ship it to main" + (
             ", then plan the next milestone" if later and st.get("action") == "plan_next_milestone" else " (new slices wait)")
-    elif cleanup:
-        due = "cleanup"
-        nxt = (f"/plan-issue {n} --cleanup: {cleanup} is accepted and #{n} has {len(progress['debt'])} open tech-debt "
-               f"issue(s); plan up to {progress['cleanup_budget']} before the next milestone's slices")
     elif behind and not offered and not progress["in_flight"]:
         due = "sync"
         nxt = f"`uv run python tools/sdlc.py sync {n}`: {epic_branch(n)} is {behind} commit(s) behind main"
@@ -862,9 +825,7 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
             nxt = "nothing for an agent: escalated " + ", ".join(f"#{x}" for x in progress["escalated"])
         else:
             nxt = f"nothing ready: the open units of work on #{n} are all blocked"
-    return {"number": n, "phases": phases, "current": cur, "due": due, "cleanup": cleanup, "offered": offered,
-            "cleanup_open": current_cleanup(progress, cur), "cleanup_needs": progress.get("cleanup_needs") or [],
-            "next": nxt}
+    return {"number": n, "phases": phases, "current": cur, "due": due, "offered": offered, "next": nxt}
 
 
 def pause_errors(view: dict[str, Any]) -> list[str]:
@@ -882,15 +843,9 @@ def pause_errors(view: dict[str, Any]) -> list[str]:
     return []
 
 
-def claim_errors(view: dict[str, Any], number: int, milestone: str | None, cleanup: bool) -> list[str]:
-    """Why a fresh claim of this slice must wait: a paused epic, a later milestone, or the cleanup pass first."""
-    errs = pause_errors(view) or merge_errors(view, milestone)
-    if not errs and view["due"] == "cleanup" and not cleanup:
-        errs.append(f"the cleanup pass after {view['cleanup']} is owed: `/plan-issue {view['number']} --cleanup` first")
-    held = [x for x in view["cleanup_open"] if x != number]
-    if not errs and held and not cleanup and number not in view["cleanup_needs"]:
-        errs.append("the cleanup pass comes first: " + ", ".join(f"#{x}" for x in held))
-    return errs
+def claim_errors(view: dict[str, Any], milestone: str | None) -> list[str]:
+    """Why a fresh claim of this slice must wait: a paused epic, or a later milestone."""
+    return pause_errors(view) or merge_errors(view, milestone)
 
 
 def merge_errors(view: dict[str, Any], milestone: str | None) -> list[str]:
@@ -912,10 +867,6 @@ def due_milestone(demos: dict[str, dict[str, Any]], progress: dict[str, Any],
 
 def current_milestone(epic: dict[str, Any], progress: dict[str, Any] | None) -> dict[str, Any] | None:
     return epic_view(epic, progress)["current"] if progress else None
-
-
-def cleanup_due(st: dict[str, Any], progress: dict[str, Any]) -> str | None:
-    return epic_view(st, progress)["cleanup"]
 
 
 def claim_pause_errors(epic: dict[str, Any], progress: dict[str, Any] | None) -> list[str]:
@@ -1178,8 +1129,6 @@ def print_state(st: dict[str, Any]) -> None:
               f"   plan rounds: {st['plan_rounds']}/{st['max_plan_rounds']}")
     for m in (st.get("progress") or {}).get("milestones", []):
         print(f"  milestone {m['title']}: {m['done']}/{m['total']} merged" + ("  (complete)" if m["done"] == m["total"] else ""))
-    if (st.get("progress") or {}).get("debt"):
-        print("  open tech debt: " + ", ".join(f"#{d}" for d in st["progress"]["debt"]))
     if st.get("demo_request"):
         r = st["demo_request"]
         print(f"  demo steps asked of a person for {r['milestone']}: {r['url']}"
@@ -1807,11 +1756,12 @@ def _text(v: Any) -> bool:
     return isinstance(v, str) and bool(v.strip())
 
 
-def validate_plan(plan: Any, criteria: set[int] | None = None) -> list[str]:
+def validate_plan(plan: Any, criteria: set[int] | None = None, kept: set[str] | frozenset[str] = frozenset()) -> list[str]:
     """Reasons a plan can't be posted or created (empty list = fine).
 
     `criteria` are the PRD's numbered acceptance criteria: each must be covered
-    by some leaf, and no leaf may claim one that doesn't exist.
+    by some leaf, and no leaf may claim one that doesn't exist. `kept` are the slices that
+    already carried the retired `debt` field (`kept_debt_keys`): they may keep it, ignored.
     """
     if not isinstance(plan, dict):
         return ["the plan is not a JSON object"]
@@ -1881,11 +1831,13 @@ def validate_plan(plan: Any, criteria: set[int] | None = None) -> list[str]:
     if all(isinstance(k, str) for k in mkeys) and mkeys != sorted(mkeys, key=natural_key):
         errs.append(f"list milestones in order ({', '.join(sorted(mkeys, key=natural_key))}): "
                     "they are built and shipped in that order")
-    if (co := plan.get("cleanup_of")) is not None and co not in mkeys:
-        errs.append(f"`cleanup_of` names the accepted milestone whose tech debt this pays down, not {co!r}")
+    # the cleanup pass is gone (tech debt has its own lane): a plan no longer pays debt down
+    if "cleanup_of" in plan:
+        errs.append("`cleanup_of` is gone with the cleanup pass: drop it (tech debt is worked in the debt epic)")
     for l in leaves:
-        if not all(isinstance(d, int) for d in l.get("debt") or []):
-            errs.append(f"{l.get('key')}: debt lists the tech-debt issue numbers it pays down")
+        if "debt" in l and l.get("key") not in kept:
+            errs.append(f"{l.get('key')}: `debt` is gone with the cleanup pass: drop it (tech debt is worked in the "
+                        "debt epic; only a slice that already carried it keeps it, ignored)")
     if plan.get("create") not in (None, "milestone", "all"):
         errs.append("`create` is `milestone` (one milestone's issues at a time) or `all`")
     if (lessons := plan.get("lessons")) is not None and not (
@@ -1978,16 +1930,26 @@ def plan_criteria(plan: dict[str, Any], ref: str | None = None,
     return (criteria or None), []
 
 
-def check_plan(plan: Any, ref: str | None = None, comment_id: str | None = None) -> list[str]:
+def check_plan(plan: Any, ref: str | None = None, comment_id: str | None = None,
+               kept: set[str] | frozenset[str] = frozenset()) -> list[str]:
     if not isinstance(plan, dict):
         return ["the plan is not a JSON object"]
     criteria, errs = plan_criteria(plan, ref, comment_id)
-    return errs + validate_plan(plan, criteria)
+    return errs + validate_plan(plan, criteria, kept)
 
 
-def plan_errors(plan: Any, ref: str | None, comment_id: str | None = None) -> list[str]:
+def plan_errors(plan: Any, ref: str | None, comment_id: str | None = None,
+                kept: set[str] | frozenset[str] = frozenset()) -> list[str]:
     """`check_plan`, also at `ref` when planning looks there; with no ref, exactly `check_plan(plan)` as before."""
-    return check_plan(plan, ref, comment_id) if ref else check_plan(plan)
+    return check_plan(plan, ref, comment_id, kept) if ref else check_plan(plan, kept=kept)
+
+
+def kept_debt_keys(bundle: dict[str, Any], st: dict[str, Any]) -> set[str]:
+    """The slices of the latest posted plan that carry `debt`, the retired cleanup pass's field. An amendment
+    keeps every key, so these may keep it (ignored: nothing renders or closes it); no other slice may add it."""
+    if not st.get("latest_plan"):
+        return set()
+    return {l["key"] for l in plan_leaves(latest_plan_of(bundle, st)[1]) if "debt" in l}
 
 
 def _fence(text: str) -> str:
@@ -2077,9 +2039,6 @@ def render_leaf_body(epic: int, leaf: dict[str, Any], parent: int | None, number
     for field, name in LEAF_SECTIONS.items():
         v = leaf[field]
         out += ["", f"## {name}", "", "\n".join(f"- [ ] {x}" for x in v) if field == "acceptance" else v.strip()]
-    if leaf.get("debt"):
-        out += ["", "## Pays down", "", ", ".join(f"#{d}" for d in leaf["debt"])
-                + ": tech debt filed against this epic. `merge` closes them with this slice."]
     if leaf.get("blocked_by"):
         refs = ", ".join(f"#{numbers[b]} ({b})" if b in numbers else b for b in leaf["blocked_by"])
         out += ["", "## Dependencies", "", f"Blocked by {refs}. GitHub's blocked-by links are the authority; "
@@ -2222,7 +2181,13 @@ def latest_plan_of(bundle: dict[str, Any], st: dict[str, Any]) -> tuple[dict[str
 
 def command_plan_validate(args: argparse.Namespace, config: dict[str, Any]) -> int:
     plan = json.loads(Path(args.file).read_text())
-    errs = plan_errors(plan, planning_ref(plan.get("issue") if isinstance(plan, dict) else None, config, offline=False))
+    kept: set[str] = set()
+    if isinstance(plan, dict) and isinstance(plan.get("issue"), int) and isinstance(plan.get("subtasks"), list) \
+            and all(isinstance(t, dict) for t in plan["subtasks"]) and any("debt" in l for l in plan_leaves(plan)):
+        bundle = fetch_bundle(plan["issue"], config)   # only then: which slices already carried it
+        kept = kept_debt_keys(bundle, bundle_state(bundle, config))
+    errs = plan_errors(plan, planning_ref(plan.get("issue") if isinstance(plan, dict) else None, config, offline=False),
+                       kept=kept)
     for e in errs:
         print(f"  - {e}")
     if errs:
@@ -2232,19 +2197,6 @@ def command_plan_validate(args: argparse.Namespace, config: dict[str, Any]) -> i
     print(f"{args.file}: ok — {len(plan['subtasks'])} subtasks, {len(leaves)} units of work, "
           f"can start at once: {', '.join(l['key'] for l in leaves if not l.get('blocked_by'))}")
     return 0
-
-
-def cleanup_budget_errors(plan: dict[str, Any], st: dict[str, Any], config: dict[str, Any]) -> list[str]:
-    """The whole plan's debt-paying slices fit the passes so far: `cleanup_slices_per_milestone` per pass
-    (the passes already created, plus this one if the plan is one). Counted from the plan, not from one
-    revision's additions, so a series of revisions can't add up past it."""
-    budget = config.get("cleanup_slices_per_milestone", 1)
-    passes = set(st.get("cleanups") or []) | ({plan["cleanup_of"]} if plan.get("cleanup_of") else set())
-    debt = [l["key"] for l in plan_leaves(plan) if l.get("debt")]
-    if len(debt) > budget * len(passes):
-        return [f"the plan has {len(debt)} debt-paying slice(s) ({', '.join(debt)}) but {len(passes)} cleanup pass(es) "
-                f"of {budget} (cleanup_slices_per_milestone): leave the rest filed"]
-    return []
 
 
 def lessons_errors(plan: dict[str, Any], st: dict[str, Any]) -> list[str]:
@@ -2264,13 +2216,12 @@ def command_plan_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
     plan = json.loads(Path(args.file).read_text())
-    cleanup = st["action"] == "work_slices" and plan.get("cleanup_of")   # a cleanup pass between milestones
-    if st["action"] not in ("plan", "continue_plan", "create_plan_issues", "replan", "plan_next_milestone") and not cleanup:
+    if st["action"] not in ("plan", "continue_plan", "create_plan_issues", "replan", "plan_next_milestone"):
         raise SdlcError(f"#{st['number']} is {st['state']} (action {st['action']}): not the time to post a plan"
                         + (" — the Codex rounds are spent; ask the poster (`transition N needs-info --kind question`)"
                            if st["action"] == "ask_poster" else ""))
     ref = planning_ref(plan.get("issue"), config, offline=bool(getattr(args, "from_file", None)))
-    errs = plan_errors(plan, ref, st.get("latest_doc") and approved_comment(st))
+    errs = plan_errors(plan, ref, st.get("latest_doc") and approved_comment(st), kept_debt_keys(bundle, st))
     if plan.get("issue") != st["number"]:
         errs.append(f"the plan is for #{plan.get('issue')}, not #{st['number']}")
     if st["state"] in BUILD_STATES and st["latest_plan"]:
@@ -2278,7 +2229,6 @@ def command_plan_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
         dropped = plan_keys(latest_plan_of(bundle, st)[1]) - plan_keys(plan)
         if dropped:
             errs.append(f"an amended plan keeps every key already created; it drops {', '.join(sorted(dropped, key=natural_key))}")
-    errs += cleanup_budget_errors(plan, st, config)
     errs += lessons_errors(plan, st)
     if errs:
         raise SdlcError("the plan does not validate (run plan-validate): " + "; ".join(errs))
@@ -2339,8 +2289,9 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
     epic = st["number"]
     ref = planning_ref(plan.get("issue"), config, offline=bool(getattr(args, "from_file", None)))
     cid = st.get("latest_doc") and approved_comment(st)
-    errs = plan_errors(plan, ref, cid) + ([] if plan.get("issue") == epic else [f"the plan is for #{plan.get('issue')}"])
-    errs += cleanup_budget_errors(plan, st, config)
+    # the plan's own `debt` keys pass: plan-post already held them to the revision before it
+    errs = plan_errors(plan, ref, cid, kept_debt_keys(bundle, st)) \
+        + ([] if plan.get("issue") == epic else [f"the plan is for #{plan.get('issue')}"])
     if errs:
         raise SdlcError("the reviewed plan no longer validates: " + "; ".join(errs))
     repo = repo_of(config)
@@ -2445,8 +2396,6 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
                 + (f"\n\n{', '.join(later)} will be planned again with what {created_after[-1]} teaches, "
                    "then created." if later and created_after else ""))
         extra = {"created": ",".join(created_after)} if target is not None else {}
-        if plan.get("cleanup_of") and plan["cleanup_of"] not in (st.get("cleanups") or []):
-            extra["cleanup"] = plan["cleanup_of"]
         post_comment(epic, render_comment("plan-created", rev, body, config, **extra), config)
     if st["state"] in BUILD_STATES:   # demo feedback or the next milestone: the epic is still being built
         if not offline:
@@ -2860,22 +2809,10 @@ def parse_pytest_summary(text: str) -> tuple[int, int]:
     return num("passed"), num("failed") + num("errors?")
 
 
-def is_cleanup(leaf: dict[str, Any]) -> bool:
-    return bool(leaf_section(leaf.get("body", ""), "Pays down"))
-
-
 def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[dict[str, Any]]]) -> dict[str, Any]:
     """An epic's units of work: what can start, what is in flight, and each milestone's count."""
     ready, waiting = ready_leaves(leaves, blockers)
     escalated = [l["number"] for l in leaves if l.get("state") == "open" and ESCALATED_LABEL in l.get("labels", [])]
-    # cleanup slices (they pay down tech debt) and the open work they wait on: epic_view puts them first
-    cleanup_open = [l["number"] for l in leaves if l.get("state", "open") == "open" and is_cleanup(l)]
-    needed, todo = set(cleanup_open), list(cleanup_open)
-    while todo:
-        for b in blockers.get(todo.pop(), []):
-            if b.get("state") != "closed" and b["number"] not in needed:
-                needed.add(b["number"])
-                todo.append(b["number"])
     by_order = lambda l: (natural_key(milestone_key(l.get("milestone"))), natural_key(l["key"]))  # noqa: E731
     free = [l["number"] for l in sorted(ready, key=by_order) if not l.get("assignees") and l["number"] not in escalated]
     in_flight = [l["number"] for l in ready + waiting if l.get("assignees") and l["number"] not in escalated]
@@ -2888,7 +2825,6 @@ def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[di
     return {"ready": free, "in_flight": in_flight, "escalated": escalated,
             "units": {l["number"]: {"key": l["key"], "complexity": l.get("complexity"),
                                     "milestone": milestone_key(l.get("milestone"))} for l in leaves},
-            "cleanup_open": cleanup_open, "cleanup_needs": sorted(needed - set(cleanup_open)),
             "waiting": [l["number"] for l in waiting if l["number"] not in in_flight],
             "open": sum(1 for l in leaves if l.get("state") == "open"), "milestones": milestones}
 
@@ -2958,15 +2894,7 @@ def epic_progress(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[
     progress = summarise_progress(leaves, blockers)
     for u in progress["units"].values():
         u["model"] = model_for(u["complexity"], config)
-    return {**progress, "behind_main": behind, "debt": open_debt(epic, config, trusted),
-            "cleanup_budget": config.get("cleanup_slices_per_milestone", 1)}
-
-
-def open_debt(epic: int, config: dict[str, Any], trusted: set[str]) -> list[int]:
-    """Open tech-debt issues filed against this epic (`file-issue --debt`)."""
-    raw = gh_pages(f"repos/{repo_of(config)}/issues?labels={DEBT_LABEL.replace(':', '%3A')}&state=open&per_page=100")
-    return sorted(r["number"] for r in raw if "pull_request" not in r and (r.get("user") or {}).get("login") in trusted
-                  and (parse_marker(r.get("body") or "") or {}).get("epic") == str(epic))
+    return {**progress, "behind_main": behind}
 
 
 # --- the debt lane: one open debt epic (`lane:debt`) holds every open tech-debt ticket as a sub-issue -------------
@@ -3497,7 +3425,7 @@ def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> in
 
 def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -> list[str]:
     """Why a fresh claim of this slice must wait: its epic isn't being built (escalated, done...), main holds an
-    unverified release, a demo or release is due, a later milestone waits, or the cleanup pass comes first."""
+    unverified release, a demo or release is due, or a later milestone waits."""
     epic = (parse_marker(b["issue"].get("body", "")) or {}).get("epic", "")
     if resume or not epic.isdigit():
         return []
@@ -3513,7 +3441,7 @@ def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -
         return [f"main holds a release no recorded run saw ({', '.join(st['untested'])}): `verify-main {epic}` first"]
     errs = claim_pause_errors(st, progress)
     if progress and not errs:
-        errs = claim_errors(epic_view(st, progress), b["issue"]["number"], b["issue"].get("milestone"), is_cleanup(b["issue"]))
+        errs = claim_errors(epic_view(st, progress), b["issue"].get("milestone"))
     return errs
 
 
@@ -4295,10 +4223,6 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
         raise SdlcError(f"merged PR #{args.pr}, but #{n} reads back {issue['state']} ({issue.get('state_reason')}): "
                         f"close it as completed (`gh issue close {n} --reason completed`)")
     print(f"merged PR #{args.pr} into {branch}; #{n} closed")
-    for d in re.findall(r"#(\d+)", leaf_section(issue["body"], "Pays down").split(":")[0]):
-        gh(["issue", "close", d, "--repo", repo, "--reason", "completed", "--comment",
-            f"Paid down by #{n} (PR #{args.pr})."], check=False)
-        print(f"#{d} (tech debt) closed")
     st = with_next(bundle_state(fetch_bundle(epic, config, trusted), config), config, trusted=trusted)
     for m in (st.get("progress") or {}).get("milestones", []):
         if m["done"] == m["total"] and m["key"] not in (st.get("shipped") or {}):
@@ -4420,7 +4344,7 @@ def escalate_to_full(n: int, reason: str | None, trigger: str, config: dict[str,
         print(f"DRY RUN #{n}: {st['state']} -> approved, out of the quick lane")
         print(f"labels: add {PREFIX}approved, remove {stale}")
         print("----- comment -----\n" + record if record else f"the lane record is already posted ({st['to_full']['url']})")
-        print(f"then: readdress open `lane={QUICK}` {DEBT_LABEL} filed against #{n} to its cleanup pass; commit-prd {n}")
+        print(f"then: readdress open `lane={QUICK}` {DEBT_LABEL} filed against #{n} as an epic's debt; commit-prd {n}")
         return 0
     if record:
         post_comment(n, record, config)
@@ -5343,8 +5267,6 @@ def command_demo_status(args: argparse.Namespace, config: dict[str, Any]) -> int
                   + ", ".join(f"{o['slice']} ({o['why']})" for o in m["review_owed"]))
         if m["shipped"]:
             print(f"  shipped to main: {m['shipped'][:12]}")
-    if debt := (brief["progress"] or {}).get("debt"):
-        print("\nopen tech debt: " + ", ".join(f"#{d}" for d in debt))
     print(f"\nnext: {brief['next']}")
     return 0
 

@@ -255,7 +255,7 @@ def test_plan_create_refuses_without_consensus(tmp_path, monkeypatch):
 
 def test_plan_create_dry_run_lists_the_tree(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
-    monkeypatch.setattr(sdlc, "check_plan", lambda plan: [])
+    monkeypatch.setattr(sdlc, "check_plan", lambda plan, *a, **k: [])
     plan_c = comment(OWNER, sdlc.render_comment("plan", 1, sdlc.render_plan(make_plan()), CONFIG), 3)
     f = _bundle(tmp_path, APPROVED + [plan_c, review(1, 4, "approve")])
     assert sdlc.main(["plan-create", "12", "--from-file", f, "--dry-run"]) == 0
@@ -268,7 +268,7 @@ def test_plan_create_dry_run_lists_the_tree(tmp_path, capsys, monkeypatch):
 
 def test_plan_post_dry_run_and_its_guards(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
-    monkeypatch.setattr(sdlc, "check_plan", lambda plan: [])
+    monkeypatch.setattr(sdlc, "check_plan", lambda plan, *a, **k: [])
     pf = tmp_path / "plan.json"
     pf.write_text(json.dumps(make_plan()))
     assert sdlc.main(["plan-post", "12", str(pf), "--from-file", _bundle(tmp_path, APPROVED), "--dry-run"]) == 0
@@ -409,7 +409,7 @@ def created_m1(plan):
 
 def test_plan_create_makes_only_the_first_milestone_by_default(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
-    monkeypatch.setattr(sdlc, "check_plan", lambda plan: [])
+    monkeypatch.setattr(sdlc, "check_plan", lambda plan, *a, **k: [])
     f = _bundle(tmp_path, APPROVED + [plan_comment(two_milestones(), 1, 3), review(1, 4, "approve")])
     assert sdlc.main(["plan-create", "12", "--from-file", f, "--dry-run"]) == 0
     out = capsys.readouterr().out
@@ -421,7 +421,7 @@ def test_plan_create_makes_only_the_first_milestone_by_default(tmp_path, capsys,
 
 def test_create_all_keeps_the_old_behaviour(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
-    monkeypatch.setattr(sdlc, "check_plan", lambda plan: [])
+    monkeypatch.setattr(sdlc, "check_plan", lambda plan, *a, **k: [])
     f = _bundle(tmp_path, APPROVED + [plan_comment(two_milestones(create="all"), 1, 3), review(1, 4, "approve")])
     assert sdlc.main(["plan-create", "12", "--from-file", f, "--dry-run"]) == 0
     out = capsys.readouterr().out
@@ -464,7 +464,7 @@ def test_a_legacy_plan_created_marker_means_everything_exists():
 
 def test_a_replan_needs_its_lessons(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
-    monkeypatch.setattr(sdlc, "check_plan", lambda plan: [])
+    monkeypatch.setattr(sdlc, "check_plan", lambda plan, *a, **k: [])
     f = _bundle(tmp_path, created_m1(two_milestones()) + DEMO_M1, labels=("sdlc:in-progress",))
     pf = tmp_path / "plan.json"
     pf.write_text(json.dumps(two_milestones()))

@@ -431,14 +431,15 @@ def test_merge_refuses_a_pr_aimed_at_main(monkeypatch, capsys):
     assert not any(c[:2] == ["pr", "merge"] for c in gh.calls)
 
 
-def test_merge_closes_the_debt_a_cleanup_slice_pays_down(monkeypatch):
+def test_merge_of_an_old_pays_down_slice_closes_only_the_slice(monkeypatch):
+    """The cleanup pass is gone: a slice created before it went still parses and merges, and its debt stays open."""
     gh = GitHub(monkeypatch)
     body = SLICE_BODY + "\n## Pays down\n\n#81, #84: tech debt filed against this epic.\n"
     stub_merge(monkeypatch, gh, [slice_issue(body=body), slice_issue(body=body),
                                  slice_issue("closed", "completed", body=body)])
     assert sdlc.main(["merge", "50"]) == 0
     closed = [c[2] for c in gh.calls if c[:2] == ["issue", "close"]]
-    assert closed == ["28", "81", "84"]
+    assert closed == ["28"]
 
 
 CLAIMED = [agent("claim", None, 1, branch="slice/28")]
@@ -703,18 +704,23 @@ def test_sync_dry_run_leaves_the_worktree_alone(repo, monkeypatch, capsys):
 
 
 def test_demo_status_and_state_agree_on_next(monkeypatch):
+    """M1 shipped with open tech debt filed against #12: both offer M2's slice, never a cleanup pass. The real
+    epic_progress runs, over a fake GitHub that holds that debt."""
     shipped = [DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)]
     leaves = [done_leaf(28, "T1.1"), {**done_leaf(31, "T3.1", "#12 M2: y"), "state": "open", "state_reason": None}]
-    p = {**sdlc.summarise_progress(leaves, {}), "behind_main": 0, "debt": [81], "cleanup_budget": 1}
+    debt = {"number": 81, "body": sdlc.marker("debt", None, epic="12", source="review", generation="1"),
+            "user": {"login": OWNER}, "labels": [{"name": "tech-debt"}], "state": "open"}
     monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted=None: epic_bundle(shipped))
     monkeypatch.setattr(sdlc, "fetch_plan_issues", lambda n, cfg, trusted: leaves)
-    monkeypatch.setattr(sdlc, "epic_progress", lambda n, cfg, trusted: p)
-    monkeypatch.setattr(sdlc, "gh_pages", lambda path: [])
+    monkeypatch.setattr(sdlc, "fetch_blockers", lambda n, cfg: [])
+    monkeypatch.setattr(sdlc, "gh_json", lambda args, **k: {"ahead_by": 0} if "/compare/" in " ".join(args) else {})
+    monkeypatch.setattr(sdlc, "gh_pages", lambda path: [debt] if "labels=tech-debt" in path else [])
     monkeypatch.setattr(sdlc, "find_slice_pr", lambda n, cfg: None)
     monkeypatch.setattr(sdlc, "reverted_on_main", lambda cfg, root=None: set())
     brief = sdlc.demo_brief(12, CONFIG, {OWNER})
     st = sdlc.with_next(sdlc.bundle_state(epic_bundle(shipped), CONFIG), CONFIG, trusted={OWNER})
-    assert brief["next"] == st["next"] and brief["next"].startswith("/plan-issue 12 --cleanup")
+    assert brief["next"] == st["next"] and st["next"].startswith("/work-slice 31")
+    assert "debt" not in st["progress"] and "--cleanup" not in st["next"]
 
 
 def test_an_untested_release_must_be_verified_before_the_epic_finishes():
@@ -742,13 +748,15 @@ def test_an_interrupted_untested_ship_does_not_finish_on_rerun(repo, monkeypatch
     assert "verify-main 12" in capsys.readouterr().err and sdlc.remote_has("epic/12", repo) and gh.labels == []
 
 
-def test_an_owed_cleanup_pass_holds_ordinary_claims():
+def test_an_accepted_milestone_never_owes_a_cleanup_pass():
     st = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)])
     p = {**progress(ms("M1", 3, 3), ms("M2", 0, 2), ready=(35,)), "debt": [81], "cleanup_budget": 1,
-         "units": {35: {"key": "T4.1", "milestone": "M2"}}}
+         "units": {35: {"key": "T4.1", "milestone": "M2"}}}   # stale keys an old caller might pass: ignored
     view = sdlc.epic_view(st, p)
-    assert view["due"] == "cleanup"
-    assert "cleanup pass after M1 is owed" in sdlc.claim_errors(view, 35, "#12 M2: y", cleanup=False)[0]
+    assert (view["due"], view["next"]) == ("build", "/work-slice 35") and "cleanup" not in view
+    assert sdlc.claim_errors(view, "#12 M2: y") == []
+    for gone in ("cleanup_owed", "cleanup_due", "current_cleanup", "is_cleanup", "cleanup_budget_errors", "open_debt"):
+        assert not hasattr(sdlc, gone), gone
 
 
 def test_changes_after_an_approve_void_it():
