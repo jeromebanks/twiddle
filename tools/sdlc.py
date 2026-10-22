@@ -2985,7 +2985,8 @@ def open_debt_tickets(config: dict[str, Any]) -> list[dict[str, Any]]:
     """Every open `tech-debt` issue, whoever filed it: the label is the gate (no issue template applies it, so only
     someone with triage access can), and intake judges each one before any is built."""
     raw = gh_pages(f"repos/{repo_of(config)}/issues?labels={_q(DEBT_LABEL)}&state=open&per_page=100")
-    return sorted(({"number": r["number"], "id": r["id"], "title": r.get("title", "")} for r in raw
+    return sorted(({"number": r["number"], "id": r["id"], "title": r.get("title", ""),
+                    "created_at": r.get("created_at", "")} for r in raw
                    if "pull_request" not in r), key=lambda t: t["number"])
 
 
@@ -3341,7 +3342,10 @@ def debt_epic_reconcile(config: dict[str, Any], trusted: set[str], dry_run: bool
     else:
         epic = attach_open_debt(epic, tickets, config, dry_run)
     if epic is not None and epic["id"] is not None:   # a dry run's "new" epic has no pass to end
-        debt_epic_pass_end(epic["number"], config, trusted, dry_run)
+        # a dry run attached nothing: the pass end it shows counts what it would attach, as the real run would
+        held = {s["number"] for s in sub_issues(epic["number"], config)} if dry_run and tickets else set()
+        debt_epic_pass_end(epic["number"], config, trusted, dry_run,
+                           projected=[t for t in tickets if t["number"] not in held] if dry_run else [])
 
 
 def attach_open_debt(epic: dict[str, Any] | None, tickets: list[dict[str, Any]], config: dict[str, Any],
@@ -3380,15 +3384,25 @@ def attach_open_debt(epic: dict[str, Any] | None, tickets: list[dict[str, Any]],
     return epic
 
 
-def debt_epic_pass_end(n: int, config: dict[str, Any], trusted: set[str], dry_run: bool) -> None:
+def debt_epic_pass_end(n: int, config: dict[str, Any], trusted: set[str], dry_run: bool,
+                       projected: list[dict[str, Any]] = ()) -> None:
     """On open debt epic #n, what a pass's end writes (debt_pass_end), each step checked against GitHub first so a
     rerun (or one after a run cut short) posts nothing twice: the pass-end record; then, with no open debt left,
     `sdlc:done` and the close (the label first: a closed epic is never found again to label), read back; or the
-    escalation, keyed by its record for that pass. An epic a person holds (escalated) is only given the record."""
+    escalation, keyed by its record for that pass. An epic a person holds (escalated) with debt still open is only
+    given the record. `projected`: open tickets a dry run would have attached first, counted as attached."""
     b = fetch_bundle(n, config, trusted)
     if not debt_passes(b["comments"], trusted):
         return   # no pass yet: nothing to end, and no more to read
-    e = debt_pass_end(n, debt_progress(n, config, trusted))
+    progress = debt_progress(n, config, trusted)
+    if projected:   # not through intake yet, as a freshly attached ticket is
+        progress = {**progress,
+                    "tickets": progress["tickets"] + [{"number": t["number"], "title": t.get("title", ""),
+                                                       "labels": [DEBT_LABEL], "intake": None,
+                                                       "created_at": t.get("created_at", "")} for t in projected],
+                    "members": progress["members"] + [{"number": t["number"], "state": "open",
+                                                       "created_at": t.get("created_at", "")} for t in projected]}
+    e = debt_pass_end(n, progress)
     if e is None:
         return
     k, labels = e["pass"], b["issue"]["labels"]
@@ -3405,7 +3419,7 @@ def debt_epic_pass_end(n: int, config: dict[str, Any], trusted: set[str], dry_ru
         else:
             post_comment(n, comment, config)
             print(f"debt epic #{n}: pass {k} ended ({len(j)} joined, {len(c)} closed)")
-    if held and not e["escalate"]:
+    if held and not e["close"] and not e["escalate"]:   # with no debt left, even a held epic is done
         print(f"debt epic #{n} is {ESCALATED_LABEL}: a person decides what follows pass {k}")
         return
     if e["close"]:

@@ -2354,3 +2354,30 @@ def test_a_close_cut_short_after_the_label_is_finished_by_a_rerun(gh, capsys, mo
     assert "record the end" not in st["next"]   # the record is posted: only the close is left
     assert run(capsys, "debt-epic")[0] == 0
     assert gh.issues[epic]["state"] == "closed" and len(ends(gh, epic)) == 1
+
+
+def test_an_escalated_epic_with_no_debt_left_still_closes_done(gh, capsys):
+    epic, b, _ = two_growing_passes(gh)
+    assert run(capsys, "debt-epic")[0] == 0
+    post_pass(gh, epic, 2, b)
+    left = join(gh, epic, 2)
+    done(gh, b)
+    assert run(capsys, "debt-epic")[0] == 0 and sdlc.ESCALATED_LABEL in gh.issues[epic]["labels"]
+    done(gh, *gh.subs[epic])   # a person dealt with every ticket left
+    assert left and run(capsys, "debt-epic")[0] == 0
+    assert gh.issues[epic]["state"] == "closed" and "sdlc:done" in gh.issues[epic]["labels"]
+    assert sdlc.ESCALATED_LABEL not in gh.issues[epic]["labels"]
+
+
+def test_a_dry_run_counts_the_debt_it_would_attach(gh, capsys, calls):
+    epic, (a,) = ready(gh, 1)
+    post_pass(gh, epic, 1, a)
+    done(gh, a)
+    loose = gh.ticket("unattached")
+    code, out, err = run(capsys, "debt-epic", "--dry-run")
+    assert code == 0, err
+    assert writes_in(calls) == []
+    assert f"would attach #{loose}" in out and "joined=1 closed=1" in out and "close it" not in out
+    assert run(capsys, "debt-epic")[0] == 0
+    (end,) = ends(gh, epic)
+    assert (end["joined"], end["closed"]) == ("1", "1") and gh.issues[epic]["state"] == "open"
