@@ -3100,11 +3100,11 @@ DEBT_EPIC_BODY = ("Tech debt: work a feature needed to support itself, filed wit
                   "`uv run python tools/sdlc.py state` on this issue says what is due.")
 
 
-def require_debt_epic_labels(config: dict[str, Any]) -> None:
-    """Refuse (before anything is written) when the debt epic's labels don't exist: without its label a rerun
-    can't find the epic, and would open a second one."""
+def require_debt_epic_labels(config: dict[str, Any], *also: str) -> None:
+    """Refuse (before anything is written) when the debt epic's labels (and `also`) don't exist: without its label
+    a rerun can't find the epic, and would open a second one."""
     have = {l["name"] for l in gh_json(["label", "list", "--repo", repo_of(config), "--limit", "200", "--json", "name"])}
-    if missing := [l for l in (DEBT_EPIC_LABEL, f"{PREFIX}in-progress") if l not in have]:
+    if missing := [l for l in (DEBT_EPIC_LABEL, f"{PREFIX}in-progress", *also) if l not in have]:
         raise SdlcError(f"labels {missing} do not exist: run `bootstrap-labels` first (nothing was created)")
 
 
@@ -5488,8 +5488,8 @@ def command_file_issue(args: argparse.Namespace, config: dict[str, Any]) -> int:
         epic = {"number": bundle["debt_epic"]} if bundle.get("debt_epic") else None
     else:
         epic = the_debt_epic(config, set(bundle["trusted"]))
-        if epic is None and not args.dry_run:
-            require_debt_epic_labels(config)
+        if epic is None and not args.dry_run:   # tech-debt too: a ticket refused after the epic opened leaves it empty
+            require_debt_epic_labels(config, DEBT_LABEL)
     cmd += ["--label", DEBT_LABEL]
     if args.dry_run:
         head = debt_head(args.number, args.source, debt_epic=epic and epic["number"], **origin)

@@ -470,11 +470,12 @@ def test_debt_opens_a_debt_epic_when_none_is_open(gh, capsys, body_file):
     assert f"debt epic #{epic}" in body.splitlines()[1] and f"opened debt epic #{epic}" in out
 
 
-def test_debt_without_the_debt_epics_label_is_refused_before_anything_is_written(gh, capsys, body_file):
-    gh.labels.discard(EPIC_LABEL)
+@pytest.mark.parametrize("label", [EPIC_LABEL, DEBT])
+def test_debt_without_its_labels_is_refused_before_anything_is_written(gh, capsys, body_file, label):
+    gh.labels.discard(label)
     n = gh.feature_epic()
     code, _, err = file_it(capsys, n, body_file)
-    assert code == 1 and "bootstrap-labels" in err and gh.writes == []
+    assert code == 1 and "bootstrap-labels" in err and label in err and gh.writes == []
 
 
 def test_debt_with_two_open_debt_epics_is_refused_before_anything_is_written(gh, capsys, body_file):
