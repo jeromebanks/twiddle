@@ -1552,9 +1552,12 @@ def test_escalate_slice_dry_run_names_every_member_and_writes_nothing(gh, repo, 
 
 
 def debt_bundle_file(tmp_path, gh, epic, tickets, head="b" * 40, pr_comments=()):
-    """A debt PR's offline bundle: the PR closing `tickets`, each ticket with its comments, the debt epic's comments."""
+    """A debt PR's offline bundle: the PR closing `tickets`, each ticket with its comments, the debt epic's comments.
+    A PR closing one ticket carries it as `slice` too, the issue pr_issue reads (live, it fetches that one)."""
     f = tmp_path / "debt-pr.json"
-    f.write_text(json.dumps({
+    one = ({"slice": gh.issues[tickets[0]], "comments": [sdlc.norm_comment(c) for c in gh.comments[tickets[0]]]}
+           if len(tickets) == 1 else {})
+    f.write_text(json.dumps({**one,
         "pr": {"number": 300, "state": "OPEN", "isDraft": False, "baseRefName": "main", "headRefName": "slice/x",
                "headRefOid": head, "body": "\n".join(f"Closes #{t}" for t in tickets)},
         "pr_comments": list(pr_comments), "trusted": [OWNER],
@@ -1617,12 +1620,16 @@ def test_codex_review_of_a_debt_pr_gives_codex_the_tickets_and_the_groups_scope_
     assert "`git diff origin/main...HEAD`" in out and "a debt PR merges straight into main" in out
     prompt = out.split("The brief Codex reads", 1)[0]
     assert "not this ticket's debt" in prompt and "non-blocking" in prompt and "<" + "SLICE>" not in prompt
+    # the gate isn't weaker: what is in scope, or what the diff itself breaks, still blocks
+    assert "A problem inside that scope is fixed in this PR, so it can be\n  blocking" in prompt
+    assert "anything the diff itself changes or breaks, wherever it is" in prompt
     assert "epic #" not in prompt and "approved brief of this quick change" not in prompt   # no slice or quick bullets
     brief = (tmp_path / "scratch" / "slice.md").read_text()
     assert f"group `debt-1-1` of pass 1 on debt epic #{epic}, closing #{a}, #{b}, into main" in brief
     assert "## The group's scope (from the pass plan)\n\nfix it" in brief and "- `src/twiddle/cli.py`" in brief
     assert f"## Ticket #{a}: debt 0" in brief and "The first ticket's own words." in brief and f"## Ticket #{b}:" in brief
     assert "not this ticket's debt" in brief and brief in out   # the dry run shows the brief itself
+    assert "A problem inside that scope is fixed in this PR" in brief and "the diff itself changes or breaks" in brief
 
 
 def test_a_debt_pr_closing_anything_else_or_another_group_is_refused(gh, repo, capsys, tmp_path):
@@ -1647,3 +1654,23 @@ def test_slice_epic_never_reads_a_debt_tickets_source_as_its_epic(gh):
     t = gh.ticket()
     assert sdlc.slice_epic(gh.issues[t]) is None
     assert sdlc.slice_epic({"body": "<!-- sdlc:v1 kind=slice epic=12 key=T1 -->", "labels": ["plan:slice"]}) == 12
+
+
+def test_slice_check_of_a_debt_ticket_reads_its_group(gh, repo, capsys):
+    epic, (a, b, c) = posted_pass(gh, [((0, 1), "routine")])
+    code, out, _ = run(capsys, "slice-check", a)
+    assert code == 0 and f"#{a}: ok to start" in out
+    code, out, _ = run(capsys, "slice-check", c)
+    assert code == 1 and "in no open pass" in out
+    assert run(capsys, "claim", a, "--debt")[0] == 0
+    code, out, _ = run(capsys, "slice-check", b)   # the sibling: its group's claim is on it too
+    assert code == 1 and f"#{b} is already claimed" in out and "--debt --resume" in out
+    code, out, _ = run(capsys, "slice-check", b, "--resume")
+    assert code == 0 and f"#{b}: ok to resume" in out
+
+
+def test_an_escalated_ticket_after_its_pass_ended_is_still_named():
+    st = view([{"number": 1, "intake": "debt", "labels": [DEBT, sdlc.ESCALATED_LABEL]},
+               {"number": 2, "intake": "debt", "labels": [DEBT]}], [pass_record(1, [1]),
+                                                                    pass_record(1, [], kind=sdlc.DEBT_PASS_END_KIND, at=2)])
+    assert st["action"] == "plan_pass" and "(#2;" in st["next"] and st["next"].endswith("; needs a human: #1 (escalated)")

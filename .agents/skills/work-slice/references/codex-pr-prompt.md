@@ -29,8 +29,11 @@ Read:
   after it, so this review is the last look anyone takes before it lands);</QUICK>
 - <DEBT>the brief of this debt PR: `<SLICE_FILE>`. Each tech-debt ticket it closes is
   the spec, and its pass group's scope and files (from the pass plan, at the top)
-  bound the change. A problem you find outside that scope is not this ticket's debt:
-  report it as **non-blocking** (it is filed as new debt), never as blocking;</DEBT>
+  bound the change. A problem inside that scope is fixed in this PR, so it can be
+  blocking; so can anything the diff itself changes or breaks, wherever it is. A
+  problem that was already there outside that scope, which the change neither causes
+  nor touches, is not this ticket's debt: report it as **non-blocking** (it is filed
+  as new debt), never as blocking;</DEBT>
 - <DEBT>the change: `git diff <BASE>...HEAD` and `git log <BASE>..HEAD` (`<BASE>` is
   main: a debt PR merges straight into main, and no milestone review or demo follows,
   so this review is the last look anyone takes before it lands);</DEBT>

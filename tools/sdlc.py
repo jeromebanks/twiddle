@@ -3128,6 +3128,8 @@ def debt_view(st: dict[str, Any], progress: dict[str, Any], rules: "DebtRules | 
         turn, action = "none", "none"
         nxt = (f"nothing: debt epic #{n}'s {len(tickets)} open ticket(s) are all through intake" if tickets
                else f"nothing: debt epic #{n} has no open tickets")
+    if not open_pass and (stuck := [t["number"] for t in judged if ESCALATED_LABEL in (t.get("labels") or [])]):
+        nxt += "; needs a human: " + ", ".join(f"#{t}" for t in stuck) + " (escalated)"
     work = pass_work(open_pass, tickets) if open_pass and not pending else {}
     return {"number": n, "action": action, "turn": turn, "tickets": tickets, "intake_pending": pending,
             "passes": passes, "open_pass": open_pass and open_pass["pass"],
@@ -4108,9 +4110,11 @@ def debt_brief(ctx: dict[str, Any]) -> str:
            "## The group's scope (from the pass plan)", "", g["scope"] or "(none given)", "",
            "## The group's files (from the pass plan)", "", *[f"- `{f}`" for f in g["files"]], "",
            f"Rated `{g['complexity'] or '?'}` in the pass plan.", "",
-           "## Findings outside the scope", "",
-           "Each ticket below is the spec, and the group's scope and files above bound the change. A problem found "
-           "outside that scope is not this ticket's debt: it never holds this PR, and is filed as new debt instead.", ""]
+           "## Findings inside and outside the scope", "",
+           "Each ticket below is the spec, and the group's scope and files above bound the change. A problem inside "
+           "that scope is fixed in this PR, and so is anything the diff itself changes or breaks, wherever it is. A "
+           "problem that was already there outside that scope, which the change neither causes nor touches, is not "
+           "this ticket's debt: it doesn't hold this PR, and is filed as new debt instead.", ""]
     for t in ctx["tickets"]:
         out += [f"## Ticket #{t['number']}: {t.get('title', '')}", "", (t.get("body") or "").strip(), ""]
     return "\n".join(out)
