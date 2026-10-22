@@ -453,8 +453,8 @@ of work: one worktree, one branch, one PR into `main` that closes exactly its ti
 loaded. There is no epic, no milestone, no demo and no sign-off. Everything in §1 to §10 holds
 except as follows.
 
-**1. Check.** `uv run python tools/sdlc.py slice-status T` prints `lane: debt` and `Codex review:
-on the PR (never deferred ...)`; `slice-check T` lists what stops a claim: a ticket that is not in
+**1. Check.** `uv run python tools/sdlc.py slice-status T` prints `lane: debt` and `Codex review: on
+the PR (mandatory ...)`; `slice-check T` lists what stops a claim: a ticket that is not in
 the open pass, is claimed already (then `--resume`), is escalated, or waits on a person. `state D`
 (the debt epic) says what is due: only a `work_debt` line is yours. A `merge_debt` line means a
 group's PR is ready to merge (go to 9).
