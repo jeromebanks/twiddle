@@ -534,6 +534,9 @@ def test_claim_quick_makes_the_worktree_posts_one_claim_and_moves_the_label(repo
 
     # `cleanup` needs nothing new: the worktree and the branch are a slice's
     monkeypatch.setattr(sdlc, "find_slice_pr", lambda n, config: {"state": "MERGED"})
+    # cleanup reads the issue (a debt ticket's group is cleaned up through its claim): this one is no debt
+    monkeypatch.setattr(sdlc, "fetch_slice", lambda n, config: (fake.bundle["issue"], fake.bundle["comments"]))
+    monkeypatch.setattr(sdlc, "fetch_trusted", lambda config: set(fake.bundle["trusted"]))
     assert sdlc.main(["cleanup", "12"]) == 0
     assert not wt.exists() and not _git("branch", "--list", "slice/12", cwd=repo)
 

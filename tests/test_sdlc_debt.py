@@ -1674,3 +1674,47 @@ def test_an_escalated_ticket_after_its_pass_ended_is_still_named():
                {"number": 2, "intake": "debt", "labels": [DEBT]}], [pass_record(1, [1]),
                                                                     pass_record(1, [], kind=sdlc.DEBT_PASS_END_KIND, at=2)])
     assert st["action"] == "plan_pass" and "(#2;" in st["next"] and st["next"].endswith("; needs a human: #1 (escalated)")
+
+
+def test_a_group_pr_must_close_every_active_member_and_a_departed_one_drops_out(gh, repo, capsys, tmp_path):
+    epic, (a, b, _) = posted_pass(gh, [((0, 1), "routine")])
+    assert run(capsys, "claim", a, "--debt")[0] == 0
+    trusted = {OWNER}
+    ec = [sdlc.norm_comment(c) for c in gh.comments[epic]]
+    one = [{"issue": gh.issues[a], "comments": [sdlc.norm_comment(c) for c in gh.comments[a]]}]
+    pr_a = {"number": 300, "body": f"Closes #{a}"}
+    with pytest.raises(sdlc.SdlcError, match=f"doesn't close #{b} of group `debt-1-1`"):
+        sdlc.debt_pr_context(pr_a, one, ec, trusted, [gh.issues[b]])
+    # live too: codex-review reads the members the PR doesn't close
+    debt_pr(gh, 300, f"slice/{a}", a)
+    code, _, err = run(capsys, "codex-review", "--pr", 300, "--out", tmp_path / "s", "--dry-run")
+    assert code == 1 and f"doesn't close #{b}" in err
+    # B leaves the debt epic for triage: no longer a member, so A's PR closing A alone is the group's
+    gh.issues[b]["labels"] = ["sdlc:triage"]
+    assert sdlc.debt_pr_context(pr_a, one, ec, trusted, [gh.issues[b]])["group"]["key"] == "debt-1-1"
+    gh.issues[b]["labels"] += [sdlc.ESCALATED_LABEL]   # whatever happens to it in triage stops A no more
+    s = status(capsys, a)
+    assert s["group"]["open"] == [a] and s["state"] == "in-review" and s["escalated"] == []
+    code, _, err = run(capsys, "claim", a, "--debt", "--resume")
+    assert code == 0, err
+
+
+def test_cleanup_of_a_debt_ticket_goes_through_its_claim_even_with_its_own_worktree_left(gh, repo, capsys):
+    epic, (a, b, _) = posted_pass(gh, [((0, 1), "routine")])
+    assert run(capsys, "claim", b, "--debt")[0] == 0
+    left = repo / ".worktrees" / f"slice-{a}"   # an old worktree under A's own number
+    _git("worktree", "add", "-q", "-b", f"slice/{a}", str(left), "origin/main", cwd=repo)
+    debt_pr(gh, 300, f"slice/{b}", a, b, state="MERGED")
+    code, out, err = run(capsys, "cleanup", a)
+    assert code == 0, err
+    assert not (repo / ".worktrees" / f"slice-{b}").exists() and not _git("branch", "--list", f"slice/{b}", cwd=repo)
+    assert left.exists()   # not the group's: left alone
+
+
+def test_state_d_names_the_model_while_every_group_is_in_progress(gh, repo, capsys):
+    epic, (a, b, _) = posted_pass(gh, [((0, 1), "judgment")])
+    assert run(capsys, "claim", a, "--debt")[0] == 0
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "work_debt"
+    assert st["next"] == (f"nothing new to start in pass 1: in progress `debt-1-1` (#{a}, #{b}) "
+                          f"(`/work-slice {a} --debt` (opus: judgment) resumes one)")

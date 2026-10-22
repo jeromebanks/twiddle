@@ -3100,8 +3100,10 @@ def debt_view(st: dict[str, Any], progress: dict[str, Any], rules: "DebtRules | 
                    + f": pass {k}'s group {group_text(g)}")
         else:
             g = work["claimed"][0]
+            model = (models or {}).get(g["complexity"] or "")
             nxt = (f"nothing new to start in pass {k}: in progress " + ", ".join(group_text(c) for c in work["claimed"])
-                   + f" (`/work-slice {g['open'][0]} --debt` resumes one)")
+                   + f" (`/work-slice {g['open'][0]} --debt`" + (f" ({model}: {g['complexity']})" if model else "")
+                   + " resumes one)")
         if human:
             nxt += "; needs a human: " + ", ".join(group_text(e) for e in human) + " (escalated)"
     elif open_pass:
@@ -3896,6 +3898,12 @@ def debt_group(b: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def active_debt(issue: dict[str, Any]) -> bool:
+    """A group member still to be built: open and still tech debt. One that left the debt epic (for triage, say)
+    is no member any more, though the claim it carried still says where the group is built."""
+    return issue.get("state") == "open" and DEBT_LABEL in issue.get("labels", [])
+
+
 def debt_members(b: dict[str, Any]) -> dict[int, tuple[dict[str, Any], list[dict[str, Any]]]]:
     """Every ticket of the bundle's group the bundle holds, this one first: number -> (issue, comments)."""
     out = {b["issue"]["number"]: (b["issue"], b["comments"])}
@@ -3913,7 +3921,7 @@ def derive_debt(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     members = debt_members(b)
     claims = {t: claim_status(c, trusted) for t, (_, c) in members.items()}
     claim = claims.get(n) or next((c for c in claims.values() if c), None)
-    group_open = [t for t in (g["tickets"] if g else [n]) if t in members and members[t][0].get("state") == "open"]
+    group_open = [t for t in (g["tickets"] if g else [n]) if t in members and active_debt(members[t][0])]
     escalated = [t for t in group_open if ESCALATED_LABEL in members[t][0].get("labels", [])]
     pr, pr_comments = b.get("pr"), b.get("pr_comments") or []
     tests, reviews = pr_records(pr_comments, trusted) if pr else ([], [])
@@ -4052,10 +4060,11 @@ def claim_debt(args: argparse.Namespace, config: dict[str, Any], b: dict[str, An
 
 
 def debt_pr_context(pr: dict[str, Any], tickets: list[dict[str, Any]], epic_comments: list[dict[str, Any]],
-                    trusted: set[str]) -> dict[str, Any] | None:
+                    trusted: set[str], others: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
     """A debt PR's group, from the issues it closes (each {issue, comments}) and the debt epic's comments: {tickets,
     claim, group, debt_epic}. None when it closes no tech-debt ticket. Refused unless every issue it closes is a
-    ticket of one claimed group."""
+    ticket of one claimed group, and it closes every active member of that group: `others` are the group's
+    members it doesn't close (each an issue), as read."""
     refs = closes_refs(pr.get("body", ""))
     by_n = {t["issue"]["number"]: t for t in tickets}
     debt = [r for r in refs if r in by_n and DEBT_LABEL in by_n[r]["issue"].get("labels", [])]
@@ -4076,6 +4085,10 @@ def debt_pr_context(pr: dict[str, Any], tickets: list[dict[str, Any]], epic_comm
     if strays := [r for r in refs if r not in group["tickets"]]:
         raise SdlcError(", ".join(f"#{r}" for r in strays) + f" isn't in group `{group['key']}`: a debt PR closes "
                         "only its group's tickets")
+    seen = {i["number"]: i for i in others or []}
+    if missing := [t for t in group["tickets"] if t not in refs and (t not in seen or active_debt(seen[t]))]:
+        raise SdlcError(f"PR #{pr['number']} doesn't close " + ", ".join(f"#{t}" for t in missing) + f" of group "
+                        f"`{group['key']}`: a debt PR closes every open ticket of its group (`Closes #T` each)")
     return {"tickets": [by_n[r]["issue"] for r in refs], "claim": claim, "group": group,
             "debt_epic": claim.get("debt_epic")}
 
@@ -4089,7 +4102,7 @@ def pr_debt(args: argparse.Namespace, pr: dict[str, Any], issue: dict[str, Any] 
         b = json.loads(Path(args.from_file).read_text())
         tickets = b.get("debt_tickets") or ([{"issue": b["slice"], "comments": b.get("comments") or []}]
                                             if b.get("slice") else [])
-        return debt_pr_context(pr, tickets, b.get("epic_comments") or [], trusted)
+        return debt_pr_context(pr, tickets, b.get("epic_comments") or [], trusted, b.get("members") or [])
     refs = closes_refs(pr.get("body", ""))
     if not refs or len(refs) == 1 and issue is not None and DEBT_LABEL not in issue.get("labels", []):
         return None
@@ -4098,7 +4111,10 @@ def pr_debt(args: argparse.Namespace, pr: dict[str, Any], issue: dict[str, Any] 
         return None
     epic = next((c.get("debt_epic") for t in tickets if (c := claim_status(t["comments"], trusted)) and c.get("debt")), "")
     ec = [norm_comment(c) for c in gh_pages(f"repos/{repo_of(config)}/issues/{epic}/comments")] if (epic or "").isdigit() else []
-    return debt_pr_context(pr, tickets, ec, trusted)
+    key = next((c.get("group") for t in tickets if (c := claim_status(t["comments"], trusted)) and c.get("debt")), None)
+    group = next((g for p in debt_passes(ec, trusted) for g in p["groups"] if g["key"] == key), None)
+    others = [fetch_slice(t, config)[0] for t in (group or {}).get("tickets", []) if t not in refs]
+    return debt_pr_context(pr, tickets, ec, trusted, others)
 
 
 def debt_brief(ctx: dict[str, Any]) -> str:
@@ -5363,11 +5379,10 @@ def command_cleanup(args: argparse.Namespace, config: dict[str, Any]) -> int:
     n, root = args.number, primary_root()
     wt, branch = worktree_path(n, config), slice_branch(n)
     debt = None
-    if not wt.exists():   # a debt group is built under the member that claimed it: its claim says where
-        issue, comments = fetch_slice(n, config)
-        claim = claim_status(comments, fetch_trusted(config)) if DEBT_LABEL in issue["labels"] else None
-        if claim and claim.get("debt"):
-            (wt, branch), debt = debt_place(claim, config), claim
+    issue, comments = fetch_slice(n, config)   # a debt group is built under the member that claimed it: its claim says where
+    claim = claim_status(comments, fetch_trusted(config)) if DEBT_LABEL in issue["labels"] else None
+    if claim and claim.get("debt"):
+        (wt, branch), debt = debt_place(claim, config), claim
     if Path.cwd().resolve() == wt.resolve() or wt.resolve() in Path.cwd().resolve().parents:
         raise SdlcError(f"run cleanup from the primary checkout ({root}), not from inside {wt}")
     pr = find_branch_pr(branch, config) if debt else find_slice_pr(n, config)
