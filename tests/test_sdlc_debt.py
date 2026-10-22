@@ -849,3 +849,17 @@ def test_an_unknown_verdict_counts_as_none(gh, capsys):
     gh.intake(t, "not_debt")   # a hand-made marker with a verdict debt-intake doesn't take
     st = json.loads(run(capsys, "state", epic, "--json")[1])
     assert st["debt"]["intake_pending"] == [t] and "without a verdict" in st["next"] and "cut short" not in st["next"]
+
+
+@pytest.mark.parametrize("verdict", ["not-debt", "novel"])
+def test_a_rerun_after_triage_moved_on_changes_nothing(gh, capsys, verdict):
+    """Codex on #271: a finished handoff is never pulled back to sdlc:triage."""
+    epic, (t,) = attached(gh)
+    assert run(capsys, "debt-intake", t, "--verdict", verdict, "--reason", "x")[0] == 0
+    gh.issues[t]["labels"] = ["sdlc:prd-review"]   # triage moved on
+    before = len(gh.writes)
+    code, out, err = run(capsys, "debt-intake", t, "--verdict", verdict, "--reason", "x")
+    assert code == 0, err
+    assert len(gh.writes) == before and gh.issues[t]["labels"] == ["sdlc:prd-review"] and len(records(gh, t)) == 1
+    code, out, _ = run(capsys, "debt-intake", t, "--verdict", verdict, "--reason", "x", "--dry-run")
+    assert code == 0 and "already recorded" in out

@@ -3280,14 +3280,20 @@ def command_debt_intake(args: argparse.Namespace, config: dict[str, Any]) -> int
             raise SdlcError(f"#{n} is in no open debt epic: run `debt-epic` first (it attaches every open "
                             f"`{DEBT_LABEL}` issue), then intake")
     leaving = v in ("not-debt", "novel")
-    relabel = leaving and (DEBT_LABEL in issue["labels"] or f"{PREFIX}triage" not in issue["labels"])
+    # handed to triage once `tech-debt` is off and it has a state label: triage may have moved it on since
+    # (sdlc:prd-review, say), and a rerun must never pull it back
+    staged = [l for l in issue["labels"] if l in state_labels(config)]
+    relabel = leaving and (DEBT_LABEL in issue["labels"] or not staged)
     steps = ([] if resume else [f"post the intake record on #{n} (verdict {v})"]) \
         + ([f"label #{n} {PREFIX}triage and remove `{DEBT_LABEL}`"] if relabel else []) \
         + ([f"detach #{n} from debt epic #{epic['number']}"] if leaving and link else []) \
         + ([f"close #{n} as completed (fixed by {sha[:12]})"] if v == "fixed" else []) \
         + ([f"close #{n} as a duplicate of #{args.of}"] if v == "duplicate" else [])
+    if not steps:
+        print(f"#{n}: intake `{v}` is already recorded and applied: nothing to do")
+        return 0
     if args.dry_run:
-        for s in steps or [f"nothing: intake `{v}` on #{n} is already recorded"]:
+        for s in steps:
             print(f"would {s}")
         return 0
     if not resume:
@@ -3307,7 +3313,8 @@ def command_debt_intake(args: argparse.Namespace, config: dict[str, Any]) -> int
     if not got or any(got.get(k) != extra.get(k) for k in ("verdict", "commit", "of")):
         bad.append(f"its latest intake record is {got!r}, not verdict {v}")
     if leaving:
-        if DEBT_LABEL in issue["labels"] or f"{PREFIX}triage" not in issue["labels"]:
+        if DEBT_LABEL in issue["labels"] or (f"{PREFIX}triage" not in issue["labels"] if relabel else
+                                             not any(l in state_labels(config) for l in issue["labels"])):
             bad.append(f"its labels are {issue['labels']}")
         if epic and any(s["number"] == n for s in sub_issues(epic["number"], config)):
             bad.append(f"debt epic #{epic['number']} still holds it")
