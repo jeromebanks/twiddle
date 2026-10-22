@@ -1278,7 +1278,8 @@ def test_a_ticket_waiting_on_a_person_is_left_out_until_they_reply(gh, git, caps
     assert code == 1 and f"#{a} waits on a person" in err and f"#{b}" not in err
     gh.comment(b, sdlc.marker(sdlc.DEBT_REQUEST_KIND) + "\nPlease run it.")
     st = ticket_state(capsys, epic)
-    assert st["action"] == "debt_waiting" and f"#{a} waits on a person; #{b} waits on a person" in st["next"]
+    assert st["action"] == "debt_waiting" and (f"#{a} waits on a person (asked in u{a}); #{b} waits on a person (asked in u{b})"
+                                               in st["next"])
     gh.comment(a, "I ran it: the Roam played, then I restored it.", author=STRANGER)   # not the author: still waits
     assert ticket_state(capsys, epic)["action"] == "debt_waiting"
     gh.comment(a, "Done, it works.")   # a collaborator's reply puts it back
@@ -2460,3 +2461,281 @@ def test_a_group_left_claimed_when_its_pass_ended_is_kept_out_of_the_next_until_
     assert run(capsys, "release", a, "--reason", "back to the pool")[0] == 0
     st = ticket_state(capsys, epic)
     assert st["debt"]["eligible"] == [a, c] and "still holds" not in st["next"]
+
+
+# --- debt that needs a person: ask on the ticket, leave the pass (T8b) --------------------------------------------
+
+ASK = ("Please run this on a speaker:\n\n    uv run twiddle snapshot --room R\n    uv run twiddle play --room R --dry-run\n"
+       "    (prints: would play on R)\n    uv run twiddle play --room R\n    uv run twiddle restore --room R\n")
+
+
+@pytest.fixture
+def ask(tmp_path):
+    f = tmp_path / "ask.md"
+    f.write_text(ASK)
+    return f
+
+
+def requests_on(gh, n):
+    return [sdlc.parse_marker(c["body"]) for c in gh.comments[n] if f"kind={sdlc.DEBT_REQUEST_KIND}" in c["body"]]
+
+
+def kept_on(gh, n):
+    return [m for m in (sdlc.parse_marker(c["body"]) or {} for c in gh.comments[n])
+            if m.get("kind") == "release" and m.get("kept")]
+
+
+def claim_of(gh, n):
+    return sdlc.claim_status([sdlc.norm_comment(c) for c in gh.comments[n]], {OWNER})
+
+
+def commit_in(wt, monkeypatch, text="x = 2\n"):
+    for k in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{k}_NAME", "t")
+        monkeypatch.setenv(f"GIT_{k}_EMAIL", "t@example.invalid")
+    (wt / "code.py").write_text(text)
+    _git("commit", "-qam", "the fix", cwd=wt)
+    return _git("rev-parse", "HEAD", cwd=wt)
+
+
+def on_origin(repo, branch):
+    out = _git("ls-remote", "--heads", "origin", branch, cwd=repo)
+    return out.split()[0] if out else None
+
+
+def reply(gh, n):
+    gh.comment(n, "I ran it: it played, then I restored it.")   # a collaborator's plain reply
+
+
+def test_debt_request_posts_the_request_with_its_dry_run_and_bracket_and_checks_it(gh, repo, capsys, ask, tmp_path):
+    epic, (a, b) = posted_pass(gh, [((0,), "routine"), ((1,), "routine")], n=2)
+    for text, named in (("Run it.", "the step's `--dry-run` output"), (ASK.replace("snapshot", "snap"), "`snapshot`"),
+                        (ASK + "\nThe Roam is at 192.168.1.20.", "an IP address")):
+        bad = tmp_path / "bad.md"
+        bad.write_text(text)
+        code, _, err = run(capsys, "debt-request", a, "--body-file", bad)
+        assert code == 1 and named in err and gh.writes == []
+    feature = gh.issue("not debt", ["sdlc:in-progress"])
+    assert run(capsys, "debt-request", feature, "--body-file", ask)[0] == 1 and gh.writes == []
+    code, out, err = run(capsys, "debt-request", a, "--body-file", ask)
+    assert code == 0, err
+    (req,) = requests_on(gh, a)
+    assert (req["group"], req["pass"]) == ("debt-1-1", "1")
+    body = gh.comments[a][-1]["body"]
+    assert "uv run twiddle play --room R --dry-run" in body and "restore --room R" in body
+    assert "never runs this write itself" in body and "Your reply puts this ticket back" in body
+    assert f"#{a} leaves debt group `debt-1-1` of pass 1" in body
+    writes = len(gh.writes)
+    code, _, err = run(capsys, "debt-request", a, "--body-file", ask)   # once is enough: it already waits
+    assert code == 1 and f"#{a} already waits on a person" in err and len(gh.writes) == writes
+
+
+def test_a_waiting_ticket_leaves_its_pass_which_ends_without_it(gh, repo, capsys, ask, main_gate):
+    """The waiting group is never named ahead of one still to build; the pass ends with it open; `state T` says it
+    waits on a person; `claim T --debt` refuses it; a reply puts it back for the next pass."""
+    epic, (a, b) = posted_pass(gh, [((0,), "routine"), ((1,), "routine")], n=2)
+    assert run(capsys, "debt-request", a, "--body-file", ask)[0] == 0
+    url = f"u{a}"
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "work_debt" and st["next"].startswith(f"/work-slice {b} --debt")
+    assert st["debt"]["groups"]["todo"] == ["debt-1-2"]
+    t = ticket_state(capsys, a)
+    assert f"waiting on a person ({url})" in t["next"] and t["person_request"]["url"] == url
+    code, out, _ = run(capsys, "state", a)
+    assert f"waits on a person ({url})" in out
+    s = status(capsys, a)
+    assert s["state"] == "waiting" and f"#{a} waits on a person ({url})" in s["next"]
+    writes = len(gh.writes)
+    code, _, err = run(capsys, "claim", a, "--debt")
+    assert code == 1 and f"#{a} waits on a person ({url})" in err and len(gh.writes) == writes
+    done(gh, b)   # b's group merged: only a is left, waiting
+    assert ticket_state(capsys, epic)["action"] == "pass_end"
+    assert run(capsys, "debt-epic")[0] == 0 and len(ends(gh, epic)) == 1
+    assert gh.issues[a]["state"] == "open"
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "debt_waiting" and f"#{a} waits on a person (asked in {url})" in st["next"]
+    reply(gh, a)
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "plan_pass" and st["debt"]["eligible"] == [a]
+    assert "waiting" not in ticket_state(capsys, a)["next"]
+
+
+def test_a_reply_during_the_pass_never_puts_the_ticket_back_in_its_group(gh, repo, capsys, ask):
+    epic, (a, b) = posted_pass(gh, [((0, 1), "routine")], n=2)
+    assert run(capsys, "claim", b, "--debt")[0] == 0
+    assert run(capsys, "debt-request", a, "--body-file", ask)[0] == 0
+    reply(gh, a)   # answered while pass 1 is still open: a waits for the next pass, not for group debt-1-1
+    st = ticket_state(capsys, epic)
+    assert st["next"].startswith(f"nothing new to start in pass 1: in progress `debt-1-1` (#{b})")
+    assert status(capsys, b)["group"]["open"] == [b] and status(capsys, a)["state"] == "not-in-pass"
+    code, _, err = run(capsys, "claim", a, "--debt")
+    assert code == 1 and "in no open pass" in err
+    code, out, err = run(capsys, "claim", b, "--debt", "--resume")   # a resume never claims a for the group again
+    assert code == 0, err
+    assert claim_of(gh, a) is None
+
+
+def test_debt_request_dry_run_writes_nothing(gh, repo, capsys, ask, calls, monkeypatch):
+    epic, (a, b) = posted_pass(gh, [((0,), "routine"), ((1,), "routine")], n=2)
+    assert run(capsys, "claim", a, "--debt")[0] == 0
+    commit_in(repo / ".worktrees" / f"slice-{a}", monkeypatch)
+    debt_pr(gh, 300, f"slice/{a}", a)
+    calls.clear()
+    writes = list(gh.writes)
+    before = {n: list(gh.comments[n]) for n in (a, b, epic)}
+    labels = {n: list(gh.issues[n]["labels"]) for n in (a, b)}
+    code, out, err = run(capsys, "debt-request", a, "--body-file", ask, "--dry-run")
+    assert code == 0, err
+    assert f"kind={sdlc.DEBT_REQUEST_KIND} group=debt-1-1 pass=1" in out and "restore --room R" in out
+    assert f"would push slice/{a} to origin" in out and f"would release the claim on #{a}" in out
+    assert "PR #300" in out and f"would post the kept record on #{a}" in out
+    assert writes_in(calls) == [] and gh.writes == writes
+    assert {n: gh.comments[n] for n in before} == before and {n: gh.issues[n]["labels"] for n in labels} == labels
+    assert on_origin(repo, f"slice/{a}") is None and claim_of(gh, a)   # nothing pushed, still claimed
+    assert ticket_state(capsys, epic)["debt"]["groups"]["claimed"] == ["debt-1-1"]   # still in its pass
+
+
+def test_a_single_ticket_group_withdrawn_keeps_its_work_and_a_later_claim_adopts_it(gh, repo, capsys, ask, main_gate,
+                                                                                  monkeypatch):
+    epic, (a, b) = posted_pass(gh, [((0,), "routine"), ((1,), "routine")], n=2)
+    assert run(capsys, "claim", a, "--debt", "--model", "opus")[0] == 0
+    wt = repo / ".worktrees" / f"slice-{a}"
+    (wt / "code.py").write_text("x = 3\n")   # uncommitted work: refused before anything is posted
+    writes = len(gh.writes)
+    code, _, err = run(capsys, "debt-request", a, "--body-file", ask)
+    assert code == 1 and "uncommitted work" in err and len(gh.writes) == writes and not requests_on(gh, a)
+    _git("checkout", "--", "code.py", cwd=wt)
+    head = commit_in(wt, monkeypatch)   # committed, not pushed: debt-request pushes it
+    debt_pr(gh, 300, f"slice/{a}", a, head=head)
+    code, out, err = run(capsys, "debt-request", a, "--body-file", ask)
+    assert code == 0, err
+    assert on_origin(repo, f"slice/{a}") == head and wt.exists()   # pushed, and the worktree kept
+    assert claim_of(gh, a) is None
+    (kept,) = kept_on(gh, a)
+    assert (kept["group"], kept["branch"], kept["worktree"], kept["pr"]) == (
+        "debt-1-1", f"slice/{a}", f".worktrees/slice-{a}", "300")
+    assert gh.prs[300]["state"] == "OPEN"
+    done(gh, b)
+    assert run(capsys, "debt-epic")[0] == 0 and len(ends(gh, epic)) == 1   # the pass ends without a
+    reply(gh, a)
+    post_pass(gh, epic, 2, a)
+    code, out, err = run(capsys, "claim", a, "--debt")
+    assert code == 0, err
+    assert f"WORKTREE={wt}" in out and "GROUP=debt-2-1" in out and "ADOPTED=debt-1-1" in out and "PR=300" in out
+    c = claim_of(gh, a)
+    assert (c["group"], c["branch"], c["worktree"]) == ("debt-2-1", f"slice/{a}", f".worktrees/slice-{a}")
+    assert sdlc.parse_marker(next(x["body"] for x in reversed(gh.comments[a]) if "kind=claim" in x["body"]))[
+        "adopted"] == "debt-1-1"
+    assert _git("rev-parse", "HEAD", cwd=wt) == head and (wt / "code.py").read_text() == "x = 2\n"
+    s = status(capsys, a)
+    assert (s["state"], s["pr"], s["key"]) == ("in-review", 300, "debt-2-1")
+    gh.branches.add(f"slice/{a}")
+    gh.behind[head] = 0
+    gh.say(300, "tests", sha=head, result="pass", passed="10")
+    gh.say(300, "pr-review", sha=head, verdict="approve", round="1")
+    code, out, err = run(capsys, "merge", 300)   # the gate takes the adopted PR under pass 2's group
+    assert code == 0, err
+    assert gh.issues[a]["state"] == "closed"
+
+
+def test_a_withdrawn_group_s_work_is_adopted_from_origin_when_its_worktree_is_gone(gh, repo, capsys, ask, monkeypatch):
+    epic, (a, b) = posted_pass(gh, [((0, 1), "routine")], n=2)
+    assert run(capsys, "claim", a, "--debt")[0] == 0
+    wt = repo / ".worktrees" / f"slice-{a}"
+    head = commit_in(wt, monkeypatch)
+    debt_pr(gh, 300, f"slice/{a}", a, b, head=head)
+    assert run(capsys, "debt-request", b, "--body-file", ask)[0] == 0   # partial: a carries on, b's claim goes
+    assert claim_of(gh, b) is None and claim_of(gh, a)["group"] == "debt-1-1" and not kept_on(gh, b)
+    assert on_origin(repo, f"slice/{a}") is None   # the group carries on: nothing pushed for it
+    assert run(capsys, "debt-request", a, "--body-file", ask)[0] == 0   # the last one: the group keeps its place
+    assert on_origin(repo, f"slice/{a}") == head
+    assert claim_of(gh, a) is None
+    assert [k["group"] for k in kept_on(gh, a)] == ["debt-1-1"] and [k["group"] for k in kept_on(gh, b)] == ["debt-1-1"]
+    code, _, err = run(capsys, "debt-request", a, "--body-file", ask)   # nothing left to do: refused
+    assert code == 1 and "already waits" in err
+    assert ticket_state(capsys, epic)["action"] == "pass_end"
+    assert run(capsys, "debt-epic")[0] == 0
+    _git("worktree", "remove", str(wt), cwd=repo)   # gone here: only origin has the work
+    _git("branch", "-D", f"slice/{a}", cwd=repo)
+    reply(gh, a)
+    reply(gh, b)
+    post_pass(gh, epic, 2, b)   # b comes back alone, under a new key: it adopts the group's branch and PR
+    code, out, err = run(capsys, "claim", b, "--debt")
+    assert code == 0, err
+    assert f"BRANCH=slice/{a}" in out and "GROUP=debt-2-1" in out and "ADOPTED=debt-1-1" in out
+    assert _git("rev-parse", "HEAD", cwd=wt) == head
+    assert status(capsys, b)["pr"] == 300
+
+
+def test_a_kept_branch_another_claim_holds_is_not_adopted_and_a_fresh_claim_never_builds_on_it(gh, repo, capsys, ask,
+                                                                                              monkeypatch):
+    epic, (a, b) = posted_pass(gh, [((0, 1), "routine")], n=2)
+    assert run(capsys, "claim", a, "--debt")[0] == 0
+    commit_in(repo / ".worktrees" / f"slice-{a}", monkeypatch)
+    for t in (b, a):
+        assert run(capsys, "debt-request", t, "--body-file", ask)[0] == 0
+    assert run(capsys, "debt-epic")[0] == 0
+    reply(gh, a)
+    reply(gh, b)
+    gh.comment(epic, sdlc.render_comment(sdlc.DEBT_PASS_KIND, None, sdlc.render_pass(
+        {"epic": epic, "pass": 2, "groups": [group(b), group(a)]}), CONFIG, **{"pass": "2"}))
+    assert run(capsys, "claim", b, "--debt")[0] == 0   # b adopts slice/a first
+    assert claim_of(gh, b)["branch"] == f"slice/{a}"
+    writes = len(gh.writes)
+    code, out, err = run(capsys, "claim", a, "--debt")
+    assert code == 1 and f"slice/{a} (kept by debt group `debt-1-1`) is held by #{b}'s claim" in out
+    assert f"slice/{a} already exists: debt group `debt-1-1` (pass 1) was built in it" in err
+    assert len(gh.writes) == writes and claim_of(gh, a) is None
+
+
+def test_a_withdrawn_member_leaves_the_group_pr_which_merges_without_it(gh, repo, capsys, ask, main_gate):
+    epic, (a, b, c), wt = due_group(gh, repo, capsys, groups=(((0, 1), "routine"),), builder=0)
+    assert run(capsys, "debt-request", b, "--body-file", ask)[0] == 0
+    st = ticket_state(capsys, epic)   # its records are on the head, so the merge is due: the gate says what's left
+    assert st["action"] == "merge_debt" and f"PR #300 still closes #{b}, which left its group" in st["next"]
+    code, _, err = run(capsys, "merge", 300)
+    assert code == 1 and f"PR #300 still closes #{b}, which left its group" in err and not merges(gh)
+    assert "edit the PR body to drop `Closes #T`" in err and "record the test run and the Codex review again" in err
+    gh.prs[300]["body"] = f"Closes #{a}"   # the head didn't change: its records still stand
+    assert sdlc.debt_pr_gate(300, CONFIG, {OWNER}) == []
+    code, out, err = run(capsys, "merge", 300)
+    assert code == 0, err
+    assert gh.issues[a]["state"] == "closed" and gh.issues[b]["state"] == "open"
+    (end,) = ends(gh, epic)   # the pass ended without b
+    assert (end["pass"], end["closed"]) == ("1", "1")
+    assert status(capsys, b)["state"] == "waiting"
+
+
+def test_the_lowest_numbered_claimer_withdrawn_leaves_the_group_its_branch_and_comes_back_later(
+        gh, repo, capsys, ask, main_gate, tmp_path, monkeypatch):
+    epic, (a, b, _), wt = due_group(gh, repo, capsys, groups=(((0, 1), "routine"),), builder=0)
+    head = commit_in(wt, monkeypatch)
+    gh.prs[300]["headRefOid"] = head
+    assert run(capsys, "debt-request", a, "--body-file", ask)[0] == 0
+    assert claim_of(gh, a) is None and claim_of(gh, b)["branch"] == f"slice/{a}" and wt.exists()
+    s = status(capsys, b)   # the group keeps its key, the claimed slice/a and its worktree, and finds its PR
+    assert (s["key"], s["claim"]["branch"], s["pr"], s["group"]["open"]) == ("debt-1-1", f"slice/{a}", 300, [b])
+    st = ticket_state(capsys, epic)
+    assert st["next"].startswith(f"nothing new to start in pass 1: in progress `debt-1-1` (#{b})")
+    out_dir = tmp_path / "scratch"
+    code, _, err = run(capsys, "codex-review", "--pr", 300, "--out", out_dir, "--dry-run")
+    assert code == 1 and f"still closes #{a}" in err
+    gh.prs[300]["body"] = f"Closes #{b}"
+    monkeypatch.chdir(wt)
+    code, out, err = run(capsys, "codex-review", "--pr", 300, "--out", out_dir, "--dry-run")
+    assert code == 0, err
+    assert str(wt) in out and f"closing #{b}, into main" in (out_dir / "slice.md").read_text()
+    monkeypatch.chdir(repo)
+    gh.behind[head] = 0
+    gh.say(300, "tests", sha=head, result="pass", passed="10")
+    gh.say(300, "pr-review", sha=head, verdict="approve", round="2")
+    code, out, err = run(capsys, "merge", 300)
+    assert code == 0, err
+    assert gh.issues[b]["state"] == "closed" and gh.issues[a]["state"] == "open" and len(ends(gh, epic)) == 1
+    assert not wt.exists()   # the merge removed the group's worktree and branch
+    reply(gh, a)
+    post_pass(gh, epic, 2, a)
+    code, out, err = run(capsys, "claim", a, "--debt")   # nothing kept to adopt: a fresh worktree from main
+    assert code == 0, err
+    assert "GROUP=debt-2-1" in out and f"BRANCH=slice/{a}" in out and "ADOPTED" not in out
+    assert claim_of(gh, a)["group"] == "debt-2-1" and wt.exists()
