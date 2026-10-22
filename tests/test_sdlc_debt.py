@@ -24,6 +24,7 @@ class FakeGitHub:
         self.writes, self.reject = [], set()   # reject: tickets GitHub refuses to attach (they have a parent)
         self.next_n = 100
         self.on_main = {}   # full commit SHA -> GitHub's compare status against main ("behind": on main)
+        self.pulls = {}     # base branch -> [(PR number, [files])], the open PRs into it
         self.cid = 0
 
     def issue(self, title, labels=(), author=OWNER, body="", state="open"):
@@ -161,6 +162,12 @@ class FakeGitHub:
                          if want <= set(i["labels"]) and state in ("all", i["state"])])
         if tail[0] == "issues" and tail[2:] == ["sub_issues"]:
             return page([self.rest(self.issues[c]) for c in self.subs.get(int(tail[1]), [])])
+        if tail == ["pulls"]:
+            assert query.get("state") == ["open"], path
+            return page([{"number": pr} for pr, _ in self.pulls.get(query["base"][0], [])])
+        if tail[0] == "pulls" and tail[2:] == ["files"]:
+            files = next(f for prs in self.pulls.values() for pr, f in prs if pr == int(tail[1]))
+            return page([{"filename": f} for f in files])
         if tail[0] == "issues" and tail[2:] == ["comments"]:
             return page(self.comments[int(tail[1])])
         if tail[0] == "issues" and len(tail) == 2:
@@ -330,8 +337,9 @@ def test_state_of_the_debt_epic_is_intake_while_a_ticket_has_no_verdict(tmp_path
     tickets[1]["intake"] = "debt"
     st = state_from_file(tmp_path, capsys, {"issue": epic_issue(), "comments": [], "trusted": [OWNER],
                                             "debt": {"tickets": tickets}})
-    assert (st["turn"], st["action"]) == ("none", "none")
-    assert st["next"] == "nothing: debt epic #250's 2 open ticket(s) are all through intake"
+    # intake done, no pass open, both eligible: a pass is due (T5), no longer "nothing"
+    assert (st["turn"], st["action"]) == ("agent", "plan_pass")
+    assert st["next"].startswith("/plan-issue 250: plan debt pass 1 from 2 eligible ticket(s) (#101, #102;")
 
 
 @pytest.mark.parametrize("labels", [[EPIC_LABEL], [EPIC_LABEL, "sdlc:triage"], [EPIC_LABEL, "sdlc:planned"]])
@@ -415,10 +423,11 @@ def test_next_names_debt_epic_while_debt_is_unattached(gh, capsys):
     listed = next_listed(capsys)   # attached: debt-epic is no longer named, and the epic's intake is
     assert [(s["number"], s["action"]) for s in listed] == [(epic, "debt_intake")]
     gh.intake(a)
-    assert next_listed(capsys) == []   # nothing due on the debt epic: it isn't listed
+    listed = next_listed(capsys)   # through intake, no pass yet: a pass is due
+    assert [(s["number"], s["action"]) for s in listed] == [(epic, "plan_pass")]
     b = gh.ticket()   # new debt, not attached yet
     listed = next_listed(capsys)
-    assert [s["number"] for s in listed] == [None] and listed[0]["unattached"] == [b]
+    assert [s["number"] for s in listed] == [epic, None] and listed[1]["unattached"] == [b]
 
 
 def test_next_reads_no_sub_issues_without_debt(monkeypatch, capsys):
@@ -436,7 +445,7 @@ def test_next_with_two_open_debt_epics_names_them_and_still_runs(gh, capsys):
     gh.subs[a], gh.subs[b] = [t1], [t2]
     gh.intake(t1)
     gh.intake(t2)
-    listed = next_listed(capsys)
+    listed = [s for s in next_listed(capsys) if s["number"] is None]
     assert [(s["number"], s["debt_epics"]) for s in listed] == [(None, [a, b])]
     assert "a person closes all but one" in listed[0]["next"]
 
@@ -792,7 +801,8 @@ def test_debt_on_every_ticket_ends_intake(gh, capsys):
     assert run(capsys, "debt-intake", b, "--verdict", "fixed", "--commit", SHA, "--reason", "x")[0] == 0
     assert run(capsys, "debt-intake", c, "--verdict", "debt", "--reason", "y")[0] == 0
     st = json.loads(run(capsys, "state", epic, "--json")[1])
-    assert (st["action"], st["turn"]) == ("none", "none") and [x["number"] for x in st["debt"]["tickets"]] == [a, c]
+    # intake is done: a pass of the two left is due (T5)
+    assert (st["action"], st["turn"]) == ("plan_pass", "agent") and [x["number"] for x in st["debt"]["tickets"]] == [a, c]
     before = len(gh.writes)   # the same verdict again posts nothing
     assert run(capsys, "debt-intake", a, "--verdict", "debt", "--reason", "again")[0] == 0 and len(gh.writes) == before
 
@@ -863,3 +873,288 @@ def test_a_rerun_after_triage_moved_on_changes_nothing(gh, capsys, verdict):
     assert len(gh.writes) == before and gh.issues[t]["labels"] == ["sdlc:prd-review"] and len(records(gh, t)) == 1
     code, out, _ = run(capsys, "debt-intake", t, "--verdict", verdict, "--reason", "x", "--dry-run")
     assert code == 0 and "already recorded" in out
+
+
+# --- passes: a plan of which tickets, checked by the tool and posted with no sign-off (T5) ---------------------------
+
+class FakeGit:
+    """origin as `git` sees it after the one fetch: main's files, and what each epic branch changes since main."""
+
+    def __init__(self, tracked=("tools/sdlc.py", "tools/sdlc_quick.py", "docs/sdlc.html", "CLAUDE.md",
+                                "tests/test_sdlc_debt.py", "src/twiddle/cli.py"), branches=None):
+        self.tracked, self.branches, self.calls = list(tracked), dict(branches or {}), []
+
+    def __call__(self, args, cwd=None, check=True, timeout=None, env=None):
+        args = list(args)
+        self.calls.append(args)
+        if args[0] == "fetch":
+            assert timeout and timeout > 0, "the fetch is bounded"
+            assert "+refs/heads/epic/*:refs/remotes/origin/epic/*" in args
+            return ""
+        if args[0] == "ls-tree":
+            assert args[-1] == "origin/main"
+            return "\0".join(self.tracked)
+        if args[0] == "rev-parse":
+            return "a" * 40 if int(args[-1].rsplit("/", 1)[1]) in self.branches else ""
+        if args[0] == "diff":
+            assert args[-1].startswith("origin/main...origin/epic/")
+            return "\0".join(self.branches[int(args[-1].rsplit("/", 1)[1])])
+        pytest.fail(f"git {args}: the fake doesn't know this call")
+
+    def fetches(self):
+        return [c for c in self.calls if c[0] == "fetch"]
+
+
+@pytest.fixture
+def git(monkeypatch):
+    fake = FakeGit()
+    monkeypatch.setattr(sdlc, "git", fake)
+    return fake
+
+
+def ready(gh, n=2, **kw):
+    """The debt epic with `n` tickets through intake (`debt`)."""
+    epic = gh.debt_epic()
+    tickets = [gh.ticket(f"debt {i}", **kw) for i in range(n)]
+    gh.subs[epic] = list(tickets)
+    for t in tickets:
+        gh.intake(t)
+    return epic, tickets
+
+
+def group(*tickets, files=("src/twiddle/cli.py",), scope="fix it", complexity="routine", **extra):
+    return {"tickets": list(tickets), "scope": scope, "files": list(files), "complexity": complexity,
+            "complexity_reason": "one function", **extra}
+
+
+def pass_file(tmp_path, epic, groups, k=1, **extra):
+    f = tmp_path / "pass.json"
+    f.write_text(json.dumps({"epic": epic, "pass": k, "groups": groups, **extra}))
+    return f
+
+
+def pass_comments(gh, epic):
+    return [c["body"] for c in gh.comments[epic] if f"kind={sdlc.DEBT_PASS_KIND} " in c["body"]]
+
+
+def test_a_valid_pass_is_posted_with_no_sign_off_and_state_names_it(gh, git, capsys, tmp_path):
+    epic, (a, b, c) = ready(gh, 3)
+    st = ticket_state(capsys, epic)
+    assert (st["action"], st["turn"]) == ("plan_pass", "agent") and st["debt"]["eligible"] == [a, b, c]
+    assert f"`uv run python tools/sdlc.py debt-pass-validate {epic} pass.json`" in st["next"]
+    f = pass_file(tmp_path, epic, [group(b, c, files=("src/twiddle/cli.py", "docs/")), group(a)])
+    code, out, err = run(capsys, "debt-pass-validate", epic, f)
+    assert code == 0, err
+    assert gh.writes == [] and len(git.fetches()) == 1   # read-only, apart from the one bounded fetch
+    code, out, err = run(capsys, "debt-pass-post", epic, f)
+    assert code == 0, err and f"debt epic #{epic}: pass 1 posted" in out
+    (body,) = pass_comments(gh, epic)
+    assert sdlc.parse_marker(body) == {"kind": sdlc.DEBT_PASS_KIND, "pass": "1"}
+    assert "/approve" not in body and "plan-review" not in body and "sign off" not in body
+    assert sdlc.extract_pass(body) == json.loads(f.read_text())
+    assert f"1. `debt-1-1` · #{b}, #{c} · *routine*: fix it" in body
+    st = ticket_state(capsys, epic)   # the pass is open: nothing new is planned, and no /approve is asked for
+    assert (st["action"], st["turn"]) == ("none", "none") and st["debt"]["open_pass"] == 1
+    assert st["debt"]["passes"][0]["tickets"] == [b, c, a]
+    assert st["next"] == (f"nothing new: debt epic #{epic}'s pass 1 is open (#{b}, #{c}, #{a}); "
+                          "the next pass waits until it ends")
+    code, out, _ = run(capsys, "state", epic)
+    assert f"pass 1: #{b}, #{c}, #{a}   (open)" in out
+
+
+def test_a_pass_posted_twice_is_refused(gh, git, capsys, tmp_path):
+    epic, (a, _) = ready(gh, 2)
+    f = pass_file(tmp_path, epic, [group(a)])
+    assert run(capsys, "debt-pass-post", epic, f)[0] == 0
+    code, _, err = run(capsys, "debt-pass-post", epic, f)
+    assert code != 0 and "`pass` is 1: debt epic" in err and "pass 1 is open: the next pass waits until it ends" in err
+    assert f"#{a} is already in open pass 1" in err
+    assert len(pass_comments(gh, epic)) == 1
+
+
+@pytest.mark.parametrize("groups, named", [
+    (lambda a, b: [group(a, a)], "is listed 2 times (in group 1)"),
+    (lambda a, b: [group(a), group(b, a)], "is listed 2 times (in groups 1, 2)"),
+    (lambda a, b: [group()], "group 1 is empty"),
+    (lambda a, b: [group(a, b, 1001, 1002, 1003)], "group 1 has 5 tickets, over debt.max_per_pr (4)"),
+    (lambda a, b: [group(a, scope=" ")], "group 1 has no scope"),
+    (lambda a, b: [{k: v for k, v in group(a).items() if k != "scope"}], "group 1 has no scope"),
+    (lambda a, b: [group(a, files=())], "group 1 has no files"),
+    (lambda a, b: [group(a, files=("/etc/x", "tools/*.py"))], "aren't repo-relative paths"),
+    (lambda a, b: [group(a, complexity="novel")], "rated `novel`: a pass makes no design choices"),
+    (lambda a, b: [group(a, complexity="hard")], "complexity is 'hard'"),
+    (lambda a, b: [], "`groups` lists the pass's PRs"),
+    (lambda a, b: [group(a, size=3)], "unknown key(s) ['size']"),
+])
+def test_a_badly_formed_pass_is_refused_and_nothing_is_posted(gh, git, capsys, tmp_path, groups, named):
+    epic, (a, b) = ready(gh, 2)
+    code, _, err = run(capsys, "debt-pass-post", epic, pass_file(tmp_path, epic, groups(a, b)))
+    assert code != 0 and named in err and "nothing was posted" in err
+    assert gh.writes == []
+
+
+def test_every_refusal_is_listed_with_its_reason_and_nothing_is_posted(gh, git, capsys, tmp_path):
+    epic, ok = ready(gh, 1)
+    closed = gh.ticket("closed", state="closed")
+    plain = gh.issue("not debt", ["enhancement"])
+    loose = gh.ticket("loose")                      # tech debt, but not in this epic
+    unjudged = gh.ticket("unjudged")
+    novel = gh.ticket("novel")
+    feature = gh.feature_epic(created=("M1",))     # building, M1 not shipped
+    waiting = gh.issue("waits", [DEBT], body=sdlc.debt_head(feature, "review", waits="M1", debt_epic=epic))
+    gh.subs[epic] += [closed, plain, unjudged, novel, waiting]
+    for t in (closed, plain, loose, waiting):
+        gh.intake(t)
+    gh.intake(novel, verdict="novel")
+    gh.say(epic, sdlc.DEBT_PASS_KIND, **{"pass": "1"})   # an open pass 1 holding ok[0] (its JSON is read below)
+    gh.comments[epic][-1]["body"] += "\n" + sdlc.render_pass({"epic": epic, "pass": 1, "groups": [group(ok[0])]})
+    many = [gh.ticket(f"m{i}") for i in range(4)]
+    gh.subs[epic] += many
+    for t in many:
+        gh.intake(t)
+    git.branches[feature] = ["src/twiddle/cli.py"]   # the feature epic changes cli.py on its branch
+    groups = [group(ok[0], closed, plain, files=("docs/sdlc.html",)), group(loose, unjudged, novel, waiting),
+              group(*many, files=("src/twiddle/",))]
+    code, _, err = run(capsys, "debt-pass-post", epic, pass_file(tmp_path, epic, groups, k=2))
+    assert code != 0 and gh.writes == []
+    for reason in ["pass 1 is open: the next pass waits until it ends",
+                   f"#{ok[0]} is already in open pass 1",
+                   f"#{closed} is closed",
+                   f"#{plain} isn't labelled `{DEBT}`",
+                   f"#{loose} isn't a sub-issue of debt epic #{epic}",
+                   f"#{unjudged} has no intake verdict (`debt-intake {unjudged}` first)",
+                   f"#{novel}'s intake verdict is `novel`, not `debt`",
+                   f"#{waiting} waits for #{feature}'s M1 to ship to main",
+                   "the pass takes 11 tickets, over debt.pass_size (8)",
+                   f"group 3 (" + ", ".join(f"#{t}" for t in many) + f") overlaps epic #{feature}, which is being "
+                   "built: `src/twiddle/cli.py`"]:
+        assert reason in err, reason
+    assert "group 1 (" not in err   # docs/sdlc.html: nobody is working on it
+
+
+def test_a_group_naming_files_in_an_open_slices_scope_is_an_overlap(gh, git, capsys, tmp_path):
+    """No PR, nothing on the epic's branch: the Scope alone claims its files, a new one main lacks included."""
+    epic, (a, b, c) = ready(gh, 3)
+    feature = gh.feature_epic(created=("M1",))
+    gh.issue(f"#{feature} T1: a slice", ["plan:slice"], body=(
+        f"<!-- sdlc:v1 kind=slice epic={feature} key=T1 -->\nEpic: #{feature}\n\n## Outcome\n\nIt works.\n\n## Scope\n\n"
+        "`tools/sdlc.py`: a new command, tested in a new tests/test_sdlc_new.py.\n\n## Acceptance criteria\n\n"
+        "- [ ] CLAUDE.md says so\n"))
+    groups = [group(a, files=("tools/sdlc.py",)), group(b, files=("tests/test_sdlc_new.py",)),
+              group(c, files=("CLAUDE.md", "docs/sdlc.html"))]
+    code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, groups))
+    assert code == 1 and gh.writes == []
+    assert f"group 1 (#{a}) overlaps epic #{feature}, which is being built: `tools/sdlc.py`" in err
+    assert f"group 2 (#{b}) overlaps epic #{feature}, which is being built: `tests/test_sdlc_new.py`" in err
+    assert "group 3" not in err   # CLAUDE.md is named outside the Scope section
+
+
+def test_an_open_pr_into_an_epic_branch_claims_its_files(gh, git, capsys, tmp_path):
+    epic, (a, b) = ready(gh, 2)
+    feature = gh.feature_epic(created=("M1",))
+    gh.pulls[f"epic/{feature}"] = [(7, ["tools/sdlc_quick.py"])]
+    groups = [group(a, files=("tools/",)), group(b, files=("docs/sdlc.html",))]
+    code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, groups))
+    assert code == 1 and f"group 1 (#{a}) overlaps epic #{feature}, which is being built: `tools/sdlc_quick.py`" in err
+    assert "group 2" not in err
+
+
+def test_shipped_or_quick_epics_claim_nothing(gh, git, capsys, tmp_path):
+    epic, (a,) = ready(gh, 1)
+    done = gh.feature_epic(created=("M1",), shipped=("M1",))
+    gh.issues[done]["labels"] = ["sdlc:done"]
+    gh.quick_change()
+    git.branches[done] = ["src/twiddle/cli.py"]
+    assert run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, [group(a)]))[0] == 0
+
+
+def test_a_failed_fetch_checks_nothing_and_posts_nothing(gh, git, capsys, tmp_path, monkeypatch):
+    epic, (a,) = ready(gh, 1)
+
+    def offline(args, **kw):
+        raise sdlc.SdlcError("git fetch -q origin timed out after 60s")
+    monkeypatch.setattr(sdlc, "git", offline)
+    code, _, err = run(capsys, "debt-pass-post", epic, pass_file(tmp_path, epic, [group(a)]))
+    assert code != 0 and "the overlap check needs origin's main and epic branches" in err and gh.writes == []
+
+
+def test_post_dry_run_writes_nothing(gh, git, capsys, tmp_path):
+    epic, (a,) = ready(gh, 1)
+    code, out, err = run(capsys, "debt-pass-post", epic, pass_file(tmp_path, epic, [group(a)]), "--dry-run")
+    assert code == 0, err
+    assert f"DRY RUN debt epic #{epic}: pass 1" in out and "<!-- pass-json -->" in out
+    assert gh.writes == [] and len(git.fetches()) == 1
+
+
+def test_a_pass_on_anything_but_the_open_debt_epic_is_refused(gh, git, capsys, tmp_path):
+    feature = gh.feature_epic()
+    code, _, err = run(capsys, "debt-pass-validate", feature, pass_file(tmp_path, feature, [group(1)]))
+    assert code != 0 and "isn't the debt epic" in err and git.calls == []
+
+
+# --- the debt epic's state: plan_pass, debt_waiting, and the next pass after one ends ----------------------------
+
+def view(tickets, comments=()):
+    st = sdlc.derive_state(epic_issue(), list(comments), {OWNER}, CONFIG)
+    return sdlc.with_next(st, CONFIG, offline=True, bundle={"comments": list(comments), "trusted": [OWNER],
+                                                            "debt": {"tickets": tickets}})
+
+
+def pass_record(k, tickets, kind=None, at=1):
+    body = sdlc.render_comment(kind or sdlc.DEBT_PASS_KIND, None, sdlc.render_pass(
+        {"epic": 250, "pass": k, "groups": [group(*tickets)]}) if kind is None else "ended", CONFIG, **{"pass": str(k)})
+    return {"id": at, "author": OWNER, "body": body, "created_at": f"2026-10-21T00:00:{at:02d}Z", "url": f"u{at}"}
+
+
+def test_plan_pass_only_when_intake_is_done_no_pass_is_open_and_a_ticket_is_eligible():
+    waits = {"epic": 12, "milestone": "M1"}
+    st = view([{"number": 1, "intake": "debt"}, {"number": 2, "intake": None}])
+    assert st["action"] == "debt_intake"
+    st = view([{"number": 1, "intake": "debt"}, {"number": 2, "intake": "debt", "waiting_for": waits}])
+    assert (st["action"], st["turn"], st["debt"]["eligible"]) == ("plan_pass", "agent", [1])
+    assert "plan debt pass 1 from 1 eligible ticket(s) (#1;" in st["next"]
+    open_pass = [pass_record(1, [1])]
+    st = view([{"number": 1, "intake": "debt"}, {"number": 3, "intake": "debt"}], open_pass)
+    assert (st["action"], st["turn"]) == ("none", "none") and "pass 1 is open (#1)" in st["next"]
+    ended = open_pass + [pass_record(1, [], kind=sdlc.DEBT_PASS_END_KIND, at=2)]
+    st = view([{"number": 3, "intake": "debt"}], ended)   # joined during pass 1: it forms pass 2
+    assert st["action"] == "plan_pass" and "plan debt pass 2 from 1 eligible ticket(s) (#3;" in st["next"]
+
+
+def test_debt_waiting_names_what_each_ticket_waits_on():
+    st = view([{"number": 1, "intake": "debt", "waiting_for": {"epic": 12, "milestone": "M1"}},
+               {"number": 2, "intake": "debt", "waits_on_person": True}])
+    assert (st["action"], st["turn"]) == ("debt_waiting", "none")
+    assert st["next"] == ("nothing yet: every ticket of debt epic #250 through intake waits: "
+                          "#1 waits for #12's M1 to ship to main; #2 waits on a person")
+
+
+def test_state_of_the_debt_epic_reads_what_its_tickets_wait_for_on_github(gh, capsys):
+    epic = gh.debt_epic()
+    feature = gh.feature_epic(created=("M1",))
+    t = gh.issue("waits", [DEBT], body=sdlc.debt_head(feature, "review", waits="M1", debt_epic=epic))
+    gh.subs[epic] = [t]
+    gh.intake(t)
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "debt_waiting" and f"#{t} waits for #{feature}'s M1 to ship to main" in st["next"]
+    assert st["turn"] == "none"   # nothing for an agent: `next` doesn't list it
+    gh.say(feature, "shipped", milestone="M1", sha="b" * 40)
+    assert ticket_state(capsys, epic)["action"] == "plan_pass"
+
+
+def test_scope_paths_reads_the_real_scope_texts():
+    tracked = {"tools/sdlc.py", "tools/sdlc_quick.py", ".sdlc/config.json", "tests/test_sdlc_epic.py", "SDLC.md",
+               "CLAUDE.md", "docs/sdlc.html", ".agents/skills/plan-issue/SKILL.md", "README.md"}
+    t9 = ("tools/sdlc.py: remove cleanup_owed, cleanup_due; `.sdlc/config.json` key; tests in tests/test_sdlc_epic.py "
+          "and test_sdlc_plan.py that assert cleanup behaviour. `.agents/skills/plan-issue/SKILL.md` and its "
+          "plan-schema reference.")
+    assert sdlc.scope_paths(t9, tracked) == {"tools/sdlc.py", ".sdlc/config.json", "tests/test_sdlc_epic.py",
+                                             ".agents/skills/plan-issue/SKILL.md"}
+    t10 = ("SDLC.md, docs/sdlc.html, CLAUDE.md (tools/sdlc.py row only), .agents/skills/{plan-issue (pass plans), "
+           "work-slice}/SKILL.md; a new tests/test_sdlc_debt_e2e.py in the style of tests/test_sdlc_quick_e2e.py. "
+           "See https://github.com/o/r/blob/main/docs/prd/243-x.md, e.g. origin/main...origin/epic/N, sdlc.py, docs")
+    assert sdlc.scope_paths(t10, tracked) == {"SDLC.md", "docs/sdlc.html", "CLAUDE.md", "tools/sdlc.py",
+                                              ".agents/skills/", "tests/test_sdlc_debt_e2e.py",
+                                              "tests/test_sdlc_quick_e2e.py"}
+    assert sdlc.paths_overlap("tools/", "tools/sdlc.py") and sdlc.paths_overlap("tools/sdlc.py", "tools")
+    assert not sdlc.paths_overlap("tools/sdlc.py", "tools/sdlc_quick.py") and not sdlc.paths_overlap("tool", "tools/x")
