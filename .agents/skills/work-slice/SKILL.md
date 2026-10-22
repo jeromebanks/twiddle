@@ -1,6 +1,6 @@
 ---
 name: work-slice
-description: Build one ready slice of a planned twiddle epic, start to finish - claim it, work in its own git worktree, implement only what the slice issue says with offline tests, open a PR, record the full test run, get Codex to approve the exact head through review rounds, then squash-merge it into the epic's branch (epic/N, never main) and clean up. Use when asked to work a slice or issue from an epic, "build the next slice", "do the next thing" on an epic in sdlc:planned or sdlc:in-progress, or to resume a slice in review.
+description: Build one ready slice of a planned twiddle epic, start to finish - claim it, work in its own git worktree, implement only what the slice issue says with offline tests, open a PR, record the full test run, get Codex to approve the exact head through review rounds, then squash-merge it into the epic's branch (epic/N, never main) and clean up. Also builds a tech-debt ticket of the debt epic's open pass (`--debt`), and merges its PR into main through the debt gate. Use when asked to work a slice or issue from an epic, "build the next slice", "do the next thing" on an epic in sdlc:planned or sdlc:in-progress, or to resume a slice in review.
 ---
 
 <!-- No dollar-digit sequences in this file: the skill loader substitutes them with arguments. -->
@@ -30,6 +30,12 @@ Context) are the whole brief. `SDLC.md` explains how the epic got here.
 `next`) and take the `/work-slice N` it suggests. That line names the model the planner's
 rating maps to, e.g. `/work-slice 29 (sonnet: routine)`: a coordinator runs the
 slice on that model.
+
+**`/work-slice T --debt` is another:** a tech-debt ticket of the debt epic's open pass (with the
+rest of its group), built from `origin/main` and merged into `main`. See "A debt ticket" at the end:
+it says what differs, and its commands win over §2's `claim N`, §7's `--base epic/E` and §8's rule
+that a review may be owed to a milestone. `state D` on the debt epic says `work_debt` and
+`next: /work-slice T --debt`; `slice-status T` says `lane: debt`.
 
 **`/work-slice N --quick` is a different lane:** an approved *quick change* (a small, read-only
 change with a short brief and no epic), built from `origin/main` and merged into `main`. For
@@ -245,6 +251,24 @@ an approving (or owed) review are recorded on its head, `slice-status N` says
 `next: uv run python tools/sdlc.py merge PR` with the gate's results, and the session that started
 you runs that one command.
 
+The poster lifts that refusal once, by adding this rule to `.claude/settings.json` (an agent never
+edits it; `SDLC.md`, "The merge permission", has the reasons):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run python tools/sdlc.py merge *)",
+      "Bash(uv run python tools/sdlc.py cleanup *)"
+    ]
+  }
+}
+```
+
+It covers the `uv run` part of `cd <PRIMARY> && uv run python tools/sdlc.py merge PR`, and
+`cleanup N`. If you are a sub-agent and are still refused, that is the finding to report: say
+so, with the refusal verbatim.
+
 Then `merge` refuses unless all of these hold:
 
 - the PR closes exactly this one slice;
@@ -419,3 +443,98 @@ call (`/plan-issue N` plans the work afresh, and `cleanup N --force` discards th
 you see the change growing before a trigger fires, you may run it yourself, with
 `escalate-to-full N --reason "<what grew>" --dry-run` first. `commit-prd N` is safe to rerun
 when an escalation was cut short (`state N` says `commit_prd`).
+
+## A debt ticket (`--debt`)
+
+A debt ticket is a `tech-debt` issue that the debt epic's open pass (a plan comment on the debt
+epic, `debt-pass-post`) put in a group of one to `debt.max_per_pr` tickets. The group is one unit
+of work: one worktree, one branch, one PR into `main` that closes exactly its tickets. The tickets
+(and the group's one-line scope and file list in the pass plan) are the brief; nothing else is
+loaded. There is no epic, no milestone, no demo and no sign-off. Everything in §1 to §10 holds
+except as follows.
+
+**1. Check.** `uv run python tools/sdlc.py slice-status T` prints `lane: debt` and `Codex review:
+on the PR (never deferred ...)`; `slice-check T` lists what stops a claim: a ticket that is not in
+the open pass, is claimed already (then `--resume`), is escalated, or waits on a person. `state D`
+(the debt epic) says what is due: only a `work_debt` line is yours. A `merge_debt` line means a
+group's PR is ready to merge (go to 9).
+
+**2. Claim.**
+
+```bash
+uv run python tools/sdlc.py claim T --debt --model <the model you are>   # or: claim T --debt --resume
+```
+
+It claims T's whole group (the claim is posted on every member), prints the usual `WORKTREE=`,
+`PRIMARY=`, `BRANCH=slice/T` and `BASE=origin/main`, and makes the worktree from `origin/main`.
+Work only in `WORKTREE`, as in §2. `T` is any ticket of the group; the branch and the PR carry its
+number. `claim` without `--debt` refuses a debt ticket.
+
+**3-6. Plan, build, test, self-review.** As §3 to §6, from the tickets and the group's scope and
+files. Offline tests only, and never a command that writes to a speaker. A finding **inside** a
+ticket's scope is fixed in this PR, not filed. A problem you notice **outside** it that your diff
+neither causes nor touches is not this ticket's debt: drop it, or file it without `--debt`, for
+triage, when it matters. A related flaw the ticket's own work turns up is debt of debt:
+
+```bash
+uv run python tools/sdlc.py file-issue T --debt --source review --title "..." --body-file <SCRATCH>/debt-1.md
+```
+
+`T` is the ticket whose work found it; the new ticket joins the debt epic and is generation 2. The
+tool refuses past `debt.max_generation` and says to file an ordinary issue (without `--debt`)
+instead. Do not work around that.
+
+**When a ticket's own check needs a real speaker** (verifying a form on one, say), build and test
+everything offline, then ask on the ticket and leave the group:
+
+```bash
+uv run python tools/sdlc.py debt-request T --body-file <SCRATCH>/request.md --dry-run
+uv run python tools/sdlc.py debt-request T --body-file <SCRATCH>/request.md
+```
+
+The body is the step's own `--dry-run` output, then `uv run twiddle snapshot --room R`, the
+command, and `uv run twiddle restore --room R`, for a person to run. You never run the write. The
+ticket waits for a reply from its author or a collaborator; the pass carries on without it.
+
+**7. The PR targets `main`:**
+
+```bash
+gh pr create --base main --head slice/T --title "<what it fixes>" --body-file <SCRATCH>/pr.md
+```
+
+The body has one `Closes #X` for each ticket of the group, and no other `Closes`, `Fixes` or
+`Resolves`: the gate compares them with what GitHub will close. Add the acceptance proof and the
+read-only commands you ran. Then `test-record PR` from `WORKTREE` with `timeout: 600000`, as §7.
+
+**8. Codex reviews the PR itself,** and it is never deferred to anything:
+
+```bash
+cd <WORKTREE> && uv run python tools/sdlc.py codex-review --pr PR --out <SCRATCH>
+```
+
+It is held to the tickets and the group's scope and files. Answer each finding, record the round
+with `pr-review` before you push a fix, and repeat on the new head, as §8. After `max_pr_rounds`
+reviews that ask for changes: `escalate-slice T --reason "..."` hands the **whole group** to a
+human and the pass ends without it. `review-defer` is refused for a debt PR. If Codex cannot run,
+leave the PR open, report `<SCRATCH>/codex.err` verbatim and stop.
+
+**9. Merge** from the primary checkout (never from `WORKTREE`), as the section above says:
+
+```bash
+git -C <PRIMARY> pull --ff-only
+cd <PRIMARY> && uv run python tools/sdlc.py merge PR --dry-run
+cd <PRIMARY> && uv run python tools/sdlc.py merge PR
+```
+
+The debt gate refuses unless the base is `main` and the head is not behind it; the PR closes only
+open tickets of one claimed group of the open pass (every active member, each a sub-issue of the
+epic) and GitHub will close the same ones; a passing run and Codex's approval are recorded on the
+exact head; and it is mergeable. It then squash-merges, deletes the branch on GitHub and here,
+removes the group's worktree, closes the tickets as completed and posts a record on each ticket
+and on the debt epic. If that was the pass's last work it also ends the pass (the next pass, or the
+epic closed). A separate `cleanup` is only needed when `merge` says a cleanup was left over. If a
+permission check refuses `merge`, do what §9 says: leave it ready and report.
+
+**10. Report** as §10, with the PR and the test count. There is no milestone. **Next:** the `next:`
+line `merge` printed (or `state D`): the next group's `/work-slice T --debt`, a pass to plan, or
+nothing.

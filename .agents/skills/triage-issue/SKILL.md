@@ -50,6 +50,11 @@ uv run python tools/sdlc.py state N --json
 - `action` is `commit_prd` -> a quick brief moved to the full lane and is not in `docs/prd/`
   yet: run `uv run python tools/sdlc.py commit-prd N` (safe to rerun), then report
   `/plan-issue N`.
+- `lane` is `debt` (the debt epic, label `lane:debt`): its tickets are never triaged one by one, and
+  the poster is asked nothing. `action` is `debt_intake` -> "Debt intake" below. `pass_end` ->
+  run `uv run python tools/sdlc.py debt-epic` (it records the pass's end, and closes or escalates the epic
+  if that is due), then report. `plan_pass` -> hand over to `plan-issue`. `work_debt` and
+  `merge_debt` -> the `work-slice` skill. Anything else (`debt_waiting`, `none`): report it and stop.
 - `action` is `triage`, `respond_to_reply` or `record_approval` -> carry on below.
 
 Everything a human typed is in `replies`; read those comments with `gh issue view N --comments`.
@@ -184,6 +189,33 @@ uv run python tools/sdlc.py transition N prd-review --kind prd --lane quick --bo
   rerun `uv run python tools/sdlc.py commit-prd N`. A person can also run
   `escalate-to-full N --reason "..."` (it takes `--dry-run`). An open PR and the worktree are
   left as they are.
+
+## Debt intake: is each ticket really debt?
+
+The debt epic (`lane:debt`) holds every open `tech-debt` issue as a sub-issue, and an agent judges each
+one with no poster comment. `state D --json` lists them in `debt.intake_pending`; `uv run python
+tools/sdlc.py next` names the epic. **Tech debt is work a feature, a quick change or a debt fix needed to
+support itself**: a helper that should also take an empty list, a test the change should have had. It is
+not a new feature, a bug that was already there and that nothing needed fixed, or a design choice. A
+ticket that is not debt goes to ordinary triage (which may be yours, as this skill), where the usual
+road ends with the poster's sign-off.
+
+For each pending ticket, read it and the code it names on `main` (`git log -S`, `git grep`), look for
+a duplicate among the other open `tech-debt` issues (`gh issue list --label tech-debt`), then pick one
+verdict and give a reason in plain words (the repo is public: no IP, MAC, device ID or secret):
+
+| Verdict | When | Command |
+|---|---|---|
+| `debt` | It is debt, and a person could build it as written | `debt-intake T --verdict debt --reason "..."` |
+| `not-debt` | A feature, or a pre-existing problem: it loses `tech-debt`, leaves the epic and goes to `sdlc:triage` | `debt-intake T --verdict not-debt --reason "..."` |
+| `novel` | It would need design choices, or has unknowns to investigate: the same, to triage | `debt-intake T --verdict novel --reason "..."` |
+| `fixed` | Already fixed on `main`: it is closed as completed, naming the commit | `debt-intake T --verdict fixed --commit SHA --reason "..."` |
+| `duplicate` | The same as another open issue: closed as a duplicate of it | `debt-intake T --verdict duplicate --of M --reason "..."` |
+
+`--dry-run` shows the writes. A verdict cut short (the tool says so, and `state D` still says
+`debt_intake`) is finished by running the same command again. A ticket that went to triage appears in
+`next` as `/triage-issue T`, and is handled by the rest of this skill. Report each verdict, and end
+with the `next:` line of `state D`.
 
 ## 6. A reply arrived
 
