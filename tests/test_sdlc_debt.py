@@ -1910,11 +1910,15 @@ def test_a_cleanup_left_over_is_named_with_its_exact_command_after_the_merge_cou
     (wt / "stray.txt").write_text("untracked\n")   # `git worktree remove` without --force refuses
     code, _, err = run(capsys, "merge", 300)
     assert code == 1 and len(merges(gh)) == 1
-    assert f"cd {repo.resolve()} && uv run python tools/sdlc.py cleanup {a}" in err
-    assert "closed and recorded" in err
+    named = f"cd {repo.resolve()} && uv run python tools/sdlc.py cleanup {a} --force"
+    assert named in err and "closed and recorded" in err
     for n in (a, b, epic):   # the merge counted: tickets closed and every record posted
         assert merged_records(gh, n)
     assert gh.issues[a]["state"] == "closed" and wt.exists()
+    # the command it names does the job, through the merged group's claim
+    code, _, err = run(capsys, *named.split("tools/sdlc.py ", 1)[1].split())
+    assert code == 0, err
+    assert not wt.exists() and not _git("branch", "--list", f"slice/{b}", cwd=repo)
 
 
 def test_a_branch_github_kept_is_named(gh, repo, capsys, main_gate, monkeypatch):
@@ -1976,7 +1980,7 @@ def test_merge_debt_comes_before_intake_and_is_offline_without_a_gate():
                                       {"group": "debt-1-2", "pass": 1, "pr": 301, "head": HEAD, "due": True}]}
     st = sdlc.debt_view({"number": 250}, progress)
     assert st["action"] == "merge_debt" and st["next"].startswith(sdlc.merge_next(300, None))
-    assert st["next"].endswith("; then PR #301")
+    assert "; then PR #301; meanwhile: intake on debt epic #250: 1 ticket(s) without a verdict (#1)" in st["next"]
 
 
 def test_merge_of_a_debt_pr_runs_main_s_gate_code_first(gh, repo, capsys, monkeypatch):
@@ -1995,3 +1999,28 @@ def test_closing_refs_reads_another_repo_and_refuses_what_it_cannot_read():
     for bad in (None, {}, {"closingIssuesReferences": [{"number": "5"}]}):
         with pytest.raises(ValueError):
             sdlc.closing_refs(bad, "o/r")
+
+
+def test_the_debt_gate_s_base_is_main_whatever_the_running_config_says(gh, repo, capsys, main_gate, monkeypatch):
+    _, _, wt = due_group(gh, repo, capsys)
+    gh.prs[300]["baseRefName"] = "epic/12"
+    monkeypatch.setattr(sdlc, "load_config", lambda *a, **k: {**CONFIG, "default_branch": "epic/12"})
+    code, _, err = run(capsys, "merge", 300)
+    assert code == 1 and "PR targets epic/12, not main" in err and not merges(gh) and wt.exists()
+
+
+def test_an_escalated_group_s_approved_pr_is_never_offered_to_merge(gh, repo, capsys, main_gate):
+    epic, (a, b, c), _ = due_group(gh, repo, capsys)
+    gh.issues[a]["labels"].append(sdlc.ESCALATED_LABEL)
+    st = ticket_state(capsys, epic)   # the other group goes on; the escalated one needs a person, as slice-status says
+    assert st["action"] == "work_debt" and st["next"].startswith(f"/work-slice {c} --debt")
+    assert "needs a human: `debt-1-1`" in st["next"] and "merge 300" not in st["next"]
+    assert status(capsys, b)["state"] == "escalated" and not status(capsys, b)["merge_due"]
+
+
+def test_while_a_merge_is_due_the_pass_s_next_group_is_still_named(gh, repo, capsys, main_gate):
+    epic, (_, _, c), _ = due_group(gh, repo, capsys)
+    gh.behind[HEAD] = 1   # the gate refuses for now: the work that can go on is not hidden behind it
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "merge_debt" and "gate still refuses" in st["next"]
+    assert f"; meanwhile: /work-slice {c} --debt (sonnet: routine): pass 1's group `debt-1-2` (#{c})" in st["next"]

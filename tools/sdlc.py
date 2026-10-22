@@ -1192,7 +1192,7 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
             if view["action"] == "merge_debt" and not offline:   # what the gate says now (read-only)
                 view["gate"] = debt_gate_read(view["merge_due"][0]["pr"], config,
                                               trusted if trusted is not None else fetch_trusted(config))
-                view["next"] = debt_merge_next(view["merge_due"], view["gate"])
+                view["next"] = debt_merge_next(view["merge_due"], view["gate"], view["also"])
             st = {**st, "action": view["action"], "turn": view["turn"], "debt": view}
             progress = dp
     nxt = next_command(st, progress)
@@ -2792,13 +2792,7 @@ def quick_merge_gate_errors(pr: dict[str, Any], issue_state: dict[str, Any] | No
     Codex must approve this head having read this brief (its record's `brief` is the approved comment's id),
     and a `review-defer` never stands in for it: a quick change has no milestone to owe a review to.
     """
-    errs = []
-    if pr.get("state") != "OPEN":
-        errs.append(f"PR is {pr.get('state')}, not OPEN")
-    if pr.get("isDraft"):
-        errs.append("PR is a draft")
-    if pr.get("baseRefName") != base:
-        errs.append(f"PR targets {pr.get('baseRefName')}, not {base}")
+    errs = sdlc_quick.pr_open_errors(pr, base)
     refs = closes_refs(pr.get("body", ""))
     issue = (issue_state or {}).get("issue")
     n = refs[0] if len(refs) == 1 else None
@@ -2820,20 +2814,7 @@ def quick_merge_gate_errors(pr: dict[str, Any], issue_state: dict[str, Any] | No
     elif not want or r.get("brief") != want:
         errs.append(f"Codex's approval of {head} was recorded against brief {r.get('brief') or 'none'}, not the "
                     f"approved brief {want or '(none)'}: a Codex round against the approved brief comes first")
-    if not t:
-        errs.append(f"no recorded test run on the current head {head} (`test-record`)")
-    elif t["result"] != "pass":
-        errs.append(f"the tests failed on {head}")
-    if behind_by is None:
-        errs.append(f"could not tell whether the head is up to date with {base}")
-    elif behind_by:
-        errs.append(f"the head is {behind_by} commit(s) behind {base}: rebase onto origin/{base}, "
-                    "push with --force-with-lease, then `test-record` and a Codex round on the new head")
-    mergeable = pr.get("mergeable")
-    if mergeable == "UNKNOWN":
-        errs.append("GitHub is still computing mergeability (UNKNOWN): wait a few seconds and try again")
-    elif mergeable != "MERGEABLE":
-        errs.append(f"GitHub says the PR conflicts ({mergeable}): rebase onto origin/{base}")
+    errs += sdlc_quick.head_errors(pr, t, behind_by, base)
     if n is not None:
         errs += sdlc_quick.diff_errors(n, files, brief or "", quick)
         if err := sdlc_quick.rounds_error(n, changes_rounds(reviews), quick):
@@ -3040,7 +3021,11 @@ def debt_group_prs(passes: list[dict[str, Any]], tickets: list[dict[str, Any]], 
     passing run and Codex's approval are recorded on its head (what `merge_debt` waits for). Read from GitHub."""
     open_pass = next((p for p in passes if p["open"]), None)
     out = []
+    # pass_work's rule: a group with any member escalated needs a person, and its PR is never offered to merge
+    held = {g["key"] for g in pass_work(open_pass, tickets)["escalated"]} if open_pass else set()
     for g in (open_pass or {}).get("groups") or []:
+        if g["key"] in held:
+            continue
         claim = next((t["claim"] for t in tickets if t["number"] in g["tickets"] and (t.get("claim") or {}).get("debt")
                       and t["claim"].get("group") == g["key"]), None)
         pr = find_branch_pr(claim["branch"], config) if claim and claim.get("branch") else None
@@ -3052,11 +3037,13 @@ def debt_group_prs(passes: list[dict[str, Any]], tickets: list[dict[str, Any]], 
     return out
 
 
-def debt_merge_next(due: list[dict[str, Any]], gate: list[str] | None) -> str:
-    """state D's `next` while a group's PR may merge: `merge PR` (the first in build order) with the gate's results."""
+def debt_merge_next(due: list[dict[str, Any]], gate: list[str] | None, also: str | None = None) -> str:
+    """state D's `next` while a group's PR may merge: `merge PR` (the first in build order) with the gate's results,
+    then any other PR due and, `also`, what the pass has to build meanwhile."""
     p = due[0]
     return (merge_next(p["pr"], gate) + f": debt group `{p['group']}` of pass {p['pass']}"
-            + ("; then " + ", ".join(f"PR #{q['pr']}" for q in due[1:]) if due[1:] else ""))
+            + ("; then " + ", ".join(f"PR #{q['pr']}" for q in due[1:]) if due[1:] else "")
+            + (f"; meanwhile: {also}" if also else ""))
 
 
 def ticket_waiting_for(raw: dict[str, Any], labels: list[str], config: dict[str, Any], trusted: set[str],
@@ -3123,10 +3110,7 @@ def debt_view(st: dict[str, Any], progress: dict[str, Any], rules: "DebtRules | 
     eligible = [t for t in judged if not ticket_refusals({"state": "open", "attached": True, **t}, n, {})]
     waiting = [t for t in judged if t.get("waiting_for") or t.get("waits_on_person")]
     due = [p for p in progress.get("prs") or [] if p.get("due")]
-    if due:   # a group's PR has its records: merging it comes first (intake of new debt can't change the open pass)
-        turn, action = "agent", "merge_debt"
-        nxt = debt_merge_next(due, None)
-    elif pending:
+    if pending:
         turn, action = "agent", "debt_intake"
         what = []
         if unjudged:
@@ -3180,8 +3164,15 @@ def debt_view(st: dict[str, Any], progress: dict[str, Any], rules: "DebtRules | 
                else f"nothing: debt epic #{n} has no open tickets")
     if not open_pass and (stuck := [t["number"] for t in judged if ESCALATED_LABEL in (t.get("labels") or [])]):
         nxt += "; needs a human: " + ", ".join(f"#{t}" for t in stuck) + " (escalated)"
+    also = None
+    if due:   # a group's PR has its records: merging it comes first (intake of new debt can't change the open pass);
+        # what the pass has to build meanwhile stays named, since the gate may still refuse the merge
+        also = nxt if action in ("work_debt", "debt_intake") and not nxt.startswith("nothing") else None
+        turn, action = "agent", "merge_debt"
+        nxt = debt_merge_next(due, None, also)
     work = pass_work(open_pass, tickets) if open_pass and not pending else {}
-    return {"number": n, "action": action, "turn": turn, "tickets": tickets, "intake_pending": pending, "merge_due": due,
+    return {"number": n, "action": action, "turn": turn, "tickets": tickets, "intake_pending": pending,
+            "merge_due": due, "also": also,
             "passes": passes, "open_pass": open_pass and open_pass["pass"],
             "groups": {k: [g["key"] for g in v] for k, v in work.items()},
             "eligible": [t["number"] for t in eligible] if not pending and not open_pass else [], "next": nxt}
@@ -5323,8 +5314,9 @@ def debt_gate_bundle(pr: dict[str, Any], pr_comments: list[dict[str, Any]], tick
                      config: dict[str, Any], trusted: set[str]) -> dict[str, Any]:
     """Everything the debt gate reads, fetched (read-only): the PR and its records, how far its head is behind main,
     the issues GitHub will close when it merges, the tickets it closes (each {issue, comments}), their debt epic's
-    comments (the passes) and sub-issues, and the group's other members."""
-    repo, base = repo_of(config), config.get("default_branch", "main")
+    comments (the passes) and sub-issues, and the group's other members. The base is GATE_BRANCH, literally main,
+    never the running config's (a checkout could name another branch there)."""
+    repo, base = repo_of(config), GATE_BRANCH
     try:
         behind = gh_json(["api", f"repos/{repo}/compare/{base}...{pr['headRefOid']}"]).get("behind_by")
     except SdlcError:
@@ -5353,13 +5345,7 @@ def debt_merge_gate_errors(b: dict[str, Any], base: str = "main") -> list[str]:
     alone. `merge_gate_errors`'s and `quick_merge_gate_errors`'s sibling: Codex's approval of this head is needed,
     and a `review-defer` never stands in for it (a debt PR has no milestone to owe a review to)."""
     pr, trusted = b["pr"], set(b["trusted"])
-    errs = []
-    if pr.get("state") != "OPEN":
-        errs.append(f"PR is {pr.get('state')}, not OPEN")
-    if pr.get("isDraft"):
-        errs.append("PR is a draft")
-    if pr.get("baseRefName") != base:
-        errs.append(f"PR targets {pr.get('baseRefName')}, not {base}: a debt PR merges straight into {base}")
+    errs = sdlc_quick.pr_open_errors(pr, base)   # the quick gate's rules for a PR straight into main, shared
     refs = closes_refs(pr.get("body", ""))
     if not refs:
         errs.append("PR closes no ticket (`Closes #T` for each ticket of its group)")
@@ -5406,22 +5392,7 @@ def debt_merge_gate_errors(b: dict[str, Any], base: str = "main") -> list[str]:
         errs.append(f"no Codex review of the current head {head} (a debt PR's review is never deferred)")
     elif r["verdict"] != "approve":
         errs.append(f"Codex's latest review of {head} asks for changes")
-    if not t:
-        errs.append(f"no recorded test run on the current head {head} (`test-record`)")
-    elif t["result"] != "pass":
-        errs.append(f"the tests failed on {head}")
-    behind = b.get("behind_by")
-    if behind is None:
-        errs.append(f"could not tell whether the head is up to date with {base}")
-    elif behind:
-        errs.append(f"the head is {behind} commit(s) behind {base}: rebase onto origin/{base}, push with "
-                    "--force-with-lease, then `test-record` and a Codex round on the new head")
-    mergeable = pr.get("mergeable")
-    if mergeable == "UNKNOWN":
-        errs.append("GitHub is still computing mergeability (UNKNOWN): wait a few seconds and run `merge` again")
-    elif mergeable != "MERGEABLE":
-        errs.append(f"GitHub says the PR conflicts ({mergeable}): rebase onto origin/{base}")
-    return errs
+    return errs + sdlc_quick.head_errors(pr, t, b.get("behind_by"), base)
 
 
 def debt_gate_read(pr_number: int, config: dict[str, Any], trusted: set[str]) -> list[str]:
@@ -5436,8 +5407,7 @@ def debt_pr_gate(pr_number: int, config: dict[str, Any], trusted: set[str]) -> l
     """The debt gate's refusals of a PR, read from GitHub (read-only), for `state` and `slice-status`."""
     pr, comments = fetch_pr(pr_number, config)
     tickets = [dict(zip(("issue", "comments"), fetch_slice(r, config))) for r in closes_refs(pr.get("body", ""))]
-    return debt_merge_gate_errors(debt_gate_bundle(pr, comments, tickets, config, trusted),
-                                  config.get("default_branch", "main"))
+    return debt_merge_gate_errors(debt_gate_bundle(pr, comments, tickets, config, trusted), GATE_BRANCH)
 
 
 def remove_worktree(wt: Path, branch: str, root: Path, force: bool = False) -> None:
@@ -5460,7 +5430,7 @@ def merge_debt(args: argparse.Namespace, config: dict[str, Any], pr: dict[str, A
     the group's worktree and local branch, close each ticket as completed if GitHub hasn't (read back), and post a
     record on each ticket and on the debt epic. A failure after the squash says what is left to do by hand, since a
     rerun is refused (the PR is merged); a cleanup left over is named with its exact `cleanup` command."""
-    repo, base = repo_of(config), config.get("default_branch", "main")
+    repo, base = repo_of(config), GATE_BRANCH
     b = debt_gate_bundle(pr, comments, tickets, config, trusted)
     if errs := debt_merge_gate_errors(b, base):
         raise SdlcError("; ".join(errs))
@@ -5475,7 +5445,9 @@ def merge_debt(args: argparse.Namespace, config: dict[str, Any], pr: dict[str, A
     head, refs = pr["headRefOid"], [t["number"] for t in ctx["tickets"]]
     t, r = head_records(pr, *pr_records(comments, trusted))
     who = ", ".join(f"#{n}" for n in refs)
-    cleanup = f"`cd {root} && uv run python tools/sdlc.py cleanup {refs[0]}`"
+    # `git worktree remove` refused (files left in it, most often): only --force removes it, and the PR is merged
+    cleanup = (f"`cd {root} && uv run python tools/sdlc.py cleanup {refs[0]} --force` (it discards whatever is left "
+               "in the worktree: its work is merged)")
 
     def record(closed_by: dict[int, str]) -> str:
         how = "; ".join(f"#{n} closed by {closed_by[n]}" for n in refs) if closed_by else ""
