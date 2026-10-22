@@ -1171,8 +1171,12 @@ def test_scope_paths_reads_the_real_scope_texts():
                       ("https://github.com/o/r/blob/0123abcd/SDLC.md", "SDLC.md"),
                       ("https://github.com/o/r/tree/feature/x/y/tools/", "tools/"),
                       ("https://github.com/o/r/tree/main/tools", "tools/"),
-                      ("https://github.com/o/r/blob/slice/9/docs/sdlc.html", "docs/sdlc.html")]:
+                      ("https://github.com/o/r/blob/slice/9/docs/sdlc.html", "docs/sdlc.html"),
+                      ("https://github.com/o/r/blob/slice/123/tests/test_new_debt.py", "tests/test_new_debt.py")]:
         assert sdlc.scope_paths(f"see [it]({url})", tracked) == {want}, url
+    # an unknown ref and a path main lacks: the split can't be known, so every tail is claimed
+    assert {"tests/new_x.py", "x/tests/new_x.py"} <= sdlc.scope_paths(
+        "[n](https://github.com/o/r/blob/feature/x/tests/new_x.py)", tracked)
     # a bare top-level directory word (no slash) claims nothing: prose `tools` or `docs` would claim too much
     assert sdlc.scope_paths("The scripts in tools and the docs", tracked) == set()
     marked = "__tools/sdlc.py__, ~~SDLC.md~~, <code>CLAUDE.md</code>, |docs/sdlc.html|, tools/sdlc_quick.py;README.md"
@@ -1289,3 +1293,15 @@ def test_a_link_to_a_file_on_an_epic_branch_overlaps(gh, git, capsys, tmp_path):
     code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, groups))
     hits = [l for l in err.splitlines() if "overlaps" in l]
     assert code == 1 and len(hits) == 2 and all("`tools/sdlc.py`" in l for l in hits), err
+
+
+@pytest.mark.parametrize("ref", ["slice/123", "feature/x", "epic/9"])
+@pytest.mark.parametrize("files", ["tests/test_new_debt.py", "tests/"])
+def test_a_link_to_a_new_file_on_any_branch_overlaps_it_and_its_directory(gh, git, capsys, tmp_path, ref, files):
+    epic, (a,) = ready(gh, 1)
+    feature = gh.feature_epic(created=("M1",))
+    gh.issue(f"#{feature} T7: a slice", ["plan:slice"], body=(
+        f"<!-- sdlc:v1 kind=slice epic={feature} key=T7 -->\n## Scope\n\n"
+        f"[new](https://github.com/{REPO}/blob/{ref}/tests/test_new_debt.py)\n"))
+    code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, [group(a, files=(files,))]))
+    assert code == 1 and "`tests/test_new_debt.py`" in err, err

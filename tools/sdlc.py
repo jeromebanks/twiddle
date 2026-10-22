@@ -3526,24 +3526,21 @@ def scope_paths(text: str, tracked: set[str], named: tuple[str, ...] | list[str]
 
 
 def link_path(url: str, tracked: set[str], dirs: set[str]) -> str:
-    """The repo path a link to a file names (`.../blob/<ref>/<path>` or `/tree/`), else "". A ref may hold slashes
-    (`epic/243`), so a known branch shape (`main`, `epic/N`, a commit) is taken off first; otherwise the longest
-    tail that is a file or directory on main, else everything after the first part."""
+    """The repo path(s) a link to a file names (`.../blob/<ref>/<path>` or `/tree/`), space-separated, else "". A ref
+    may hold slashes (`epic/243`), so a known branch shape (`main`, `epic/N`, `slice/N`, a commit) is taken off first;
+    otherwise the longest tail that is a file or directory on main; otherwise, the split being unknown, every tail
+    (claiming too much only refuses more)."""
     u = re.search(r"/(?:blob|tree)/([^?#]+)", url)
     if not u:
         return ""
     parts = [p for p in u.group(1).split("/") if p]
-    known = re.match(r"(?:main|epic/\d+|[0-9a-f]{7,40})/", "/".join(parts) + "/")
+    mark = lambda path: path + "/" if path in dirs else path   # noqa: E731  (a directory keeps its slash)
+    known = re.match(r"(?:main|(?:epic|slice)/\d+|[0-9a-f]{7,40})/", "/".join(parts) + "/")
     if known and len(parts) > known.group(0).count("/"):
-        path = "/".join(parts[known.group(0).count("/"):])
-        return path + "/" if path in dirs else path
-    for i in range(1, len(parts)):
-        tail = "/".join(parts[i:])
-        if tail in tracked:
-            return tail
-        if tail in dirs:
-            return tail + "/"   # a directory keeps its slash, so a bare top-level name still claims it here
-    return "/".join(parts[1:])
+        return mark("/".join(parts[known.group(0).count("/"):]))
+    tails = ["/".join(parts[i:]) for i in range(1, len(parts))]
+    hit = next((t for t in tails if t in tracked or t in dirs), None)
+    return mark(hit) if hit else " ".join(tails)
 
 
 def scope_token(tok: str, tracked: set[str], dirs: set[str]) -> set[str]:
