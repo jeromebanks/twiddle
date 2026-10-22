@@ -3508,7 +3508,9 @@ def scope_paths(text: str, tracked: set[str]) -> set[str]:
     dirs = {"/".join(parts[:i]) for f in tracked for parts in [f.split("/")] for i in range(1, len(parts))}
     out = set()
     for raw in re.split(r"[\s`'\"()\[\]]+", re.sub(r"[^\s()\[\]]*://[^\s()\[\]]*", " ", text or "")):   # markdown links split too
-        tok = raw.strip("<>,;:!?*").rstrip(".")
+        tok = re.split(r"[:#]", raw.strip("<>,;:!?*"), maxsplit=1)[0].rstrip(".")   # `tools/sdlc.py:120`, `#L3`
+        while tok.startswith(("./", "/")):   # `./tools/sdlc.py` is `tools/sdlc.py`
+            tok = tok[1:] if tok.startswith("/") else tok[2:]
         if not tok:
             continue
         if cut := re.search(r"[{*]", tok):

@@ -1161,6 +1161,8 @@ def test_scope_paths_reads_the_real_scope_texts():
                                               "tests/test_sdlc_quick_e2e.py",
                                               # prose shaped like a path is claimed too: it only refuses more
                                               "origin/main...origin/epic/N", "sdlc.py", "e.g"}
+    assert sdlc.scope_paths("[helper](./tools/sdlc.py) and /CLAUDE.md", tracked) == {"tools/sdlc.py", "CLAUDE.md"}
+    assert sdlc.scope_paths("tools/sdlc.py:120, SDLC.md#lanes", tracked) == {"tools/sdlc.py", "SDLC.md"}
     md = "**tools/sdlc.py** and *SDLC.md*, see [the guide](docs/sdlc.html) and [CLAUDE.md](https://x.org/CLAUDE.md)"
     assert sdlc.scope_paths(md, tracked) == {"tools/sdlc.py", "SDLC.md", "docs/sdlc.html", "CLAUDE.md"}
     assert sdlc.paths_overlap("tools/", "tools/sdlc.py") and sdlc.paths_overlap("tools/sdlc.py", "tools")
@@ -1205,3 +1207,12 @@ def test_a_ticket_waiting_on_a_person_is_left_out_until_they_reply(gh, git, caps
     gh.comment(a, "Done, it works.")   # a collaborator's reply puts it back
     st = ticket_state(capsys, epic)
     assert st["action"] == "plan_pass" and st["debt"]["eligible"] == [a]
+
+
+def test_a_scope_path_written_with_a_leading_dot_slash_still_overlaps(gh, git, capsys, tmp_path):
+    epic, (a,) = ready(gh, 1)
+    feature = gh.feature_epic(created=("M1",))
+    gh.issue(f"#{feature} T3: a slice", ["plan:slice"], body=(
+        f"<!-- sdlc:v1 kind=slice epic={feature} key=T3 -->\n## Scope\n\nThe [helper](./tools/sdlc.py).\n"))
+    code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, [group(a, files=("tools/sdlc.py",))]))
+    assert code == 1 and f"group 1 (#{a}) overlaps epic #{feature}, which is being built: `tools/sdlc.py`" in err
