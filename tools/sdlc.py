@@ -3509,7 +3509,8 @@ def scope_paths(text: str, tracked: set[str], named: tuple[str, ...] | list[str]
     `named` (a pass's files and directories) is claimed wherever the text holds it whole, whatever markup
     surrounds it, as a backstop."""
     dirs = {"/".join(parts[:i]) for f in tracked for parts in [f.split("/")] for i in range(1, len(parts))}
-    text = re.sub(r"\\(?=\S)", "", text or "")   # markdown escapes: `tools/sdlc\_quick.py`
+    text = re.sub(r"\\(?=[\\`*_{}\[\]()#+.!|~<>-])", "", text or "")   # markdown escapes: `tools/sdlc\_quick.py`
+    text = text.replace("\\", "/")   # any other backslash separates a path: `tools\sdlc.py`
     # a URL is not a path, but a link to a file in the repo (`.../blob/main/tools/sdlc.py`) names that file
     text = re.sub(r"[^\s()\[\]<>|]*://[^\s()\[\]<>|]*", lambda m: f" {link_path(m.group(0), tracked, dirs)} ", text)
     # a file is held whole (no path character either side); a directory `g/` with its slash, so prose `tools` isn't
@@ -3527,27 +3528,28 @@ def scope_paths(text: str, tracked: set[str], named: tuple[str, ...] | list[str]
 
 def link_path(url: str, tracked: set[str], dirs: set[str]) -> str:
     """The repo path(s) a link to a file names (`.../blob/<ref>/<path>` or `/tree/`), space-separated, else "". A ref
-    may hold slashes (`epic/243`), so a known branch shape (`main`, `epic/N`, `slice/N`, a commit) is taken off first;
-    otherwise the longest tail that is a file or directory on main; otherwise, the split being unknown, every tail
+    may hold slashes (`epic/243`), so a known branch shape (`main`, `epic/N`, `slice/N`, a commit) is taken off;
+    for any other ref, or any other URL, the split can't be known, so every tail of the URL's path is claimed
     (claiming too much only refuses more)."""
-    u = re.search(r"/(?:blob|tree)/([^?#]+)", url)
-    if not u:
-        return ""
-    parts = [p for p in u.group(1).split("/") if p]
     mark = lambda path: path + "/" if path in dirs else path   # noqa: E731  (a directory keeps its slash)
-    known = re.match(r"(?:main|(?:epic|slice)/\d+|[0-9a-f]{7,40})/", "/".join(parts) + "/")
-    if known and len(parts) > known.group(0).count("/"):
-        return mark("/".join(parts[known.group(0).count("/"):]))
-    tails = ["/".join(parts[i:]) for i in range(1, len(parts))]
-    hit = next((t for t in tails if t in tracked or t in dirs), None)
-    return mark(hit) if hit else " ".join(tails)
+    if u := re.search(r"/(?:blob|tree)/([^?#]+)", url):
+        parts = [p for p in u.group(1).split("/") if p]
+        known = re.match(r"(?:main|(?:epic|slice)/\d+|[0-9a-f]{7,40})/", "/".join(parts) + "/")
+        if known and len(parts) > known.group(0).count("/"):
+            return mark("/".join(parts[known.group(0).count("/"):]))
+    # any other ref, or any other URL (raw files, a fork): where the path starts can't be known (a tail on main
+    # proves nothing), so every tail of the URL's path is claimed
+    parts = [p for p in re.sub(r"^[a-z]+://[^/]*", "", url.split("?")[0].split("#")[0]).split("/") if p]
+    return " ".join(mark("/".join(parts[i:])) for i in range(len(parts)))
 
 
 def scope_token(tok: str, tracked: set[str], dirs: set[str]) -> set[str]:
     """What one Scope token claims (see scope_paths): nothing, a path, or a directory (`dir/`)."""
     out: set[str] = set()
-    for _ in range(len(tok)):   # `./tools/sdlc.py` is `tools/sdlc.py`
-        if tok.startswith("./"):
+    for _ in range(len(tok)):   # `./tools/sdlc.py` and `../tools/sdlc.py` are `tools/sdlc.py`
+        if tok.startswith("../"):
+            tok = tok[3:]
+        elif tok.startswith("./"):
             tok = tok[2:]
         elif tok.startswith("/"):
             tok = tok[1:]

@@ -1163,13 +1163,17 @@ def test_scope_paths_reads_the_real_scope_texts():
                                               "origin/main...origin/epic/N", "sdlc.py", "e.g", "docs/prd/243-x.md"}
     assert sdlc.scope_paths("[helper](./tools/sdlc.py) and /CLAUDE.md", tracked) == {"tools/sdlc.py", "CLAUDE.md"}
     assert sdlc.scope_paths("tools/sdlc.py:120, SDLC.md#lanes", tracked) == {"tools/sdlc.py", "SDLC.md"}
-    assert sdlc.scope_paths("[it](https://github.com/o/r/blob/main/tools/sdlc_quick.py#L3), https://x.org/a/b.py",
-                            tracked) == {"tools/sdlc_quick.py"}
+    assert sdlc.scope_paths("[it](https://github.com/o/r/blob/main/tools/sdlc_quick.py#L3)", tracked) == {
+        "tools/sdlc_quick.py"}
+    # any other URL: every tail of its path (a raw file, a fork); `..`, a backslash and an escape all still name it
+    assert {"tools/sdlc.py", "SDLC.md"} <= sdlc.scope_paths(
+        "https://raw.githubusercontent.com/o/r/feature/x/tools/sdlc.py and https://x.org/a/SDLC.md?v=1", tracked)
+    assert sdlc.scope_paths(r"[a](../tools/sdlc.py), tools\sdlc_quick.py, docs\_x/new\_file.py", tracked) == {
+        "tools/sdlc.py", "tools/sdlc_quick.py", "docs_x/new_file.py"}
     # a ref with a slash: a known branch shape is taken off, else the longest tail that is on main
     for url, want in [("https://github.com/o/r/blob/epic/243/tools/sdlc.py", "tools/sdlc.py"),
                       ("https://github.com/o/r/blob/epic/243/tests/test_new_thing.py", "tests/test_new_thing.py"),
                       ("https://github.com/o/r/blob/0123abcd/SDLC.md", "SDLC.md"),
-                      ("https://github.com/o/r/tree/feature/x/y/tools/", "tools/"),
                       ("https://github.com/o/r/tree/main/tools", "tools/"),
                       ("https://github.com/o/r/blob/slice/9/docs/sdlc.html", "docs/sdlc.html"),
                       ("https://github.com/o/r/blob/slice/123/tests/test_new_debt.py", "tests/test_new_debt.py")]:
@@ -1177,6 +1181,10 @@ def test_scope_paths_reads_the_real_scope_texts():
     # an unknown ref and a path main lacks: the split can't be known, so every tail is claimed
     assert {"tests/new_x.py", "x/tests/new_x.py"} <= sdlc.scope_paths(
         "[n](https://github.com/o/r/blob/feature/x/tests/new_x.py)", tracked)
+    # ... even when a tail is on main: it proves nothing about where the ref ends
+    assert {"new-doc/docs/new-guide/README.md", "docs/new-guide/README.md", "new-guide/README.md", "README.md"} \
+        <= sdlc.scope_paths("[g](https://github.com/o/r/blob/feature/new-doc/docs/new-guide/README.md)", tracked)
+    assert "tools/" in sdlc.scope_paths("[t](https://github.com/o/r/tree/feature/x/y/tools/)", tracked)
     # a bare top-level directory word (no slash) claims nothing: prose `tools` or `docs` would claim too much
     assert sdlc.scope_paths("The scripts in tools and the docs", tracked) == set()
     marked = "__tools/sdlc.py__, ~~SDLC.md~~, <code>CLAUDE.md</code>, |docs/sdlc.html|, tools/sdlc_quick.py;README.md"
@@ -1295,13 +1303,18 @@ def test_a_link_to_a_file_on_an_epic_branch_overlaps(gh, git, capsys, tmp_path):
     assert code == 1 and len(hits) == 2 and all("`tools/sdlc.py`" in l for l in hits), err
 
 
-@pytest.mark.parametrize("ref", ["slice/123", "feature/x", "epic/9"])
-@pytest.mark.parametrize("files", ["tests/test_new_debt.py", "tests/"])
-def test_a_link_to_a_new_file_on_any_branch_overlaps_it_and_its_directory(gh, git, capsys, tmp_path, ref, files):
+@pytest.mark.parametrize("ref", ["slice/123", "feature/x", "epic/9", "feature/new-doc"])
+@pytest.mark.parametrize("path, files", [("tests/test_new_debt.py", "tests/test_new_debt.py"),
+                                         ("tests/test_new_debt.py", "tests/"),
+                                         ("docs/new-guide/CLAUDE.md", "docs/new-guide/CLAUDE.md"),
+                                         ("docs/new-guide/CLAUDE.md", "docs/new-guide/")])
+def test_a_link_to_a_new_file_on_any_branch_overlaps_it_and_its_directory(gh, git, capsys, tmp_path, ref, path,
+                                                                           files):
+    """A new file main lacks, linked on any branch, even when a tail of it (`CLAUDE.md`) is on main."""
     epic, (a,) = ready(gh, 1)
     feature = gh.feature_epic(created=("M1",))
     gh.issue(f"#{feature} T7: a slice", ["plan:slice"], body=(
         f"<!-- sdlc:v1 kind=slice epic={feature} key=T7 -->\n## Scope\n\n"
-        f"[new](https://github.com/{REPO}/blob/{ref}/tests/test_new_debt.py)\n"))
+        f"[new](https://github.com/{REPO}/blob/{ref}/{path})\n"))
     code, _, err = run(capsys, "debt-pass-validate", epic, pass_file(tmp_path, epic, [group(a, files=(files,))]))
-    assert code == 1 and "`tests/test_new_debt.py`" in err, err
+    assert code == 1 and f"`{path}`" in err, err
