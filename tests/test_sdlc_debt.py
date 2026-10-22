@@ -2024,3 +2024,25 @@ def test_while_a_merge_is_due_the_pass_s_next_group_is_still_named(gh, repo, cap
     st = ticket_state(capsys, epic)
     assert st["action"] == "merge_debt" and "gate still refuses" in st["next"]
     assert f"; meanwhile: /work-slice {c} --debt (sonnet: routine): pass 1's group `debt-1-2` (#{c})" in st["next"]
+
+
+def test_a_failure_on_the_second_ticket_after_the_squash_still_says_what_is_left(gh, repo, capsys, main_gate,
+                                                                                   monkeypatch, tmp_path):
+    import tempfile
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    epic, (a, b, _), wt = due_group(gh, repo, capsys)
+    real = sdlc.fetch_slice
+
+    def flaky(n, config):   # the second ticket can't be read back once the PR has merged
+        if n == b and merges(gh):
+            raise sdlc.SdlcError(f"gh api repos/{REPO}/issues/{n} failed: HTTP 502")
+        return real(n, config)
+    monkeypatch.setattr(sdlc, "fetch_slice", flaky)
+    code, _, err = run(capsys, "merge", 300)
+    assert code == 1 and len(merges(gh)) == 1
+    assert f"merged PR #300 into main at {HEAD[:12]}, then: " in err and "HTTP 502" in err
+    assert "gh issue close T --reason completed" in err and f"on #{epic}" in err
+    path = err.split("--body-file ")[1].split("`")[0]
+    text = Path(path).read_text()
+    assert "kind=debt-merged" in text and f"#{a} closed by GitHub" in text and f"#{b} closed" not in text
+    assert not merged_records(gh, a) and not merged_records(gh, epic)   # nothing half-posted

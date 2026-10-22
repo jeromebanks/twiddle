@@ -5450,7 +5450,8 @@ def merge_debt(args: argparse.Namespace, config: dict[str, Any], pr: dict[str, A
                "in the worktree: its work is merged)")
 
     def record(closed_by: dict[int, str]) -> str:
-        how = "; ".join(f"#{n} closed by {closed_by[n]}" for n in refs) if closed_by else ""
+        # only what was read: a failure partway (the handler after the squash calls this too) never raises again
+        how = "; ".join(f"#{n} closed by {closed_by[n]}" for n in refs if n in closed_by)
         return render_comment(
             "debt-merged", None, f"Merged PR #{args.pr} (debt group `{g['key']}` of pass {g['pass']}: {who}) into "
             f"`{base}` at `{head[:12]}`: tests {t['url']}, Codex review {r['url']}." + (f" {how}." if how else ""),
