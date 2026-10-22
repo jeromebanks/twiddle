@@ -4229,7 +4229,7 @@ def derive_debt(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     if issue.get("state") == "closed":
         state = "merged" if issue.get("state_reason") == "completed" else "closed"
     elif asked:
-        state = "waiting"
+        state = "waiting on a person"
     elif escalated:
         state = "escalated"
     elif pr and pr.get("state") == "OPEN":
@@ -4242,7 +4242,7 @@ def derive_debt(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         state = "ready"
     if state in ("ready", "claimed", "in-review"):
         nxt = f"/work-slice {n} --debt"
-    elif state == "waiting":
+    elif state == "waiting on a person":
         nxt = (f"nothing for an agent: #{n} waits on a person ({asked['url']}): a reply from its author or a "
                "collaborator puts it back for a later debt pass")
     elif state == "escalated":
@@ -4397,8 +4397,21 @@ def claim_debt(args: argparse.Namespace, config: dict[str, Any], b: dict[str, An
 # first: a ticket that comes back in a later pass adopts that branch, worktree and PR under its new group key
 # (`claim T --debt`, recording `adopted=<old key>`), never a fresh worktree on top. The agent never runs the write.
 
-DEBT_REQUEST_NEEDS = (("--dry-run", "the step's `--dry-run` output"),
-                      ("snapshot", "the `snapshot` before it"), ("restore", "the `restore` after it"))
+BRACKET_RE = {k: re.compile(rf"\btwiddle\s+(?:alarm\s+)?{k}\b") for k in ("snapshot", "restore")}
+
+
+def debt_request_lacks(body: str) -> list[str]:
+    """What a `debt-request` body is missing (none: it is complete): the step's dry run, and the bracket around the
+    write: `twiddle snapshot` (or `alarm snapshot`) before, `twiddle restore` (or `alarm restore`) after."""
+    out = [] if "--dry-run" in body else ["the step's `--dry-run` output"]
+    snap, rest = BRACKET_RE["snapshot"].search(body), BRACKET_RE["restore"].search(body)
+    if not snap:
+        out.append("the `twiddle snapshot` before it")
+    if not rest:
+        out.append("the `twiddle restore` after it")
+    if snap and rest and rest.start() < snap.start():
+        out.append("the `snapshot` first: `restore` comes after the write")
+    return out
 
 
 def debt_claims(comments: list[dict[str, Any]], trusted: set[str]) -> list[dict[str, Any]]:
@@ -4481,9 +4494,10 @@ def command_debt_request(args: argparse.Namespace, config: dict[str, Any]) -> in
     body = Path(args.body_file).read_text().strip()
     if hits := identifier_hits(body):
         raise SdlcError("the request contains " + ", ".join(hits) + ": the issue is public")
-    if missing := [what for word, what in DEBT_REQUEST_NEEDS if word not in body]:
+    if missing := debt_request_lacks(body):
         raise SdlcError("the request lacks " + ", ".join(missing) + ": a person runs the write, bracketed by "
-                        "`uv run twiddle snapshot --room R` and `uv run twiddle restore --room R`, after its dry run")
+                        "`uv run twiddle snapshot --room R` and `uv run twiddle restore --room R` (or `alarm snapshot` "
+                        "and `alarm restore`), after its dry run")
     plan = debt_request_plan(n, config, trusted, issue, comments)
     g, claim, asked = plan["group"], plan["claim"], plan["asked"]
     if asked and not (plan["release"] or plan["keep"]):
@@ -4593,11 +4607,18 @@ def debt_pr_context(pr: dict[str, Any], tickets: list[dict[str, Any]], epic_comm
     # the group, from a ticket still in it: a withdrawn one's claim is released, or names the group it left
     key = next((c["group"] for r, c in claims.items() if (c or {}).get("debt") and group_member(flags[r], c.get("group"))),
                None)
+    # a ticket the PR closes that isn't (or no longer is) in the group: what to drop from the body, said before the
+    # claims are checked (it carries none: released when it left, or never claimed in this group)
+    redo = "; if that changes the head, record the test run and the Codex review again on the new head"
     if gone := [r for r in refs if flags[r]["waits_on_person"] or key in flags[r]["withdrawn"]]:
         raise SdlcError(f"PR #{pr['number']} still closes " + ", ".join(f"#{r}" for r in gone) + ", which left its "
                         "group for a person (`debt-request`) and stays open: edit the PR body to drop `Closes #T` for "
-                        + ", ".join(f"#{r}" for r in gone) + "; if that changes the head, record the test run and the "
-                        "Codex review again on the new head")
+                        + ", ".join(f"#{r}" for r in gone) + redo)
+    by_key = next((g for p in debt_passes(epic_comments, trusted) for g in p["groups"] if g["key"] == key), None)
+    if by_key and (out := [r for r in refs if not (claims[r] or {}).get("debt") and r not in by_key["tickets"]]):
+        raise SdlcError(f"PR #{pr['number']} closes " + ", ".join(f"#{r}" for r in out) + f", which isn't in group "
+                        f"`{key}` (another group's, or the group's an adopted PR was first opened for): edit the PR body to drop "
+                        "`Closes #T` for " + ", ".join(f"#{r}" for r in out) + redo)
     keys = {(c or {}).get("group") for c in claims.values() if (c or {}).get("debt")}
     if len(keys) != 1 or any(not (c or {}).get("debt") for c in claims.values()):
         raise SdlcError(f"PR #{pr['number']}'s tickets (" + ", ".join(f"#{r}" for r in refs) + ") aren't one claimed "

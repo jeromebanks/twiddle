@@ -1859,7 +1859,7 @@ REFUSALS = {
     "base not main": (lambda gh, t: gh.prs[300].update(baseRefName="epic/12"), "PR targets epic/12, not main"),
     "behind": (lambda gh, t: gh.behind.update({HEAD: 3}), "the head is 3 commit(s) behind main"),
     "another group's ticket": (lambda gh, t: gh.prs[300].update(body=gh.prs[300]["body"] + f"\nCloses #{t[2]}"),
-                               "aren't one claimed debt group"),
+                               "which isn't in group `debt-1-1`"),
     "not in the pass": (lambda gh, t: add_unpassed(gh, t[3]), "isn't in the current pass of debt epic"),
     "closed": (lambda gh, t: gh.issues[t[0]].update(state="closed", state_reason="completed"),
                "is closed: a debt PR closes only open tickets"),
@@ -2509,7 +2509,11 @@ def reply(gh, n):
 
 def test_debt_request_posts_the_request_with_its_dry_run_and_bracket_and_checks_it(gh, repo, capsys, ask, tmp_path):
     epic, (a, b) = posted_pass(gh, [((0,), "routine"), ((1,), "routine")], n=2)
-    for text, named in (("Run it.", "the step's `--dry-run` output"), (ASK.replace("snapshot", "snap"), "`snapshot`"),
+    backwards = ASK.replace("twiddle snapshot", "twiddle SNAP").replace("twiddle restore", "twiddle snapshot") \
+        .replace("twiddle SNAP", "twiddle restore")
+    for text, named in (("Run it.", "the step's `--dry-run` output"), (ASK.replace("snapshot", "snap"), "`twiddle snapshot`"),
+                        (ASK.replace("twiddle restore", "then it restored"), "`twiddle restore`"),
+                        (backwards, "`restore` comes after the write"),
                         (ASK + "\nThe Roam is at 192.168.1.20.", "an IP address")):
         bad = tmp_path / "bad.md"
         bad.write_text(text)
@@ -2544,7 +2548,7 @@ def test_a_waiting_ticket_leaves_its_pass_which_ends_without_it(gh, repo, capsys
     code, out, _ = run(capsys, "state", a)
     assert f"waits on a person ({url})" in out
     s = status(capsys, a)
-    assert s["state"] == "waiting" and f"#{a} waits on a person ({url})" in s["next"]
+    assert s["state"] == "waiting on a person" and f"#{a} waits on a person ({url})" in s["next"]
     writes = len(gh.writes)
     code, _, err = run(capsys, "claim", a, "--debt")
     assert code == 1 and f"#{a} waits on a person ({url})" in err and len(gh.writes) == writes
@@ -2638,7 +2642,8 @@ def test_a_single_ticket_group_withdrawn_keeps_its_work_and_a_later_claim_adopts
     assert gh.issues[a]["state"] == "closed"
 
 
-def test_a_withdrawn_group_s_work_is_adopted_from_origin_when_its_worktree_is_gone(gh, repo, capsys, ask, monkeypatch):
+def test_a_withdrawn_group_s_work_is_adopted_from_origin_when_its_worktree_is_gone(gh, repo, capsys, ask, monkeypatch,
+                                                                                   main_gate, tmp_path):
     epic, (a, b) = posted_pass(gh, [((0, 1), "routine")], n=2)
     assert run(capsys, "claim", a, "--debt")[0] == 0
     wt = repo / ".worktrees" / f"slice-{a}"
@@ -2665,6 +2670,19 @@ def test_a_withdrawn_group_s_work_is_adopted_from_origin_when_its_worktree_is_go
     assert f"BRANCH=slice/{a}" in out and "GROUP=debt-2-1" in out and "ADOPTED=debt-1-1" in out
     assert _git("rev-parse", "HEAD", cwd=wt) == head
     assert status(capsys, b)["pr"] == 300
+    # the adopted PR still closes a, which isn't in debt-2-1: every view says to drop it from the body
+    say = f"PR #300 closes #{a}, which isn't in group `debt-2-1`"
+    code, _, err = run(capsys, "codex-review", "--pr", 300, "--out", tmp_path / "s", "--dry-run")
+    assert code == 1 and say in err and "edit the PR body to drop `Closes #T`" in err
+    assert any(say in e for e in sdlc.debt_pr_gate(300, CONFIG, {OWNER}))
+    gh.prs[300]["body"] = f"Closes #{b}"
+    gh.branches.add(f"slice/{a}")
+    gh.behind[head] = 0
+    gh.say(300, "tests", sha=head, result="pass", passed="10")
+    gh.say(300, "pr-review", sha=head, verdict="approve", round="1")
+    code, _, err = run(capsys, "merge", 300)
+    assert code == 0, err
+    assert gh.issues[b]["state"] == "closed" and gh.issues[a]["state"] == "open"
 
 
 def test_a_kept_branch_another_claim_holds_is_not_adopted_and_a_fresh_claim_never_builds_on_it(gh, repo, capsys, ask,
@@ -2703,7 +2721,7 @@ def test_a_withdrawn_member_leaves_the_group_pr_which_merges_without_it(gh, repo
     assert gh.issues[a]["state"] == "closed" and gh.issues[b]["state"] == "open"
     (end,) = ends(gh, epic)   # the pass ended without b
     assert (end["pass"], end["closed"]) == ("1", "1")
-    assert status(capsys, b)["state"] == "waiting"
+    assert status(capsys, b)["state"] == "waiting on a person"
 
 
 def test_the_lowest_numbered_claimer_withdrawn_leaves_the_group_its_branch_and_comes_back_later(
