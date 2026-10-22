@@ -506,8 +506,8 @@ ordinary triage. A group that needs a person waits on its ticket, and the pass c
 <p>There is at most one open <strong>debt epic</strong> (<span class="chip">lane:debt</span>). It holds every open
 <span class="chip">tech-debt</span> issue as a sub-issue, whatever lane or epic filed it. <code>debt-epic</code> opens it when open debt
 exists and none is open, attaches any debt it doesn't hold, and records a pass's end; <code>file-issue N --debt</code> does the same
-for its one ticket. <code>state</code> on the epic says what is due, and <code>state T</code> on a ticket names its epic, its pass
-and what it waits for. When a pass ends with no open debt left, the epic is closed as <span class="chip">sdlc:done</span>, and the next
+for its one ticket. <code>state</code> on the epic says what is due, and <code>state T</code> on a ticket names its epic, its generation
+and what it waits for, and <code>slice-status T</code> its pass and group. When a pass ends with no open debt left, the epic is closed as <span class="chip">sdlc:done</span>, and the next
 filed debt opens a new one.</p>
 
 <h3>Step by step</h3>
@@ -581,8 +581,8 @@ built a PR can run it, sub-agent or not (add the two entries to <code>permission
     ]
   }
 }</code></pre>
-<p>A skill runs it as <code>cd &lt;primary&gt; &amp;&amp; uv run python tools/sdlc.py merge PR</code>; Claude Code checks each part of a chained command, and the
-rule covers the <code>uv run</code> part. It allows <code>merge PR</code>, <code>merge PR --dry-run</code> and <code>cleanup N</code>, and nothing else of
+<p>A skill runs it as <code>cd &lt;primary&gt; &amp;&amp; uv run python tools/sdlc.py merge PR</code>; Claude Code is expected to check each part of a chained command
+separately, so the rule should cover the <code>uv run</code> part. It allows <code>merge PR</code>, <code>merge PR --dry-run</code> and <code>cleanup N</code>, and nothing else of
 <code>tools/sdlc.py</code>. That it clears the check for a sub-agent is expected, not yet shown: the first milestone's demo confirms it with a real
 sub-agent merge. Without the rule a refused session leaves the PR ready, <code>state</code> names <code>merge PR</code> with the gate's results, and the
 session the poster runs does that one merge. Nothing is merged around the gate.</p>
@@ -748,7 +748,7 @@ passing suite and Codex's approval on the exact head (never deferred), the poste
 <code>quick</code> limits. Anything that writes to a speaker, or touches the SDLC tooling, the skills or the review logic, is never quick.</li>
 <li><strong>Debt has its own gate, and every merge is one command.</strong> A debt PR reaches <code>main</code> only through <code>merge</code>'s debt gate
 (a passing suite and Codex's approval on the exact head, never deferred, tickets of the open pass only). No skill or tool runs a bare
-<code>gh pr merge</code>; <code>merge</code> runs from the primary checkout, with <code>origin/main</code>'s own gate code.</li>
+<code>gh pr merge</code>; <code>merge</code> runs only <code>origin/main</code>'s own gate code, which in practice means from the primary checkout.</li>
 <li><strong>People are reached through the issue.</strong> No skill asks a question in the chat. Publishing a demo is gated by automated checks
 (no device IDs, addresses or secrets, no blank pictures), and the poster's reply is the human check.</li>
 <li><strong>Speakers are safe.</strong> Tests are offline. Agents run only read-only and <code>--dry-run</code> commands. A real speaker plays only when a

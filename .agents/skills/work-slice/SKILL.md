@@ -265,8 +265,8 @@ edits it; `SDLC.md`, "The merge permission", has the reasons):
 }
 ```
 
-It covers the `uv run` part of `cd <PRIMARY> && uv run python tools/sdlc.py merge PR`, and
-`cleanup N`. If you are a sub-agent and are still refused, that is the finding to report: say
+It should cover the `uv run` part of `cd <PRIMARY> && uv run python tools/sdlc.py merge PR`,
+and `cleanup N` (not yet shown for a sub-agent). If you are a sub-agent and are still refused, that is the finding to report: say
 so, with the refusal verbatim.
 
 Then `merge` refuses unless all of these hold:

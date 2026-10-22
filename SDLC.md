@@ -171,8 +171,9 @@ like any other (`state` on it says so); if the change then escalates to the full
   and a diff that stays inside `.sdlc/config.json`'s `quick` rules.
 - A debt PR merges into `main` only through `merge`'s debt gate (the debt lane, above): the base is
   `main`, it closes only open tickets of one claimed group of the open pass, and a passing suite and
-  Codex's approval are recorded on the head, never deferred. `merge`, in any lane, runs only from the
-  primary checkout, with `tools/sdlc.py` and `tools/sdlc_quick.py` identical to `origin/main`'s.
+  Codex's approval are recorded on the head, never deferred. `merge`, in any lane, runs only main's gate code:
+  its `tools/sdlc.py` and `tools/sdlc_quick.py` must be identical to `origin/main`'s, which in practice means the
+  primary checkout.
 - Each PRD/diagnosis revision is a new comment; the previous one is collapsed and
   linked to its successor. After `max_rounds` (`.sdlc/config.json`) the agent escalates.
 - Reproducing a bug uses read-only commands and `--dry-run` only (see `CLAUDE.md`).
@@ -264,7 +265,8 @@ open debt exists and none is open, attaches every open `tech-debt` issue as a su
 pass has ended, records it and closes or escalates the epic if that is due. `next` names it while
 some debt is attached to no epic. `file-issue N --debt` opens it too if none is open, and the new
 ticket joins at once, whatever filed it, with a **generation** in its marker. `state D` on the epic
-says what is due; `state T` on a ticket names its epic, its pass and anything it waits for.
+says what is due; `state T` on a ticket names its epic, its generation and anything it waits for,
+and `slice-status T` its pass and group.
 
 1. **Intake**, by an agent and with no poster (`triage-issue` runs it; `state D` says `debt_intake`).
    Each ticket is held to the definition above, and `debt-intake T --verdict V --reason "..."`
@@ -353,8 +355,8 @@ permissions, by design:
 ```
 
 If the file already has a `permissions.allow` list, add the two entries to it. A skill runs the
-commands as `cd <PRIMARY> && uv run python tools/sdlc.py merge PR`; Claude Code checks each part of
-a chained command, and the rule covers the `uv run` part. It allows `merge PR` and `merge PR
+commands as `cd <PRIMARY> && uv run python tools/sdlc.py merge PR`; Claude Code is expected to
+check each part of a chained command separately, so the rule should cover the `uv run` part. It allows `merge PR` and `merge PR
 --dry-run` and `cleanup N`, and nothing else of `tools/sdlc.py`. That the rule clears the check for a
 sub-agent is expected, not yet shown: the first milestone of the debt lane's own epic confirms it with
 a real sub-agent merge. **Without the rule**, a session that is refused leaves the PR ready and says

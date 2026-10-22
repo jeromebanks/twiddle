@@ -184,7 +184,8 @@ def test_the_debt_lane_runs_from_a_filing_to_the_epic_closing(lane):
     assert "generation=1" in first_line and "lane=quick" in first_line
     st = lane.state(epic)
     assert (st["action"], st["turn"]) == ("debt_intake", "agent") and st["debt"]["intake_pending"] == [stale, one, two]
-    assert lane.state(one)["debt_epic"] == epic and f"debt epic #{epic}" in lane.state(one)["next"]
+    st = lane.state(one)
+    assert (st["debt_epic"], st["debt_generation"]) == (epic, 1) and f"debt epic #{epic}" in st["next"]
 
     # intake, by an agent and with no poster: one is already fixed on main, two are debt
     fix = gh.origin_git("rev-parse", "main~1")      # a commit already on main, behind its tip
@@ -340,7 +341,9 @@ def test_the_lane_holds_back_what_is_not_ready_and_what_is_not_debt(lane):
     lane.verdict(feature_really, "not-debt", "A new feature, not work something else needed.")
     lane.verdict(needs_design, "novel", "Several designs are possible.")
     lane.verdict(same, "duplicate", f"The same docstring as #{ready}.", "--of", ready)
+    listed = lane.ok("next")
     for t in (feature_really, needs_design):
+        assert f"/triage-issue {t}" in listed
         assert "tech-debt" not in gh.issues[t]["labels"] and sdlc_labels(gh.issues[t]["labels"]) == ["sdlc:triage"]
         assert t not in gh.sub_issues[epic]
     for t, why in ((feature_really, "A new feature, not work something else needed."),
