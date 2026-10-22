@@ -23,12 +23,14 @@ class FakeGitHub:
         self.labels = set(labels)
         self.writes, self.reject = [], set()   # reject: tickets GitHub refuses to attach (they have a parent)
         self.next_n = 100
+        self.on_main = {}   # full commit SHA -> GitHub's compare status against main ("behind": on main)
+        self.cid = 0
 
     def issue(self, title, labels=(), author=OWNER, body="", state="open"):
         self.next_n += 1
         n = self.next_n
         self.issues[n] = {"number": n, "id": 9000 + n, "title": title, "labels": list(labels), "author": author,
-                          "body": body, "state": state}
+                          "body": body, "state": state, "state_reason": None, "pr": False}
         self.comments[n] = []
         return n
 
@@ -39,16 +41,17 @@ class FakeGitHub:
         return self.issue("Tech debt", [EPIC_LABEL, "sdlc:in-progress"], author=author, state=state,
                           body=sdlc.marker(sdlc.DEBT_EPIC_KIND) + "\nThe debt epic.")
 
-    def intake(self, n, verdict="debt", author=OWNER):
-        self.comments[n].append({"id": len(self.comments[n]) + 1, "user": {"login": author},
-                                 "body": sdlc.marker(sdlc.INTAKE_KIND, None, verdict=verdict) + "\nIt is debt.",
-                                 "created_at": "2026-10-21T00:00:00Z", "html_url": f"u{n}"})
+    def intake(self, n, verdict="debt", author=OWNER, **extra):
+        self.comment(n, sdlc.marker(sdlc.INTAKE_KIND, None, verdict=verdict, **extra) + "\nIt is debt.", author)
+
+    def comment(self, n, body, author=OWNER):
+        self.cid += 1
+        self.comments[n].append({"id": self.cid, "user": {"login": author}, "body": body,
+                                 "created_at": f"2026-10-21T00:00:{self.cid:02d}Z", "html_url": f"u{n}"})
 
     def say(self, n, kind, rev=None, **extra):
         """A marked comment by the owner on #n, as the tool posts it."""
-        self.comments[n].append({"id": len(self.comments[n]) + 1, "user": {"login": OWNER},
-                                 "body": sdlc.render_comment(kind, rev, "text", CONFIG, **extra),
-                                 "created_at": f"2026-10-21T00:00:{len(self.comments[n]):02d}Z", "html_url": f"u{n}"})
+        self.comment(n, sdlc.render_comment(kind, rev, "text", CONFIG, **extra))
 
     def feature_epic(self, created=("M1",), shipped=()):
         """A feature epic being built: its milestones' issues created, some shipped to main."""
@@ -68,8 +71,10 @@ class FakeGitHub:
         return n
 
     def rest(self, i):
-        return {"number": i["number"], "id": i["id"], "title": i["title"], "state": i["state"], "body": i["body"],
-                "user": {"login": i["author"]}, "labels": [{"name": l} for l in i["labels"]]}
+        out = {"number": i["number"], "id": i["id"], "title": i["title"], "state": i["state"], "body": i["body"],
+               "state_reason": i["state_reason"], "user": {"login": i["author"]},
+               "labels": [{"name": l} for l in i["labels"]]}
+        return {**out, "pull_request": {}} if i["pr"] else out
 
     def __call__(self, args, *, check=True):
         args = list(args)
@@ -88,9 +93,24 @@ class FakeGitHub:
             n = self.issue(args[args.index("--title") + 1], labels, body=body)
             self.writes.append(("issue create", {"number": n, "labels": labels, "body": body}))
             return f"https://github.com/{REPO}/issues/{n}\n"
-        if args[:2] == ["issue", "edit"]:
+        if args[:2] == ["issue", "edit"] and "--body-file" in args:
             self.issues[int(args[2])]["body"] = Path(args[args.index("--body-file") + 1]).read_text()
             self.writes.append(("issue edit", int(args[2])))
+            return ""
+        if args[:2] == ["issue", "edit"]:
+            self.writes.append(("edit", args))
+            labels = self.issues[int(args[2])]["labels"]
+            for flag, name in zip(args, args[1:]):
+                if flag == "--remove-label" and name in labels:
+                    labels.remove(name)
+                elif flag == "--add-label" and name not in labels:
+                    labels.append(name)
+            return ""
+        if args[:2] == ["issue", "close"]:
+            self.writes.append(("close", args))
+            i = self.issues[int(args[2])]
+            i["state"] = "closed"
+            i["state_reason"] = "duplicate" if "--duplicate-of" in args else args[args.index("--reason") + 1]
             return ""
         if args[:2] == ["issue", "view"]:
             i = self.issues[int(args[2])]
@@ -104,6 +124,18 @@ class FakeGitHub:
         url = urlsplit(path)
         tail, query = url.path.split("/")[3:], parse_qs(url.query)
         assert url.path.startswith(f"repos/{REPO}/"), path
+        if method == "POST" and "-F" in rest:   # post_comment: -F body=@file
+            body = Path(rest[rest.index("-F") + 1].split("=@", 1)[1]).read_text()
+            self.writes.append((path, body))
+            self.comment(int(tail[1]), body)
+            return json.dumps({"id": self.cid})
+        if method == "DELETE":
+            payload = json.loads(Path(rest[rest.index("--input") + 1]).read_text())
+            self.writes.append((path, payload))
+            assert tail[0] == "issues" and tail[2:] == ["sub_issue"], path   # singular, as GitHub's REST API has it
+            child = next(i["number"] for i in self.issues.values() if i["id"] == payload["sub_issue_id"])
+            self.subs[int(tail[1])].remove(child)
+            return json.dumps({})
         if method == "POST":
             payload = json.loads(Path(rest[rest.index("--input") + 1]).read_text())
             self.writes.append((path, payload))
@@ -127,12 +159,22 @@ class FakeGitHub:
             state = query.get("state", ["open"])[0]
             return page([self.rest(i) for i in self.issues.values()
                          if want <= set(i["labels"]) and state in ("all", i["state"])])
-        if tail[0] == "issues" and len(tail) == 2:
-            return json.dumps(self.rest(self.issues[int(tail[1])]))
         if tail[0] == "issues" and tail[2:] == ["sub_issues"]:
             return page([self.rest(self.issues[c]) for c in self.subs.get(int(tail[1]), [])])
         if tail[0] == "issues" and tail[2:] == ["comments"]:
             return page(self.comments[int(tail[1])])
+        if tail[0] == "issues" and len(tail) == 2:
+            if int(tail[1]) not in self.issues:
+                raise sdlc.SdlcError("gh api repos/... failed: HTTP 404: Not Found")
+            return json.dumps(self.rest(self.issues[int(tail[1])]))
+        if tail[0] == "compare":
+            sha = tail[1].split("...", 1)[1]
+            full = next((f for f in self.on_main if f.startswith(sha)), None)
+            if full is None:
+                raise sdlc.SdlcError("gh api repos/... failed: HTTP 404: No commit found")
+            status = self.on_main[full]
+            return json.dumps({"status": status, "merge_base_commit": {"sha": full if status in ("behind", "identical")
+                                                                           else "0" * 40}})
         pytest.fail(f"gh api {rest}: the fake doesn't know this call")
 
     def created(self):
@@ -649,3 +691,175 @@ def test_readdressed_quick_debt_keeps_its_generation_and_names_its_debt_epic(gh,
     assert gh.issues[edited]["body"] == ("<!-- sdlc:v1 kind=debt epic=12 source=review generation=1 -->\n"
                                          "A lead written by hand.\n\nWhy.")
     assert capsys.readouterr().out.count("is now an epic's debt") == 3
+
+
+# --- debt-intake: an agent's verdict, applied and read back ------------------------------------------------
+
+SHA = "a" * 40
+
+
+def attached(gh, n=1):
+    """A debt epic holding n fresh tickets: (epic, [tickets])."""
+    epic = gh.debt_epic()
+    ts = [gh.ticket(f"t{k}") for k in range(n)]
+    gh.subs[epic] = list(ts)
+    return epic, ts
+
+
+def records(gh, n):
+    return [sdlc.parse_marker(c["body"]) for c in gh.comments[n]
+            if (sdlc.parse_marker(c["body"]) or {}).get("kind") == sdlc.INTAKE_KIND]
+
+
+@pytest.mark.parametrize("verdict", ["not-debt", "novel"])
+def test_not_debt_or_novel_goes_to_triage(gh, capsys, verdict):
+    epic, (t,) = attached(gh)
+    code, out, err = run(capsys, "debt-intake", t, "--verdict", verdict, "--reason", "a new feature, not support")
+    assert code == 0, err
+    assert DEBT not in gh.issues[t]["labels"] and "sdlc:triage" in gh.issues[t]["labels"]
+    assert t not in gh.subs[epic] and gh.issues[t]["state"] == "open"
+    (rec,) = records(gh, t)
+    assert rec["verdict"] == verdict and rec["epic"] == str(epic)
+    assert "a new feature, not support" in gh.comments[t][-1]["body"] and "ordinary triage" in gh.comments[t][-1]["body"]
+    assert f"/triage-issue {t}" in out
+    listed = next_listed(capsys)
+    assert {"number": t, "next": f"/triage-issue {t}"}.items() <= next(s for s in listed if s["number"] == t).items()
+
+
+def test_fixed_closes_as_completed_naming_the_commit(gh, capsys):
+    epic, (t,) = attached(gh)
+    gh.on_main[SHA] = "behind"
+    code, out, err = run(capsys, "debt-intake", t, "--verdict", "fixed", "--commit", SHA[:10], "--reason", "done in #200")
+    assert code == 0, err
+    assert (gh.issues[t]["state"], gh.issues[t]["state_reason"]) == ("closed", "completed")
+    (rec,) = records(gh, t)
+    assert rec["commit"] == SHA and SHA in gh.comments[t][-1]["body"]   # the full SHA, named
+    assert ("close", ["issue", "close", str(t), "--repo", REPO, "--reason", "completed"]) in gh.writes
+
+
+@pytest.mark.parametrize("status", ["ahead", "diverged", None])
+def test_fixed_is_refused_for_a_commit_not_on_main(gh, capsys, status):
+    epic, (t,) = attached(gh)
+    if status:
+        gh.on_main[SHA] = status
+    code, _, err = run(capsys, "debt-intake", t, "--verdict", "fixed", "--commit", SHA, "--reason", "x")
+    assert code == 1 and ("is not on origin/main" in err if status else "isn't known to GitHub" in err)
+    assert gh.writes == [] and gh.issues[t]["state"] == "open"
+
+
+@pytest.mark.parametrize("argv,named", [
+    (["--verdict", "fixed", "--reason", "x"], "--commit SHA goes with --verdict fixed"),
+    (["--verdict", "debt", "--commit", SHA, "--reason", "x"], "--commit SHA goes with --verdict fixed"),
+    (["--verdict", "fixed", "--commit", "main", "--reason", "x"], "isn't a commit SHA"),
+    (["--verdict", "duplicate", "--reason", "x"], "--of M goes with --verdict duplicate"),
+    (["--verdict", "novel", "--of", "5", "--reason", "x"], "--of M goes with --verdict duplicate"),
+    (["--verdict", "debt", "--reason", " "], "--reason says why"),
+    (["--verdict", "debt", "--reason", "seen at 192.168.1.20"], "the repo is public"),
+])
+def test_bad_arguments_are_refused_before_any_read(monkeypatch, capsys, argv, named):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("refused before GitHub is read"))
+    code, _, err = run(capsys, "debt-intake", 7, *argv)
+    assert code == 1 and named in err
+
+
+def test_duplicate_closes_naming_the_other(gh, capsys):
+    epic, (t,) = attached(gh)
+    other = gh.issue("the same fix", state="closed")   # a closed issue may be the original
+    code, out, err = run(capsys, "debt-intake", t, "--verdict", "duplicate", "--of", other, "--reason", "same CLAUDE.md fix")
+    assert code == 0, err
+    assert (gh.issues[t]["state"], gh.issues[t]["state_reason"]) == ("closed", "duplicate")
+    assert f"Duplicate of #{other}" in gh.comments[t][-1]["body"] and records(gh, t)[0]["of"] == str(other)
+    assert ("close", ["issue", "close", str(t), "--repo", REPO, "--duplicate-of", str(other)]) in gh.writes
+
+
+def test_duplicate_of_a_missing_issue_itself_or_a_pr_is_refused(gh, capsys):
+    epic, (t,) = attached(gh)
+    pr = gh.issue("a PR")
+    gh.issues[pr]["pr"] = True
+    for of, named in ((999, "#999 isn't an issue here"), (t, "a duplicate of itself"), (pr, "is a pull request")):
+        code, _, err = run(capsys, "debt-intake", t, "--verdict", "duplicate", "--of", of, "--reason", "x")
+        assert code == 1 and named in err, err
+    assert gh.writes == []
+
+
+def test_debt_on_every_ticket_ends_intake(gh, capsys):
+    epic, (a, b, c) = attached(gh, 3)
+    gh.on_main[SHA] = "identical"
+    assert run(capsys, "debt-intake", a, "--verdict", "debt", "--reason", "the alarm server needed it")[0] == 0
+    assert records(gh, a)[0]["verdict"] == "debt" and gh.issues[a]["labels"] == [DEBT] and a in gh.subs[epic]
+    st = json.loads(run(capsys, "state", epic, "--json")[1])
+    assert st["action"] == "debt_intake" and st["debt"]["intake_pending"] == [b, c]
+    assert run(capsys, "debt-intake", b, "--verdict", "fixed", "--commit", SHA, "--reason", "x")[0] == 0
+    assert run(capsys, "debt-intake", c, "--verdict", "debt", "--reason", "y")[0] == 0
+    st = json.loads(run(capsys, "state", epic, "--json")[1])
+    assert (st["action"], st["turn"]) == ("none", "none") and [x["number"] for x in st["debt"]["tickets"]] == [a, c]
+    before = len(gh.writes)   # the same verdict again posts nothing
+    assert run(capsys, "debt-intake", a, "--verdict", "debt", "--reason", "again")[0] == 0 and len(gh.writes) == before
+
+
+def test_a_cut_short_verdict_keeps_intake_due_and_a_rerun_finishes_it(gh, capsys):
+    epic, (t,) = attached(gh)
+    gh.intake(t, "not-debt", epic=str(epic))   # recorded, then the run died before the labels and the detach
+    st = json.loads(run(capsys, "state", epic, "--json")[1])
+    assert st["action"] == "debt_intake" and st["debt"]["intake_pending"] == [t] and "cut short" in st["next"]
+    code, _, err = run(capsys, "debt-intake", t, "--verdict", "not-debt", "--reason", "x")
+    assert code == 0, err
+    assert len(records(gh, t)) == 1 and t not in gh.subs[epic] and "sdlc:triage" in gh.issues[t]["labels"]
+    # labels moved but still attached: a rerun still finishes it, though the ticket is no longer tech-debt
+    u = gh.ticket("u")
+    gh.subs[epic].append(u)
+    gh.intake(u, "novel")
+    gh.issues[u]["labels"] = ["sdlc:triage"]
+    assert run(capsys, "debt-intake", u, "--verdict", "novel", "--reason", "x")[0] == 0 and u not in gh.subs[epic]
+
+
+def test_a_fresh_verdict_needs_tech_debt_in_the_debt_epic(gh, capsys):
+    epic, (t,) = attached(gh)
+    loose, plain = gh.ticket("loose"), gh.issue("a feature", ["enhancement"])
+    gone = gh.ticket("closed", state="closed")
+    gh.subs[epic] += [plain, gone]
+    for n, named in ((loose, "run `debt-epic` first"), (plain, "isn't labelled `tech-debt`"), (gone, "is closed")):
+        code, _, err = run(capsys, "debt-intake", n, "--verdict", "debt", "--reason", "x")
+        assert code == 1 and named in err, err
+    assert gh.writes == []
+
+
+@pytest.mark.parametrize("argv", [["--verdict", "debt"], ["--verdict", "not-debt"], ["--verdict", "novel"],
+                                  ["--verdict", "fixed", "--commit", SHA], ["--verdict", "duplicate", "--of", "OTHER"]])
+def test_dry_run_writes_nothing(gh, capsys, argv):
+    epic, (t,) = attached(gh)
+    other = gh.issue("other")
+    gh.on_main[SHA] = "behind"
+    argv = [str(other) if a == "OTHER" else a for a in argv]
+    code, out, err = run(capsys, "debt-intake", t, *argv, "--reason", "why", "--dry-run")
+    assert code == 0, err
+    assert gh.writes == [] and gh.comments[t] == [] and t in gh.subs[epic]
+    assert out.startswith(f"would post the intake record on #{t}")
+
+
+def test_an_untrusted_intake_record_does_not_count(gh, capsys):
+    epic, (t,) = attached(gh)
+    gh.intake(t, "not-debt", author=STRANGER)
+    st = json.loads(run(capsys, "state", epic, "--json")[1])
+    assert st["debt"]["intake_pending"] == [t] and "without a verdict" in st["next"]
+
+
+def test_an_unknown_verdict_counts_as_none(gh, capsys):
+    epic, (t,) = attached(gh)
+    gh.intake(t, "not_debt")   # a hand-made marker with a verdict debt-intake doesn't take
+    st = json.loads(run(capsys, "state", epic, "--json")[1])
+    assert st["debt"]["intake_pending"] == [t] and "without a verdict" in st["next"] and "cut short" not in st["next"]
+
+
+@pytest.mark.parametrize("verdict", ["not-debt", "novel"])
+def test_a_rerun_after_triage_moved_on_changes_nothing(gh, capsys, verdict):
+    """Codex on #271: a finished handoff is never pulled back to sdlc:triage."""
+    epic, (t,) = attached(gh)
+    assert run(capsys, "debt-intake", t, "--verdict", verdict, "--reason", "x")[0] == 0
+    gh.issues[t]["labels"] = ["sdlc:prd-review"]   # triage moved on
+    before = len(gh.writes)
+    code, out, err = run(capsys, "debt-intake", t, "--verdict", verdict, "--reason", "x")
+    assert code == 0, err
+    assert len(gh.writes) == before and gh.issues[t]["labels"] == ["sdlc:prd-review"] and len(records(gh, t)) == 1
+    code, out, _ = run(capsys, "debt-intake", t, "--verdict", verdict, "--reason", "x", "--dry-run")
+    assert code == 0 and "already recorded" in out

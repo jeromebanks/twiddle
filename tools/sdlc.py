@@ -1011,6 +1011,7 @@ HEADERS = {
     "quick-merged": "merged to main",
     "lane": "moved to the full lane",
     "prd-merged": "PRD merged",
+    "intake": "debt intake",
 }
 FOOTERS = {
     "question": "Reply in a comment. Anything you leave unanswered, I will assume the stated default.",
@@ -1157,9 +1158,12 @@ def print_state(st: dict[str, Any]) -> None:
     for c in st["conflicts"]:
         print(f"  CONFLICT: {c}")
     if (dv := st.get("debt")) is not None:
+        none = [t["number"] for t in dv["tickets"] if t.get("intake") not in INTAKE_VERDICTS]
+        short = [f"#{t['number']} ({t['intake']})" for t in dv["tickets"]
+                 if t.get("intake") in INTAKE_VERDICTS and t["intake"] != "debt"]
         print(f"  debt epic: {len(dv['tickets'])} open ticket(s)"
-              + (f", without an intake verdict: {', '.join(f'#{t}' for t in dv['intake_pending'])}"
-                 if dv["intake_pending"] else ""))
+              + (f", without an intake verdict: {', '.join(f'#{t}' for t in none)}" if none else "")
+              + (f", intake cut short: {', '.join(short)}" if short else ""))
     if st["reconcile"]:
         print(f"  needs reconcile ({st['reconcile']}): run `reconcile`")
     for d in (st.get("demos") or {}).values():
@@ -3053,12 +3057,24 @@ def debt_progress(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[
 def debt_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
     """{action, turn, next, ...}: what the debt epic has due, from its tickets. Later slices add passes."""
     n, tickets = st["number"], progress.get("tickets") or []
-    pending = [t["number"] for t in tickets if not t.get("intake")]
+    # a verdict `debt-intake` doesn't know (a hand-made marker) counts as none
+    unjudged = [t["number"] for t in tickets if t.get("intake") not in INTAKE_VERDICTS]
+    # a verdict other than `debt` on a ticket still open here was cut short (it should have left or closed it):
+    # still intake, so a rerun of `debt-intake` finishes it rather than the ticket being silently dropped
+    unfinished = [t["number"] for t in tickets if t.get("intake") in INTAKE_VERDICTS and t["intake"] != "debt"]
+    pending = sorted(unjudged + unfinished)
     if pending:
         turn, action = "agent", "debt_intake"
-        nxt = (f"intake on debt epic #{n}: {len(pending)} ticket(s) without a verdict ("
-               + ", ".join(f"#{t}" for t in pending) + "): judge each against the definition of debt and "
-               "record the verdict on the ticket (`debt-intake T`)")
+        what = []
+        if unjudged:
+            what.append(f"{len(unjudged)} ticket(s) without a verdict (" + ", ".join(f"#{t}" for t in unjudged)
+                        + "): judge each against the definition of debt and record the verdict on the ticket "
+                        "(`debt-intake T`)")
+        if unfinished:
+            what.append(f"{len(unfinished)} ticket(s) whose verdict was cut short ("
+                        + ", ".join(f"#{t} {next(x['intake'] for x in tickets if x['number'] == t)}" for t in unfinished)
+                        + "): rerun `debt-intake T` with the same verdict to finish it")
+        nxt = f"intake on debt epic #{n}: " + "; ".join(what)
     else:
         turn, action = "none", "none"
         nxt = (f"nothing: debt epic #{n}'s {len(tickets)} open ticket(s) are all through intake" if tickets
@@ -3156,6 +3172,161 @@ def command_debt_epic(args: argparse.Namespace, config: dict[str, Any]) -> int:
         raise SdlcError(f"read-back: debt epic #{epic['number']} doesn't hold " + ", ".join(f"#{m}" for m in missing_now)
                         + (" (" + "; ".join(failed) + ")" if failed else "") + ": fix that, then rerun `debt-epic`")
     print(f"debt epic #{epic['number']}: attached {len(todo)}, holds all {len(tickets)} open tech-debt ticket(s)")
+    return 0
+
+
+# --- intake: an agent's verdict on each ticket the debt epic holds, applied by the tool and read back ----------
+#
+# `debt` stays for a pass. `not-debt` (not work a feature needed to support itself) and `novel` (it needs design
+# choices) leave the lane: `tech-debt` comes off, the ticket leaves the debt epic and goes to ordinary triage.
+# `fixed` closes it as completed, naming a commit on main; `duplicate` closes it as a duplicate of another issue.
+# The verdict is a marked comment on the ticket (INTAKE_KIND), written first: a run cut short after it is
+# finished by the same command again, and until then debt_view keeps the epic in intake.
+
+INTAKE_VERDICTS = ("debt", "not-debt", "novel", "fixed", "duplicate")
+INTAKE_CLOSE = {"fixed": "completed", "duplicate": "duplicate"}   # verdict -> the closed ticket's state_reason
+SHA_RE = re.compile(r"[0-9a-f]{7,40}")
+
+
+def latest_intake(comments: list[dict[str, Any]], trusted: set[str]) -> dict[str, str] | None:
+    """The marker of a ticket's latest intake record (by a collaborator), or None."""
+    marks = [mk for mk, _ in _marked(comments, trusted) if mk.get("kind") == INTAKE_KIND]
+    return marks[-1] if marks else None
+
+
+def delete_json(path: str, payload: dict[str, Any]) -> Any:
+    with tempfile.NamedTemporaryFile("w", suffix=".json") as fh:
+        json.dump(payload, fh)
+        fh.flush()
+        return gh_json(["api", "-X", "DELETE", path, "--input", fh.name])
+
+
+def commit_on_main(sha: str, config: dict[str, Any]) -> str:
+    """The full SHA of `sha` when origin's default branch contains it (GitHub's compare: `behind` or `identical`),
+    else an SdlcError. Read on GitHub, so no local fetch can be stale."""
+    repo, base = repo_of(config), config.get("default_branch", "main")
+    try:
+        cmp = gh_json(["api", f"repos/{repo}/compare/{base}...{sha}"]) or {}
+    except SdlcError as exc:
+        raise SdlcError(f"commit {sha} isn't known to GitHub ({exc}): name a commit on origin/{base}") from None
+    full = (cmp.get("merge_base_commit") or {}).get("sha") or ""
+    if cmp.get("status") not in ("behind", "identical") or not full.startswith(sha):
+        raise SdlcError(f"commit {sha} is not on origin/{base} (GitHub's compare says {cmp.get('status')!r}): "
+                        f"`fixed` names the commit on {base} that fixed the ticket")
+    return full
+
+
+def intake_note(verdict: str, reason: str, epic: int | None, sha: str | None, of: int | None) -> str:
+    leaves = f"debt epic #{epic}" if epic else "the debt epic"
+    return {
+        "debt": f"Intake: **tech debt**. It stays in {leaves} for a pass.\n\n{reason}",
+        "not-debt": (f"Intake: **not tech debt** (not work a feature needed to support itself). It leaves {leaves}, "
+                     f"loses `{DEBT_LABEL}` and goes to ordinary triage.\n\nWhy: {reason}"),
+        "novel": (f"Intake: **novel**: it needs design choices, which a debt pass doesn't make. It leaves {leaves}, "
+                  f"loses `{DEBT_LABEL}` and goes to ordinary triage.\n\nWhy: {reason}"),
+        "fixed": f"Intake: **already fixed** on `main` by {sha}. Closed as completed.\n\n{reason}",
+        "duplicate": f"Intake: **a duplicate**. Duplicate of #{of}.\n\n{reason}",
+    }[verdict]
+
+
+def command_debt_intake(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Record an agent's intake verdict on a debt ticket and apply it (labels, the sub-issue link, the close), each
+    read back. Everything is checked before the first write; a rerun with the same verdict finishes a cut-short one."""
+    load_debt(config)
+    n, v, reason = args.number, args.verdict, (args.reason or "").strip()
+    sha = args.commit.lower() if args.commit else None
+    errs = []
+    if not reason:
+        errs.append("--reason says why, on the ticket")
+    if (sha is not None) != (v == "fixed"):
+        errs.append("--commit SHA goes with --verdict fixed, and only with it")
+    elif sha is not None and not SHA_RE.fullmatch(sha):
+        errs.append(f"--commit {args.commit!r} isn't a commit SHA (7 to 40 hex digits)")
+    if (args.of is not None) != (v == "duplicate"):
+        errs.append("--of M goes with --verdict duplicate, and only with it")
+    elif args.of == n:
+        errs.append(f"#{n} can't be a duplicate of itself")
+    if hits := identifier_hits(reason):
+        errs.append("the reason would contain " + ", ".join(hits) + ": the repo is public")
+    if errs:
+        raise SdlcError("; ".join(errs))
+    repo, trusted = repo_of(config), fetch_trusted(config)
+    issue, comments = fetch_slice(n, config)
+    prior = latest_intake(comments, trusted)
+    epic = the_debt_epic(config, trusted)
+    link = next((s for s in sub_issues(epic["number"], config) if s["number"] == n), None) if epic else None
+    if sha is not None:
+        sha = commit_on_main(sha, config)
+    if args.of is not None:
+        try:
+            dup = gh_json(["api", f"repos/{repo}/issues/{args.of}"]) or {}
+        except SdlcError as exc:
+            raise SdlcError(f"#{args.of} isn't an issue here ({exc}): `--of` names the issue #{n} duplicates") from None
+        if "pull_request" in dup:
+            raise SdlcError(f"#{args.of} is a pull request: `--of` names the issue #{n} duplicates")
+    extra = {"verdict": v, **({"commit": sha} if sha else {}), **({"of": str(args.of)} if args.of is not None else {}),
+             **({"epic": str(epic["number"])} if epic else {})}
+    # the same verdict (same commit, same issue) already on record: finish what it left, never post it twice
+    resume = bool(prior) and all(prior.get(k) == extra.get(k) for k in ("verdict", "commit", "of"))
+    if issue["state"] == "closed":
+        if v in INTAKE_CLOSE and resume and issue.get("state_reason") == INTAKE_CLOSE[v]:
+            print(f"#{n}: intake `{v}` is already recorded and applied (closed as {INTAKE_CLOSE[v]})")
+            return 0
+        raise SdlcError(f"#{n} is closed ({issue.get('state_reason')}): intake judges open tickets")
+    if not resume:   # a fresh verdict: only on tech debt the debt epic holds
+        if DEBT_LABEL not in issue["labels"]:
+            raise SdlcError(f"#{n} isn't labelled `{DEBT_LABEL}`: intake judges tech debt only")
+        if link is None:
+            raise SdlcError(f"#{n} is in no open debt epic: run `debt-epic` first (it attaches every open "
+                            f"`{DEBT_LABEL}` issue), then intake")
+    leaving = v in ("not-debt", "novel")
+    # handed to triage once `tech-debt` is off and it has a state label: triage may have moved it on since
+    # (sdlc:prd-review, say), and a rerun must never pull it back
+    staged = [l for l in issue["labels"] if l in state_labels(config)]
+    relabel = leaving and (DEBT_LABEL in issue["labels"] or not staged)
+    steps = ([] if resume else [f"post the intake record on #{n} (verdict {v})"]) \
+        + ([f"label #{n} {PREFIX}triage and remove `{DEBT_LABEL}`"] if relabel else []) \
+        + ([f"detach #{n} from debt epic #{epic['number']}"] if leaving and link else []) \
+        + ([f"close #{n} as completed (fixed by {sha[:12]})"] if v == "fixed" else []) \
+        + ([f"close #{n} as a duplicate of #{args.of}"] if v == "duplicate" else [])
+    if not steps:
+        print(f"#{n}: intake `{v}` is already recorded and applied: nothing to do")
+        return 0
+    if args.dry_run:
+        for s in steps:
+            print(f"would {s}")
+        return 0
+    if not resume:
+        post_comment(n, render_comment(INTAKE_KIND, None, intake_note(v, reason, epic and epic["number"], sha, args.of),
+                                       config, **extra), config)
+    if relabel:
+        set_state_label(n, issue["labels"], "triage", config, remove=(DEBT_LABEL,))
+    if leaving and link:
+        delete_json(f"repos/{repo}/issues/{epic['number']}/sub_issue", {"sub_issue_id": link["id"]})
+    if v == "fixed":
+        gh(["issue", "close", str(n), "--repo", repo, "--reason", "completed"])
+    elif v == "duplicate":
+        gh(["issue", "close", str(n), "--repo", repo, "--duplicate-of", str(args.of)])
+    # read back: the record, then what the verdict does
+    issue, comments = fetch_slice(n, config)
+    got, bad = latest_intake(comments, trusted), []
+    if not got or any(got.get(k) != extra.get(k) for k in ("verdict", "commit", "of")):
+        bad.append(f"its latest intake record is {got!r}, not verdict {v}")
+    if leaving:
+        if DEBT_LABEL in issue["labels"] or (f"{PREFIX}triage" not in issue["labels"] if relabel else
+                                             not any(l in state_labels(config) for l in issue["labels"])):
+            bad.append(f"its labels are {issue['labels']}")
+        if epic and any(s["number"] == n for s in sub_issues(epic["number"], config)):
+            bad.append(f"debt epic #{epic['number']} still holds it")
+    if v in INTAKE_CLOSE and not (issue["state"] == "closed" and issue.get("state_reason") == INTAKE_CLOSE[v]):
+        bad.append(f"it reads back {issue['state']} ({issue.get('state_reason')}), not closed as {INTAKE_CLOSE[v]}")
+    if bad:
+        raise SdlcError(f"read-back of #{n}: " + "; ".join(bad) + f": rerun `debt-intake {n}` with the same verdict")
+    print(f"#{n}: intake `{v}` recorded" + {
+        "debt": "", "not-debt": f"; it left the debt epic and is in {PREFIX}triage (`/triage-issue {n}`)",
+        "novel": f"; it left the debt epic and is in {PREFIX}triage (`/triage-issue {n}`)",
+        "fixed": f"; closed as completed, fixed by {sha[:12] if sha else '?'}",
+        "duplicate": f"; closed as a duplicate of #{args.of}"}[v])
     return 0
 
 
@@ -5680,6 +5851,16 @@ def main(argv: list[str] | None = None) -> int:
                                          "every open tech-debt issue to it (idempotent)")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_debt_epic)
+
+    p = sub.add_parser("debt-intake", help="record an agent's intake verdict on a debt ticket and apply it "
+                                           "(labels, the debt epic's link, the close), read back")
+    p.add_argument("number", type=int, help="the debt ticket")
+    p.add_argument("--verdict", required=True, choices=INTAKE_VERDICTS)
+    p.add_argument("--reason", required=True, help="why, posted on the ticket")
+    p.add_argument("--commit", help="with `fixed`: the commit on main that fixed it")
+    p.add_argument("--of", type=int, help="with `duplicate`: the issue it duplicates")
+    p.add_argument("--dry-run", action="store_true", help="check everything and print the writes, make none")
+    p.set_defaults(fn=command_debt_intake)
 
     p = sub.add_parser("merge", help="the merge gate, then squash-merge a slice's PR")
     p.add_argument("pr", type=int)
