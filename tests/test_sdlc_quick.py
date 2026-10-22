@@ -2439,69 +2439,73 @@ def test_a_merge_refused_for_another_reason_does_not_escalate(monkeypatch, capsy
     assert fake.posted == []
 
 
-# --- a quick change's tech debt: debt by what it is, waiting in the open tech-debt list -----------
+# --- a quick change's tech debt: debt by what it is, in the debt epic like any other -----------------------
 
-EPIC_LEAD = "Tech debt from #12 (review): not blocking, budgeted into a cleanup pass after a milestone is accepted."
-QUICK_LEAD = ("Tech debt from quick change #12 (review): not blocking. A quick change has no epic and no cleanup pass, "
-              "so it waits in the open `tech-debt` list (`gh issue list --label tech-debt`).")
-EPIC_DEBT_NEXT = "nothing: #77 is tech debt, planned by its epic's cleanup pass (remove `tech-debt` to triage it alone)"
-QUICK_DEBT_NEXT = ("nothing: #77 is tech debt from quick change #12, waiting in the open `tech-debt` list "
-                   "(a quick change has no epic and no cleanup pass; remove `tech-debt` to triage it alone)")
+EPIC_LEAD = ("Tech debt from #12 (review), generation 1: not blocking. It joins debt epic #250, whose passes work it "
+             "into `main`.")
+QUICK_LEAD = ("Tech debt from quick change #12 (review), generation 1: not blocking. It joins debt epic #250, whose "
+              "passes work it into `main`.")
+DEBT_NEXT = "nothing for #77 alone: it is tech debt in debt epic #250 (`uv run python tools/sdlc.py state 250` says what is due)"
+LOOSE_NEXT = "`uv run python tools/sdlc.py debt-epic` (#77 is tech debt in no open debt epic: it attaches it)"
 ESCALATED = approved_quick() + [agent("lane", None, 3, "Moved to the full lane: too big.", lane="full")]
 
 
 def file_debt(tmp_path, capsys, monkeypatch, labels, comments, state="open"):
-    """`file-issue 12 --debt --dry-run` against issue #12 as given: the marker line and the lead line it would post."""
+    """`file-issue 12 --debt --dry-run` against issue #12 as given (debt epic #250 open): the marker line and the
+    lead line it would post."""
     monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("a dry run from a bundle must not call gh"))
     f = tmp_path / "b.json"
-    f.write_text(json.dumps({"issue": issue(labels, state=state), "comments": list(comments), "trusted": [OWNER]}))
+    f.write_text(json.dumps({"issue": issue(labels, state=state), "comments": list(comments), "trusted": [OWNER],
+                             "debt_epic": 250}))
     body = tmp_path / "debt.md"
     body.write_text("`alarm list` sorts rooms case-sensitively.")
     assert sdlc.main(["file-issue", "12", "--title", "alarm list: room order", "--body-file", str(body), "--debt",
                       "--source", "review", "--dry-run", "--from-file", str(f)]) == 0
     out = capsys.readouterr().out.splitlines()
     assert out[0].startswith("would run: gh issue create") and "--label tech-debt" in out[0]
-    return out[1], out[2], "\n".join(out[1:])
+    assert out[-1] == "would attach the new issue to debt epic #250"
+    return out[1], out[2], "\n".join(out[1:-1])
 
 
 @pytest.mark.parametrize("labels,state", [([ROUTINE, "sdlc:in-progress"], "open"), ([ROUTINE, "sdlc:done"], "closed")])
-def test_quick_debt_names_the_quick_change_and_the_open_list(tmp_path, capsys, monkeypatch, labels, state):
+def test_quick_debt_names_the_quick_change_and_its_debt_epic(tmp_path, capsys, monkeypatch, labels, state):
     mk, lead, _ = file_debt(tmp_path, capsys, monkeypatch, labels, approved_quick(), state=state)
-    assert mk == "<!-- sdlc:v1 kind=debt epic=12 source=review lane=quick -->"
-    assert lead == QUICK_LEAD and "cleanup pass after" not in lead
+    assert mk == "<!-- sdlc:v1 kind=debt epic=12 source=review lane=quick generation=1 -->"
+    assert lead == QUICK_LEAD and "cleanup pass" not in lead
 
 
-def test_an_epics_debt_reads_as_before(tmp_path, capsys, monkeypatch):
-    mk, lead, _ = file_debt(tmp_path, capsys, monkeypatch, ["sdlc:in-progress"],
-                            [agent("prd", 1, 1), agent("approval", 1, 2, by=POSTER, via="comment")])
-    assert (mk, lead) == ("<!-- sdlc:v1 kind=debt epic=12 source=review -->", EPIC_LEAD)
+def test_an_epics_debt_joins_the_debt_epic(tmp_path, capsys, monkeypatch):
+    mk, lead, full = file_debt(tmp_path, capsys, monkeypatch, ["sdlc:in-progress"],
+                               [agent("prd", 1, 1), agent("approval", 1, 2, by=POSTER, via="comment")])
+    assert (mk, lead) == ("<!-- sdlc:v1 kind=debt epic=12 source=review generation=1 -->", EPIC_LEAD)
+    assert "budgeted into a cleanup pass" not in full
 
 
 def test_an_issue_escalated_from_quick_to_full_reads_as_an_epic(tmp_path, capsys, monkeypatch):
     st = derive([ROUTINE, "sdlc:approved"], ESCALATED)
     assert st["lane"] is None and not sdlc.is_quick(st)   # the ledger's latest lane record, not the original brief
     mk, lead, full = file_debt(tmp_path, capsys, monkeypatch, [ROUTINE, "sdlc:approved"], ESCALATED)
-    assert (mk, lead) == ("<!-- sdlc:v1 kind=debt epic=12 source=review -->", EPIC_LEAD)
+    assert (mk, lead) == ("<!-- sdlc:v1 kind=debt epic=12 source=review generation=1 -->", EPIC_LEAD)
     assert "quick" not in full
 
 
-def debt_state(tmp_path, capsys, body):
+def debt_state(tmp_path, capsys, body, debt_epic=250):
     f = tmp_path / "debt.json"
     f.write_text(json.dumps({"issue": {"number": 77, "title": "alarm list: room order", "state": "open",
                                        "author": OWNER, "labels": ["tech-debt"], "body": body},
-                             "comments": [], "trusted": [OWNER]}))
+                             "comments": [], "trusted": [OWNER], "debt_epic": debt_epic}))
     assert sdlc.main(["state", "--from-file", str(f)]) == 0
     return capsys.readouterr().out
 
 
-def test_state_on_a_debt_issue_says_where_it_waits(tmp_path, capsys, monkeypatch):
+def test_state_on_a_debt_issue_names_its_debt_epic(tmp_path, capsys, monkeypatch):
     _, _, quick = file_debt(tmp_path, capsys, monkeypatch, [ROUTINE, "sdlc:done"], approved_quick(), state="closed")
     _, _, epic = file_debt(tmp_path, capsys, monkeypatch, ["sdlc:in-progress"],
                            [agent("prd", 1, 1), agent("approval", 1, 2, by=POSTER, via="comment")])
     _, _, escalated = file_debt(tmp_path, capsys, monkeypatch, [ROUTINE, "sdlc:approved"], ESCALATED)
-    assert f"next: {QUICK_DEBT_NEXT}\n" in debt_state(tmp_path, capsys, quick)
-    for body in (epic, escalated, "no marker at all"):
-        assert f"next: {EPIC_DEBT_NEXT}\n" in debt_state(tmp_path, capsys, body)
+    for body in (quick, epic, escalated, "no marker at all"):
+        assert f"next: {DEBT_NEXT}\n" in debt_state(tmp_path, capsys, body)
+    assert f"next: {LOOSE_NEXT}\n" in debt_state(tmp_path, capsys, quick, debt_epic=None)
 
 
 def test_state_reads_the_debt_issues_own_body_from_github(monkeypatch):
@@ -2513,7 +2517,9 @@ def test_state_reads_the_debt_issues_own_body_from_github(monkeypatch):
     monkeypatch.setattr(sdlc, "gh_json", gh_json)
     monkeypatch.setattr(sdlc, "gh_pages", lambda path: [])
     b = sdlc.fetch_bundle(77, {**CONFIG, "repository": "o/r"}, trusted={OWNER})
-    assert sdlc.next_command(sdlc.bundle_state(b, CONFIG)) == QUICK_DEBT_NEXT
+    st = sdlc.bundle_state(b, CONFIG)
+    assert (st["debt_lane"], st["debt_of"], st["debt_generation"]) == ("quick", "12", 1)
+    assert sdlc.debt_wait_source(st) is None   # a quick change's debt never waits: nothing is fetched for it
 
 
 def test_file_issue_from_a_bundle_only_dry_runs(tmp_path, capsys, monkeypatch):
