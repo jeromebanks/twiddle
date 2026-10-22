@@ -222,11 +222,14 @@ def fill_prompt(template: str, values: dict[str, str], keep: dict[str, bool]) ->
     return NAME_RE.sub(lambda m: values[m.group(1)] if m.group(1) in values else m.group(0), text)
 
 
-def fill_pr_prompt(template: str, slice_file: Path, base: str, epic: int | None, response_file: Path | None) -> str:
-    """A slice PR's prompt (its epic's number), or a quick change's (`epic` None: it merges into main)."""
+def fill_pr_prompt(template: str, slice_file: Path, base: str, epic: int | None, response_file: Path | None,
+                   debt: bool = False) -> str:
+    """A slice PR's prompt (its epic's number), a quick change's (`epic` None: it merges into main), or a debt PR's
+    (`debt`: its tickets and its pass group's scope and files, into main)."""
     values = {"SLICE_FILE": str(slice_file), "BASE": base, "RESPONSE_FILE": str(response_file or "")}
     return fill_prompt(template, values | ({"EPIC": str(epic)} if epic is not None else {}),
-                       {"SLICE": epic is not None, "QUICK": epic is None, "ROUND2": bool(response_file)})
+                       {"SLICE": epic is not None, "QUICK": epic is None and not debt, "DEBT": epic is None and debt,
+                        "ROUND2": bool(response_file)})
 
 
 def _write_response(rounds: list[dict[str, Any]], record: str, scratch: Path, files: dict[str, Path]) -> int:
@@ -239,26 +242,30 @@ def _write_response(rounds: list[dict[str, Any]], record: str, scratch: Path, fi
 
 
 def prepare_pr_round(pr: dict[str, Any], brief: str, base: str, rounds: list[dict[str, Any]],
-                     scratch: Path, template: str | None = None, quick: bool = False) -> tuple[str, dict[str, Path]]:
-    """(the filled prompt, the files written for it) for one round on a slice PR, or a quick change's.
+                     scratch: Path, template: str | None = None, quick: bool = False,
+                     debt: bool = False) -> tuple[str, dict[str, Path]]:
+    """(the filled prompt, the files written for it) for one round on a slice PR, a quick change's or a debt PR's.
 
-    `base` is the branch the PR must merge into: a slice's epic branch (`epic/N`), or main for a quick change.
-    `brief` is what Codex holds it to: a slice issue's title and body, or the quick change's approved brief
-    (never the poster's request). It and the previous round's response are written to `scratch`, since
-    Codex's sandbox has no network."""
+    `base` is the branch the PR must merge into: a slice's epic branch (`epic/N`), or main for a quick change or
+    a debt PR. `brief` is what Codex holds it to: a slice issue's title and body, the quick change's approved
+    brief (never the poster's request), or a debt PR's tickets with its pass group's scope and files. It and the
+    previous round's response are written to `scratch`, since Codex's sandbox has no network."""
     m = re.fullmatch(r"epic/(\d+)", base)
-    if not quick and not m:
+    if quick and debt:
+        raise ReviewError("a PR is a quick change's or a debt group's, not both")
+    if not (quick or debt) and not m:
         raise ReviewError(f"a slice PR's base is its epic's branch (epic/N), not {base}")
     if pr.get("baseRefName") != base:
         raise ReviewError(f"PR #{pr.get('number')} targets {pr.get('baseRefName')}, not {base}: "
                           + ("a quick change merges straight into main" if quick
+                             else "a debt PR merges straight into main" if debt
                              else "a slice merges into its epic's branch"))
-    epic = None if quick else int(m.group(1))
+    epic = None if quick or debt else int(m.group(1))
     files = {"brief": scratch / "slice.md", "prompt": scratch / "prompt.md"}
     files["brief"].write_text(brief)
     _write_response(rounds, "pr-review", scratch, files)
     prompt = fill_pr_prompt(PR_PROMPT.read_text() if template is None else template, files["brief"],
-                            f"origin/{base}", epic, files.get("response"))
+                            f"origin/{base}", epic, files.get("response"), debt=debt)
     files["prompt"].write_text(prompt)
     return prompt, files
 
