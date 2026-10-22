@@ -467,8 +467,11 @@ uv run python tools/sdlc.py claim T --debt --model <the model you are>   # or: c
 
 It claims T's whole group (the claim is posted on every member), prints the usual `WORKTREE=`,
 `PRIMARY=`, `BRANCH=slice/T` and `BASE=origin/main`, and makes the worktree from `origin/main`.
-Work only in `WORKTREE`, as in §2. `T` is any ticket of the group; the branch and the PR carry its
-number. `claim` without `--debt` refuses a debt ticket.
+Work only in `WORKTREE`, as in §2. The branch is named for the ticket the group was **first**
+claimed through: a resume through another member (`claim X --debt --resume`) prints the same
+`WORKTREE` and `BRANCH`, which is `slice/T` for the first ticket T, not `slice/X`. Write `BRANCH`
+down and use it wherever this section says `<BRANCH>`; never assume the number of the ticket you
+were handed. `claim` without `--debt` refuses a debt ticket.
 
 **3-6. Plan, build, test, self-review.** As §3 to §6, from the tickets and the group's scope and
 files. Offline tests only, and never a command that writes to a speaker. A finding **inside** a
@@ -499,7 +502,7 @@ ticket waits for a reply from its author or a collaborator; the pass carries on 
 **7. The PR targets `main`:**
 
 ```bash
-gh pr create --base main --head slice/T --title "<what it fixes>" --body-file <SCRATCH>/pr.md
+gh pr create --base main --head <BRANCH> --title "<what it fixes>" --body-file <SCRATCH>/pr.md
 ```
 
 The body has one `Closes #X` for each ticket of the group, and no other `Closes`, `Fixes` or

@@ -219,6 +219,9 @@ def test_the_debt_lane_runs_from_a_filing_to_the_epic_closing(lane):
     assert wt == lane.root / ".worktrees" / f"slice-{one}" and _git("rev-parse", "HEAD", cwd=wt) == base
     for t in (one, two):
         assert "debt=1 pass=1 group=debt-1-1" in gh.records(t, "claim")[0]["body"].splitlines()[0]
+    # a resume through the group's other member reattaches the same worktree and branch (named for the first claimer)
+    out = lane.ok("claim", two, "--debt", "--resume")
+    assert f"WORKTREE={wt}" in out and f"BRANCH=slice/{one}" in out and "BRANCH=slice/%d\n" % two not in out
     head = lane.commit(wt, one, {FILE: "x = 2\n"}, "Sort the station list and match tags without case")
     pr = lane.open_debt_pr(one, [one, two], "Sort the station list and match tags without case")
     assert f"/work-slice {one} --debt" in lane.state(epic)["next"]            # claimed: its work resumes here

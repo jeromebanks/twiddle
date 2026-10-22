@@ -287,7 +287,9 @@ and `slice-status T` its pass and group.
    built has changed or plans to (its branch, its open PRs, the Scope of its open slices), so debt
    merging into `main` does not make that epic's next `sync` conflict.
 3. **Build** (`work-slice T --debt`). `claim T --debt` claims T's whole group (the claim is posted on
-   every member) and makes `.worktrees/slice-T` on `slice/T` from `origin/main`. The tickets are the
+   every member) and makes `.worktrees/slice-T` on `slice/T` from `origin/main`, T being the ticket it was first
+   claimed through (a resume through another member reattaches that same worktree and branch, which
+   `claim` prints as `BRANCH`). The tickets are the
    spec. It is built like a slice with offline tests; the PR targets `main`, and its body has one
    `Closes #T` for each ticket of the group and nothing else. `test-record PR` records the full suite
    on the head. `codex-review --pr PR` reviews the head against the tickets and the group's scope

@@ -522,7 +522,7 @@ PR, in build order, with a one-line scope, its files and a <code>routine</code> 
 <code>debt-pass-validate D pass.json</code> checks it and <code>debt-pass-post D pass.json</code> posts it. The poster signs nothing and
 Codex reviews no plan; the advisor checks the order, and the tool checks the list (see the table below).</li>
 <li><strong>Build.</strong> <code>work-slice T --debt</code>. <code>claim T --debt</code> claims T's whole group and makes
-<code>.worktrees/slice-T</code> on <code>slice/T</code> from <code>origin/main</code>. The tickets are the spec. The PR targets
+<code>.worktrees/slice-T</code> on <code>slice/T</code> from <code>origin/main</code>, T being the ticket it was first claimed through (a resume through another member reattaches that same branch, which <code>claim</code> prints as <code>BRANCH</code>). The tickets are the spec. The PR targets
 <code>main</code> and closes exactly the group's tickets, one <code>Closes #T</code> each.</li>
 <li><strong>Test and review.</strong> <code>test-record PR</code> records the full suite on the head. <code>codex-review --pr PR</code> reviews that
 head against the tickets and the group's scope and files, and <code>pr-review</code> records the round. The review is <strong>never
