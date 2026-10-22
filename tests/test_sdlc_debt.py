@@ -1,5 +1,6 @@
 """tools/sdlc.py: the debt lane — the debt epic (`lane:debt`), `debt-epic`, its state, and `next`. No network:
 a fake `gh` answers from dicts."""
+import argparse
 import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -1630,6 +1631,10 @@ def test_codex_review_of_a_debt_pr_gives_codex_the_tickets_and_the_groups_scope_
     assert f"## Ticket #{a}: debt 0" in brief and "The first ticket's own words." in brief and f"## Ticket #{b}:" in brief
     assert "not this ticket's debt" in brief and brief in out   # the dry run shows the brief itself
     assert "A problem inside that scope is fixed in this PR" in brief and "the diff itself changes or breaks" in brief
+    for text in (prompt, brief):   # out of scope is not debt of this ticket: never filed as debt (PRD, how the lane stops)
+        flat = " ".join(text.split())
+        assert "isn't filed as debt either" in flat and "an ordinary issue for triage" in flat
+        assert "filed as new debt" not in flat
 
 
 def test_a_debt_pr_closing_anything_else_or_another_group_is_refused(gh, repo, capsys, tmp_path):
@@ -1697,6 +1702,22 @@ def test_a_group_pr_must_close_every_active_member_and_a_departed_one_drops_out(
     assert s["group"]["open"] == [a] and s["state"] == "in-review" and s["escalated"] == []
     code, _, err = run(capsys, "claim", a, "--debt", "--resume")
     assert code == 0, err
+    st = ticket_state(capsys, epic)   # state D applies the same rule: the group is A's, in progress, not escalated
+    assert st["action"] == "work_debt" and "needs a human" not in st["next"]
+    assert f"in progress `debt-1-1` (#{a})" in st["next"]
+    assert st["debt"]["groups"] == {"todo": [], "claimed": ["debt-1-1"], "escalated": []}
+    # offline too: a bundle's members come as {issue, comments}, as debt_bundle reads them
+    f = debt_bundle_file(tmp_path, gh, epic, [a])
+    bundle = json.loads(f.read_text())
+    bundle["members"] = [{"issue": gh.issues[b], "comments": []}]
+    f.write_text(json.dumps(bundle))
+    args = argparse.Namespace(from_file=str(f))
+    assert sdlc.pr_debt(args, bundle["pr"], None, CONFIG, trusted)["group"]["key"] == "debt-1-1"
+    gh.issues[b]["labels"] = [DEBT]   # back in the debt epic: the PR closing A alone is refused again
+    bundle["members"] = [{"issue": gh.issues[b], "comments": []}]
+    f.write_text(json.dumps(bundle))
+    with pytest.raises(sdlc.SdlcError, match=f"doesn't close #{b}"):
+        sdlc.pr_debt(args, bundle["pr"], None, CONFIG, trusted)
 
 
 def test_cleanup_of_a_debt_ticket_goes_through_its_claim_even_with_its_own_worktree_left(gh, repo, capsys):

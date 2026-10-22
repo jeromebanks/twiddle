@@ -3038,7 +3038,7 @@ def pass_work(open_pass: dict[str, Any], tickets: list[dict[str, Any]]) -> dict[
     epic's open tickets ({number, labels, claim}); a group none of whose tickets is open is done (merged, or gone
     from the epic) and in none of them. A group with any member escalated needs a person, and the pass can end
     without it; one with any member claimed is being built."""
-    open_t = {t["number"]: t for t in tickets}
+    open_t = {t["number"]: t for t in tickets if active_debt(t)}
     out: dict[str, list[dict[str, Any]]] = {"todo": [], "claimed": [], "escalated": []}
     for g in open_pass.get("groups") or []:
         members = [open_t[t] for t in g["tickets"] if t in open_t]
@@ -3900,8 +3900,10 @@ def debt_group(b: dict[str, Any]) -> dict[str, Any] | None:
 
 def active_debt(issue: dict[str, Any]) -> bool:
     """A group member still to be built: open and still tech debt. One that left the debt epic (for triage, say)
-    is no member any more, though the claim it carried still says where the group is built."""
-    return issue.get("state") == "open" and DEBT_LABEL in issue.get("labels", [])
+    is no member any more, though the claim it carried still says where the group is built. The one membership
+    rule for `state D` (pass_work), the ticket's own state (derive_debt) and a debt PR (debt_pr_context); a
+    ticket read without its state or labels (an offline view's) counts as both."""
+    return issue.get("state", "open") == "open" and DEBT_LABEL in issue.get("labels", [DEBT_LABEL])
 
 
 def debt_members(b: dict[str, Any]) -> dict[int, tuple[dict[str, Any], list[dict[str, Any]]]]:
@@ -4085,7 +4087,7 @@ def debt_pr_context(pr: dict[str, Any], tickets: list[dict[str, Any]], epic_comm
     if strays := [r for r in refs if r not in group["tickets"]]:
         raise SdlcError(", ".join(f"#{r}" for r in strays) + f" isn't in group `{group['key']}`: a debt PR closes "
                         "only its group's tickets")
-    seen = {i["number"]: i for i in others or []}
+    seen = {i["number"]: i for i in (o.get("issue", o) for o in others or [])}
     if missing := [t for t in group["tickets"] if t not in refs and (t not in seen or active_debt(seen[t]))]:
         raise SdlcError(f"PR #{pr['number']} doesn't close " + ", ".join(f"#{t}" for t in missing) + f" of group "
                         f"`{group['key']}`: a debt PR closes every open ticket of its group (`Closes #T` each)")
@@ -4130,7 +4132,8 @@ def debt_brief(ctx: dict[str, Any]) -> str:
            "Each ticket below is the spec, and the group's scope and files above bound the change. A problem inside "
            "that scope is fixed in this PR, and so is anything the diff itself changes or breaks, wherever it is. A "
            "problem that was already there outside that scope, which the change neither causes nor touches, is not "
-           "this ticket's debt: it doesn't hold this PR, and is filed as new debt instead.", ""]
+           "this ticket's debt: it doesn't hold this PR, and it isn't filed as debt either. It is dropped, or filed "
+           "as an ordinary issue for triage when it matters.", ""]
     for t in ctx["tickets"]:
         out += [f"## Ticket #{t['number']}: {t.get('title', '')}", "", (t.get("body") or "").strip(), ""]
     return "\n".join(out)
