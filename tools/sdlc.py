@@ -1183,8 +1183,10 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
                   fetch_bundle(wait_on, config, trusted if trusted is not None else fetch_trusted(config)))
             src = bundle_state({"trusted": (bundle or {}).get("trusted", []), **sb}, config) if sb else None
         st = {**st, "debt_epic": held_by, "waiting_for": debt_waiting_for(st, src)}
-    if is_debt_epic(st) and st["action"] == "none" and st["turn"] == "agent":
-        # what the debt epic has due comes from its tickets (offline: the bundle's `debt`, {"tickets": [...]})
+    held = is_debt_epic(st) and st["state"] == "escalated" and st["action"] == "human"
+    if is_debt_epic(st) and (held or (st["action"] == "none" and st["turn"] == "agent")):
+        # what the debt epic has due comes from its tickets (offline: the bundle's `debt`, {"tickets": [...]}); one a
+        # person holds (escalated) only reports a pass end `debt-epic` has to write (its close, most of all)
         dp = ((bundle or {}).get("debt") if offline else
               debt_progress(st["number"], config, trusted if trusted is not None else fetch_trusted(config)))
         if dp is not None:
@@ -1192,12 +1194,15 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
                 dp = {**dp, "passes": debt_passes((bundle or {}).get("comments") or [],
                                                   set((bundle or {}).get("trusted") or []))}
             view = debt_view(st, dp, load_debt(config), config.get("models"))
-            if view["action"] == "merge_debt" and not offline:   # what the gate says now (read-only)
+            if held and view["action"] != "pass_end":
+                view = None
+            if view and view["action"] == "merge_debt" and not offline:   # what the gate says now (read-only)
                 view["gate"] = debt_gate_read(view["merge_due"][0]["pr"], config,
                                               trusted if trusted is not None else fetch_trusted(config))
                 view["next"] = debt_merge_next(view["merge_due"], view["gate"], view["also"])
-            st = {**st, "action": view["action"], "turn": view["turn"], "debt": view}
-            progress = dp
+            if view:
+                st = {**st, "action": view["action"], "turn": view["turn"], "debt": view}
+                progress = dp
     nxt = next_command(st, progress)
     if st.get("plan_kind") == "debt" and st.get("debt_epic") and not offline and bundle is not None:
         # its group's PR may be due to merge: read it as slice-status does. A failed read leaves `next` as it was
@@ -1259,7 +1264,8 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
     def consider(n: int) -> None:
         b = fetch_bundle(n, config, trusted)
         st = bundle_state(b, config)
-        if st["turn"] == "agent":
+        # a debt epic a person holds may still have a pass end due (its close): with_next says
+        if st["turn"] == "agent" or (is_debt_epic(st) and st["state"] == "escalated" and st["action"] == "human"):
             st = with_next(st, config, trusted=trusted, bundle=b)
             if st["turn"] == "agent":   # the debt epic's turn comes from its tickets, in with_next
                 out.append(st)
@@ -3117,8 +3123,10 @@ def pass_end_due(open_pass: dict[str, Any], tickets: list[dict[str, Any]]) -> bo
 
 def pass_end_counts(p: dict[str, Any], progress: dict[str, Any]) -> dict[str, list[int]]:
     """{joined, closed} of pass `p`, ending now. `closed`: the pass's tickets now closed. `joined`: the debt epic's
-    sub-issues not in the pass, filed (created) at or after the pass was posted and still open: one intake closed
-    (`fixed`, `duplicate`) added no debt, as one it sent to triage (detached) didn't. Without
+    open sub-issues not in the pass that it didn't hold when the pass was posted (`held`), however they joined:
+    filed, labelled or reopened, then attached. One intake closed (`fixed`, `duplicate`) added no debt, as one it
+    sent to triage (detached) didn't. An older pass record without `held` falls back on when each was filed
+    (created at or after the pass was posted). Without
     `members` (an offline view) its open tickets stand in, and a pass ticket no longer among them counts closed."""
     tickets, members = progress.get("tickets") or [], progress.get("members")
     if members is None:
@@ -3126,9 +3134,10 @@ def pass_end_counts(p: dict[str, Any], progress: dict[str, Any]) -> dict[str, li
         closed = [t for t in p["tickets"] if t not in {x["number"] for x in tickets}]
     else:
         closed = [m["number"] for m in members if m["number"] in p["tickets"] and m.get("state") == "closed"]
-    since = p.get("posted_at") or ""
+    since, held = p.get("posted_at") or "", p.get("held")
     joined = [m["number"] for m in members if m["number"] not in p["tickets"] and m.get("state", "open") == "open"
-              and since and (m.get("created_at") or "") >= since]
+              and (m["number"] not in held if held is not None
+                   else bool(since) and (m.get("created_at") or "") >= since)]
     return {"joined": joined, "closed": closed}
 
 
@@ -3257,6 +3266,9 @@ def debt_view(st: dict[str, Any], progress: dict[str, Any], rules: "DebtRules | 
                else f"nothing: debt epic #{n} has no open tickets")
     if not open_pass and (stuck := [t["number"] for t in judged if ESCALATED_LABEL in (t.get("labels") or [])]):
         nxt += "; needs a human: " + ", ".join(f"#{t}" for t in stuck) + " (escalated)"
+    if not open_pass and (stale := [t for t in judged if ESCALATED_LABEL not in (t.get("labels") or [])
+                                    and (t.get("claim") or {}).get("debt")]):
+        nxt += "; needs a human: " + "; ".join(f"#{t['number']} {stale_claim_text(t)}" for t in stale)
     also = None
     if due:   # a group's PR has its records: merging it comes first (intake of new debt can't change the open pass);
         # what the pass has to build meanwhile stays named, since the gate may still refuse the merge
@@ -3658,7 +3670,8 @@ def pass_groups(plan: Any, k: int) -> list[dict[str, Any]]:
 
 
 def debt_passes(comments: list[dict[str, Any]], trusted: set[str]) -> list[dict[str, Any]]:
-    """The passes posted on the debt epic, by number: {pass, url, posted_at, tickets, groups, open, end, escalated}.
+    """The passes posted on the debt epic, by number: {pass, url, posted_at, held, tickets, groups, open, end,
+    escalated}. `held`: the epic's open tickets when the pass was posted (None on an older pass record).
     Only the tool posts them (by a collaborator, `pass=K`); the first record of each number counts, and a pass-end
     record closes one: `end` is its frozen {joined, closed} counts (None without them, as on an older record).
     `escalated`: the epic was escalated at that pass's end (the two-in-a-row rule), so it is never escalated again
@@ -3675,7 +3688,10 @@ def debt_passes(comments: list[dict[str, Any]], trusted: set[str]) -> list[dict[
                 plan = extract_pass(c.get("body", ""))
             except SdlcError:
                 plan = {}
+            held = mk.get("held")
             posted[int(k)] = {"pass": int(k), "url": c.get("url", ""), "posted_at": c.get("created_at", ""),
+                              "held": (None if held is None or not re.fullmatch(r"none|\d+(,\d+)*", held)
+                                       else [] if held == "none" else [int(x) for x in held.split(",")]),
                               "tickets": pass_ticket_numbers(plan), "groups": pass_groups(plan, int(k))}
         elif mk.get("kind") == DEBT_PASS_END_KIND and int(k) not in ended:
             counts = (mk.get("joined", ""), mk.get("closed", ""))
@@ -3708,6 +3724,13 @@ def ticket_wait_text(t: dict[str, Any]) -> str:
     return "waits on a person"
 
 
+def stale_claim_text(t: dict[str, Any]) -> str:
+    c, n = t["claim"], t["number"]
+    return (f"still holds debt group `{c.get('group')}`'s claim from pass {c.get('pass')}, which ended without it: "
+            f"a person releases it (`release {n}`; `cleanup {n}` removes its worktree, and its branch if unpushed "
+            "work is to go) before a pass takes it")
+
+
 def ticket_refusals(t: dict[str, Any], epic: int, in_open_pass: dict[int, int]) -> list[str]:
     """Why ticket `t` can't be in a pass of debt epic `epic` (none: it can). `t` is {number, state, labels,
     attached, intake, waiting_for, waits_on_person}; `in_open_pass` maps a ticket to the open pass holding it.
@@ -3729,6 +3752,8 @@ def ticket_refusals(t: dict[str, Any], epic: int, in_open_pass: dict[int, int]) 
         why.append(f"#{n} is already in open pass {in_open_pass[n]}")
     if ESCALATED_LABEL in t.get("labels", []):   # its group's escalation: a person clears it before a pass takes it
         why.append(f"#{n} is escalated to a human")
+    if (c := t.get("claim")) and c.get("debt") and n not in in_open_pass:   # its group left unbuilt as its pass ended
+        why.append(f"#{n} {stale_claim_text(t)}")
     if t.get("waiting_for") or t.get("waits_on_person"):
         why.append(f"#{n} {ticket_wait_text(t)}")
     return why
@@ -4016,6 +4041,7 @@ def pass_check(n: int, plan: Any, config: dict[str, Any]) -> tuple[dict[str, Any
         labels = [l["name"] for l in raw.get("labels", [])]
         errs += ticket_refusals({"number": t, "state": raw.get("state", "open"), "labels": labels,
                                  "attached": t in attached, "intake": intake_of(comments, trusted),
+                                 "claim": claim_status(comments, trusted),
                                  "waits_on_person": waits_on_person(comments, trusted,
                                                                     (raw.get("user") or {}).get("login", "")),
                                  "waiting_for": ticket_waiting_for(raw, labels, config, trusted, sources)},
@@ -4070,7 +4096,12 @@ def command_debt_pass_post(args: argparse.Namespace, config: dict[str, Any]) -> 
     if errs:
         raise SdlcError(f"the pass does not validate, so nothing was posted ({len(errs)}):\n"
                         + "\n".join(f"  - {e}" for e in errs))
-    comment = render_comment(DEBT_PASS_KIND, None, render_pass(plan), config, **{"pass": str(plan["pass"])})
+    # the epic's open tickets as the pass starts: debt that joins during it is any open ticket not among them at
+    # its end, however it joined (filed, labelled or reopened, then attached), never judged by when it was filed
+    held = sorted(x["number"] for x in sub_issues(n, config)
+                  if x.get("state", "open") == "open" and "pull_request" not in x)
+    comment = render_comment(DEBT_PASS_KIND, None, render_pass(plan), config, **{"pass": str(plan["pass"])},
+                             held=",".join(map(str, held)) or "none")
     if len(comment) > COMMENT_LIMIT:
         raise SdlcError(f"the pass comment is {len(comment)} characters, over GitHub's limit: tighten the scopes")
     if args.dry_run:

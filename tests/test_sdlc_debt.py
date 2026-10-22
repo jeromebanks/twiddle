@@ -993,7 +993,8 @@ def test_a_valid_pass_is_posted_with_no_sign_off_and_state_names_it(gh, git, cap
     assert f"debt epic #{epic}: pass 1 posted" in out
     assert len(gh.writes) == 1 and len(git.fetches()) == 2   # the comment, and post's own one fetch
     (body,) = pass_comments(gh, epic)
-    assert sdlc.parse_marker(body) == {"kind": sdlc.DEBT_PASS_KIND, "pass": "1"}
+    # T8a: it carries the epic's open tickets as the pass starts (`held`), what its end's `joined` is counted against
+    assert sdlc.parse_marker(body) == {"kind": sdlc.DEBT_PASS_KIND, "pass": "1", "held": f"{a},{b},{c}"}
     assert "/approve" not in body and "plan-review" not in body and "sign off" not in body
     assert sdlc.extract_pass(body) == json.loads(f.read_text())
     assert f"1. `debt-1-1` · #{b}, #{c} · *routine*: fix it" in body
@@ -2075,9 +2076,13 @@ def writes_in(seen):
     return [a for a in seen if a[:2] in WRITE_CALLS or (a[0] == "api" and a[1] == "-X" and a[2] != "GET")]
 
 
-def post_pass(gh, epic, k, *tickets):
+def post_pass(gh, epic, k, *tickets, held=True):
+    """Pass `k` of `tickets` posted as `debt-pass-post` posts it: with the epic's open tickets (`held`), or, held
+    False, as an older pass record without them."""
+    now = [t for t in gh.subs.get(epic, []) if gh.issues[t]["state"] == "open"]
+    extra = {"held": ",".join(map(str, now)) or "none"} if held else {}
     gh.comment(epic, sdlc.render_comment(sdlc.DEBT_PASS_KIND, None, sdlc.render_pass(
-        {"epic": epic, "pass": k, "groups": [group(*tickets)]}), CONFIG, **{"pass": str(k)}))
+        {"epic": epic, "pass": k, "groups": [group(*tickets)]}), CONFIG, **{"pass": str(k)}, **extra))
 
 
 def join(gh, epic, n=1):
@@ -2381,3 +2386,77 @@ def test_a_dry_run_counts_the_debt_it_would_attach(gh, capsys, calls):
     assert run(capsys, "debt-epic")[0] == 0
     (end,) = ends(gh, epic)
     assert (end["joined"], end["closed"]) == ("1", "1") and gh.issues[epic]["state"] == "open"
+
+
+@pytest.mark.parametrize("how", ["labelled", "reopened"])
+def test_older_debt_that_joins_during_a_pass_counts_as_joined(gh, capsys, how):
+    """Codex round 2: joining is judged against the tickets the epic held as the pass started, not by when each
+    issue was filed, so two passes that grew by older debt still escalate."""
+    epic, (a, b) = ready(gh, 2)
+    old = [gh.issue("an older issue", [] if how == "labelled" else [DEBT],
+                    state="open" if how == "labelled" else "closed") for _ in range(4)]
+    post_pass(gh, epic, 1, a)
+    for t in old[:2]:   # labelled tech-debt (or reopened) during pass 1, then attached by debt-epic
+        gh.issues[t]["labels"], gh.issues[t]["state"] = [DEBT], "open"
+    done(gh, a)
+    assert run(capsys, "debt-epic")[0] == 0
+    assert set(old[:2]) <= set(gh.subs[epic])
+    assert [(e["joined"], e["closed"]) for e in ends(gh, epic)] == [("2", "1")]
+    for t in old[:2]:
+        gh.intake(t)
+    post_pass(gh, epic, 2, b)
+    for t in old[2:]:
+        gh.issues[t]["labels"], gh.issues[t]["state"] = [DEBT], "open"
+    done(gh, b)
+    assert run(capsys, "debt-epic")[0] == 0
+    assert [(e["joined"], e["closed"]) for e in ends(gh, epic)] == [("2", "1"), ("2", "1")]
+    assert [e["pass"] for e in escalations(gh, epic)] == ["2"]
+
+
+def test_an_older_pass_record_without_held_counts_by_when_debt_was_filed(gh, capsys):
+    epic, (a, b) = ready(gh, 2)
+    post_pass(gh, epic, 1, a, held=False)
+    new, = join(gh, epic)
+    done(gh, a)
+    assert run(capsys, "debt-epic")[0] == 0
+    assert [(e["joined"], e["closed"]) for e in ends(gh, epic)] == [("1", "1")]
+
+
+def test_an_escalated_epic_with_no_debt_left_reports_its_close_to_state_and_next(gh, capsys, calls):
+    epic, b, _ = two_growing_passes(gh)
+    assert run(capsys, "debt-epic")[0] == 0
+    post_pass(gh, epic, 2, b)
+    join(gh, epic, 2)
+    done(gh, b)
+    assert run(capsys, "debt-epic")[0] == 0
+    assert ticket_state(capsys, epic)["action"] == "human"   # held, with debt still open
+    done(gh, *gh.subs[epic])
+    before = len(writes_in(calls))
+    st = ticket_state(capsys, epic)
+    assert (st["action"], st["turn"]) == ("pass_end", "agent") and f"close debt epic #{epic} as sdlc:done" in st["next"]
+    assert [(s["number"], s["action"]) for s in next_listed(capsys) if s["number"] == epic] == [(epic, "pass_end")]
+    assert len(writes_in(calls)) == before
+    assert run(capsys, "debt-epic")[0] == 0 and gh.issues[epic]["state"] == "closed"
+
+
+def test_a_group_left_claimed_when_its_pass_ended_is_kept_out_of_the_next_until_released(gh, repo, capsys, tmp_path,
+                                                                                       monkeypatch):
+    """Codex round 2: an escalated group's claim outlives its pass; once a person clears the escalation, no new pass
+    takes the ticket (where `claim --debt` would refuse it as claimed and the gate as pass 1's) until it's released."""
+    epic, (a, b, c) = posted_pass(gh, [((0,), "routine"), ((1,), "routine")])
+    assert run(capsys, "claim", a, "--debt", "--model", "opus")[0] == 0
+    assert run(capsys, "escalate-slice", a, "--reason", "stuck")[0] == 0
+    done(gh, b)
+    assert run(capsys, "debt-epic")[0] == 0 and len(ends(gh, epic)) == 1
+    gh.issues[a]["labels"].remove(sdlc.ESCALATED_LABEL)   # a person clears the escalation
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "plan_pass" and st["debt"]["eligible"] == [c]
+    assert f"needs a human: #{a} still holds debt group `debt-1-1`'s claim from pass 1" in st["next"]
+    assert f"`release {a}`" in st["next"]
+    monkeypatch.setattr(sdlc, "git", FakeGit())   # the pass check's one fetch, faked from here on
+    f = pass_file(tmp_path, epic, [group(a), group(c)], k=2)
+    code, out, err = run(capsys, "debt-pass-validate", epic, f)
+    assert code == 1 and f"#{a} still holds debt group `debt-1-1`'s claim from pass 1" in out + err
+    assert run(capsys, "release", a, "--reason", "back to the pool")[0] == 0
+    st = ticket_state(capsys, epic)
+    assert st["debt"]["eligible"] == [a, c] and "still holds" not in st["next"]
