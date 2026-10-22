@@ -199,6 +199,42 @@ def rounds_error(n: int, rounds: int, rules: QuickRules) -> str | None:
     return None
 
 
+# --- what a PR straight into main is held to, for a quick change and a debt PR alike (sdlc.py's two main gates) ---
+
+def pr_open_errors(pr: dict[str, Any], base: str) -> list[str]:
+    """The PR is open, not a draft, and targets `base`."""
+    errs = []
+    if pr.get("state") != "OPEN":
+        errs.append(f"PR is {pr.get('state')}, not OPEN")
+    if pr.get("isDraft"):
+        errs.append("PR is a draft")
+    if pr.get("baseRefName") != base:
+        errs.append(f"PR targets {pr.get('baseRefName')}, not {base}")
+    return errs
+
+
+def head_errors(pr: dict[str, Any], tests: dict[str, Any] | None, behind_by: int | None, base: str) -> list[str]:
+    """A passing test run recorded on the PR's head (`tests`, or None), the head up to date with `base`, and the
+    PR mergeable. A rebase voids the run and the review, so being behind names both again."""
+    errs = []
+    head = (pr.get("headRefOid") or "")[:12]
+    if not tests:
+        errs.append(f"no recorded test run on the current head {head} (`test-record`)")
+    elif tests.get("result") != "pass":
+        errs.append(f"the tests failed on {head}")
+    if behind_by is None:
+        errs.append(f"could not tell whether the head is up to date with {base}")
+    elif behind_by:
+        errs.append(f"the head is {behind_by} commit(s) behind {base}: rebase onto origin/{base}, "
+                    "push with --force-with-lease, then `test-record` and a Codex round on the new head")
+    mergeable = pr.get("mergeable")
+    if mergeable == "UNKNOWN":
+        errs.append("GitHub is still computing mergeability (UNKNOWN): wait a few seconds and try again")
+    elif mergeable != "MERGEABLE":
+        errs.append(f"GitHub says the PR conflicts ({mergeable}): rebase onto origin/{base}")
+    return errs
+
+
 def eligibility_errors(issue: dict[str, Any], st: dict[str, Any]) -> list[str]:
     """Why the issue is not, now, a quick change being built: re-read at merge, since any of it can change
     after the claim (the brief revised or re-approved, the rating changed, an escalation, a conflict)."""

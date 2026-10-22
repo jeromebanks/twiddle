@@ -28,6 +28,10 @@ class FakeGitHub:
         self.pulls = {}     # base branch -> [(PR number, [files])], the open PRs into it
         self.prs = {}       # PR number -> the PR as `gh pr view --json` gives it (T6: a debt group's PR)
         self.cid = 0
+        self.branches = set()   # T7: branches on GitHub (`git/ref/heads/...` reads 404 for any other)
+        self.behind = {}        # T7: head SHA -> how many commits it is behind main (compare's `behind_by`)
+        self.closing = {}       # T7: PR number -> closingIssuesReferences (default: the body's `Closes #N`)
+        self.autoclose = True   # T7: a merge into main closes its `Closes #N` tickets, as GitHub does
 
     def issue(self, title, labels=(), author=OWNER, body="", state="open"):
         self.next_n += 1
@@ -118,8 +122,22 @@ class FakeGitHub:
         if args[:2] == ["pr", "list"]:
             head = args[args.index("--head") + 1]
             return json.dumps([p for p in self.prs.values() if p["headRefName"] == head])
+        if args[:2] == ["pr", "view"] and "closingIssuesReferences" in args:
+            n = int(args[2])
+            refs = self.closing.get(n, sdlc.closes_refs(self.prs[n]["body"]))
+            return json.dumps({"closingIssuesReferences": [
+                {"number": r, "repository": {"name": REPO.split("/")[1], "owner": {"login": REPO.split("/")[0]}}}
+                if isinstance(r, int) else r for r in refs]})
         if args[:2] == ["pr", "view"]:
             return json.dumps(self.prs[int(args[2])])
+        if args[:2] == ["pr", "merge"]:
+            self.writes.append(("pr merge", args))
+            pr = self.prs[int(args[2])]
+            assert args[args.index("--match-head-commit") + 1] == pr["headRefOid"]
+            pr["state"] = "MERGED"
+            for t in sdlc.closes_refs(pr["body"]) if self.autoclose and pr["baseRefName"] == "main" else []:
+                self.issues[t]["state"], self.issues[t]["state_reason"] = "closed", "completed"
+            return ""
         if args[:2] == ["issue", "view"]:
             i = self.issues[int(args[2])]
             return json.dumps({"number": i["number"], "title": i["title"], "state": i["state"].upper(),
@@ -137,6 +155,10 @@ class FakeGitHub:
             self.writes.append((path, body))
             self.comment(int(tail[1]), body)
             return json.dumps({"id": self.cid})
+        if method == "DELETE" and tail[:3] == ["git", "refs", "heads"]:
+            self.writes.append(("delete ref", path))
+            self.branches.discard("/".join(tail[3:]))
+            return ""
         if method == "DELETE":
             payload = json.loads(Path(rest[rest.index("--input") + 1]).read_text())
             self.writes.append((path, payload))
@@ -183,6 +205,12 @@ class FakeGitHub:
             if int(tail[1]) not in self.issues:
                 raise sdlc.SdlcError("gh api repos/... failed: HTTP 404: Not Found")
             return json.dumps(self.rest(self.issues[int(tail[1])]))
+        if tail[:3] == ["git", "ref", "heads"]:
+            if "/".join(tail[3:]) not in self.branches:
+                raise sdlc.SdlcError("gh api repos/... failed: HTTP 404: Not Found")
+            return json.dumps({"ref": "refs/heads/" + "/".join(tail[3:])})
+        if tail[0] == "compare" and tail[1].split("...", 1)[1] in self.behind:
+            return json.dumps({"behind_by": self.behind[tail[1].split("...", 1)[1]]})
         if tail[0] == "compare":
             sha = tail[1].split("...", 1)[1]
             full = next((f for f in self.on_main if f.startswith(sha)), None)
@@ -1739,3 +1767,282 @@ def test_state_d_names_the_model_while_every_group_is_in_progress(gh, repo, caps
     assert st["action"] == "work_debt"
     assert st["next"] == (f"nothing new to start in pass 1: in progress `debt-1-1` (#{a}, #{b}) "
                           f"(`/work-slice {a} --debt` (opus: judgment) resumes one)")
+
+
+# --- merging a debt PR into main through its gate (T7) ------------------------------------------------------------
+
+HEAD = "b" * 40
+
+
+@pytest.fixture
+def main_gate(monkeypatch):
+    """`merge` runs main's gate code here: T1's check is its own test (the last of these), never the network."""
+    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR": [])
+
+
+def due_group(gh, repo, capsys, groups=(((0, 1), "judgment"), ((2,), "routine")), builder=1, records=True):
+    """Pass 1 posted, its first group claimed by its `builder`-th ticket, and that group's PR #300 into main with a
+    passing run and Codex's approval on its head: (epic, tickets, the worktree)."""
+    epic, tickets = posted_pass(gh, list(groups))
+    members = [tickets[i] for i in groups[0][0]]
+    b = members[min(builder, len(members) - 1)]
+    assert run(capsys, "claim", b, "--debt", "--model", "opus")[0] == 0
+    debt_pr(gh, 300, f"slice/{b}", *members)
+    gh.branches.add(f"slice/{b}")
+    gh.behind[HEAD] = 0
+    if records:
+        gh.say(300, "tests", sha=HEAD, result="pass", passed="10")
+        gh.say(300, "pr-review", sha=HEAD, verdict="approve", round="1")
+    return epic, tickets, repo / ".worktrees" / f"slice-{b}"
+
+
+def merged_records(gh, n):
+    return [sdlc.parse_marker(c["body"]) for c in gh.comments[n] if "kind=debt-merged" in c["body"]]
+
+
+def merges(gh):
+    return [w for w in gh.writes if w[0] == "pr merge"]
+
+
+@pytest.mark.parametrize("autoclose", [True, False])
+def test_a_group_pr_merges_into_main_closes_its_tickets_and_cleans_up_in_one_run(gh, repo, capsys, main_gate,
+                                                                              autoclose):
+    epic, (a, b, c), wt = due_group(gh, repo, capsys)
+    gh.autoclose = autoclose
+    assert wt.exists()
+    code, out, err = run(capsys, "merge", 300)   # a group PR closing two tickets: the debt gate, not no_epic_error
+    assert code == 0, err
+    assert "no epic" not in out + err
+    (merge,) = merges(gh)
+    assert merge[1] == ["pr", "merge", "300", "--repo", REPO, "--squash", "--match-head-commit", HEAD]
+    # its branch is gone on GitHub and here, and the group's worktree with it, as soon as `merge` returns
+    assert ("delete ref", f"repos/{REPO}/git/refs/heads/slice/{b}") in gh.writes and f"slice/{b}" not in gh.branches
+    assert not wt.exists() and not _git("branch", "--list", f"slice/{b}", cwd=repo)
+    for t in (a, b):   # closed as completed (by GitHub, or by `merge` when it hadn't), read back
+        assert (gh.issues[t]["state"], gh.issues[t]["state_reason"]) == ("closed", "completed")
+    closes = [w for w in gh.writes if w[0] == "close"]
+    assert len(closes) == (0 if autoclose else 2)
+    assert gh.issues[c]["state"] == "open"
+    for n in (a, b, epic):   # a record on each ticket and on the debt epic
+        (rec,) = merged_records(gh, n)
+        assert (rec["pr"], rec["sha"], rec["group"], rec["pass"], rec["tickets"], rec["debt_epic"]) == \
+            ("300", HEAD, "debt-1-1", "1", f"{a},{b}", str(epic))
+    body = next(c["body"] for c in gh.comments[epic] if "kind=debt-merged" in c["body"])
+    assert ("closed by GitHub (`Closes #" if autoclose else "closed by `merge`") in body
+    assert f"merged PR #300 into main; #{a}, #{b} closed; slice/{b} deleted on GitHub and here" in out
+    assert f"/work-slice {c} --debt" in out.split("next:", 1)[1]   # the next group of the pass
+
+
+def test_a_single_ticket_debt_pr_takes_the_debt_gate_too(gh, repo, capsys, main_gate):
+    epic, (a, _, _), wt = due_group(gh, repo, capsys, groups=(((0,), "routine"), ((1, 2), "routine")))
+    code, out, err = run(capsys, "merge", 300)
+    assert code == 0, err
+    assert merged_records(gh, a) and merged_records(gh, epic) and not wt.exists()
+
+
+def add_unpassed(gh, epic):
+    """A ticket of the debt epic through intake but in no pass, closed by PR #300 too."""
+    t = gh.ticket("late debt")
+    gh.subs[epic].append(t)
+    gh.intake(t)
+    gh.prs[300]["body"] += f"\nCloses #{t}"
+
+
+REFUSALS = {
+    "base not main": (lambda gh, t: gh.prs[300].update(baseRefName="epic/12"), "PR targets epic/12, not main"),
+    "behind": (lambda gh, t: gh.behind.update({HEAD: 3}), "the head is 3 commit(s) behind main"),
+    "another group's ticket": (lambda gh, t: gh.prs[300].update(body=gh.prs[300]["body"] + f"\nCloses #{t[2]}"),
+                               "aren't one claimed debt group"),
+    "not in the pass": (lambda gh, t: add_unpassed(gh, t[3]), "isn't in the current pass of debt epic"),
+    "closed": (lambda gh, t: gh.issues[t[0]].update(state="closed", state_reason="completed"),
+               "is closed: a debt PR closes only open tickets"),
+    "pass ended": (lambda gh, t: gh.say(t[3], sdlc.DEBT_PASS_END_KIND, **{"pass": "1"}),
+                   "isn't in the current pass of debt epic"),
+    "no run": (lambda gh, t: gh.comments[300].pop(0), "no recorded test run on the current head"),
+    "failed run": (lambda gh, t: gh.say(300, "tests", sha=HEAD, result="fail", passed="9"), "the tests failed on"),
+    "no review": (lambda gh, t: gh.comments[300].pop(1), "no Codex review of the current head"),
+    "changes asked": (lambda gh, t: gh.say(300, "pr-review", sha=HEAD, verdict="changes", round="2"),
+                      "asks for changes"),
+    "not mergeable": (lambda gh, t: gh.prs[300].update(mergeable="CONFLICTING"), "GitHub says the PR conflicts"),
+    "unknown mergeable": (lambda gh, t: gh.prs[300].update(mergeable="UNKNOWN"), "still computing mergeability"),
+    "draft": (lambda gh, t: gh.prs[300].update(isDraft=True), "PR is a draft"),
+    "github closes more": (lambda gh, t: gh.closing.update({300: [t[0], t[1], 999]}), "GitHub will close #"),
+    "a review deferred": (lambda gh, t: (gh.comments[300].pop(1),
+                                         gh.say(300, "review-deferred", sha=HEAD)), "never deferred"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(REFUSALS))
+def test_each_failing_condition_is_refused_and_nothing_is_merged(gh, repo, capsys, main_gate, case):
+    epic, tickets, wt = due_group(gh, repo, capsys)
+    change, want = REFUSALS[case]
+    change(gh, [*tickets, epic])
+    writes = len(gh.writes)
+    for flags in ((), ("--dry-run",)):
+        code, _, err = run(capsys, "merge", 300, *flags)
+        assert code == 1 and want in err, err
+    assert len(gh.writes) == writes and not merges(gh) and wt.exists()
+    assert f"slice/{tickets[1]}" in gh.branches
+
+
+def test_every_refusal_is_listed_at_once(gh, repo, capsys, main_gate):
+    epic, (a, b, c), _ = due_group(gh, repo, capsys, records=False)
+    gh.prs[300].update(baseRefName="epic/12", mergeable="CONFLICTING")
+    gh.behind[HEAD] = 2
+    gh.issues[a].update(state="closed", state_reason="completed")
+    code, _, err = run(capsys, "merge", 300)
+    assert code == 1 and not merges(gh)
+    for want in ("PR targets epic/12, not main", "2 commit(s) behind main", f"#{a} is closed",
+                 "no Codex review of the current head", "no recorded test run", "GitHub says the PR conflicts"):
+        assert want in err, want
+
+
+def test_merge_from_inside_the_groups_worktree_is_refused_before_the_squash(gh, repo, capsys, main_gate, monkeypatch):
+    _, _, wt = due_group(gh, repo, capsys)
+    monkeypatch.chdir(wt)
+    code, _, err = run(capsys, "merge", 300)
+    assert code == 1 and "from the primary checkout" in err and "Nothing was merged" in err
+    assert not merges(gh) and wt.exists()
+
+
+def test_a_cleanup_left_over_is_named_with_its_exact_command_after_the_merge_counts(gh, repo, capsys, main_gate):
+    epic, (a, b, _), wt = due_group(gh, repo, capsys)
+    (wt / "stray.txt").write_text("untracked\n")   # `git worktree remove` without --force refuses
+    code, _, err = run(capsys, "merge", 300)
+    assert code == 1 and len(merges(gh)) == 1
+    named = f"cd {repo.resolve()} && uv run python tools/sdlc.py cleanup {a} --force"
+    assert named in err and "closed and recorded" in err
+    for n in (a, b, epic):   # the merge counted: tickets closed and every record posted
+        assert merged_records(gh, n)
+    assert gh.issues[a]["state"] == "closed" and wt.exists()
+    # the command it names does the job, through the merged group's claim
+    code, _, err = run(capsys, *named.split("tools/sdlc.py ", 1)[1].split())
+    assert code == 0, err
+    assert not wt.exists() and not _git("branch", "--list", f"slice/{b}", cwd=repo)
+
+
+def test_a_branch_github_kept_is_named(gh, repo, capsys, main_gate, monkeypatch):
+    _, (_, b, _), _ = due_group(gh, repo, capsys)
+    real = gh.api
+
+    def keeps_branch(rest):
+        if rest[0] == "-X" and "git/refs/heads" in rest[2]:
+            return ""
+        return real(rest)
+    monkeypatch.setattr(gh, "api", keeps_branch)
+    code, _, err = run(capsys, "merge", 300)
+    assert code == 1 and f"slice/{b} is still on GitHub" in err and "-X DELETE" in err
+
+
+def test_merge_dry_run_shows_the_squash_and_writes_nothing(gh, repo, capsys, main_gate):
+    epic, (a, b, _), wt = due_group(gh, repo, capsys)
+    writes = len(gh.writes)
+    code, out, err = run(capsys, "merge", 300, "--dry-run")
+    assert code == 0, err
+    assert f"would squash-merge debt PR #300 (group `debt-1-1`: #{a}, #{b}) into main at {HEAD[:12]}" in out
+    assert "kind=debt-merged" in out and len(gh.writes) == writes and wt.exists()
+
+
+def test_state_d_says_merge_debt_and_every_view_names_the_merge_with_the_gate(gh, repo, capsys, main_gate):
+    epic, (a, b, c), _ = due_group(gh, repo, capsys)
+    st = ticket_state(capsys, epic)
+    assert (st["action"], st["turn"]) == ("merge_debt", "agent")
+    want = sdlc.merge_next(300, [])
+    assert st["next"].startswith(want) and "gate: ok" in st["next"] and "debt group `debt-1-1` of pass 1" in st["next"]
+    for t in (a, b):
+        assert ticket_state(capsys, t)["next"] == want
+        s = status(capsys, t)
+        assert s["merge_due"] and s["gate"] == [] and s["next"] == want
+    code, out, _ = run(capsys, "slice-status", a)
+    assert f"next: {want}" in out
+    # the gate refuses now (main moved on): every view still names the merge, with what the gate says
+    gh.behind[HEAD] = 1
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "merge_debt" and "gate still refuses: the head is 1 commit(s) behind main" in st["next"]
+    assert "gate still refuses: the head is 1 commit(s) behind main" in ticket_state(capsys, a)["next"]
+    assert "gate still refuses: the head is 1 commit(s) behind main" in status(capsys, b)["next"]
+    # `next` lists the debt epic's merge
+    code, out, _ = run(capsys, "next", "--json")
+    assert code == 0 and "merge_debt" in out
+
+
+def test_without_both_records_on_its_head_the_group_is_still_being_built(gh, repo, capsys, main_gate):
+    epic, (a, _, _), _ = due_group(gh, repo, capsys)
+    gh.prs[300]["headRefOid"] = "c" * 40   # a new push: the records are on the old head
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "work_debt" and "merge " not in st["next"]
+    assert status(capsys, a)["next"] == f"/work-slice {a} --debt"
+
+
+def test_merge_debt_comes_before_intake_and_is_offline_without_a_gate():
+    progress = {"tickets": [{"number": 1, "labels": [DEBT]}, {"number": 2, "intake": "debt", "labels": [DEBT]}],
+                "passes": [], "prs": [{"group": "debt-1-1", "pass": 1, "pr": 300, "head": HEAD, "due": True},
+                                      {"group": "debt-1-2", "pass": 1, "pr": 301, "head": HEAD, "due": True}]}
+    st = sdlc.debt_view({"number": 250}, progress)
+    assert st["action"] == "merge_debt" and st["next"].startswith(sdlc.merge_next(300, None))
+    assert "; then PR #301; meanwhile: intake on debt epic #250: 1 ticket(s) without a verdict (#1)" in st["next"]
+
+
+def test_merge_of_a_debt_pr_runs_main_s_gate_code_first(gh, repo, capsys, monkeypatch):
+    due_group(gh, repo, capsys)
+    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR": ["tools/sdlc.py differs from origin/main's"])
+    calls = []
+    monkeypatch.setattr(sdlc, "gh", lambda args, **k: calls.append(args) or pytest.fail(f"gh {args} before the check"))
+    code, _, err = run(capsys, "merge", 300)
+    assert code == 1 and "differs from origin/main's" in err and not calls
+
+
+def test_closing_refs_reads_another_repo_and_refuses_what_it_cannot_read():
+    raw = {"closingIssuesReferences": [{"number": 5, "repository": {"name": "r", "owner": {"login": "o"}}},
+                                       {"number": 6, "repository": {"name": "x", "owner": {"login": "y"}}}]}
+    assert sdlc.closing_refs(raw, "o/r") == ["#5", "y/x#6"]
+    for bad in (None, {}, {"closingIssuesReferences": [{"number": "5"}]}):
+        with pytest.raises(ValueError):
+            sdlc.closing_refs(bad, "o/r")
+
+
+def test_the_debt_gate_s_base_is_main_whatever_the_running_config_says(gh, repo, capsys, main_gate, monkeypatch):
+    _, _, wt = due_group(gh, repo, capsys)
+    gh.prs[300]["baseRefName"] = "epic/12"
+    monkeypatch.setattr(sdlc, "load_config", lambda *a, **k: {**CONFIG, "default_branch": "epic/12"})
+    code, _, err = run(capsys, "merge", 300)
+    assert code == 1 and "PR targets epic/12, not main" in err and not merges(gh) and wt.exists()
+
+
+def test_an_escalated_group_s_approved_pr_is_never_offered_to_merge(gh, repo, capsys, main_gate):
+    epic, (a, b, c), _ = due_group(gh, repo, capsys)
+    gh.issues[a]["labels"].append(sdlc.ESCALATED_LABEL)
+    st = ticket_state(capsys, epic)   # the other group goes on; the escalated one needs a person, as slice-status says
+    assert st["action"] == "work_debt" and st["next"].startswith(f"/work-slice {c} --debt")
+    assert "needs a human: `debt-1-1`" in st["next"] and "merge 300" not in st["next"]
+    assert status(capsys, b)["state"] == "escalated" and not status(capsys, b)["merge_due"]
+
+
+def test_while_a_merge_is_due_the_pass_s_next_group_is_still_named(gh, repo, capsys, main_gate):
+    epic, (_, _, c), _ = due_group(gh, repo, capsys)
+    gh.behind[HEAD] = 1   # the gate refuses for now: the work that can go on is not hidden behind it
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "merge_debt" and "gate still refuses" in st["next"]
+    assert f"; meanwhile: /work-slice {c} --debt (sonnet: routine): pass 1's group `debt-1-2` (#{c})" in st["next"]
+
+
+def test_a_failure_on_the_second_ticket_after_the_squash_still_says_what_is_left(gh, repo, capsys, main_gate,
+                                                                                   monkeypatch, tmp_path):
+    import tempfile
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    epic, (a, b, _), wt = due_group(gh, repo, capsys)
+    real = sdlc.fetch_slice
+
+    def flaky(n, config):   # the second ticket can't be read back once the PR has merged
+        if n == b and merges(gh):
+            raise sdlc.SdlcError(f"gh api repos/{REPO}/issues/{n} failed: HTTP 502")
+        return real(n, config)
+    monkeypatch.setattr(sdlc, "fetch_slice", flaky)
+    code, _, err = run(capsys, "merge", 300)
+    assert code == 1 and len(merges(gh)) == 1
+    assert f"merged PR #300 into main at {HEAD[:12]}, then: " in err and "HTTP 502" in err
+    assert "gh issue close T --reason completed" in err and f"on #{epic}" in err
+    path = err.split("--body-file ")[1].split("`")[0]
+    text = Path(path).read_text()
+    assert "kind=debt-merged" in text and f"#{a} closed by GitHub" in text and f"#{b} closed" not in text
+    assert not merged_records(gh, a) and not merged_records(gh, epic)   # nothing half-posted
