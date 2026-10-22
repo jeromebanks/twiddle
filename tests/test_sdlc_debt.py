@@ -2309,3 +2309,48 @@ def test_the_pass_end_rule_reads_only_the_frozen_counts():
               pass_record(2, [2], at=3), ended(2, 2, 1, 4)]   # an end record without counts never counts as growth
     assert view(tickets, legacy)["action"] == "plan_pass"
     assert view([], level)["action"] == "pass_end" and view([], level)["debt"]["pass_end"]["close"] is True
+
+
+def test_merge_attaches_debt_the_epic_doesnt_hold_before_deciding_to_close(gh, repo, capsys, main_gate):
+    epic, (a, b, c), _ = due_group(gh, repo, capsys, groups=(((0,), "routine"),))
+    done(gh, b, c)
+    loose = gh.ticket("filed, but its attach failed")   # open tech debt in no debt epic
+    code, out, err = run(capsys, "merge", 300)
+    assert code == 0, err
+    assert loose in gh.subs[epic] and gh.issues[epic]["state"] == "open" and "sdlc:done" not in gh.issues[epic]["labels"]
+    (end,) = ends(gh, epic)
+    assert (end["joined"], end["closed"]) == ("1", "1")
+    assert ticket_state(capsys, epic)["action"] == "debt_intake"   # the attached ticket goes through intake next
+
+
+def test_debt_closed_by_intake_during_the_pass_did_not_join_it(gh, capsys):
+    epic, (a, b) = ready(gh, 2)
+    post_pass(gh, epic, 1, a)
+    dup, kept = join(gh, epic, 2)
+    gh.issues[dup]["state"], gh.issues[dup]["state_reason"] = "closed", "not_planned"   # a duplicate, closed by intake
+    done(gh, a)
+    assert run(capsys, "debt-epic")[0] == 0
+    (end,) = ends(gh, epic)
+    assert (end["joined"], end["closed"]) == ("1", "1")
+    assert f"Joined during it: 1 (#{kept})." in next(c["body"] for c in gh.comments[epic] if "kind=debt-pass-end" in c["body"])
+
+
+def test_a_close_cut_short_after_the_label_is_finished_by_a_rerun(gh, capsys, monkeypatch):
+    epic, (a,) = ready(gh, 1)
+    post_pass(gh, epic, 1, a)
+    done(gh, a)
+    real = sdlc.gh
+
+    def cut(args, **kw):
+        if list(args[:2]) == ["issue", "close"]:
+            raise sdlc.SdlcError("gh issue close failed: HTTP 502")
+        return real(args, **kw)
+    monkeypatch.setattr(sdlc, "gh", cut)
+    assert run(capsys, "debt-epic")[0] == 1
+    assert gh.issues[epic]["state"] == "open" and "sdlc:done" in gh.issues[epic]["labels"]   # labelled first
+    monkeypatch.setattr(sdlc, "gh", real)
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "pass_end" and f"close debt epic #{epic} as sdlc:done" in st["next"]
+    assert "record the end" not in st["next"]   # the record is posted: only the close is left
+    assert run(capsys, "debt-epic")[0] == 0
+    assert gh.issues[epic]["state"] == "closed" and len(ends(gh, epic)) == 1

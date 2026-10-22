@@ -3116,7 +3116,8 @@ def pass_end_due(open_pass: dict[str, Any], tickets: list[dict[str, Any]]) -> bo
 
 def pass_end_counts(p: dict[str, Any], progress: dict[str, Any]) -> dict[str, list[int]]:
     """{joined, closed} of pass `p`, ending now. `closed`: the pass's tickets now closed. `joined`: the debt epic's
-    sub-issues, in any state and not in the pass, filed (created) at or after the pass was posted. Without
+    sub-issues not in the pass, filed (created) at or after the pass was posted and still open: one intake closed
+    (`fixed`, `duplicate`) added no debt, as one it sent to triage (detached) didn't. Without
     `members` (an offline view) its open tickets stand in, and a pass ticket no longer among them counts closed."""
     tickets, members = progress.get("tickets") or [], progress.get("members")
     if members is None:
@@ -3125,8 +3126,8 @@ def pass_end_counts(p: dict[str, Any], progress: dict[str, Any]) -> dict[str, li
     else:
         closed = [m["number"] for m in members if m["number"] in p["tickets"] and m.get("state") == "closed"]
     since = p.get("posted_at") or ""
-    joined = [m["number"] for m in members
-              if m["number"] not in p["tickets"] and since and (m.get("created_at") or "") >= since]
+    joined = [m["number"] for m in members if m["number"] not in p["tickets"] and m.get("state", "open") == "open"
+              and since and (m.get("created_at") or "") >= since]
     return {"joined": joined, "closed": closed}
 
 
@@ -3325,17 +3326,22 @@ def command_debt_epic(args: argparse.Namespace, config: dict[str, Any]) -> int:
     as a sub-issue (read back); then, on the open one, what a pass's end writes (debt_epic_pass_end). Idempotent:
     a rerun creates, attaches and posts nothing."""
     load_debt(config)   # a bad `debt` section is refused before anything is written
-    trusted = fetch_trusted(config)
+    debt_epic_reconcile(config, fetch_trusted(config), args.dry_run)
+    return 0
+
+
+def debt_epic_reconcile(config: dict[str, Any], trusted: set[str], dry_run: bool) -> None:
+    """`debt-epic`'s whole run, which `merge` of a debt PR runs too: attach every open tech-debt ticket first (so
+    a pass's end never closes the epic while debt it doesn't hold yet is open), then the pass end's writes."""
     epic = the_debt_epic(config, trusted)
     tickets = open_debt_tickets(config)
     if not tickets:
         print("no open tech-debt issues: nothing to attach" + (f" (debt epic #{epic['number']} is open)" if epic
                                                                else ", and no debt epic is opened"))
     else:
-        epic = attach_open_debt(epic, tickets, config, args.dry_run)
+        epic = attach_open_debt(epic, tickets, config, dry_run)
     if epic is not None and epic["id"] is not None:   # a dry run's "new" epic has no pass to end
-        debt_epic_pass_end(epic["number"], config, trusted, args.dry_run)
-    return 0
+        debt_epic_pass_end(epic["number"], config, trusted, dry_run)
 
 
 def attach_open_debt(epic: dict[str, Any] | None, tickets: list[dict[str, Any]], config: dict[str, Any],
@@ -5662,7 +5668,7 @@ def merge_debt(args: argparse.Namespace, config: dict[str, Any], pr: dict[str, A
                         f"record on each of {who} and on #{epic}: `gh issue comment N --body-file {fh.name}`"
                         + "".join(f"; {x}" for x in left))
     try:   # the pass's last work merged: its end, and what follows it (the next pass, the close, or a person)
-        debt_epic_pass_end(epic, config, trusted, dry_run=False)
+        debt_epic_reconcile(config, trusted, dry_run=False)
     except SdlcError as exc:
         left.append(f"the pass-end check failed ({exc}): `uv run python tools/sdlc.py debt-epic` finishes it")
     if left:
