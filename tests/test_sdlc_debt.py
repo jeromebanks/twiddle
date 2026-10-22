@@ -2701,8 +2701,7 @@ def test_a_kept_branch_another_claim_holds_is_not_adopted_and_a_fresh_claim_neve
     assert claim_of(gh, b)["branch"] == f"slice/{a}"
     writes = len(gh.writes)
     code, out, err = run(capsys, "claim", a, "--debt")
-    assert code == 1 and f"slice/{a} (kept by debt group `debt-1-1`) is held by #{b}'s claim" in out
-    assert f"slice/{a} already exists: debt group `debt-1-1` (pass 1) was built in it" in err
+    assert code == 1 and f"slice/{a}, the work debt group `debt-1-1` kept" in err and f"held by #{b}'s claim" in err
     assert len(gh.writes) == writes and claim_of(gh, a) is None
 
 
@@ -2802,5 +2801,44 @@ def test_a_kept_branch_claimed_by_a_ticket_outside_its_old_group_is_not_adopted(
     post_pass(gh, epic, 3, a)
     writes = len(gh.writes)
     code, out, err = run(capsys, "claim", a, "--debt")
-    assert code == 1 and f"slice/{a} (kept by debt group `debt-1-1`) is held by #{c}'s claim" in out
-    assert f"slice/{a} already exists" in err and len(gh.writes) == writes and claim_of(gh, a) is None
+    assert code == 1 and f"slice/{a}, the work debt group `debt-1-1` kept" in err and f"held by #{c}'s claim" in err
+    assert len(gh.writes) == writes and claim_of(gh, a) is None
+
+
+def test_a_returning_ticket_whose_kept_branch_another_claim_holds_never_starts_fresh(gh, repo, capsys, ask, monkeypatch):
+    """Codex round 2: [A, B] withdraws keeping slice/A; A adopts it in pass 2 and escalates; B, back in pass 3, must
+    not get a fresh slice/B from main, leaving the kept work behind."""
+    epic, (a, b) = posted_pass(gh, [((0, 1), "routine")], n=2)
+    assert run(capsys, "claim", a, "--debt")[0] == 0
+    commit_in(repo / ".worktrees" / f"slice-{a}", monkeypatch)
+    for t in (b, a):
+        assert run(capsys, "debt-request", t, "--body-file", ask)[0] == 0
+    assert run(capsys, "debt-epic")[0] == 0
+    reply(gh, a)
+    reply(gh, b)
+    post_pass(gh, epic, 2, a)
+    assert "ADOPTED=debt-1-1" in run(capsys, "claim", a, "--debt")[1]
+    assert run(capsys, "escalate-slice", a, "--reason", "stuck")[0] == 0
+    assert run(capsys, "debt-epic")[0] == 0 and len(ends(gh, epic)) == 2
+    post_pass(gh, epic, 3, b)
+    writes = len(gh.writes)
+    code, out, err = run(capsys, "claim", b, "--debt")
+    assert code == 1 and f"slice/{a}, the work debt group `debt-1-1` kept" in err and f"held by #{a}'s claim" in err
+    assert len(gh.writes) == writes and claim_of(gh, b) is None
+    assert not (repo / ".worktrees" / f"slice-{b}").exists() and on_origin(repo, f"slice/{b}") is None
+
+
+def test_a_fresh_claim_never_builds_on_a_branch_its_old_group_still_holds(gh, repo, capsys, ask):
+    """A, the claimer, left [A, B]; B's group escalated and kept slice/A as pass 1 ended. A, back alone in pass 2,
+    has nothing kept to adopt, and its own slice/A is still the old group's: refused, never built on top of."""
+    epic, (a, b) = posted_pass(gh, [((0, 1), "routine")], n=2)
+    assert run(capsys, "claim", a, "--debt")[0] == 0
+    assert run(capsys, "debt-request", a, "--body-file", ask)[0] == 0
+    assert run(capsys, "escalate-slice", b, "--reason", "stuck")[0] == 0
+    assert run(capsys, "debt-epic")[0] == 0
+    reply(gh, a)
+    post_pass(gh, epic, 2, a)
+    writes = len(gh.writes)
+    code, _, err = run(capsys, "claim", a, "--debt")
+    assert code == 1 and f"slice/{a} already exists: debt group `debt-1-1` (pass 1) was built in it" in err
+    assert len(gh.writes) == writes and claim_of(gh, a) is None

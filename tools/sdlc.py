@@ -4564,11 +4564,11 @@ def command_debt_request(args: argparse.Namespace, config: dict[str, Any]) -> in
 
 
 def adoptable(b: dict[str, Any], members: list[int], config: dict[str, Any]) -> dict[str, Any] | None:
-    """The kept place (`kept_places`) a fresh claim of `members` adopts, or None to start fresh. A place counts while
-    its branch still exists (here or on origin) and no open ticket's claim holds it: every open ticket of the debt
-    epic and of the group that kept it is read, since a branch may have been adopted, and claimed, by tickets that
-    were never in that group. Two places on different branches are refused: one claim never silently leaves a
-    member's saved work behind; a person merges them or discards one first."""
+    """The kept place (`kept_places`) a fresh claim of `members` adopts, or None to start fresh (none is kept, or
+    its branch is gone: merged or removed). One claim never silently leaves a member's saved work behind, so it is
+    refused while a kept branch is held by an open ticket's claim (every open ticket of the debt epic and of the
+    group that kept it is read: a branch may have been adopted, and claimed, by tickets never in that group), and
+    when the members' work is kept on two branches (a person merges them or discards one first)."""
     trusted, have, root = set(b["trusted"]), debt_members(b), primary_root()
     found = sorted((k for t in members if t in have for k in kept_places(have[t][1], trusted)),
                    key=lambda k: k["at"], reverse=True)
@@ -4595,10 +4595,11 @@ def adoptable(b: dict[str, Any], members: list[int], config: dict[str, Any]) -> 
             if ti.get("state", "open") == "open" and (c or {}).get("debt") and c.get("branch") == k["branch"]:
                 holder = (t, c)
                 break
-        if holder:
-            print(f"{k['branch']} (kept by debt group `{k['group']}`) is held by #{holder[0]}'s claim "
-                  f"({holder[1]['url']}): not adopted")
-            continue
+        if holder:   # saved work another claim is building on: never left behind for a fresh start
+            raise SdlcError(f"{k['branch']}, the work debt group `{k['group']}` kept for this group's tickets "
+                            f"({k['url']}), is held by #{holder[0]}'s claim ({holder[1]['url']}): a claim here would "
+                            "leave that work behind. Once that claim's work merges or a person releases it, claim "
+                            "again. Nothing was claimed")
         live[k["branch"]] = k
     if len(live) > 1:
         raise SdlcError("this group's tickets hold work kept on more than one branch ("
