@@ -112,7 +112,7 @@ class FakeGitHub:
     def __init__(self, monkeypatch, root, labels):
         self.root, self.origin = root, root.parent / "origin.git"
         self.labels = set(labels)
-        self.issues, self.prs, self.comments, self.blocked_by = {}, {}, {}, {}
+        self.issues, self.prs, self.comments, self.blocked_by, self.sub_issues = {}, {}, {}, {}, {}
         self.calls = []
         self._number, self._id, self._clock = 10, 900, 0
         monkeypatch.setattr(sdlc, "gh", self.gh)
@@ -342,6 +342,19 @@ class FakeGitHub:
             if not body.startswith("body=@"):
                 pytest.fail(f"gh api {rest}: a comment body is posted from a file")
             return json.dumps(self.say(n, OWNER, Path(body[len("body=@"):]).read_text()))
+        if method == "POST" and tail == ["issues"]:   # the debt epic, opened by `file-issue --debt`
+            payload = json.loads(Path(flag(rest, "--input")).read_text())
+            if missing := [l for l in payload["labels"] if l not in self.labels]:
+                raise GhError(f"could not add label: {missing}")
+            n = self.new_issue(payload["title"], payload["body"], payload["labels"], author=OWNER)
+            return json.dumps(self.issue_rest(self.issues[n]))
+        if method == "POST" and tail[0] == "issues" and tail[2:] == ["sub_issues"]:
+            payload = json.loads(Path(flag(rest, "--input")).read_text())
+            child = next(i for i in self.issues.values() if i["id"] == payload["sub_issue_id"])
+            if any(child["number"] in subs for subs in self.sub_issues.values()):
+                raise GhError("HTTP 422: Sub issue may only have one parent")
+            self.sub_issues.setdefault(int(tail[1]), []).append(child["number"])
+            return json.dumps(self.issue_rest(self.issue(tail[1])))
         if method == "PATCH" and tail[:2] == ["issues", "comments"]:
             c = next((c for cs in self.comments.values() for c in cs if c["id"] == int(tail[2])), None)
             if c is None:
@@ -382,6 +395,8 @@ class FakeGitHub:
             if n not in self.comments:
                 raise GhError("HTTP 404: Not Found")
             return self.page(rest, list(self.comments[n]))
+        if tail[0] == "issues" and tail[2:] == ["sub_issues"]:
+            return self.page(rest, [self.issue_rest(self.issues[c]) for c in self.sub_issues.get(int(tail[1]), [])])
         if tail[0] == "issues" and tail[2:] == ["dependencies", "blocked_by"]:
             return self.page(rest, [self.issue_rest(self.issues[b]) for b in self.blocked_by.get(int(tail[1]), [])])
         if tail[0] == "pulls" and tail[2:] == ["files"]:
@@ -772,23 +787,27 @@ def test_when_codex_cannot_run_the_pr_stays_open_until_a_person_escalates_it(lan
 
 
 def test_debt_filed_on_a_quick_change_follows_it_to_the_full_lane(lane):
-    """#225: debt filed while the change was quick says it waits in the open tech-debt list; once the change is
-    escalated it is an epic's debt, picked up by its cleanup pass, and its marker and lead line say so."""
+    """#225, #247: debt filed while the change was quick joins the debt epic (opened for it) as a quick change's;
+    once the change is escalated it is an epic's debt, and its marker and lead line say so. Its generation is
+    kept, so it is never derived to wait on the escalated epic's milestones."""
     gh = lane.gh
     n = lane.quick_issue()
     lane.claim(n)
-    other = gh.new_issue("Other debt", sdlc.debt_head(n + 100, "review", True) + "\n\nNot this change's.",
+    other = gh.new_issue("Other debt", sdlc.debt_head(n + 100, "review", quick=True) + "\n\nNot this change's.",
                          ["tech-debt"], author=OWNER)
     body = lane.scratch / "debt.md"
     body.write_text("The station's tags are a guess.")
-    url = lane.ok("file-issue", n, "--debt", "--source", "review", "--title", "Psyched FM: tags", "--body-file", body)
-    debt = int(url.strip().rsplit("/", 1)[1])
-    assert "lane=quick" in gh.issues[debt]["body"].splitlines()[0]
-    assert "waiting in the open `tech-debt` list" in lane.state(debt)["next"]
+    out = lane.ok("file-issue", n, "--debt", "--source", "review", "--title", "Psyched FM: tags", "--body-file", body)
+    debt = int(out.splitlines()[1].strip().rsplit("/", 1)[1])   # after "opened debt epic #E"
+    epic = next(k for k, i in gh.issues.items() if "lane:debt" in i["labels"])
+    assert out.splitlines()[0] == f"opened debt epic #{epic}" and gh.sub_issues[epic] == [debt]
+    assert gh.issues[debt]["body"].splitlines()[0].endswith("lane=quick generation=1 -->")
+    assert lane.state(debt)["next"].startswith(f"nothing for #{debt} alone: it is tech debt in debt epic #{epic} (")
     out = lane.ok("escalate-to-full", n, "--reason", "it needs a plan after all")
-    assert f"#{debt} (tech debt from #{n}) now waits for #{n}'s cleanup pass" in out
-    assert gh.issues[debt]["body"] == (sdlc.debt_head(n, "review", False) + "\n\nThe station's tags are a guess.\n")
-    assert lane.state(debt)["next"].startswith(f"nothing: #{debt} is tech debt, planned by its epic's cleanup pass")
+    assert f"#{debt} (tech debt from #{n}) is now an epic's debt" in out
+    assert gh.issues[debt]["body"] == (sdlc.debt_head(n, "review", debt_epic=epic) + "\n\nThe station's tags are a guess.\n")
+    st = lane.state(debt)
+    assert (st["debt_lane"], st["debt_generation"], st["waiting_for"]) == (None, 1, None)
     assert "lane=quick" in gh.issues[other]["body"]                 # another change's debt is left alone
     assert debt in sdlc.open_debt(n, lane.cfg, {OWNER})            # what the cleanup pass reads
 

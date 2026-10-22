@@ -364,12 +364,14 @@ def test_file_issue_dry_run(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, config, trusted=None: fetched.append(n) or {
         "issue": {"number": n, "title": "an epic", "state": "open", "author": "owner", "labels": ["sdlc:in-progress"]},
         "comments": [], "trusted": ["owner"]})
+    monkeypatch.setattr(sdlc, "the_debt_epic", lambda config, trusted: {"number": 250, "id": 9250})
     f = tmp_path / "debt.md"
     f.write_text("`alarm list` sorts rooms case-sensitively.")
     assert sdlc.main(["file-issue", "12", "--title", "alarm list: room order", "--body-file", str(f), "--debt",
                       "--source", "review", "--dry-run"]) == 0
     out = capsys.readouterr().out
-    assert "--label tech-debt" in out and "kind=debt epic=12 source=review" in out
+    assert "--label tech-debt" in out and "kind=debt epic=12 source=review generation=1 -->" in out
+    assert "would attach the new issue to debt epic #250" in out
     assert fetched == [12]
     assert sdlc.main(["file-issue", "12", "--title", "x", "--body-file", str(f), "--dry-run"]) == 0
     out = capsys.readouterr().out
@@ -450,11 +452,12 @@ def test_a_demo_request_ends_when_the_milestone_goes_back_to_being_built():
     assert other["action"] == "demo_heard"
 
 
-def test_tech_debt_waits_for_its_epics_cleanup_pass():
+def test_tech_debt_is_never_triaged_or_built_alone():
     st = sdlc.derive_state({"number": 81, "title": "t", "state": "open", "author": OWNER, "labels": ["tech-debt"]},
                            [], TRUSTED, CONFIG)
     assert (st["turn"], st["plan_kind"]) == ("none", "debt")
-    assert sdlc.next_command(st).startswith("nothing: #81 is tech debt, planned by its epic's cleanup pass")
+    assert sdlc.next_command(st).startswith("`uv run python tools/sdlc.py debt-epic` (#81 is tech debt in no open")
+    assert sdlc.next_command({**st, "debt_epic": 250}).startswith("nothing for #81 alone: it is tech debt in debt epic #250")
     assert sdlc.check_transition(st, "triage", "note", CONFIG)
 
 

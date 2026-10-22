@@ -33,7 +33,7 @@ class FakeGitHub:
         return n
 
     def ticket(self, title="debt", **kw):
-        return self.issue(title, [DEBT], body="<!-- sdlc:v1 kind=debt epic=12 source=review -->\nTech debt.", **kw)
+        return self.issue(title, [DEBT], body="<!-- sdlc:v1 kind=debt epic=12 source=review generation=1 -->\nTech debt.", **kw)
 
     def debt_epic(self, author=OWNER, state="open"):
         return self.issue("Tech debt", [EPIC_LABEL, "sdlc:in-progress"], author=author, state=state,
@@ -43,6 +43,29 @@ class FakeGitHub:
         self.comments[n].append({"id": len(self.comments[n]) + 1, "user": {"login": author},
                                  "body": sdlc.marker(sdlc.INTAKE_KIND, None, verdict=verdict) + "\nIt is debt.",
                                  "created_at": "2026-10-21T00:00:00Z", "html_url": f"u{n}"})
+
+    def say(self, n, kind, rev=None, **extra):
+        """A marked comment by the owner on #n, as the tool posts it."""
+        self.comments[n].append({"id": len(self.comments[n]) + 1, "user": {"login": OWNER},
+                                 "body": sdlc.render_comment(kind, rev, "text", CONFIG, **extra),
+                                 "created_at": f"2026-10-21T00:00:{len(self.comments[n]):02d}Z", "html_url": f"u{n}"})
+
+    def feature_epic(self, created=("M1",), shipped=()):
+        """A feature epic being built: its milestones' issues created, some shipped to main."""
+        n = self.issue("a feature", ["sdlc:in-progress", "enhancement"], author=STRANGER)
+        self.say(n, "prd", 1)
+        self.say(n, "approval", 1, by=STRANGER, via="comment")
+        if created:
+            self.say(n, "plan-created", created=",".join(created))
+        for m in shipped:
+            self.say(n, "shipped", milestone=m, sha="a" * 40)
+        return n
+
+    def quick_change(self):
+        n = self.issue("a station", ["sdlc:in-progress", "complexity:routine"], author=STRANGER)
+        self.say(n, "prd", 1, lane="quick")
+        self.say(n, "approval", 1, by=STRANGER, via="comment")
+        return n
 
     def rest(self, i):
         return {"number": i["number"], "id": i["id"], "title": i["title"], "state": i["state"], "body": i["body"],
@@ -58,6 +81,17 @@ class FakeGitHub:
             return json.dumps([{"number": i["number"], "title": i["title"], "state": "OPEN", "author": {"login": i["author"]},
                                 "labels": [{"name": l} for l in i["labels"]], "createdAt": ""}
                                for i in self.issues.values() if i["state"] == "open"])
+        if args[:2] == ["issue", "create"]:
+            labels = [args[k + 1] for k, a in enumerate(args) if a == "--label"]
+            assert not [l for l in labels if l not in self.labels], f"a label that doesn't exist: {labels}"
+            body = Path(args[args.index("--body-file") + 1]).read_text()
+            n = self.issue(args[args.index("--title") + 1], labels, body=body)
+            self.writes.append(("issue create", {"number": n, "labels": labels, "body": body}))
+            return f"https://github.com/{REPO}/issues/{n}\n"
+        if args[:2] == ["issue", "edit"]:
+            self.issues[int(args[2])]["body"] = Path(args[args.index("--body-file") + 1]).read_text()
+            self.writes.append(("issue edit", int(args[2])))
+            return ""
         if args[:2] == ["issue", "view"]:
             i = self.issues[int(args[2])]
             return json.dumps({"number": i["number"], "title": i["title"], "state": i["state"].upper(),
@@ -93,6 +127,8 @@ class FakeGitHub:
             state = query.get("state", ["open"])[0]
             return page([self.rest(i) for i in self.issues.values()
                          if want <= set(i["labels"]) and state in ("all", i["state"])])
+        if tail[0] == "issues" and len(tail) == 2:
+            return json.dumps(self.rest(self.issues[int(tail[1])]))
         if tail[0] == "issues" and tail[2:] == ["sub_issues"]:
             return page([self.rest(self.issues[c]) for c in self.subs.get(int(tail[1]), [])])
         if tail[0] == "issues" and tail[2:] == ["comments"]:
@@ -307,7 +343,7 @@ def test_state_of_a_ticket_names_its_debt_epic(gh, capsys):
     assert f"next: nothing for #{t} alone: it is tech debt in debt epic #{epic}" in out
     code, out, _ = run(capsys, "state", loose, "--json")
     st = json.loads(out)
-    assert st["debt_epic"] is None and st["next"].startswith(f"nothing: #{loose} is tech debt, planned by")
+    assert st["debt_epic"] is None and st["next"].startswith("`uv run python tools/sdlc.py debt-epic` (")
 
 
 def test_state_of_a_ticket_offline_takes_its_epic_from_the_bundle(tmp_path, capsys, monkeypatch):
@@ -386,3 +422,230 @@ def test_next_finds_old_debt_behind_a_full_issue_list(gh, monkeypatch, capsys, w
         assert [(s["number"], s["action"]) for s in listed] == [(epic, "debt_intake")]
     else:
         assert [(s["number"], s["unattached"]) for s in listed] == [(None, [old])]
+
+
+# --- file-issue --debt: joins the debt epic, with a generation and what it waits for ----------------------
+
+@pytest.fixture
+def body_file(tmp_path):
+    f = tmp_path / "debt.md"
+    f.write_text("The thing the feature needed to support itself.")
+    return f
+
+
+def file_it(capsys, n, body_file, *extra):
+    return run(capsys, "file-issue", n, "--debt", "--source", "review", "--title", "a debt", "--body-file", body_file,
+               *extra)
+
+
+def filed(gh):
+    (w,) = [p for path, p in gh.writes if path == "issue create"]
+    return w["number"], sdlc.parse_marker(w["body"]), w["body"]
+
+
+@pytest.mark.parametrize("source", ["feature", "quick", "demo"])
+def test_debt_joins_the_open_debt_epic_with_generation_1(gh, capsys, body_file, source):
+    epic = gh.debt_epic()
+    n = gh.quick_change() if source == "quick" else gh.feature_epic(created=("M1",), shipped=("M1",))
+    code, out, err = run(capsys, "file-issue", n, "--debt", "--source", "demo" if source == "demo" else "review",
+                         "--title", "a debt", "--body-file", body_file)
+    assert code == 0, err
+    t, mk, body = filed(gh)
+    assert gh.issues[t]["labels"] == [DEBT] and gh.subs[epic] == [t] and gh.created() == []
+    assert (mk["epic"], mk["generation"], mk.get("waits")) == (str(n), "1", None)
+    assert (mk.get("lane") == "quick") == (source == "quick")
+    assert f"It joins debt epic #{epic}, whose passes work it into `main`." in body
+    assert "cleanup pass" not in body and "open `tech-debt` list" not in body
+    assert out.splitlines()[0].endswith(f"/issues/{t}") and f"#{t} joined debt epic #{epic}" in out
+
+
+def test_debt_opens_a_debt_epic_when_none_is_open(gh, capsys, body_file):
+    n = gh.feature_epic(shipped=("M1",))
+    code, out, err = file_it(capsys, n, body_file)
+    assert code == 0, err
+    (made,) = gh.created()
+    epic = next(k for k, i in gh.issues.items() if i["title"] == "Tech debt")
+    t, _, body = filed(gh)
+    assert made["labels"] == [EPIC_LABEL, "sdlc:in-progress"] and gh.subs[epic] == [t]
+    assert f"debt epic #{epic}" in body.splitlines()[1] and f"opened debt epic #{epic}" in out
+
+
+@pytest.mark.parametrize("label", [EPIC_LABEL, DEBT])
+def test_debt_without_its_labels_is_refused_before_anything_is_written(gh, capsys, body_file, label):
+    gh.labels.discard(label)
+    n = gh.feature_epic()
+    code, _, err = file_it(capsys, n, body_file)
+    assert code == 1 and "bootstrap-labels" in err and label in err and gh.writes == []
+
+
+def test_debt_with_two_open_debt_epics_is_refused_before_anything_is_written(gh, capsys, body_file):
+    a, b = gh.debt_epic(), gh.debt_epic()
+    code, _, err = file_it(capsys, gh.feature_epic(), body_file)
+    assert code == 1 and f"#{a}, #{b}" in err and gh.writes == []
+
+
+def test_debt_github_wont_attach_is_filed_and_names_debt_epic(gh, capsys, body_file):
+    epic = gh.debt_epic()
+    n = gh.feature_epic(shipped=("M1",))
+    gh.reject.add(gh.next_n + 1)   # the ticket about to be filed
+    code, out, err = file_it(capsys, n, body_file)
+    t, _, _ = filed(gh)
+    assert code == 1 and f"/issues/{t}" in out and gh.subs.get(epic, []) == []
+    assert f"#{t} is filed, but debt epic #{epic} doesn't hold it" in err and "debt-epic" in err
+
+
+def test_debt_of_a_debt_ticket_is_its_generation_plus_1_until_max(gh, capsys, body_file):
+    epic = gh.debt_epic()
+    first = gh.ticket()   # generation 1, from #12
+    code, _, err = file_it(capsys, first, body_file)
+    assert code == 0, err
+    second, mk, body = filed(gh)
+    assert (mk["epic"], mk["generation"], mk.get("waits")) == (str(first), "2", None)   # epic= is its source
+    assert f"Tech debt from debt ticket #{first} (review), generation 2" in body and gh.subs[epic] == [second]
+    # max_generation is 2: debt of a generation-2 ticket is refused, and names the ordinary file-issue
+    before = list(gh.writes)
+    code, _, err = file_it(capsys, second, body_file)
+    assert code == 1 and gh.writes == before
+    assert f"#{second} is generation-2 tech debt and debt.max_generation is 2" in err
+    assert f"`uv run python tools/sdlc.py file-issue {second} --title ... --body-file ...` (without --debt)" in err
+    code, _, err = run(capsys, "file-issue", second, "--title", "x", "--body-file", body_file)   # that one works
+    assert code == 0, err
+
+
+def test_an_old_debt_ticket_is_generation_1(gh, capsys, body_file):
+    gh.debt_epic()
+    old = gh.issue("old debt", [DEBT], body="<!-- sdlc:v1 kind=debt epic=12 source=review -->\nTech debt.")
+    assert file_it(capsys, old, body_file)[0] == 0
+    assert filed(gh)[1]["generation"] == "2"
+
+
+def test_a_bad_generation_is_refused_not_guessed(gh, capsys, body_file):
+    gh.debt_epic()
+    bad = gh.issue("bad", [DEBT], body="<!-- sdlc:v1 kind=debt epic=12 source=review generation=0 -->\nTech debt.")
+    code, _, err = file_it(capsys, bad, body_file)
+    assert code == 1 and "bad generation" in err and gh.writes == []
+
+
+@pytest.mark.parametrize("what", ["debt epic", "slice"])
+def test_debt_against_the_debt_epic_or_a_slice_is_refused(gh, capsys, body_file, what):
+    n = (gh.debt_epic() if what == "debt epic" else
+         gh.issue("a slice", ["plan:slice"], body=sdlc.marker("slice", None, epic="12", key="A1")))
+    code, _, err = file_it(capsys, n, body_file)
+    assert code == 1 and gh.writes == []
+    assert ("the debt ticket whose PR found it" if what == "debt epic" else "file its debt against the epic") in err
+
+
+# --- what it waits for: the feature milestone being built, until it ships to main --------------------------
+
+def ticket_state(capsys, t):
+    code, out, err = run(capsys, "state", t, "--json")
+    assert code == 0, err
+    return json.loads(out)
+
+
+def test_debt_of_an_unshipped_milestone_waits_for_it_to_ship(gh, capsys, body_file):
+    epic = gh.debt_epic()
+    n = gh.feature_epic(created=("M1",))
+    assert file_it(capsys, n, body_file)[0] == 0
+    t, mk, body = filed(gh)
+    assert mk["waits"] == f"{n}:M1" and body.splitlines()[1].endswith(f"once #{n}'s M1 has shipped to `main`.")
+    st = ticket_state(capsys, t)
+    assert (st["debt_of"], st["debt_generation"], st["debt_epic"]) == (str(n), 1, epic)
+    assert st["waiting_for"] == {"epic": n, "milestone": "M1"}
+    assert f"waiting for #{n}'s M1 to ship to main" in st["next"]
+    code, out, _ = run(capsys, "state", t)
+    assert f"tech debt of #{n}, generation 1; waits for #{n}'s M1 to ship to main" in out
+    gh.say(n, "shipped", milestone="M1", sha="b" * 40)   # recorded shipped: it no longer waits
+    st = ticket_state(capsys, t)
+    assert st["waiting_for"] is None and "waiting" not in st["next"]
+
+
+def test_two_milestones_one_shipped(gh, capsys, body_file):
+    """Codex on the plan: with M1 shipped and M2 created, new debt waits for M2; a ticket that waited for M1 no
+    longer waits; an old marker (no generation) is derived to wait for M2."""
+    gh.debt_epic()
+    n = gh.feature_epic(created=("M1", "M2"), shipped=("M1",))
+    assert file_it(capsys, n, body_file)[0] == 0
+    new, mk, _ = filed(gh)
+    assert mk["waits"] == f"{n}:M2"
+    on_m1 = gh.issue("m1 debt", [DEBT], body=sdlc.debt_head(n, "review", waits="M1", debt_epic=1))
+    old = gh.issue("old debt", [DEBT], body=f"<!-- sdlc:v1 kind=debt epic={n} source=review -->\nTech debt.")
+    assert ticket_state(capsys, new)["waiting_for"] == {"epic": n, "milestone": "M2"}
+    assert ticket_state(capsys, on_m1)["waiting_for"] is None
+    st = ticket_state(capsys, old)
+    assert (st["debt_generation"], st["debt_of"], st["waiting_for"]) == (1, str(n), {"epic": n, "milestone": "M2"})
+
+
+def test_an_old_debt_ticket_reports_its_source_and_waits_only_when_derived(gh, capsys):
+    epic = gh.debt_epic()
+    done = gh.feature_epic(created=("M1",), shipped=("M1",))
+    building = gh.feature_epic(created=("M1",))
+    quick = gh.quick_change()
+    old = {k: gh.issue("old", [DEBT], body=f"<!-- sdlc:v1 kind=debt epic={src} source=review{lane} -->\nTech debt.")
+           for k, src, lane in [("done", done, ""), ("building", building, ""), ("quick", quick, " lane=quick")]}
+    gh.subs[epic] = list(old.values())
+    for k, t in old.items():
+        st = ticket_state(capsys, t)
+        src = {"done": done, "building": building, "quick": quick}[k]
+        assert (st["debt_generation"], st["debt_of"], st["debt_epic"]) == (1, str(src), epic)   # its source, not #epic
+        assert st["waiting_for"] == ({"epic": building, "milestone": "M1"} if k == "building" else None)
+
+
+def test_debt_of_a_quick_change_or_a_shipped_epic_never_waits(gh, capsys, body_file):
+    gh.debt_epic()
+    for n in (gh.quick_change(), gh.feature_epic(created=()), gh.feature_epic(shipped=("M1",))):
+        gh.writes.clear()
+        assert file_it(capsys, n, body_file)[0] == 0
+        assert "waits" not in filed(gh)[1]
+
+
+def test_state_of_a_waiting_ticket_offline_reads_its_source_from_the_bundle(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("--from-file reads the bundle only"))
+    ticket = {"number": 77, "title": "t", "state": "open", "author": OWNER, "labels": [DEBT],
+              "body": sdlc.debt_head(12, "review", waits="M1", debt_epic=250)}
+    source = {"issue": {"number": 12, "title": "e", "state": "open", "author": OWNER, "labels": ["sdlc:in-progress"]},
+              "comments": []}
+    b = {"issue": ticket, "comments": [], "trusted": [OWNER], "debt_epic": 250}
+    assert state_from_file(tmp_path, capsys, b)["waiting_for"] == {"epic": 12, "milestone": "M1"}   # can't see a ship
+    st = state_from_file(tmp_path, capsys, {**b, "source": source})
+    assert st["waiting_for"] == {"epic": 12, "milestone": "M1"}
+    source["comments"] = [{"id": 1, "author": OWNER, "created_at": "t", "url": "u",
+                           "body": sdlc.render_comment("shipped", None, "x", CONFIG, milestone="M1", sha="c" * 40)}]
+    assert state_from_file(tmp_path, capsys, {**b, "source": source})["waiting_for"] is None
+
+
+# --- --dry-run: the issue and the attachment, nothing written ----------------------------------------------
+
+def test_file_issue_dry_run_shows_the_issue_and_the_attachment(gh, capsys, body_file):
+    epic = gh.debt_epic()
+    n = gh.feature_epic(created=("M1",))
+    code, out, err = file_it(capsys, n, body_file, "--dry-run")
+    assert code == 0, err
+    assert gh.writes == []
+    lines = out.splitlines()
+    assert lines[0].startswith("would run: gh issue create") and "--label tech-debt" in lines[0]
+    assert lines[1] == f"<!-- sdlc:v1 kind=debt epic={n} source=review generation=1 waits={n}:M1 -->"
+    assert f"It joins debt epic #{epic}" in lines[2] and lines[-1] == f"would attach the new issue to debt epic #{epic}"
+    del gh.issues[epic]   # none open: it says it would open one
+    code, out, _ = file_it(capsys, n, body_file, "--dry-run")
+    assert code == 0 and gh.writes == [] and "would open the debt epic 'Tech debt'" in out
+    assert out.splitlines()[-1] == "would attach the new issue to debt epic #new"
+
+
+def test_readdressed_quick_debt_keeps_its_generation_and_names_its_debt_epic(gh, capsys):
+    """An escalated quick change's debt: `lane=quick` goes, `generation=` stays (written even on a pre-#247 marker,
+    so nothing is derived from the escalated epic), and the lead is rewritten unless someone edited it by hand."""
+    epic = gh.debt_epic()
+    new = gh.issue("new", [DEBT], body=sdlc.debt_head(12, "review", quick=True, debt_epic=epic) + "\n\nWhy.")
+    pre = gh.issue("pre", [DEBT], body="<!-- sdlc:v1 kind=debt epic=12 source=demo lane=quick -->\n"
+                                       "Tech debt from quick change #12 (demo): not blocking. A quick change has no "
+                                       "epic.\n\nWhy.")
+    edited = gh.issue("edited", [DEBT], body=sdlc.marker("debt", None, epic="12", source="review", lane="quick",
+                                                          generation="1") + "\nA lead written by hand.\n\nWhy.")
+    gh.subs[epic] = [new, pre]
+    sdlc.readdress_quick_debt(12, CONFIG, {OWNER})
+    assert gh.issues[new]["body"] == sdlc.debt_head(12, "review", debt_epic=epic) + "\n\nWhy."
+    assert gh.issues[pre]["body"] == sdlc.debt_head(12, "demo", debt_epic=epic) + "\n\nWhy."
+    assert gh.issues[edited]["body"] == ("<!-- sdlc:v1 kind=debt epic=12 source=review generation=1 -->\n"
+                                         "A lead written by hand.\n\nWhy.")
+    assert capsys.readouterr().out.count("is now an epic's debt") == 3

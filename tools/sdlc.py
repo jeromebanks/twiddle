@@ -404,7 +404,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
               "action": "none", "plan_kind": plan_kind, "conflicts": []}
         if plan_kind == "debt":   # where it came from, from its own marker: issue N is never looked up (it may be closed)
             mk = parse_marker(issue.get("body", "")) or {}
-            st.update(debt_of=mk.get("epic"), debt_lane=mk.get("lane"))
+            st.update(debt_of=mk.get("epic"), debt_lane=mk.get("lane"), debt_generation=debt_generation(mk),
+                      debt_waits=mk.get("waits"), debt_legacy="generation" not in mk)
         return st
     debt_epic = DEBT_EPIC_LABEL in issue.get("labels", [])
     all_labels = state_labels(config)
@@ -588,6 +589,61 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
 is_quick = sdlc_quick.is_quick     # a quick change: its latest or its approved revision is in the quick lane
 
 
+def debt_generation(mk: dict[str, str]) -> int | None:
+    """A debt marker's generation: 1 from a feature, a quick change or a demo, its ticket's + 1 from a debt PR. An
+    old marker (no `generation=`) is generation 1; one that isn't a positive whole number is None, never a guess."""
+    g = mk.get("generation", "1")
+    return int(g) if g.isdigit() and int(g) > 0 else None
+
+
+def unshipped_milestone(src: dict[str, Any]) -> str | None:
+    """The feature epic's earliest created milestone not yet shipped to main (the one `merge` builds now), from its
+    state alone: debt filed against it waits for that ship. None for a quick change, a debt ticket or epic, an
+    epic with no milestone created, or one whose created milestones have all shipped."""
+    if src.get("plan_kind") or is_quick(src) or is_debt_epic(src):
+        return None
+    shipped = src.get("shipped") or {}
+    return next((m for m in src.get("created_milestones") or [] if m not in shipped), None)
+
+
+def debt_wait_source(st: dict[str, Any]) -> int | None:
+    """The epic whose state says whether this debt ticket still waits: the one its `waits=` names, or, for an old
+    marker (no generation) that isn't a quick change's, its source epic. A new marker without `waits=` never waits."""
+    if st.get("debt_waits"):
+        epic = st["debt_waits"].split(":", 1)[0]
+        return int(epic) if epic.isdigit() else None
+    if st.get("debt_legacy") and st.get("debt_lane") != QUICK and (st.get("debt_of") or "").isdigit():
+        return int(st["debt_of"])
+    return None
+
+
+def debt_waiting_for(st: dict[str, Any], src: dict[str, Any] | None) -> dict[str, Any] | None:
+    """{epic, milestone} a debt ticket waits for (no pass takes it until that milestone ships to main), or None.
+    `src` is the state of debt_wait_source's epic; without it an explicit `waits=` is taken as still waiting (its
+    ship can't be seen), and an old marker as not waiting (nothing to derive it from)."""
+    epic = debt_wait_source(st)
+    if epic is None:
+        return None
+    if st.get("debt_waits"):
+        ms = st["debt_waits"].split(":", 1)[1] if ":" in st["debt_waits"] else ""
+        if not ms:
+            return None
+        return None if src is not None and ms in (src.get("shipped") or {}) else {"epic": epic, "milestone": ms}
+    ms = unshipped_milestone(src) if src is not None else None
+    return {"epic": epic, "milestone": ms} if ms else None
+
+
+def debt_ticket_next(st: dict[str, Any]) -> str:
+    """`next` for a tech-debt ticket: its debt epic works it (or `debt-epic` attaches it to one first)."""
+    n, held = st["number"], st.get("debt_epic")
+    if not held:
+        return f"`uv run python tools/sdlc.py debt-epic` (#{n} is tech debt in no open debt epic: it attaches it)"
+    w = st.get("waiting_for")
+    return (f"nothing for #{n} alone: it is tech debt in debt epic #{held}"
+            + (f", waiting for #{w['epic']}'s {w['milestone']} to ship to main" if w else "")
+            + f" (`uv run python tools/sdlc.py state {held}` says what is due)")
+
+
 def is_debt_epic(st: dict[str, Any]) -> bool:
     """The debt epic (`lane:debt`): its tickets are worked through passes, never through a feature epic's plan."""
     return st.get("lane") == DEBT_LANE
@@ -614,18 +670,12 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
     `progress` (from epic_progress) is needed for an epic whose slices are being built.
     """
     n, a = st["number"], st["action"]
-    if st.get("plan_kind") == "debt" and st.get("debt_epic"):
-        return (f"nothing for #{n} alone: it is tech debt in debt epic #{st['debt_epic']} "
-                f"(`uv run python tools/sdlc.py state {st['debt_epic']}` says what is due)")
+    if st.get("plan_kind") == "debt":
+        return debt_ticket_next(st)
     if is_debt_epic(st) and st.get("debt") is not None:   # debt_view, applied by with_next
         return st["debt"]["next"]
     if is_debt_epic(st) and a == "none" and st["turn"] == "agent":   # debt_view not applied: its tickets are needed
         return f"`uv run python tools/sdlc.py state {n}` (needs the debt epic's tickets)"
-    if st.get("plan_kind") == "debt" and st.get("debt_lane") == QUICK:
-        return (f"nothing: #{n} is tech debt from quick change #{st.get('debt_of')}, waiting in the open `{DEBT_LABEL}` "
-                f"list (a quick change has no epic and no cleanup pass; remove `{DEBT_LABEL}` to triage it alone)")
-    if st.get("plan_kind") == "debt":
-        return f"nothing: #{n} is tech debt, planned by its epic's cleanup pass (remove `{DEBT_LABEL}` to triage it alone)"
     if st.get("plan_kind"):
         return f"`uv run python tools/sdlc.py slice-status {n}`"
     if a in TRIAGE_ACTIONS:
@@ -1082,7 +1132,12 @@ def set_state_label(n: int, current: list[str], to: str, config: dict[str, Any],
 def print_state(st: dict[str, Any]) -> None:
     if st.get("plan_kind"):
         print(f"#{st['number']} {st['title']}\n  a plan:{st['plan_kind']} issue"
-              + (f"\n  in debt epic #{st['debt_epic']}" if st.get("debt_epic") else "") + f"\n  next: {st.get('next')}")
+              + (f"\n  in debt epic #{st['debt_epic']}" if st.get("debt_epic") else ""))
+        if st["plan_kind"] == "debt":
+            w = st.get("waiting_for")
+            print(f"  tech debt of #{st.get('debt_of') or '?'}, generation {st.get('debt_generation') or '? (a bad marker)'}"
+                  + (f"; waits for #{w['epic']}'s {w['milestone']} to ship to main" if w else ""))
+        print(f"  next: {st.get('next')}")
         return
     doc = st["latest_doc"]
     print(f"#{st['number']} {st['title']}")
@@ -1153,7 +1208,13 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
     if st.get("plan_kind") == "debt":   # the ticket's debt epic, if one holds it (offline: the bundle's `debt_epic`)
         held_by = ((bundle or {}).get("debt_epic") if offline else
                    ticket_debt_epic(st["number"], config, trusted if trusted is not None else fetch_trusted(config)))
-        st = {**st, "debt_epic": held_by}
+        # what it waits for, from the epic its marker points at (offline: the bundle's `source`, that epic's bundle)
+        src = None
+        if (wait_on := debt_wait_source(st)) is not None:
+            sb = ((bundle or {}).get("source") if offline else
+                  fetch_bundle(wait_on, config, trusted if trusted is not None else fetch_trusted(config)))
+            src = bundle_state({"trusted": (bundle or {}).get("trusted", []), **sb}, config) if sb else None
+        st = {**st, "debt_epic": held_by, "waiting_for": debt_waiting_for(st, src)}
     if is_debt_epic(st) and st["action"] == "none" and st["turn"] == "agent":
         # what the debt epic has due comes from its tickets (offline: the bundle's `debt`, {"tickets": [...]})
         load_debt(config)
@@ -3039,6 +3100,23 @@ DEBT_EPIC_BODY = ("Tech debt: work a feature needed to support itself, filed wit
                   "`uv run python tools/sdlc.py state` on this issue says what is due.")
 
 
+def require_debt_epic_labels(config: dict[str, Any], *also: str) -> None:
+    """Refuse (before anything is written) when the debt epic's labels (and `also`) don't exist: without its label
+    a rerun can't find the epic, and would open a second one."""
+    have = {l["name"] for l in gh_json(["label", "list", "--repo", repo_of(config), "--limit", "200", "--json", "name"])}
+    if missing := [l for l in (DEBT_EPIC_LABEL, f"{PREFIX}in-progress", *also) if l not in have]:
+        raise SdlcError(f"labels {missing} do not exist: run `bootstrap-labels` first (nothing was created)")
+
+
+def open_debt_epic(config: dict[str, Any]) -> dict[str, Any]:
+    """Open the debt epic ({number, id}); the caller has checked none is open and its labels exist."""
+    made = post_json(f"repos/{repo_of(config)}/issues", {
+        "title": "Tech debt", "labels": [DEBT_EPIC_LABEL, f"{PREFIX}in-progress"],
+        "body": f"{marker(DEBT_EPIC_KIND)}\n{DEBT_EPIC_BODY}\n"})
+    print(f"opened debt epic #{made['number']}")
+    return {"number": made["number"], "id": made["id"]}
+
+
 def command_debt_epic(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Open the debt epic if open tech debt exists and none is open, and attach every open tech-debt ticket to it
     as a sub-issue (read back). Idempotent: a rerun creates and attaches nothing."""
@@ -3053,19 +3131,9 @@ def command_debt_epic(args: argparse.Namespace, config: dict[str, Any]) -> int:
         return 0
     if epic is None:
         if not args.dry_run:
-            have = {l["name"] for l in gh_json(["label", "list", "--repo", repo, "--limit", "200", "--json", "name"])}
-            if missing := [l for l in (DEBT_EPIC_LABEL, f"{PREFIX}in-progress") if l not in have]:
-                # without its label a rerun can't find the epic, and would open a second one
-                raise SdlcError(f"labels {missing} do not exist: run `bootstrap-labels` first (nothing was created)")
+            require_debt_epic_labels(config)
         say(f"open the debt epic 'Tech debt' [{DEBT_EPIC_LABEL}, {PREFIX}in-progress]")
-        if args.dry_run:
-            epic = {"number": "new", "id": None}
-        else:
-            made = post_json(f"repos/{repo}/issues", {
-                "title": "Tech debt", "labels": [DEBT_EPIC_LABEL, f"{PREFIX}in-progress"],
-                "body": f"{marker(DEBT_EPIC_KIND)}\n{DEBT_EPIC_BODY}\n"})
-            epic = {"number": made["number"], "id": made["id"]}
-            print(f"opened debt epic #{epic['number']}")
+        epic = {"number": "new", "id": None} if args.dry_run else open_debt_epic(config)
     held = set() if epic["id"] is None else {s["number"] for s in sub_issues(epic["number"], config)}
     todo = [t for t in tickets if t["number"] not in held]
     failed: list[str] = []
@@ -5323,20 +5391,26 @@ def command_demo_request(args: argparse.Namespace, config: dict[str, Any]) -> in
     return 0
 
 
-def debt_head(n: int, source: str, quick: bool) -> str:
-    """A debt issue's first two lines: its marker, and where it waits (a quick change's open list, or #n's cleanup)."""
-    if quick:
-        return (f"{marker('debt', None, epic=str(n), source=source, lane=QUICK)}\n"
-                f"Tech debt from quick change #{n} ({source}): not blocking. A quick change has no epic and no cleanup "
-                f"pass, so it waits in the open `{DEBT_LABEL}` list (`gh issue list --label {DEBT_LABEL}`).")
-    return (f"{marker('debt', None, epic=str(n), source=source)}\n"
-            f"Tech debt from #{n} ({source}): not blocking, budgeted into a cleanup pass after a milestone is accepted.")
+def debt_head(n: int, source: str, *, generation: int = 1, quick: bool = False, of_debt: bool = False,
+              waits: str | None = None, debt_epic: int | None = None) -> str:
+    """A debt issue's first two lines: its marker (`epic=` is always where it came from, never the debt epic) and a
+    lead naming the debt epic it joins and, for debt of a feature milestone not yet on main, the ship it waits for."""
+    extra = {"lane": QUICK} if quick else {}
+    extra["generation"] = str(generation)
+    if waits:
+        extra["waits"] = f"{n}:{waits}"
+    origin = f"quick change #{n}" if quick else f"debt ticket #{n}" if of_debt else f"#{n}"
+    joins = f"debt epic #{debt_epic}" if debt_epic else "the debt epic"
+    return (f"{marker('debt', None, epic=str(n), source=source, **extra)}\n"
+            f"Tech debt from {origin} ({source}), generation {generation}: not blocking. It joins {joins}, whose "
+            f"passes work it into `main`" + (f", once #{n}'s {waits} has shipped to `main`." if waits else "."))
 
 
 def readdress_quick_debt(n: int, config: dict[str, Any], trusted: set[str]) -> None:
-    """#n has left the quick lane, so debt filed against it while it was quick waits for its cleanup pass now:
-    rewrite each open one's marker and lead line as an epic's (`debt_head`). Best effort, and safe to rerun: a
-    failure is printed, never raised, since #n's escalation itself is done."""
+    """#n has left the quick lane, so debt filed against it while it was quick is an epic's debt now: drop
+    `lane=quick` from each open one's marker (its generation is kept, so nothing is derived from #n's milestones)
+    and rewrite its lead (`debt_head`). Best effort, and safe to rerun: a failure is printed, never raised, since
+    #n's escalation itself is done."""
     try:
         raw = gh_pages(f"repos/{repo_of(config)}/issues?labels={DEBT_LABEL.replace(':', '%3A')}&state=open&per_page=100")
         for r in raw:
@@ -5344,50 +5418,115 @@ def readdress_quick_debt(n: int, config: dict[str, Any], trusted: set[str]) -> N
             if ("pull_request" in r or (r.get("user") or {}).get("login") not in trusted
                     or mk.get("kind") != "debt" or mk.get("epic") != str(n) or mk.get("lane") != QUICK):
                 continue
-            old, new = debt_head(n, mk.get("source", "?"), True), debt_head(n, mk.get("source", "?"), False)
+            kept = {k: v for k, v in mk.items() if k not in ("kind", "lane")}
+            kept.setdefault("generation", "1")   # quick debt is always generation 1: written, so it never derives
             lines = body.split("\n", 2)
-            fixed = (new + body[len(old):] if body.startswith(old)
-                     else "\n".join([new.split("\n")[0], *lines[1:]]))   # a lead edited by hand: only the marker
+            if len(lines) > 1 and lines[1].startswith(f"Tech debt from quick change #{n} ("):
+                held = ticket_debt_epic(r["number"], config, trusted)
+                head = debt_head(n, mk.get("source", "?"), generation=debt_generation(kept) or 1, debt_epic=held)
+                fixed = "\n".join([head, *lines[2:]])
+            else:   # a lead edited by hand: only the marker
+                fixed = "\n".join([marker("debt", None, **kept), *lines[1:]])
             with tempfile.NamedTemporaryFile("w", suffix=".md") as fh:
                 fh.write(fixed)
                 fh.flush()
                 gh(["issue", "edit", str(r["number"]), "--repo", repo_of(config), "--body-file", fh.name])
-            print(f"#{r['number']} (tech debt from #{n}) now waits for #{n}'s cleanup pass")
+            print(f"#{r['number']} (tech debt from #{n}) is now an epic's debt, no longer a quick change's")
     except Exception as exc:
-        print(f"warning: #{n}'s open quick-lane tech debt may still say it waits in the `{DEBT_LABEL}` list: {exc} "
+        print(f"warning: #{n}'s open quick-lane tech debt may still say it is a quick change's: {exc} "
               f"(by hand: drop ` lane={QUICK}` from each one's first line, the marker)", file=sys.stderr)
 
 
+def debt_origin(n: int, bundle: dict[str, Any], st: dict[str, Any], rules: DebtRules) -> dict[str, Any]:
+    """What `file-issue N --debt` records of where the debt came from: {generation, quick, of_debt, waits}.
+    Generation 1 from a feature epic, a quick change or a demo; N's generation + 1 when N is itself a debt ticket
+    (its PR found it), refused at debt.max_generation. Debt of a feature epic waits for its milestone being built."""
+    plain = f"`uv run python tools/sdlc.py file-issue {n} --title ... --body-file ...` (without --debt)"
+    if st.get("plan_kind") == "debt":
+        g = st.get("debt_generation")
+        if g is None:
+            raise SdlcError(f"#{n}'s debt marker has a bad generation: fix its first line, or file an ordinary "
+                            f"issue for triage with {plain}")
+        if g >= rules.max_generation:
+            raise SdlcError(f"#{n} is generation-{g} tech debt and debt.max_generation is {rules.max_generation}: "
+                            f"debt of it is not filed as debt. File an ordinary issue for triage with {plain}")
+        return {"generation": g + 1, "quick": False, "of_debt": True, "waits": None}
+    if st.get("plan_kind"):
+        epic = (parse_marker(bundle["issue"].get("body") or "") or {}).get("epic", "?")
+        raise SdlcError(f"#{n} is a plan:{st['plan_kind']} of epic #{epic}: file its debt against the epic "
+                        f"(`file-issue {epic} --debt ...`)")
+    if is_debt_epic(st):
+        raise SdlcError(f"#{n} is the debt epic: file debt against the debt ticket whose PR found it")
+    quick = st.get("lane") == QUICK
+    return {"generation": 1, "quick": quick, "of_debt": False, "waits": None if quick else unshipped_milestone(st)}
+
+
 def command_file_issue(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """File something found while building or demoing an epic or a quick change as its own issue: tech debt, or
-    new for triage. Debt from a quick change (by its current lane in the ledger: one escalated to the full lane is
-    an epic) has no cleanup pass to wait for, so it says it waits in the open tech-debt list, and its marker says
-    `lane=quick`."""
+    """File something found while building or demoing an epic, a quick change or a debt ticket as its own issue:
+    tech debt, or new for triage. Debt joins the open debt epic at once (one is opened if none), with its
+    generation and, for debt of a feature milestone not yet on main, what it waits for (`debt_origin`)."""
     title, body = args.title.strip(), Path(args.body_file).read_text().strip()
     if hits := identifier_hits(title + "\n" + body):
         raise SdlcError("the issue would contain " + ", ".join(hits) + ": the repo is public")
     if args.from_file and not args.dry_run:
         raise SdlcError("--from-file reads a saved bundle, not GitHub: use it with --dry-run")
-    kind = "debt" if args.debt else "finding"
-    quick = args.debt and bundle_state(load_bundle(args, config), config).get("lane") == QUICK
-    if args.debt:
-        head = debt_head(args.number, args.source, quick)
-    else:
-        head = (f"{marker(kind, None, epic=str(args.number), source=args.source)}\n"
-                f"Found while working on #{args.number} ({args.source}).")
-    full = f"{head}\n\n{body}\n"
-    cmd = ["issue", "create", "--repo", repo_of(config), "--title", title]
-    if args.debt:
-        cmd += ["--label", DEBT_LABEL]
-    if args.dry_run:
-        print(f"would run: gh {' '.join(cmd)} --body-file <body>\n{full}")
+    repo = repo_of(config)
+    cmd = ["issue", "create", "--repo", repo, "--title", title]
+    if not args.debt:
+        full = (f"{marker('finding', None, epic=str(args.number), source=args.source)}\n"
+                f"Found while working on #{args.number} ({args.source}).\n\n{body}\n")
+        if args.dry_run:
+            print(f"would run: gh {' '.join(cmd)} --body-file <body>\n{full}")
+            return 0
+        print(file_body(cmd, full).strip())
         return 0
-    with tempfile.NamedTemporaryFile("w", suffix=".md") as fh:
-        fh.write(full)
-        fh.flush()
-        url = gh(cmd + ["--body-file", fh.name])
-    print(url.strip())
+    rules = load_debt(config)
+    bundle = load_bundle(args, config)
+    origin = debt_origin(args.number, bundle, bundle_state(bundle, config), rules)
+    # the open debt epic (offline: the bundle's `debt_epic`); two open is refused here, before anything is written
+    if args.from_file:
+        epic = {"number": bundle["debt_epic"]} if bundle.get("debt_epic") else None
+    else:
+        epic = the_debt_epic(config, set(bundle["trusted"]))
+        if epic is None and not args.dry_run:   # tech-debt too: a ticket refused after the epic opened leaves it empty
+            require_debt_epic_labels(config, DEBT_LABEL)
+    cmd += ["--label", DEBT_LABEL]
+    if args.dry_run:
+        head = debt_head(args.number, args.source, debt_epic=epic and epic["number"], **origin)
+        print(f"would run: gh {' '.join(cmd)} --body-file <body>\n{head}\n\n{body}\n")
+        if epic is None:
+            print(f"would open the debt epic 'Tech debt' [{DEBT_EPIC_LABEL}, {PREFIX}in-progress]")
+        print(f"would attach the new issue to debt epic #{epic['number'] if epic else 'new'}")
+        return 0
+    if epic is None:
+        epic = open_debt_epic(config)
+    head = debt_head(args.number, args.source, debt_epic=epic["number"], **origin)
+    url = file_body(cmd, f"{head}\n\n{body}\n").strip()
+    print(url)
+    attach_debt(epic["number"], int(url.rsplit("/", 1)[1]), config)
     return 0
+
+
+def file_body(cmd: list[str], body: str) -> str:
+    """`gh issue create` with the body from a file; its URL."""
+    with tempfile.NamedTemporaryFile("w", suffix=".md") as fh:
+        fh.write(body)
+        fh.flush()
+        return gh(cmd + ["--body-file", fh.name])
+
+
+def attach_debt(epic: int, n: int, config: dict[str, Any]) -> None:
+    """Add the new debt ticket #n to the debt epic as a sub-issue, and read it back. The ticket is filed either way:
+    when it isn't held, the error names `debt-epic`, which attaches every open tech-debt ticket."""
+    repo, why = repo_of(config), ""
+    try:
+        post_json(f"repos/{repo}/issues/{epic}/sub_issues", {"sub_issue_id": gh_json(["api", f"repos/{repo}/issues/{n}"])["id"]})
+    except SdlcError as exc:
+        why = f" ({exc})"
+    if not any(s["number"] == n for s in sub_issues(epic, config)):
+        raise SdlcError(f"#{n} is filed, but debt epic #{epic} doesn't hold it{why}: "
+                        "run `uv run python tools/sdlc.py debt-epic` to attach it")
+    print(f"#{n} joined debt epic #{epic}")
 
 
 def main(argv: list[str] | None = None) -> int:
