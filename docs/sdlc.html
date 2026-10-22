@@ -227,7 +227,7 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <td><code>work_slices</code> → <code>/work-slice S</code></td></tr>
 <tr><td><span class="chip">sdlc:in-progress</span></td><td class="turn agent">agent</td>
 <td>Slices are built one per session. When a milestone is complete, it's demoed. Once accepted, it ships to <code>main</code>. Then the next milestone is planned and built.</td>
-<td><code>work_slices</code> → <code>/work-slice S</code>, <code>/milestone-demo N</code>, <code>sync N</code>, or <code>/plan-issue N</code> (<code>plan_next_milestone</code>, <code>--cleanup</code>, or demo feedback)</td></tr>
+<td><code>work_slices</code> → <code>/work-slice S</code>, <code>/milestone-demo N</code>, <code>sync N</code>, or <code>/plan-issue N</code> (<code>plan_next_milestone</code> or demo feedback)</td></tr>
 <tr><td><span class="chip">sdlc:in-progress</span> with a demo request</td><td class="turn poster">a person</td>
 <td>A demo step would make a real speaker play, so the agent asks on the issue for someone to run it and say what they heard.</td>
 <td><code>wait_for_poster</code>, then <code>demo_heard</code> → <code>/milestone-demo N</code></td></tr>
@@ -504,8 +504,6 @@ as a pull request (<code>ship-review</code>). Nothing is shown to the poster unt
 <li><strong>Ship it</strong> (<code>accepted</code>). <code>sync N</code> merges <code>main</code> into <code>epic/N</code> and runs the suite.
 Codex reviews the milestone's whole diff (<code>ship-review</code>). Then <code>ship N</code> merges <code>epic/N</code> into <code>main</code>
 through a pull request, with a merge commit.</li>
-<li><strong>Pay down debt</strong> (just after the previous milestone shipped, when tech debt is open). <code>/plan-issue N --cleanup</code>
-plans up to <code>cleanup_slices_per_milestone</code> debt slices, and they go before the rest of this milestone.</li>
 <li><strong>Catch up</strong> with <code>main</code>. When nothing's ready or in flight and <code>epic/N</code> is behind, <code>sync N</code>.</li>
 <li><strong>Build it.</strong> <code>/work-slice S</code> for the first slice on offer, named with the model its rating maps to,
 e.g. <code>(sonnet: routine)</code>.</li>

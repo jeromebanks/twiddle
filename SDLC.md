@@ -137,12 +137,9 @@ Publishing a demo is gated by `demo-post`'s checks, not by a person's OK.
 `work-slice` files the non-blocking review findings and adjacent issues the same way
 when it merges.
 
-**Tech debt is budgeted.** After each accepted milestone, if the epic has open
-`tech-debt` issues, `next:` says `/plan-issue N --cleanup`. That plans up to
-`cleanup_slices_per_milestone` of them as slices in the next milestone, Codex-reviewed,
-before its other slices, and `merge` closes the debt they pay down. After the last
-milestone the rest stay filed for triage. Ready slices are always taken from the
-earliest milestone first, so fix slices go before later work.
+**Tech debt is not planned into the epic.** An accepted milestone goes straight on to the
+next one's slices; open `tech-debt` issues are worked in the debt epic. Ready slices are
+always taken from the earliest milestone first, so fix slices go before later work.
 A follow-up is tech debt because of what it is, not the lane it came from, so a quick change's
 `file-issue N --debt` files work it needed to support itself too; with no epic and no cleanup
 pass, that debt waits in the open `tech-debt` list (`state` on it says so); if the change then

@@ -260,7 +260,7 @@ def test_epic_branch_and_sync_refuse_a_quick_issue(capsys, monkeypatch, argv):
 def test_epic_view_never_offers_an_epic_step_for_a_quick_issue():
     st = derive([ROUTINE, "sdlc:in-progress"], approved_quick())
     empty = sdlc.summarise_progress([], {})
-    view = sdlc.epic_view(st, {**empty, "behind_main": 0, "debt": [], "cleanup_budget": 1})
+    view = sdlc.epic_view(st, {**empty, "behind_main": 0})
     assert view["due"] == "quick" and view["next"].startswith("/work-slice 12 --quick")
     assert sdlc.pause_errors(view) == []
 
@@ -2164,7 +2164,7 @@ def test_escalate_to_full_dry_run_posts_nothing(monkeypatch, capsys):
     assert sdlc.main(["escalate-to-full", "12", "--reason", "bigger", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert fake.posted == [] and fake.calls == [] and fake.committed == []
-    assert "kind=lane lane=full trigger=manual" in out and "to its cleanup pass; commit-prd 12" in out
+    assert "kind=lane lane=full trigger=manual" in out and "filed against #12 as an epic's debt; commit-prd 12" in out
     assert "remove ['sdlc:in-progress', 'lane:quick']" in out
 
 

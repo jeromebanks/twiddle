@@ -178,7 +178,7 @@ def test_an_amended_plan_keeps_what_was_created(tmp_path, monkeypatch):
     f.write_text(json.dumps({"issue": issue(["sdlc:in-progress"]), "comments": history, "trusted": [OWNER]}))
     p = tmp_path / "plan.json"
     p.write_text(json.dumps(new))
-    monkeypatch.setattr(sdlc, "check_plan", lambda plan: [])
+    monkeypatch.setattr(sdlc, "check_plan", lambda plan, *a, **k: [])
     with pytest.raises(sdlc.SdlcError, match="drops T1"):
         sdlc.command_plan_post(sdlc.argparse.Namespace(number=12, file=str(p), from_file=str(f), dry_run=True), CONFIG)
 
@@ -381,7 +381,7 @@ def test_file_issue_dry_run(tmp_path, capsys, monkeypatch):
     assert sdlc.main(["file-issue", "12", "--title", "x", "--body-file", str(f), "--dry-run"]) == 1
 
 
-# --- the order of work, and the cleanup budget ----------------------------------------
+# --- the order of work, with no cleanup pass ---------------------------------------------
 
 def test_the_earliest_milestones_slices_come_first():
     leaves = [{"number": n, "key": k, "state": "open", "assignees": [], "labels": [], "milestone": f"#12 {m}: x"}
@@ -389,55 +389,79 @@ def test_the_earliest_milestones_slices_come_first():
     assert sdlc.summarise_progress(leaves, {})["ready"] == [41, 40, 42]
 
 
-def debt_progress(*milestones, debt=(101, 102), budget=1, **kw):
-    return {**progress(*milestones, **kw), "debt": list(debt), "cleanup_budget": budget}
-
-
-def test_a_cleanup_pass_comes_after_an_accepted_milestone():
+def test_an_accepted_milestone_goes_straight_on_to_the_next():
     shipped_m1 = [DEMO, agent("demo-approval", 1, 12, milestone="M1", by=POSTER),
                   agent("shipped", None, 13, milestone="M1", sha="c" * 40)]
     st = derive(["sdlc:in-progress"], shipped_m1)
-    p = debt_progress(ms("M1", 3, 3), ms("M2", 0, 4), ready=(35,))
-    assert sdlc.next_command(st, p).startswith("/plan-issue 12 --cleanup: M1 is accepted and #12 has 2 open tech-debt")
-    assert sdlc.next_command(st, {**p, "debt": []}) == "/work-slice 35"
-    assert sdlc.next_command(st, {**p, "cleanup_budget": 0}) == "/work-slice 35"
+    p = progress(ms("M1", 3, 3), ms("M2", 0, 4), ready=(35,))
+    assert sdlc.next_command(st, p) == "/work-slice 35"
+    # a plan-created comment from a cleanup pass (before it was retired) still parses, and counts for nothing
     done = derive(["sdlc:in-progress"], shipped_m1 + [agent("plan", 2, 14), agent("plan-review", 2, 15, verdict="approve"),
                                                       agent("plan-created", 2, 16, cleanup="M1")])
-    assert done["cleanups"] == ["M1"] and sdlc.next_command(done, p) == "/work-slice 35"
-    last = debt_progress(ms("M1", 3, 3), ready=())       # after the last milestone the debt stays filed
-    assert sdlc.cleanup_due(st, last) is None
+    assert "cleanups" not in done and done["action"] == "work_slices" and sdlc.next_command(done, p) == "/work-slice 35"
 
 
-def test_a_cleanup_plan_is_held_to_its_budget(tmp_path, capsys, monkeypatch):
+def test_a_plan_no_longer_pays_debt_down(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
-    monkeypatch.setattr(sdlc, "check_plan", lambda plan: [])
+    monkeypatch.setattr(sdlc, "planning_ref", lambda *a, **k: None)     # no PRD to read: the plan's own rules only
+    monkeypatch.setattr(sdlc, "plan_criteria", lambda plan, *a: (None, []))
     def unit(key, ms_key):
         return {"key": key, "title": key, "covers": [1], "outcome": "o", "scope": "s", "acceptance": ["a"],
                 "validation": "v", "demo": "d", "non_goals": "n", "context": "c", "complexity": "routine",
                 "complexity_reason": "r", "milestone": ms_key}
-    old = {"issue": 12, "kind": "feature", "create": "all",
+    # posted before the cleanup pass was retired: C1 carries `debt`, and the plan `cleanup_of`
+    old = {"issue": 12, "kind": "feature", "create": "all", "cleanup_of": "M1",
            "milestones": [{"key": "M1", "title": "a", "demo": "d"}, {"key": "M2", "title": "b", "demo": "d"}],
-           "subtasks": [unit("T1", "M1"), unit("T2", "M2")]}
+           "subtasks": [unit("T1", "M1"), unit("T2", "M2"), {**unit("C1", "M2"), "debt": [101]}]}
     history = [agent("prd", 1, 1), agent("approval", 1, 2, by=POSTER),
                comment(OWNER, sdlc.render_comment("plan", 1, sdlc.render_plan(old), CONFIG), 3),
-               agent("plan-review", 1, 4, verdict="approve", round="1"), agent("plan-created", 1, 5),
-               DEMO, agent("demo-approval", 1, 12, milestone="M1", by=POSTER)]
+               agent("plan-review", 1, 4, verdict="approve", round="1"), agent("plan-created", 1, 5, cleanup="M1"),
+               DEMO, agent("demo-changes", 1, 12, milestone="M1")]
     f = tmp_path / "b.json"
     f.write_text(json.dumps({"issue": issue(["sdlc:in-progress"]), "comments": history, "trusted": [OWNER]}))
     pf = tmp_path / "plan.json"
-    two = {**old, "cleanup_of": "M1", "subtasks": old["subtasks"] + [{**unit("C1", "M2"), "debt": [101]},
-                                                                     {**unit("C2", "M2"), "debt": [102]}]}
-    pf.write_text(json.dumps(two))
+    pf.write_text(json.dumps(old))
     assert sdlc.main(["plan-post", "12", str(pf), "--from-file", str(f), "--dry-run"]) == 1
-    assert "has 2 debt-paying slice(s) (C1, C2) but 1 cleanup pass(es) of 1" in capsys.readouterr().err
-    pf.write_text(json.dumps({**two, "subtasks": two["subtasks"][:3]}))
+    assert "`cleanup_of` is gone with the cleanup pass: drop it" in capsys.readouterr().err
+    kept = {k: v for k, v in old.items() if k != "cleanup_of"}       # the amendment keeps C1, `debt` and all
+    pf.write_text(json.dumps(kept))
     assert sdlc.main(["plan-post", "12", str(pf), "--from-file", str(f), "--dry-run"]) == 0
-    # the budget counts debt-paying slices only: a replan may split ordinary work freely alongside
-    split = {**two, "subtasks": [unit("T1", "M1"), unit("T2", "M2"), unit("T2b", "M2"), {**unit("C1", "M2"), "debt": [101]}]}
-    pf.write_text(json.dumps(split))
-    assert sdlc.main(["plan-post", "12", str(pf), "--from-file", str(f), "--dry-run"]) == 0
+    capsys.readouterr()
+    pf.write_text(json.dumps({**kept, "subtasks": kept["subtasks"] + [{**unit("C2", "M2"), "debt": [102]}]}))
+    assert sdlc.main(["plan-post", "12", str(pf), "--from-file", str(f), "--dry-run"]) == 1
+    err = capsys.readouterr().err
+    assert "C2: `debt` is gone with the cleanup pass" in err and "C1:" not in err
     body = sdlc.render_leaf_body(12, {**unit("C1", "M2"), "debt": [101]}, None, {}, None)
-    assert "## Pays down\n\n#101: tech debt" in body
+    assert "Pays down" not in body and "#101" not in body       # kept, and ignored
+
+
+def test_validate_plan_refuses_the_cleanup_fields_but_on_kept_slices():
+    unit = lambda k, **kw: {"key": k, "title": k, "milestone": "M2", **kw}  # noqa: E731
+    plan = {"milestones": [{"key": "M1"}, {"key": "M2"}], "subtasks": [unit("T2"), unit("C1", debt=[81])]}
+    errs = sdlc.validate_plan(plan)
+    assert any(e.startswith("C1: `debt` is gone") for e in errs)
+    assert not any("`debt` is gone" in e for e in sdlc.validate_plan(plan, kept={"C1"}))
+    assert any(e.startswith("`cleanup_of` is gone") for e in sdlc.validate_plan({**plan, "cleanup_of": "M1"}, kept={"C1"}))
+
+
+def test_plan_validate_reads_the_issue_only_for_debt(tmp_path, capsys, monkeypatch):
+    """`plan-validate` alone has no posted plan to compare with: it looks one up only when a slice carries `debt`."""
+    fetched = []
+    old = {"issue": 12, "subtasks": [{"key": "C1", "debt": [81]}]}
+    monkeypatch.setattr(sdlc, "planning_ref", lambda *a, **k: None)
+    monkeypatch.setattr(sdlc, "check_plan", lambda plan, *a, kept=frozenset(), **k: [f"kept {sorted(kept)}"])
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted=None: fetched.append(n) or {
+        "issue": issue(["sdlc:in-progress"]), "trusted": [OWNER],
+        "comments": [comment(OWNER, sdlc.render_comment("plan", 1, sdlc.render_plan(
+            {**old, "kind": "feature", "subtasks": [{"key": "T", "title": "t", "summary": "s", "slices": [{"key": "C1", "title": "c", "debt": [81]}]}]}),
+            CONFIG), 3)]})
+    pf = tmp_path / "plan.json"
+    pf.write_text(json.dumps({"issue": 12, "subtasks": [{"key": "T1"}]}))
+    assert sdlc.main(["plan-validate", str(pf)]) == 1 and fetched == []
+    assert "kept []" in capsys.readouterr().out
+    pf.write_text(json.dumps({"issue": 12, "subtasks": [{"key": "C1", "debt": [81]}]}))
+    assert sdlc.main(["plan-validate", str(pf)]) == 1 and fetched == [12]
+    assert "kept ['C1']" in capsys.readouterr().out
 
 
 def test_a_demo_request_ends_when_the_milestone_goes_back_to_being_built():
@@ -461,48 +485,22 @@ def test_tech_debt_is_never_triaged_or_built_alone():
     assert sdlc.check_transition(st, "triage", "note", CONFIG)
 
 
-def test_cleanup_slices_go_first():
+def test_an_old_pays_down_slice_is_an_ordinary_slice():
+    """A slice made by a cleanup pass (before it was retired) neither goes first nor holds anything."""
     pays = "## Pays down\n\n#81: tech debt filed against this epic."
     leaves = [{"number": 40, "key": "A1", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": ""},
               {"number": 44, "key": "C1", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": pays}]
     p = sdlc.summarise_progress(leaves, {})
     epic = derive(["sdlc:in-progress"])
-    assert (sdlc.epic_view(epic, p)["offered"], p["cleanup_open"]) == ([44], [44])
+    assert sdlc.epic_view(epic, p)["offered"] == [40, 44] and "cleanup_open" not in p
     bundle = {"issue": {"number": 40, "body": sdlc.marker("slice", None, epic="12", key="A1"), "milestone": "#12 M2: x"},
               "epic_state": epic, "epic_progress": p, "trusted": [OWNER]}
-    assert "the cleanup pass comes first: #44" in sdlc.epic_pause_errors(bundle, CONFIG, resume=False)
-    bundle["issue"] = {"number": 44, "body": sdlc.marker("slice", None, epic="12", key="C1") + "\n" + pays,
-                       "milestone": "#12 M2: x"}
     assert sdlc.epic_pause_errors(bundle, CONFIG, resume=False) == []
 
 
 def test_only_svg_pictures_are_published(tmp_path):
     d = _demo_dir(tmp_path, files={"list.svg": SHOT, "photo.png": ""})
     assert any("photo.png: only .md, .svg files are published" in e for e in sdlc.demo_post_errors("![l](list.svg)", d))
-
-
-def test_a_cleanup_slice_can_wait_on_ordinary_work_without_a_deadlock():
-    pays = "## Pays down\n\n#81: tech debt filed against this epic."
-    leaves = [{"number": 40, "key": "T2", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": ""},
-              {"number": 41, "key": "T3", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": ""},
-              {"number": 44, "key": "C1", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": pays}]
-    p = sdlc.summarise_progress(leaves, {44: [{"number": 40, "state": "open"}]})
-    view = sdlc.epic_view(derive(["sdlc:in-progress"]), p)
-    assert (view["offered"], p["cleanup_needs"]) == ([40], [40])    # C1's prerequisite goes first; T3 still waits
-    bundle = {"issue": {"number": 40, "body": sdlc.marker("slice", None, epic="12", key="T2"), "milestone": "#12 M2: x"},
-              "epic_state": derive(["sdlc:in-progress"]), "epic_progress": p, "trusted": [OWNER]}
-    assert sdlc.epic_pause_errors(bundle, CONFIG, resume=False) == []
-
-
-def test_cleanup_goes_first_only_within_its_milestone():
-    pays = "## Pays down\n\n#81: tech debt filed against this epic."
-    leaves = [{"number": 45, "key": "F1", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M1: x", "body": ""},
-              {"number": 44, "key": "C1", "state": "open", "assignees": [], "labels": [], "milestone": "#12 M2: x", "body": pays}]
-    p = sdlc.summarise_progress(leaves, {})
-    assert p["ready"] == [45, 44]                       # M1's fix slice isn't held behind M2's cleanup
-    bundle = {"issue": {"number": 45, "body": sdlc.marker("slice", None, epic="12", key="F1"), "milestone": "#12 M1: x"},
-              "epic_state": derive(["sdlc:in-progress"]), "epic_progress": p, "trusted": [OWNER]}
-    assert not any("cleanup" in e for e in sdlc.epic_pause_errors(bundle, CONFIG, resume=False))
 
 
 def test_a_wrapped_command_alone_is_still_blank():
@@ -513,17 +511,6 @@ def test_a_wrapped_command_alone_is_still_blank():
     assert sdlc.svg_text(svg) == ""
     shown = demo_shot.render_terminal(f"$ {cmd}\nwould ring Kitchen at 20% for a minute (dry run)\n", cmd, 60)
     assert sdlc.svg_text(shown).startswith("wouldringKitchen")
-
-
-def test_revisions_cant_add_up_past_the_cleanup_budget():
-    unit = lambda k, debt=None: {"key": k, "title": k, "milestone": "M2", **({"debt": debt} if debt else {})}  # noqa: E731
-    plan = {"milestones": [{"key": "M1"}, {"key": "M2"}], "cleanup_of": "M1",
-            "subtasks": [unit("T2"), unit("C1", [81])]}
-    st = {"cleanups": []}
-    assert sdlc.cleanup_budget_errors(plan, st, CONFIG) == []
-    plan["subtasks"].append(unit("C2", [82]))                      # a later revision keeps C1 and adds C2
-    assert sdlc.cleanup_budget_errors(plan, st, CONFIG)
-    assert sdlc.cleanup_budget_errors(plan, {"cleanups": ["M0"]}, CONFIG) == []   # two passes, two slices
 
 
 def test_an_acceptance_cut_short_is_finished_by_a_rerun(tmp_path, capsys, monkeypatch):
