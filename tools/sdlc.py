@@ -1234,7 +1234,7 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
             except SdlcError as exc:
                 print(f"could not read #{st['number']}'s group PR ({exc}): `next` doesn't say whether it may merge",
                       file=sys.stderr)
-        if dst and dst["state"] in ("ready", "claimed", "in-review") and not st.get("waiting_for"):
+        if dst and dst["state"] in ("ready", "claimed", "in-review", "escalated") and not st.get("waiting_for"):
             nxt = dst["next"]
             st = {**st, "pass": dst["pass"], "group": dst["group"], "complexity": dst["complexity"],
                   "model": dst["model"]}

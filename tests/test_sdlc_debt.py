@@ -1561,6 +1561,7 @@ def test_escalating_one_member_stops_the_whole_group(gh, repo, capsys, size):
             code, _, err = run(capsys, "claim", t, "--debt", *flags)
             assert code == 1 and "escalated to a human" in err
         assert status(capsys, t)["state"] == "escalated"
+        assert ticket_state(capsys, t)["next"] == status(capsys, t)["next"] and "needs a human" in status(capsys, t)["next"]
     group_text = "`debt-1-1` (" + ", ".join(f"#{t}" for t in members) + ")"
     st = ticket_state(capsys, epic)   # the other group goes on; the escalated one needs a person
     assert st["action"] == "work_debt" and st["next"].startswith(f"/work-slice {other} --debt")
@@ -2921,7 +2922,7 @@ def test_claim_debt_names_a_stray_directory_for_a_person_to_move(gh, repo, capsy
     (wt / "mine.txt").write_text("keep me\n")
     code, _, err = run(capsys, "claim", a, "--debt")
     assert code == 1 and "is not a git worktree" in err and str(wt) in err and "a person moves" in err, err
-    assert "cleanup" in err.split("so", 1)[1].split("a person")[0] and "--resume" not in err   # says cleanup can't
+    assert "so `cleanup` can't remove it" in err and "--resume" not in err
     assert f"claim {a} --debt" in err and claims_on(gh, a) == []
     assert (wt / "mine.txt").read_text() == "keep me\n"   # nothing deleted it
     wt.rename(repo / "aside")
