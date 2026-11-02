@@ -1561,6 +1561,7 @@ def test_escalating_one_member_stops_the_whole_group(gh, repo, capsys, size):
             code, _, err = run(capsys, "claim", t, "--debt", *flags)
             assert code == 1 and "escalated to a human" in err
         assert status(capsys, t)["state"] == "escalated"
+        assert ticket_state(capsys, t)["next"] == status(capsys, t)["next"] and "needs a human" in status(capsys, t)["next"]
     group_text = "`debt-1-1` (" + ", ".join(f"#{t}" for t in members) + ")"
     st = ticket_state(capsys, epic)   # the other group goes on; the escalated one needs a person
     assert st["action"] == "work_debt" and st["next"].startswith(f"/work-slice {other} --debt")
@@ -2842,3 +2843,112 @@ def test_a_fresh_claim_never_builds_on_a_branch_its_old_group_still_holds(gh, re
     code, _, err = run(capsys, "claim", a, "--debt")
     assert code == 1 and f"slice/{a} already exists: debt group `debt-1-1` (pass 1) was built in it" in err
     assert len(gh.writes) == writes and claim_of(gh, a) is None
+
+
+# --- `state T` on a ticket an open pass holds, and a debt claim's way out of a leftover path (#294) ----------------
+
+def test_state_of_a_ticket_in_an_open_pass_names_its_pass_and_slice_status_next(gh, repo, capsys):
+    epic, (a, b, c) = posted_pass(gh, [((0, 1), "judgment"), ((2,), "routine")])
+    for t, key, members in ((a, "debt-1-1", [a, b]), (c, "debt-1-2", [c])):   # ready: slice-status's `next`
+        st = ticket_state(capsys, t)
+        assert st["next"] == f"/work-slice {t} --debt" == status(capsys, t)["next"] and "nothing for" not in st["next"]
+        assert (st["pass"], st["group"]["key"], st["group"]["tickets"]) == (1, key, members)
+        assert status(capsys, t)["state"] == "ready"
+    st = ticket_state(capsys, a)
+    assert (st["complexity"], st["model"]) == ("judgment", "opus") and "(opus" not in st["next"]
+    code, out, err = run(capsys, "state", a)
+    assert code == 0, err
+    assert f"in pass 1, group `debt-1-1` (#{a}, #{b})   complexity: judgment (model opus)" in out
+    assert f"next: /work-slice {a} --debt\n" in out and "nothing for" not in out
+    assert out.count("next:") == 1
+    # claimed, then in review: still the same string slice-status gives, from either member
+    assert run(capsys, "claim", b, "--debt")[0] == 0
+    for t in (a, b):
+        assert ticket_state(capsys, t)["next"] == f"/work-slice {t} --debt" == status(capsys, t)["next"]
+        assert status(capsys, t)["state"] == "claimed"
+    debt_pr(gh, 300, f"slice/{b}", a, b)
+    for t in (a, b):
+        st = ticket_state(capsys, t)
+        assert status(capsys, t)["state"] == "in-review"
+        assert st["next"] == f"/work-slice {t} --debt" == status(capsys, t)["next"] and st["group"]["key"] == "debt-1-1"
+
+
+def test_state_of_a_ticket_in_no_open_pass_or_waiting_keeps_its_wording(gh, capsys):
+    epic, (a, b, c) = posted_pass(gh, [((0,), "routine"), ((1,), "routine")])
+    st = ticket_state(capsys, c)   # in no group of the pass
+    assert st["next"].startswith(f"nothing for #{c} alone: it is tech debt in debt epic #{epic}") and "group" not in st
+    gh.say(epic, sdlc.DEBT_PASS_END_KIND, **{"pass": "1"})   # the pass ended: its tickets are in no open pass
+    st = ticket_state(capsys, a)
+    assert st["next"].startswith(f"nothing for #{a} alone") and "group" not in st and "pass" not in st
+    code, out, _ = run(capsys, "state", a)
+    assert "in pass" not in out
+
+
+def test_state_of_a_ticket_offline_reads_the_passes_from_the_bundle(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("--from-file reads the bundle only"))
+    plan = {"epic": 250, "pass": 1, "groups": [group(77, complexity="routine")]}
+    pass_comment = {"id": 1, "author": OWNER, "created_at": "2026-10-21T00:00:00Z",
+                    "body": sdlc.render_comment(sdlc.DEBT_PASS_KIND, None, sdlc.render_pass(plan), CONFIG, **{"pass": "1"})}
+    ticket = {"number": 77, "title": "t", "state": "open", "author": OWNER, "labels": [DEBT],
+              "body": "<!-- sdlc:v1 kind=debt epic=12 source=review -->"}
+    bundle = {"issue": ticket, "comments": [], "trusted": [OWNER], "debt_epic": 250, "epic_comments": [pass_comment]}
+    st = state_from_file(tmp_path, capsys, bundle)
+    assert st["next"] == "/work-slice 77 --debt" and (st["pass"], st["group"]["key"]) == (1, "debt-1-1")
+    del bundle["epic_comments"]   # a bundle without the passes keeps the old line
+    assert state_from_file(tmp_path, capsys, bundle)["next"].startswith("nothing for #77 alone")
+
+
+def test_claim_debt_names_the_debt_lanes_way_out_of_a_leftover_worktree(gh, repo, capsys):
+    epic, (a, b, c) = posted_pass(gh, [((0,), "routine"), ((1,), "routine")], n=3)
+    wt = repo / ".worktrees" / f"slice-{a}"
+    # (a) a registered worktree with no slice/T branch (detached): cleanup removes it, then the claim succeeds
+    _git("worktree", "add", "--detach", str(wt), cwd=repo)
+    assert not _git("branch", "--list", f"slice/{a}", cwd=repo)
+    code, _, err = run(capsys, "claim", a, "--debt")
+    assert code == 1 and f"cleanup {a} --force" in err and f"claim {a} --debt" in err and "--resume" not in err, err
+    assert claims_on(gh, a) == []
+    code, out, err = run(capsys, "cleanup", a, "--force")
+    assert code == 0, err
+    assert not wt.exists()
+    code, out, err = run(capsys, "claim", a, "--debt")
+    assert code == 0, err
+    assert wt.exists() and len(claims_on(gh, a)) == 1
+
+
+def test_claim_debt_names_a_stray_directory_for_a_person_to_move(gh, repo, capsys):
+    epic, (a, b, c) = posted_pass(gh, [((0,), "routine"), ((1,), "routine")], n=3)
+    wt = repo / ".worktrees" / f"slice-{a}"
+    wt.mkdir(parents=True)
+    (wt / "mine.txt").write_text("keep me\n")
+    code, _, err = run(capsys, "claim", a, "--debt")
+    assert code == 1 and "is not a git worktree" in err and str(wt) in err and "a person moves" in err, err
+    assert "so `cleanup` can't remove it" in err and "--resume" not in err
+    assert f"claim {a} --debt" in err and claims_on(gh, a) == []
+    assert (wt / "mine.txt").read_text() == "keep me\n"   # nothing deleted it
+    wt.rename(repo / "aside")
+    code, _, err = run(capsys, "claim", a, "--debt")
+    assert code == 0, err
+    assert wt.exists() and (repo / "aside" / "mine.txt").exists()
+
+
+def test_claim_debt_keeps_its_branch_check_and_its_resume(gh, repo, capsys):
+    epic, (a, b, c) = posted_pass(gh, [((0,), "routine"), ((1,), "routine")], n=3)
+    # (c) an interrupted claim left the branch with no claim posted: the existing refusal, unchanged
+    _git("branch", f"slice/{a}", cwd=repo)
+    code, _, err = run(capsys, "claim", a, "--debt")
+    assert code == 1 and f"slice/{a} already exists" in err and f"`cleanup {a} --force` discards it" in err, err
+    assert claims_on(gh, a) == []
+    # (d) a recorded claim still reattaches
+    assert run(capsys, "claim", b, "--debt")[0] == 0
+    wtb = repo / ".worktrees" / f"slice-{b}"
+    _git("worktree", "remove", str(wtb), cwd=repo)
+    code, out, err = run(capsys, "claim", b, "--debt", "--resume")
+    assert code == 0, err
+    assert wtb.exists() and len(claims_on(gh, b)) == 1
+
+
+def test_a_slice_claims_refusal_still_names_resume(repo):
+    (repo / ".worktrees" / "slice-9").mkdir(parents=True)
+    with pytest.raises(sdlc.SdlcError) as exc:
+        sdlc.add_slice_worktree(9, "main", False, CONFIG)
+    assert "`claim 9 --resume`, or `cleanup 9 --force`" in str(exc.value)
