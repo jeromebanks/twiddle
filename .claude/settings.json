@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run python tools/sdlc.py merge *)",
+      "Bash(uv run python tools/sdlc.py cleanup *)"
+    ]
+  }
+}
