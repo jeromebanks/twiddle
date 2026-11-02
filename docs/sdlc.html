@@ -96,6 +96,7 @@ covers every state, whose move each one is, and the skill that moves it on.</p>
 <li><a href="#skills">The four skills</a></li>
 <li><a href="#slices">A slice, from ready to merged</a></li>
 <li><a href="#quick">A quick change, from approved to merged</a></li>
+<li><a href="#debt">Tech debt, from filed to fixed</a></li>
 <li><a href="#milestones">A milestone, from plan to <code>main</code></a></li>
 <li><a href="#branches">Branches: nothing unseen reaches <code>main</code></a></li>
 <li><a href="#findings">Problems found along the way</a></li>
@@ -251,7 +252,7 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <td><code>merge_debt</code> first, once a group's PR has a passing run and Codex's approval on its head (<code>next</code> names <code>uv run python tools/sdlc.py merge PR</code> with the debt gate's results: base <code>main</code> and up to date, closing only open tickets of the open pass, mergeable); <code>pass_end</code> when a pass has ended and <code>debt-epic</code> has its writes to make (the pass-end record, closing the epic, or escalating it: <code>next</code> says which; <code>state</code> never makes them); <code>debt_intake</code> while a ticket has no intake verdict (or one cut short: rerun it); <code>work_debt</code> while a pass is open and one of its groups is unclaimed or being built (<code>next</code> names <code>/work-slice T --debt</code> and the model for the group's rating, and any escalated group as needing a human); then <code>plan_pass</code> when no pass is open and a ticket can go in one; <code>debt_waiting</code> when every ticket left waits (for a milestone to ship, or on a person: <code>next</code> says which); else <code>none</code></td></tr>
 </tbody></table></div>
 <p class="note">The slices themselves (<span class="chip">plan:slice</span>, <span class="chip">plan:subtask</span>) and filed
-<span class="chip">tech-debt</span> are never triaged on their own. They move with their epic (a quick change's debt, which has no epic, waits in the open tech-debt list).</p>
+<span class="chip">tech-debt</span> are never triaged on their own. They move with the debt epic (<a href="#debt">section 7</a>), and <code>state T</code> on one names it.</p>
 
 <h2 id="skills">4. The four skills</h2>
 <p>Each skill does one stage and ends by printing the <code>next:</code> line, so the next session (or an
@@ -261,13 +262,13 @@ orchestrator) knows exactly what to run.</p>
 <tbody>
 <tr><td><code>triage-issue</code></td><td>new, <code>triage</code>, a reply in review</td>
 <td>untriaged → <span class="chip">triage</span> / <span class="chip">needs-info</span> → <span class="chip">prd-review</span> or <span class="chip">diagnosis-review</span> → <span class="chip">approved</span></td>
-<td><code>state</code>, <code>transition</code> (<code>--lane quick</code> for a short brief), <code>reconcile</code>, <code>merge-prd</code>, <code>commit-prd</code></td></tr>
+<td><code>state</code>, <code>transition</code> (<code>--lane quick</code> for a short brief), <code>reconcile</code>, <code>merge-prd</code>, <code>commit-prd</code>; for the debt epic, <code>debt-epic</code> and <code>debt-intake</code></td></tr>
 <tr><td><code>plan-issue</code></td><td><span class="chip">approved</span>, the next milestone, demo changes</td>
 <td><span class="chip">approved</span> → <span class="chip">planned</span>, or adds issues while <span class="chip">in-progress</span></td>
-<td><code>plan-validate</code>, <code>plan-post</code>, <code>plan-review</code>, <code>plan-create</code>, <code>plan-annotate</code>, <code>bootstrap-labels</code></td></tr>
+<td><code>plan-validate</code>, <code>plan-post</code>, <code>plan-review</code>, <code>plan-create</code>, <code>plan-annotate</code>, <code>bootstrap-labels</code>; a debt pass: <code>debt-pass-validate</code>, <code>debt-pass-post</code></td></tr>
 <tr><td><code>work-slice</code></td><td>a slice is ready</td>
 <td><span class="chip">planned</span> → <span class="chip">in-progress</span> (first claim). The slice goes from ready to merged. A quick change (<code>work-slice N --quick</code>) goes <span class="chip">approved</span> → <span class="chip">in-progress</span> → <span class="chip">done</span>.</td>
-<td><code>slice-status</code>, <code>slice-check</code>, <code>claim</code> (<code>--quick</code> for a quick change, <code>--debt</code> for a debt ticket's group), <code>quick-gate</code>, <code>test-record</code>, <code>codex-review</code>, <code>pr-review</code>, <code>merge</code>, <code>cleanup</code>, <code>release</code>, <code>escalate-slice</code>, <code>file-issue</code>, <code>ready</code></td></tr>
+<td><code>slice-status</code>, <code>slice-check</code>, <code>claim</code> (<code>--quick</code> for a quick change, <code>--debt</code> for a debt ticket's group), <code>quick-gate</code>, <code>test-record</code>, <code>codex-review</code>, <code>pr-review</code>, <code>merge</code>, <code>cleanup</code>, <code>release</code>, <code>escalate-slice</code>, <code>file-issue</code>, <code>ready</code>; a debt ticket that needs a person: <code>debt-request</code></td></tr>
 <tr><td><code>milestone-demo</code></td><td>a milestone is complete, the poster replied, or an accepted one is due to ship</td>
 <td><span class="chip">in-progress</span> ⇄ <span class="chip">demo-review</span>. The last ship makes it <span class="chip">done</span>.</td>
 <td><code>demo-status</code>, <code>demo-request</code>, <code>demo-post</code>, <code>demo-accept</code>, <code>demo-changes</code>, <code>sync</code>, <code>ship-review</code>, <code>ship</code>, <code>verify-main</code>, <code>revert-slice</code>, <code>file-issue</code></td></tr>
@@ -455,7 +456,138 @@ what it would do. An open PR and the worktree are left for a person to close or 
 without code. <code>bootstrap-labels</code> creates the <span class="chip">lane:quick</span> label. After a quick merge the poster can't
 <code>/changes</code> a demo (there isn't one): they comment on the issue, and a revert PR follows.</p>
 
-<h2 id="milestones">7. A milestone, from plan to <code>main</code></h2>
+<h2 id="debt">7. Tech debt, from filed to fixed</h2>
+<p>Tech debt is work a slice, a quick change, a demo or an earlier debt fix needed to support itself and left behind: "the helper
+should also take an empty list". A full PRD, a plan, a demo and a ship would cost far more than the fix, and nobody wants to be asked
+about it. So debt takes its own road, the <strong>debt lane</strong>. The poster is asked nothing and sees issues close. The tests and
+Codex's review of every PR are the same as everywhere else; only the ceremony is gone.</p>
+<figure>
+<svg viewBox="0 0 900 250" role="img" aria-labelledby="dl-t dl-d">
+  <title id="dl-t">The debt lane</title>
+  <desc id="dl-d">A finding filed as tech debt joins the one open debt epic. An agent judges it at intake. A pass plan picks which
+  tickets to take. Each group is built in its own worktree from main, reviewed by Codex on the exact head, and merged into main by the
+  gate. When a pass ends, debt that joined waits for the next pass, or the epic closes. A ticket that is not debt goes to triage,
+  and one that needs a person waits on the ticket.</desc>
+  <rect class="box agent" x="10" y="30" width="150" height="56" rx="10"/>
+  <text class="title" x="85" y="55" text-anchor="middle">file-issue --debt</text>
+  <text class="small" x="85" y="74" text-anchor="middle">joins the debt epic</text>
+  <rect class="box agent" x="190" y="30" width="130" height="56" rx="10"/>
+  <text class="title" x="255" y="55" text-anchor="middle">intake</text>
+  <text class="small" x="255" y="74" text-anchor="middle">debt-intake</text>
+  <rect class="box agent" x="350" y="30" width="130" height="56" rx="10"/>
+  <text class="title" x="415" y="55" text-anchor="middle">a pass</text>
+  <text class="small" x="415" y="74" text-anchor="middle">no sign-off</text>
+  <rect class="box agent" x="510" y="30" width="170" height="56" rx="10"/>
+  <text class="title" x="595" y="55" text-anchor="middle">build + review</text>
+  <text class="small" x="595" y="74" text-anchor="middle">claim --debt · Codex on the head</text>
+  <rect class="box agent" x="710" y="30" width="110" height="56" rx="10"/>
+  <text class="title" x="765" y="55" text-anchor="middle">merge</text>
+  <text class="small" x="765" y="74" text-anchor="middle">into main</text>
+  <path class="edge" d="M160,58 H186"/>
+  <path class="edge" d="M320,58 H346"/>
+  <path class="edge" d="M480,58 H506"/>
+  <path class="edge" d="M680,58 H706"/>
+  <rect class="box done" x="710" y="160" width="110" height="56" rx="10"/>
+  <text class="title" x="765" y="185" text-anchor="middle">pass ends</text>
+  <text class="small" x="765" y="204" text-anchor="middle">next pass or done</text>
+  <path class="edge" d="M765,86 V156"/>
+  <path class="edge back" d="M710,188 H415 V90"/>
+  <text class="label" x="560" y="180">debt that joined: the next pass</text>
+  <rect class="box human" x="190" y="160" width="130" height="56" rx="10"/>
+  <text class="title" x="255" y="185" text-anchor="middle">triage</text>
+  <text class="small" x="255" y="204" text-anchor="middle">not debt, or novel</text>
+  <path class="edge" d="M255,86 V156"/>
+</svg>
+<figcaption>Blue is the agent's move; there is no orange, because the poster is not asked. A ticket that is not really debt leaves for
+ordinary triage. A group that needs a person waits on its ticket, and the pass carries on.</figcaption>
+</figure>
+
+<h3>One epic holds all of it</h3>
+<p>There is at most one open <strong>debt epic</strong> (<span class="chip">lane:debt</span>). It holds every open
+<span class="chip">tech-debt</span> issue as a sub-issue, whatever lane or epic filed it. <code>debt-epic</code> opens it when open debt
+exists and none is open, attaches any debt it doesn't hold, and records a pass's end; <code>file-issue N --debt</code> does the same
+for its one ticket. <code>state</code> on the epic says what is due, and <code>state T</code> on a ticket names its epic, its generation
+and what it waits for, and <code>slice-status T</code> its pass and group. When a pass ends with no open debt left, the epic is closed as <span class="chip">sdlc:done</span>, and the next
+filed debt opens a new one.</p>
+
+<h3>Step by step</h3>
+<ol class="steps">
+<li><strong>Intake.</strong> An agent (<code>triage-issue</code>) holds each ticket to the definition of debt and records a verdict with
+<code>debt-intake T --verdict … --reason …</code>: <code>debt</code> keeps it; <code>not-debt</code> or <code>novel</code> (it needs design
+choices) takes off <span class="chip">tech-debt</span>, detaches it and sends it to <span class="chip">sdlc:triage</span> with the reason;
+<code>fixed</code> (<code>--commit SHA</code> on <code>main</code>) and <code>duplicate</code> (<code>--of M</code>) close it, naming the commit
+or the other issue. A cut-short verdict is finished by running the same command again. State's action is <code>debt_intake</code>.</li>
+<li><strong>A pass.</strong> <code>plan-issue</code> writes a plan of which tickets this round takes (<code>plan_pass</code>): groups, each one
+PR, in build order, with a one-line scope, its files and a <code>routine</code> or <code>judgment</code> rating.
+<code>debt-pass-validate D pass.json</code> checks it and <code>debt-pass-post D pass.json</code> posts it. The poster signs nothing and
+Codex reviews no plan; the advisor checks the order, and the tool checks the list (see the table below).</li>
+<li><strong>Build.</strong> <code>work-slice T --debt</code>. <code>claim T --debt</code> claims T's whole group and makes
+<code>.worktrees/slice-T</code> on <code>slice/T</code> from <code>origin/main</code>, T being the ticket it was first claimed through (a resume through another member reattaches that same branch, which <code>claim</code> prints as <code>BRANCH</code>). The tickets are the spec. The PR targets
+<code>main</code> and closes exactly the group's tickets, one <code>Closes #T</code> each.</li>
+<li><strong>Test and review.</strong> <code>test-record PR</code> records the full suite on the head. <code>codex-review --pr PR</code> reviews that
+head against the tickets and the group's scope and files, and <code>pr-review</code> records the round. The review is <strong>never
+deferred</strong>: no milestone review follows a debt PR, so <code>review-defer</code> is refused. After <code>max_pr_rounds</code>,
+<code>escalate-slice T</code> hands the whole group to a human, and the pass ends without it.</li>
+<li><strong>Merge.</strong> <code>merge PR</code>, run from the primary checkout (see below), squash-merges into <code>main</code> when the head
+isn't behind it, the PR closes only open tickets of one claimed group of the open pass, a passing run and Codex's approval are recorded on
+the exact head, and it is mergeable. It then deletes the branch on GitHub and here, removes the group's worktree, closes the tickets as
+completed (read back) and posts a record on each ticket and on the epic. State's action is <code>merge_debt</code> while one is due.</li>
+<li><strong>The pass ends</strong> when no group has anything left to build. The last merge records it (<code>pass_end</code> if that was cut
+short): how many tickets <em>joined</em> during the pass, and how many it <em>closed</em>. What joined waits for the next pass.</li>
+</ol>
+
+<h3>What a pass refuses, and what makes the lane stop</h3>
+<div class="tablewrap"><table>
+<thead><tr><th>Rule</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><strong>The pass check</strong></td>
+<td>A ticket that is closed, not <span class="chip">tech-debt</span>, not in this epic, without a <code>debt</code> verdict, in another open pass,
+escalated, waiting on a person, or waiting for a milestone to ship; a pass over <code>debt.pass_size</code> (8); a group over
+<code>debt.max_per_pr</code> (4) or rated <code>novel</code>; and a group whose files overlap an epic being built (its branch, its open PRs, the Scope
+of its open slices). The overlap rule keeps debt from making that epic's next <code>sync</code> conflict.</td></tr>
+<tr><td><strong>Scope</strong></td>
+<td>A ticket's review is held to its scope and files. A finding inside it is fixed in the same PR. A finding outside it is not this ticket's debt:
+it is dropped, or filed without <code>--debt</code> for triage when it matters.</td></tr>
+<tr><td><strong>Generations</strong></td>
+<td>Debt from a slice, a quick change or a demo is generation 1; debt filed from a debt PR is its ticket's generation plus 1.
+<code>file-issue --debt</code> refuses past <code>debt.max_generation</code> (2) and says to file an ordinary issue, so a chain of debt has at most
+two links.</td></tr>
+<tr><td><strong>Passes</strong></td>
+<td>If a pass ends with more debt joined than closed, and the pass before did too, the epic is escalated to a human instead of another pass
+being planned. Moving it back to <span class="chip">sdlc:in-progress</span> lets the next one go.</td></tr>
+<tr><td><strong>Debt of an unshipped milestone</strong></td>
+<td>Debt a feature epic files against a milestone not yet on <code>main</code> joins the epic but waits: no pass takes it until that milestone
+ships. <code>state T</code> says what it waits for.</td></tr>
+<tr><td><strong>A check only a person can run</strong></td>
+<td>When a ticket's own check needs a real speaker, the agent builds what it can offline, then <code>debt-request T --body-file F</code>
+(<code>--dry-run</code>) asks on the ticket with the step's dry run and the <code>snapshot</code> and <code>restore</code> around it. The ticket leaves its
+pass and waits; a reply from its author or a collaborator puts it back for a later pass. The agent never writes to a speaker.</td></tr>
+</tbody></table></div>
+<p class="note">The three numbers are in <code>.sdlc/config.json</code>'s <code>debt</code> section. <code>bootstrap-labels</code> creates
+<span class="chip">lane:debt</span>.</p>
+
+<h3 id="permission">Who may run the merge</h3>
+<p>Claude Code's permission check refuses a sub-agent's <code>gh pr merge</code> ("Merge Without Review"), and rightly refuses an agent editing its
+own permissions. So no skill and no tool ever merges with a bare <code>gh pr merge</code> (a test greps for it). Every merge, in every lane, is
+<code>uv run python tools/sdlc.py merge PR</code> from the primary checkout on <code>main</code>. The gate's own review of the exact head stands behind
+it, and <code>merge</code> first refuses unless its <code>tools/sdlc.py</code> and <code>tools/sdlc_quick.py</code> match <code>origin/main</code>'s, so a
+PR is never judged by a gate it changed. The poster adds one rule to <code>.claude/settings.json</code>, once, by hand, so that the session that
+built a PR can run it, sub-agent or not (add the two entries to <code>permissions.allow</code> if the file already has one):</p>
+<pre><code>{
+  "permissions": {
+    "allow": [
+      "Bash(uv run python tools/sdlc.py merge *)",
+      "Bash(uv run python tools/sdlc.py cleanup *)"
+    ]
+  }
+}</code></pre>
+<p>A skill runs it as <code>cd &lt;primary&gt; &amp;&amp; uv run python tools/sdlc.py merge PR</code>; Claude Code is expected to check each part of a chained command
+separately, so the rule should cover the <code>uv run</code> part. It allows <code>merge PR</code>, <code>merge PR --dry-run</code> and <code>cleanup N</code>, and nothing else of
+<code>tools/sdlc.py</code>. That it clears the check for a sub-agent is expected, not yet shown: the first milestone's demo confirms it with a real
+sub-agent merge. Without the rule a refused session leaves the PR ready, <code>state</code> names <code>merge PR</code> with the gate's results, and the
+session the poster runs does that one merge. Nothing is merged around the gate.</p>
+
+<h2 id="milestones">8. A milestone, from plan to <code>main</code></h2>
 <p>A milestone is a group of slices that ends in something the poster can see. The epic works on
 <strong>one milestone at a time</strong>, the earliest one not yet shipped. Only its slices are offered,
 claimed or merged.</p>
@@ -509,7 +641,7 @@ through a pull request, with a merge commit.</li>
 e.g. <code>(sonnet: routine)</code>.</li>
 </ol>
 
-<h2 id="branches">8. Branches: nothing unseen reaches <code>main</code></h2>
+<h2 id="branches">9. Branches: nothing unseen reaches <code>main</code></h2>
 <figure>
 <svg viewBox="0 0 900 190" role="img" aria-labelledby="br-t">
   <title id="br-t">main gets only accepted milestones; slices squash into epic/N</title>
@@ -554,7 +686,7 @@ and records it, and pushes only on a pass. A conflict or a failure goes to a hum
 no Codex review: nothing of it is on the branch, so a review would judge a later milestone's code.</li>
 </ul>
 
-<h2 id="findings">9. Problems found along the way</h2>
+<h2 id="findings">10. Problems found along the way</h2>
 <p>Nothing found is left in a chat or buried in a PR. It's sorted, and each kind has its own path:</p>
 <div class="tablewrap"><table>
 <thead><tr><th>Found</th><th>What happens</th></tr></thead>
@@ -572,7 +704,7 @@ it joins the debt epic the same way (<code>state</code> on it says so).</td></tr
 <td>Their <code>/changes</code> becomes new slices in the same milestone, then demo rev 2.</td></tr>
 </tbody></table></div>
 
-<h2 id="you">10. What you can type</h2>
+<h2 id="you">11. What you can type</h2>
 <div class="grid">
   <div class="card"><h3><code>/approve</code></h3><p>On a line of its own. It signs off the <em>latest</em> PRD or diagnosis, or accepts
   the latest milestone demo. A newer revision voids an earlier approval.</p></div>
@@ -582,14 +714,14 @@ it joins the debt epic the same way (<code>state</code> on it says so).</td></tr
 </div>
 <p class="note">Only the issue's author or someone with write access can <code>/approve</code>. Quoted and code-block lines don't count.</p>
 
-<h2 id="where">11. Where is my issue?</h2>
+<h2 id="where">12. Where is my issue?</h2>
 <pre><code>uv run python tools/sdlc.py state 12        # its state, whose move, and the next: line
 uv run python tools/sdlc.py next            # every issue where it's the agent's move
 uv run python tools/sdlc.py demo-status 12  # each milestone: its slices, before/after, demo and release
 uv run python tools/sdlc.py ready --epic 12 # the slices that can start now</code></pre>
 <p>The <code>next:</code> line is always the answer to "what now?". Every skill ends by printing it.</p>
 
-<h2 id="example">12. A worked example</h2>
+<h2 id="example">13. A worked example</h2>
 <ol class="steps">
 <li>Someone files <em>"Sonos alarm manager"</em> (#12). <code>/triage-issue 12</code> asks two questions, and the issue becomes <span class="chip">sdlc:needs-info</span>.</li>
 <li>They answer. The agent writes PRD rev 1 (<span class="chip">sdlc:prd-review</span>), and they reply <code>/approve</code>. The PRD is merged into <code>docs/prd/</code>, and the issue becomes <span class="chip">sdlc:approved</span>.</li>
@@ -601,7 +733,7 @@ uv run python tools/sdlc.py ready --epic 12 # the slices that can start now</cod
 <li>When the last milestone ships, <code>epic/12</code> is deleted, the issue becomes <span class="chip">sdlc:done</span>, and it's closed.</li>
 </ol>
 
-<h2 id="rules">13. The rules that hold it together</h2>
+<h2 id="rules">14. The rules that hold it together</h2>
 <ul>
 <li><strong>One label at a time.</strong> Every <span class="chip">sdlc:*</span> label is changed only by <code>tools/sdlc.py</code>. The labels are
 <span class="chip">sdlc:triage</span> <span class="chip">sdlc:needs-info</span> <span class="chip">sdlc:prd-review</span>
@@ -614,6 +746,9 @@ is read back from those markers, so any session can pick up an issue from GitHub
 <li><strong>A quick change keeps the same gates.</strong> It reaches <code>main</code> only through <code>merge</code>'s quick gate: a recorded
 passing suite and Codex's approval on the exact head (never deferred), the poster's <code>/approve</code> of the brief, and a diff inside the
 <code>quick</code> limits. Anything that writes to a speaker, or touches the SDLC tooling, the skills or the review logic, is never quick.</li>
+<li><strong>Debt has its own gate, and every merge is one command.</strong> A debt PR reaches <code>main</code> only through <code>merge</code>'s debt gate
+(a passing suite and Codex's approval on the exact head, never deferred, tickets of the open pass only). No skill or tool runs a bare
+<code>gh pr merge</code>; <code>merge</code> runs only <code>origin/main</code>'s own gate code, which in practice means from the primary checkout.</li>
 <li><strong>People are reached through the issue.</strong> No skill asks a question in the chat. Publishing a demo is gated by automated checks
 (no device IDs, addresses or secrets, no blank pictures), and the poster's reply is the human check.</li>
 <li><strong>Speakers are safe.</strong> Tests are offline. Agents run only read-only and <code>--dry-run</code> commands. A real speaker plays only when a

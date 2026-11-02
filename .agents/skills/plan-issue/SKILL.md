@@ -52,6 +52,7 @@ Dispatch on `action`:
 | `continue_plan` / `create_plan_issues` while `sdlc:in-progress` | an amendment is under review: steps 5-6 |
 | `escalate_plan` | an amendment (feedback, the next milestone) spent its Codex rounds: `transition N escalated --kind escalation --reason "..."`. The epic is being built, so a human settles it, not a question to the poster |
 | `reconcile_label` | `uv run python tools/sdlc.py reconcile N`, then as `plan` |
+| `plan_pass` on a debt epic (`lane: debt`) | "A debt pass" below: no PRD, no plan JSON, no Codex round, no poster |
 | anything in triage | use `triage-issue` instead |
 | `turn` is `poster`, `human` or `later` | report it and stop |
 
@@ -248,6 +249,40 @@ stays `sdlc:in-progress`. Amend the plan; don't start over:
 
 When the new slices merge, the milestone is complete again and `next` asks for its
 next demo.
+
+## A debt pass
+
+`state D` on the debt epic says `plan_pass` when intake is done, no pass is open and a ticket can go in
+one (`/plan-issue D`). This is not the road above: there is no PRD or plan schema, the poster signs
+nothing, and Codex reviews no plan (it reviews every PR that builds one). Your advisor checks the order,
+and the tool checks the list.
+
+1. `uv run python tools/sdlc.py state D --json`: `debt.eligible` are the tickets a pass may take, and
+   `debt.passes` the earlier ones. Read each ticket and the files it names on `main`.
+2. Choose at most `debt.pass_size` tickets (8). Put tickets that change the same files in one group (at
+   most `debt.max_per_pr`, 4, per PR), and order the groups so earlier ones don't depend on later ones.
+   Leave out a ticket the validator refuses (a milestone not yet shipped, an overlap with an epic being
+   built): it waits for a later pass. A ticket that turns out to need design choices is not a pass's:
+   `debt-intake T --verdict novel --reason "..."` sends it to triage. One whose check needs a real
+   speaker is still planned; the build asks a person (`work-slice`, "A debt ticket").
+3. Write `pass.json` in your scratchpad. `pass` is the next number (1, then 2, ...):
+
+```json
+{"epic": 250, "pass": 1, "groups": [
+  {"tickets": [131, 140], "scope": "One line: what these tickets change.",
+   "files": ["tools/sdlc.py", "tests/test_sdlc_review.py"],
+   "complexity": "routine", "complexity_reason": "why that rating"}]}
+```
+
+   `files` are exact repository paths (no globs) the group may change, and Codex holds the PR to them.
+   `complexity` is `routine` or `judgment`; it picks the model that builds the group.
+4. Have the `advisor` check the order and the groups.
+5. `uv run python tools/sdlc.py debt-pass-validate D pass.json` lists every reason it can't be posted
+   (read-only, apart from one bounded `git fetch` for the overlap check). Fix them and rerun.
+6. `uv run python tools/sdlc.py debt-pass-post D pass.json` (`--dry-run` shows the comment). Debt that
+   joins while the pass is open goes into the next pass.
+
+End with the pass number, its groups, and the `next:` line of `state D` (`/work-slice T --debt`).
 
 ## 8. Report
 
