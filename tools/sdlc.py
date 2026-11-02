@@ -584,7 +584,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "demo_request": request,
         "planned_milestones": planned_ms, "created_milestones": sorted(created_ms, key=natural_key),
         "uncreated_milestones": uncreated, "create_mode": latest_plan_json.get("create") or config.get("create", "milestone"),
-        "plan_created": L.plan_created, "closed": issue.get("state", "open").lower() == "closed",
+        "plan_created": L.plan_created, "issue_closed": issue.get("state", "open").lower() == "closed",
     }
 
 
@@ -609,8 +609,13 @@ def unshipped_milestone(src: dict[str, Any]) -> str | None:
     shipped = src.get("shipped") or {}
     if created := src.get("created_milestones"):
         return next((m for m in created if m not in shipped), None)
-    building = src.get("plan_created") and not src.get("closed") and src.get("state") not in LATER_STATES
-    return NO_MILESTONE if building and NO_MILESTONE not in shipped else None
+    return NO_MILESTONE if no_milestone_building(src) and NO_MILESTONE not in shipped else None
+
+
+def no_milestone_building(src: dict[str, Any]) -> bool:
+    """An epic whose plan was created with no named milestones, still open and not done: its one release, `all`,
+    holds its debt back until it ships. Closed or done, it holds nothing back, whatever a ticket's `waits=` says."""
+    return bool(src.get("plan_created") and not src.get("issue_closed") and src.get("state") not in LATER_STATES)
 
 
 def wait_target(epic: Any, milestone: str) -> str:
@@ -640,7 +645,9 @@ def debt_waiting_for(st: dict[str, Any], src: dict[str, Any] | None) -> dict[str
         ms = st["debt_waits"].split(":", 1)[1] if ":" in st["debt_waits"] else ""
         if not ms:
             return None
-        return None if src is not None and ms in (src.get("shipped") or {}) else {"epic": epic, "milestone": ms}
+        if src is not None and (ms in (src.get("shipped") or {}) or ms == NO_MILESTONE and not no_milestone_building(src)):
+            return None
+        return {"epic": epic, "milestone": ms}
     ms = unshipped_milestone(src) if src is not None else None
     return {"epic": epic, "milestone": ms} if ms else None
 

@@ -727,6 +727,22 @@ def test_debt_of_an_epic_without_named_milestones_waits_for_it_to_ship(gh, git, 
     assert code == 0, err
 
 
+@pytest.mark.parametrize("ends", ["closed", "done"])
+def test_debt_waiting_for_a_no_milestone_epic_stops_when_it_closes_or_is_done(gh, capsys, body_file, ends):
+    """A `waits=N:all` ticket filed while the epic was built doesn't wait forever on an epic closed or done without
+    a recorded ship of `all`."""
+    gh.debt_epic()
+    n = gh.feature_epic(created=None)
+    assert file_it(capsys, n, body_file)[0] == 0
+    t, mk, _ = filed(gh)
+    assert mk["waits"] == f"{n}:all" and ticket_state(capsys, t)["waiting_for"] == {"epic": n, "milestone": "all"}
+    if ends == "closed":
+        gh.issues[n]["state"] = "closed"
+    else:
+        gh.issues[n]["labels"] = ["sdlc:done", "enhancement"]
+    assert ticket_state(capsys, t)["waiting_for"] is None
+
+
 @pytest.mark.parametrize("source", ["unplanned", "closed", "done", "quick", "debt ticket"])
 def test_debt_of_a_no_milestone_epic_that_is_not_being_built_never_waits(gh, capsys, body_file, source):
     gh.debt_epic()
