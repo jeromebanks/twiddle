@@ -1100,6 +1100,9 @@ def print_state(st: dict[str, Any]) -> None:
             print(f"  tech debt of #{st.get('debt_of') or '?'}, generation {st.get('debt_generation') or '? (a bad marker)'}"
                   + (f"; waits for #{w['epic']}'s {w['milestone']} to ship to main" if w else "")
                   + (f"; waits on a person ({st['person_request']['url']})" if st.get("person_request") else ""))
+        if g := st.get("group"):   # an open pass holds it: `slice-status`'s group and rating, outside `next`
+            print(f"  in pass {st['pass']}, group `{g['key']}` (" + ", ".join(f"#{t}" for t in g["tickets"]) + ")"
+                  + (f"   complexity: {st['complexity']} (model {st['model']})" if st.get("complexity") else ""))
         print(f"  next: {st.get('next')}")
         return
     doc = st["latest_doc"]
@@ -1212,18 +1215,29 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
                 st = {**st, "action": view["action"], "turn": view["turn"], "debt": view}
                 progress = dp
     nxt = next_command(st, progress)
-    if st.get("plan_kind") == "debt" and st.get("debt_epic") and not offline and bundle is not None:
-        # its group's PR may be due to merge: read it as slice-status does. A failed read leaves `next` as it was
-        trusted = trusted if trusted is not None else set(bundle["trusted"])
-        try:
-            issue, comments = fetch_slice(st["number"], config)
-            db = debt_bundle(st["number"], config, trusted, issue, comments)
-            dst = derive_debt(db, config)
-            if dst["merge_due"]:
-                nxt = merge_next(dst["pr"], debt_gate_read(dst["pr"], config, trusted))
-        except SdlcError as exc:
-            print(f"could not read #{st['number']}'s group PR ({exc}): `next` doesn't say whether it may merge",
-                  file=sys.stderr)
+    if st.get("plan_kind") == "debt" and st.get("debt_epic") and bundle is not None:
+        # a ticket an open pass holds is built as `slice-status` says (derive_debt's `next`, its group's PR due to
+        # merge included). Offline reads the passes from the bundle's `epic_comments`; a failed online read leaves
+        # `next` as it was
+        dst = None
+        if offline:
+            if "epic_comments" in bundle:
+                dst = derive_debt({"members": [], "pr": None, "pr_comments": [], **bundle,
+                                   "debt_epic": st["debt_epic"]}, config)
+        else:
+            trusted = trusted if trusted is not None else set(bundle["trusted"])
+            try:
+                issue, comments = fetch_slice(st["number"], config)
+                dst = derive_debt(debt_bundle(st["number"], config, trusted, issue, comments), config)
+                if dst["merge_due"]:
+                    dst["next"] = merge_next(dst["pr"], debt_gate_read(dst["pr"], config, trusted))
+            except SdlcError as exc:
+                print(f"could not read #{st['number']}'s group PR ({exc}): `next` doesn't say whether it may merge",
+                      file=sys.stderr)
+        if dst and dst["state"] in ("ready", "claimed", "in-review") and not st.get("waiting_for"):
+            nxt = dst["next"]
+            st = {**st, "pass": dst["pass"], "group": dst["group"], "complexity": dst["complexity"],
+                  "model": dst["model"]}
     # a quick change that claim refuses is not offered to /work-slice (read offline: no git). The bundle gives
     # claim's issue checks too (the rating, the brief's sections); without one, only the brief's `## Files`
     if st["action"] == "work_quick":
@@ -4365,7 +4379,7 @@ def claim_debt(args: argparse.Namespace, config: dict[str, Any], b: dict[str, An
               + (f"; adopting debt group `{adopted['group']}`'s kept branch, worktree"
                  + (f" and PR #{adopted['pr']}" if adopted.get("pr") else "") if adopted else ""))
         return 0
-    add_slice_worktree(n, base, args.resume or bool(adopted), config, wt=wt, branch=branch)
+    add_slice_worktree(n, base, args.resume or bool(adopted), config, wt=wt, branch=branch, lane=DEBT_LANE)
     trusted, have = set(b["trusted"]), debt_members(b)
     model = {"model": args.model} if args.model else {}
     for t in members:
@@ -4945,16 +4959,30 @@ def command_slice_check(args: argparse.Namespace, config: dict[str, Any]) -> int
     return 1 if errs else 0
 
 
+def registered_worktree(wt: Path, root: Path) -> bool:
+    """Whether git lists `wt` among the checkout's worktrees (a stray directory at the path is not one)."""
+    out = git(["worktree", "list", "--porcelain"], cwd=root, check=False)
+    return any(Path(l[len("worktree "):]).resolve() == wt.resolve() for l in out.splitlines() if l.startswith("worktree "))
+
+
 def add_slice_worktree(n: int, base: str, resume: bool, config: dict[str, Any], wt: Path | None = None,
-                       branch: str | None = None) -> None:
+                       branch: str | None = None, lane: str | None = None) -> None:
     """Make (or, resuming, reattach) worktree `.worktrees/slice-N` on branch slice/N, new branches from origin/<base>.
-    A debt group resumed under another member's number passes the worktree and branch its claim recorded."""
+    A debt group resumed under another member's number passes the worktree and branch its claim recorded. A debt
+    claim (`lane`) names the debt lane's recovery for a path that is in the way: `claim --resume` takes only a
+    recorded claim, and `cleanup` removes only a registered worktree."""
     root = primary_root()
     wt, branch = wt or worktree_path(n, config), branch or slice_branch(n)
     git(["fetch", "origin", base], cwd=root)
     local = bool(git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root, check=False))
     remote = bool(git(["ls-remote", "--heads", "origin", branch], cwd=root, check=False))
     if wt.exists():
+        if not resume and lane == DEBT_LANE:
+            if registered_worktree(wt, root):
+                raise SdlcError(f"{wt} is already a worktree and #{n} has no claim to resume: `cleanup {n} --force` "
+                                f"discards it, then `claim {n} --debt`")
+            raise SdlcError(f"{wt} exists but is not a git worktree, so `cleanup` can't remove it: a person moves "
+                            f"{wt} aside, then `claim {n} --debt`")
         if not resume:
             raise SdlcError(f"{wt} already exists: `claim {n} --resume`, or `cleanup {n} --force` to discard it")
     elif local:
