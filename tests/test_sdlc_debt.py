@@ -65,12 +65,15 @@ class FakeGitHub:
         """A marked comment by the owner on #n, as the tool posts it."""
         self.comment(n, sdlc.render_comment(kind, rev, "text", CONFIG, **extra))
 
-    def feature_epic(self, created=("M1",), shipped=()):
-        """A feature epic being built: its milestones' issues created, some shipped to main."""
-        n = self.issue("a feature", ["sdlc:in-progress", "enhancement"], author=STRANGER)
+    def feature_epic(self, created=("M1",), shipped=(), label="sdlc:in-progress", state="open"):
+        """A feature epic being built: its milestones' issues created, some shipped to main. `created=None` is a
+        plan with no named milestones: its plan-created has no `created=` (one release, `all`); `()` is unplanned."""
+        n = self.issue("a feature", [label, "enhancement"], author=STRANGER, state=state)
         self.say(n, "prd", 1)
         self.say(n, "approval", 1, by=STRANGER, via="comment")
-        if created:
+        if created is None:
+            self.say(n, "plan-created")
+        elif created:
             self.say(n, "plan-created", created=",".join(created))
         for m in shipped:
             self.say(n, "shipped", milestone=m, sha="a" * 40)
@@ -690,6 +693,70 @@ def test_debt_of_a_quick_change_or_a_shipped_epic_never_waits(gh, capsys, body_f
         gh.writes.clear()
         assert file_it(capsys, n, body_file)[0] == 0
         assert "waits" not in filed(gh)[1]
+
+
+def test_debt_of_an_epic_without_named_milestones_waits_for_it_to_ship(gh, git, capsys, body_file, tmp_path):
+    """PRD criterion 11: an epic planned with no named milestones has one release, `all`. Its debt records
+    `waits=N:all`, waits (`state T`, the pass check, `state D`) until `shipped` has `all`; an old marker likewise."""
+    epic = gh.debt_epic()
+    n = gh.feature_epic(created=None)
+    assert file_it(capsys, n, body_file)[0] == 0
+    t, mk, body = filed(gh)
+    assert mk["waits"] == f"{n}:all" and body.splitlines()[1].endswith(f"once #{n} has shipped to `main`.")
+    old = gh.issue("old debt", [DEBT], body=f"<!-- sdlc:v1 kind=debt epic={n} source=review -->\nTech debt.")
+    gh.subs[epic] = [t, old]
+    for k in (t, old):
+        gh.intake(k)
+        st = ticket_state(capsys, k)
+        assert st["waiting_for"] == {"epic": n, "milestone": "all"}
+        assert f"waiting for #{n} to ship to main" in st["next"] and "'s all" not in st["next"]
+        code, out, _ = run(capsys, "state", k)
+        assert f"waits for #{n} to ship to main" in out and "'s all" not in out
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "debt_waiting" and f"#{t} waits for #{n} to ship to main" in st["next"]
+    code, _, err = run(capsys, "debt-pass-validate", epic,
+                       pass_file(tmp_path, epic, [group(t, old, files=("docs/sdlc.html",))]))
+    assert code == 1 and f"#{t} waits for #{n} to ship to main" in err and f"#{old} waits for #{n} to ship" in err
+    gh.say(n, "shipped", milestone="all", sha="b" * 40)   # the epic's one release is on main: neither waits
+    for k in (t, old):
+        st = ticket_state(capsys, k)
+        assert st["waiting_for"] is None and "waiting" not in st["next"]
+    assert ticket_state(capsys, epic)["action"] == "plan_pass"
+    code, _, err = run(capsys, "debt-pass-validate", epic,
+                       pass_file(tmp_path, epic, [group(t, old, files=("docs/sdlc.html",))]))
+    assert code == 0, err
+
+
+@pytest.mark.parametrize("ends", ["closed", "done"])
+def test_debt_waiting_for_a_no_milestone_epic_stops_when_it_closes_or_is_done(gh, capsys, body_file, ends):
+    """A `waits=N:all` ticket filed while the epic was built doesn't wait forever on an epic closed or done without
+    a recorded ship of `all`."""
+    gh.debt_epic()
+    n = gh.feature_epic(created=None)
+    assert file_it(capsys, n, body_file)[0] == 0
+    t, mk, _ = filed(gh)
+    assert mk["waits"] == f"{n}:all" and ticket_state(capsys, t)["waiting_for"] == {"epic": n, "milestone": "all"}
+    if ends == "closed":
+        gh.issues[n]["state"] = "closed"
+    else:
+        gh.issues[n]["labels"] = ["sdlc:done", "enhancement"]
+    assert ticket_state(capsys, t)["waiting_for"] is None
+
+
+@pytest.mark.parametrize("source", ["unplanned", "closed", "done", "quick", "debt ticket"])
+def test_debt_of_a_no_milestone_epic_that_is_not_being_built_never_waits(gh, capsys, body_file, source):
+    gh.debt_epic()
+    n = {"unplanned": lambda: gh.feature_epic(created=()),
+         "closed": lambda: gh.feature_epic(created=None, state="closed"),
+         "done": lambda: gh.feature_epic(created=None, label="sdlc:done"),
+         "quick": gh.quick_change,
+         "debt ticket": lambda: gh.ticket()}[source]()
+    assert file_it(capsys, n, body_file)[0] == 0
+    t, mk, _ = filed(gh)
+    assert "waits" not in mk
+    if source in ("unplanned", "closed", "done"):   # an old marker isn't derived to wait for it either
+        old = gh.issue("old debt", [DEBT], body=f"<!-- sdlc:v1 kind=debt epic={n} source=review -->\nTech debt.")
+        assert ticket_state(capsys, old)["waiting_for"] is None
 
 
 def test_state_of_a_waiting_ticket_offline_reads_its_source_from_the_bundle(tmp_path, capsys, monkeypatch):
