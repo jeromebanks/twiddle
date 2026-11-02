@@ -2508,6 +2508,9 @@ def test_a_ticket_left_claimed_when_its_pass_ended_is_offered_release_by_every_v
     assert status(capsys, a)["state"] == "in-review"
     every_view_says_release()
     assert "merge 300" not in ticket_state(capsys, epic)["next"]
+    assert run(capsys, "release", a, "--reason", "back to the pool")[0] == 0   # what every view named
+    assert ticket_state(capsys, a)["next"].startswith(f"nothing for #{a} alone")
+    assert "still holds" not in ticket_state(capsys, epic)["next"]
 
 
 # --- debt that needs a person: ask on the ticket, leave the pass (T8b) --------------------------------------------
