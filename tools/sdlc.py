@@ -1235,9 +1235,10 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
                 print(f"could not read #{st['number']}'s group PR ({exc}): `next` doesn't say whether it may merge",
                       file=sys.stderr)
         if dst and dst["state"] in ("ready", "claimed", "in-review", "escalated") and not st.get("waiting_for"):
-            nxt = dst["next"]
-            st = {**st, "pass": dst["pass"], "group": dst["group"], "complexity": dst["complexity"],
-                  "model": dst["model"]}
+            nxt = dst["next"]   # a claim its ended pass kept included: its release
+            if dst["group"] and dst["group"]["open_pass"]:   # only an open pass is the ticket's pass
+                st = {**st, "pass": dst["pass"], "group": dst["group"], "complexity": dst["complexity"],
+                      "model": dst["model"]}
     # a quick change that claim refuses is not offered to /work-slice (read offline: no git). The bundle gives
     # claim's issue checks too (the rating, the brief's sections); without one, only the brief's `## Files`
     if st["action"] == "work_quick":
@@ -4254,7 +4255,12 @@ def derive_debt(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         state = "not-in-pass"
     else:
         state = "ready"
-    if state in ("ready", "claimed", "in-review"):
+    # its group kept the claim (or PR) as its pass ended (escalated, then cleared): a person releases it, as
+    # `state D` says; nobody builds or merges it for a pass that is over
+    stale = state in ("claimed", "in-review") and bool(claim and claim.get("debt")) and bool(g) and not g["open_pass"]
+    if stale:
+        nxt = f"needs a human: #{n} {stale_claim_text({'number': n, 'claim': claim})}"
+    elif state in ("ready", "claimed", "in-review"):
         nxt = f"/work-slice {n} --debt"
     elif state == "waiting on a person":
         nxt = (f"nothing for an agent: #{n} waits on a person ({asked['url']}): a reply from its author or a "
@@ -4268,7 +4274,7 @@ def derive_debt(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     else:
         nxt = f"`uv run python tools/sdlc.py state {epic}` (the debt epic's next)" if epic else "nothing"
     # the records allow the merge: next is `merge PR`, whose gate results the caller adds (`merge_next`)
-    due = state == "in-review" and bool(t) and t.get("result") == "pass" and bool(r) and r["verdict"] == "approve"
+    due = not stale and state == "in-review" and bool(t) and t.get("result") == "pass" and bool(r) and r["verdict"] == "approve"
     if due:
         nxt = merge_next(pr["number"], None)
     complexity = (g or {}).get("complexity")
@@ -4298,15 +4304,18 @@ def debt_claim_errors(b: dict[str, Any], resume: bool = False) -> list[str]:
     if asked := st["person_request"]:
         errs.append(f"#{n} waits on a person ({asked['url']}): a reply from its author or a collaborator puts it back "
                     "for a later debt pass")
+    claim = st["claim"]
+    stale = bool(claim and claim.get("debt") and st["group"] and not st["group"]["open_pass"])
     if not b.get("debt_epic"):
         errs.append(f"#{n} is in no open debt epic (`debt-epic` attaches open debt)")
+    elif stale:   # its pass ended with the claim kept: neither a fresh claim nor a resume builds it
+        errs.append(f"#{n} {stale_claim_text({'number': n, 'claim': claim})}")
     elif not (st["group"] and (st["group"]["open_pass"] or st["claim"])):
         errs.append(f"#{n} is in no open pass of debt epic #{b['debt_epic']}: `state {b['debt_epic']}` says what is due")
     if st["escalated"]:
         errs.append(f"#{n}'s group `{st['key']}` is escalated to a human ("
                     + ", ".join(f"#{e}" for e in st["escalated"]) + "): a person clears it")
-    claim = st["claim"]
-    if claim and not resume:
+    if claim and not resume and not stale:
         whose = "" if claim_status(b["comments"], set(b["trusted"])) else f"its group `{st['key']}` is claimed: "
         errs.append(f"#{n} is already claimed ({whose}{claim['url']}): `claim {n} --debt --resume` to continue it")
     if resume and not claim:

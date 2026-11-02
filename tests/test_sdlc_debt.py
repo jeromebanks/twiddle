@@ -2464,6 +2464,52 @@ def test_a_group_left_claimed_when_its_pass_ended_is_kept_out_of_the_next_until_
     assert st["debt"]["eligible"] == [a, c] and "still holds" not in st["next"]
 
 
+def test_a_ticket_left_claimed_when_its_pass_ended_is_offered_release_by_every_view(gh, repo, capsys, main_gate):
+    """#243 F2 (Codex's milestone review): the same case as the test above, from the ticket. `state T`, `slice-status
+    T` and `state D` agree that a person releases it; nothing offers `/work-slice T --debt` or `merge PR`, nothing
+    names the ended group as its pass, and `claim T --debt --resume` refuses without writing."""
+    epic, (a, b, c) = posted_pass(gh, [((0,), "routine"), ((1,), "routine")])
+    assert run(capsys, "claim", a, "--debt", "--model", "opus")[0] == 0
+    assert run(capsys, "escalate-slice", a, "--reason", "stuck")[0] == 0
+    done(gh, b)
+    assert run(capsys, "debt-epic")[0] == 0 and len(ends(gh, epic)) == 1
+    gh.issues[a]["labels"].remove(sdlc.ESCALATED_LABEL)   # a person clears the escalation
+
+    def release_only(nxt):
+        return f"`release {a}`" in nxt and "/work-slice" not in nxt and "merge" not in nxt
+
+    def every_view_says_release():
+        st = ticket_state(capsys, a)
+        assert release_only(st["next"]) and "pass" not in st and "group" not in st, st
+        code, out, err = run(capsys, "state", a)
+        assert code == 0, err
+        assert "in pass" not in out and "/work-slice" not in out and f"`release {a}`" in out
+        s = status(capsys, a)
+        assert release_only(s["next"]) and not s["merge_due"] and s["next"] == st["next"]
+        assert any(f"`release {a}`" in e for e in s["refusals"])
+        code, out, err = run(capsys, "slice-status", a)
+        assert code == 0 and "/work-slice" not in out and f"`release {a}`" in out, err
+        assert release_only(ticket_state(capsys, epic)["next"].split("needs a human: ", 1)[1])
+
+    every_view_says_release()
+    writes = len(gh.writes)
+    for flags in (("--resume",), ()):
+        code, _, err = run(capsys, "claim", a, "--debt", *flags)
+        assert code == 1 and f"`release {a}`" in err and "--resume` to continue" not in err, err
+    code, out, err = run(capsys, "slice-check", a, "--resume")
+    assert code == 1 and f"`release {a}`" in out + err
+    assert len(gh.writes) == writes
+    # its group's PR, tested and approved on its head: still a person's to release, never `merge 300`
+    debt_pr(gh, 300, f"slice/{a}", a)
+    gh.branches.add(f"slice/{a}")
+    gh.behind[HEAD] = 0
+    gh.say(300, "tests", sha=HEAD, result="pass", passed="10")
+    gh.say(300, "pr-review", sha=HEAD, verdict="approve", round="1")
+    assert status(capsys, a)["state"] == "in-review"
+    every_view_says_release()
+    assert "merge 300" not in ticket_state(capsys, epic)["next"]
+
+
 # --- debt that needs a person: ask on the ticket, leave the pass (T8b) --------------------------------------------
 
 ASK = ("Please run this on a speaker:\n\n    uv run twiddle snapshot --room R\n    uv run twiddle play --room R --dry-run\n"
