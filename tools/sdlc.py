@@ -192,6 +192,7 @@ class Ledger:
     plan_review: dict[str, Any] | None = None   # the latest round counted in plan_rounds: its response feeds the next
     plan_after_created: bool = False     # a plan revision posted since the last plan-created: an amendment
     created: set[str] | None = field(default_factory=set)   # milestones whose issues exist (None: all, legacy)
+    plan_created: bool = False           # a plan-created record exists (with no milestones, `created` can't say so)
     feedback: bool = False               # demo changes (the poster's or the agent's) not yet turned into issues
     feedback_plan: bool = False          # a plan revision posted since that feedback
     demos: dict[str, dict[str, Any]] = field(default_factory=dict)   # milestone -> its latest demo
@@ -288,6 +289,7 @@ def _on_plan_review(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) ->
 def _on_plan_created(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     L.feedback = L.feedback_plan = L.plan_after_created = False
     L.plan_rounds, L.plan_review = 0, None   # the next amendment (a milestone's replan, demo changes) gets fresh rounds
+    L.plan_created = True
     if "created" not in mk:
         L.created = None
     elif L.created is not None:
@@ -582,6 +584,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "demo_request": request,
         "planned_milestones": planned_ms, "created_milestones": sorted(created_ms, key=natural_key),
         "uncreated_milestones": uncreated, "create_mode": latest_plan_json.get("create") or config.get("create", "milestone"),
+        "plan_created": L.plan_created, "closed": issue.get("state", "open").lower() == "closed",
     }
 
 
@@ -597,12 +600,22 @@ def debt_generation(mk: dict[str, str]) -> int | None:
 
 def unshipped_milestone(src: dict[str, Any]) -> str | None:
     """The feature epic's earliest created milestone not yet shipped to main (the one `merge` builds now), from its
-    state alone: debt filed against it waits for that ship. None for a quick change, a debt ticket or epic, an
-    epic with no milestone created, or one whose created milestones have all shipped."""
+    state alone: debt filed against it waits for that ship. An open, not-done epic whose plan was created with no
+    named milestones has one release, `all` (NO_MILESTONE), until it ships. None for a quick change, a debt ticket
+    or epic, an unplanned epic, a closed or done one with no named milestones, or one whose milestones have all
+    shipped."""
     if src.get("plan_kind") or is_quick(src) or is_debt_epic(src):
         return None
     shipped = src.get("shipped") or {}
-    return next((m for m in src.get("created_milestones") or [] if m not in shipped), None)
+    if created := src.get("created_milestones"):
+        return next((m for m in created if m not in shipped), None)
+    building = src.get("plan_created") and not src.get("closed") and src.get("state") not in LATER_STATES
+    return NO_MILESTONE if building and NO_MILESTONE not in shipped else None
+
+
+def wait_target(epic: Any, milestone: str) -> str:
+    """What a debt ticket waits on to ship: `#12's M1`, or `#12` itself for an epic with no named milestones."""
+    return f"#{epic}" if milestone == NO_MILESTONE else f"#{epic}'s {milestone}"
 
 
 def debt_wait_source(st: dict[str, Any]) -> int | None:
@@ -639,7 +652,7 @@ def debt_ticket_next(st: dict[str, Any]) -> str:
         return f"`uv run python tools/sdlc.py debt-epic` (#{n} is tech debt in no open debt epic: it attaches it)"
     w, asked = st.get("waiting_for"), st.get("person_request")
     return (f"nothing for #{n} alone: it is tech debt in debt epic #{held}"
-            + (f", waiting for #{w['epic']}'s {w['milestone']} to ship to main" if w else "")
+            + (f", waiting for {wait_target(w['epic'], w['milestone'])} to ship to main" if w else "")
             + (f", waiting on a person ({asked['url']}): a reply from its author or a collaborator puts it back for "
                "a later pass" if asked else "")
             + f" (`uv run python tools/sdlc.py state {held}` says what is due)")
@@ -1098,7 +1111,7 @@ def print_state(st: dict[str, Any]) -> None:
         if st["plan_kind"] == "debt":
             w = st.get("waiting_for")
             print(f"  tech debt of #{st.get('debt_of') or '?'}, generation {st.get('debt_generation') or '? (a bad marker)'}"
-                  + (f"; waits for #{w['epic']}'s {w['milestone']} to ship to main" if w else "")
+                  + (f"; waits for {wait_target(w['epic'], w['milestone'])} to ship to main" if w else "")
                   + (f"; waits on a person ({st['person_request']['url']})" if st.get("person_request") else ""))
         if g := st.get("group"):   # an open pass holds it: `slice-status`'s group and rating, outside `next`
             print(f"  in pass {st['pass']}, group `{g['key']}` (" + ", ".join(f"#{t}" for t in g["tickets"]) + ")"
@@ -3757,7 +3770,7 @@ def withdrawn_from(comments: list[dict[str, Any]], trusted: set[str]) -> set[str
 def ticket_wait_text(t: dict[str, Any]) -> str:
     w = t.get("waiting_for")
     if w:
-        return f"waits for #{w['epic']}'s {w['milestone']} to ship to main"
+        return f"waits for {wait_target(w['epic'], w['milestone'])} to ship to main"
     url = (t.get("person_request") or {}).get("url")
     return "waits on a person" + (f" (asked in {url})" if url else "")
 
@@ -7314,7 +7327,7 @@ def debt_head(n: int, source: str, *, generation: int = 1, quick: bool = False, 
     joins = f"debt epic #{debt_epic}" if debt_epic else "the debt epic"
     return (f"{marker('debt', None, epic=str(n), source=source, **extra)}\n"
             f"Tech debt from {origin} ({source}), generation {generation}: not blocking. It joins {joins}, whose "
-            f"passes work it into `main`" + (f", once #{n}'s {waits} has shipped to `main`." if waits else "."))
+            f"passes work it into `main`" + (f", once {wait_target(n, waits)} has shipped to `main`." if waits else "."))
 
 
 def readdress_quick_debt(n: int, config: dict[str, Any], trusted: set[str]) -> None:
