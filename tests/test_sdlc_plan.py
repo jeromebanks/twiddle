@@ -794,3 +794,6 @@ def test_a_real_amendment_round_runs_codex_in_a_checkout_of_epic_n(tmp_path, mon
     assert saved.startswith(f"HEAD: {r.epic}\n") and r.epic != r.main
     assert "read: only epic/12 has this" in saved and saved.rstrip().endswith("VERDICT: approve")
     assert not (r.out / "epic-12").exists() and str(r.out / "epic-12") not in git_("worktree", "list", cwd=r.root)
+    # and the round it made can be recorded
+    assert sdlc.main(["plan-review", "12", "--plan", str(r.out / "plan.json"), "--report", str(r.out / "codex.md"),
+                      "--from-file", _bundle(tmp_path, AMENDED, ("sdlc:in-progress",)), "--dry-run"]) == 0
