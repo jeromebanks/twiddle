@@ -66,6 +66,8 @@ REFUSED = [
     "uv run twiddle tune kalx --room roam",
     "uv run twiddle alarm rm 1",
     "twiddle alarm rm 1",
+    "twiddle rooms --json",                            # bare: PATH could find any build
+    "twiddle status",
     "uv run twiddle snapshot --room roam",
     "uv run twiddle scene list --refresh",
     "uv run twiddle scene list --ref",                 # argparse would expand it to --refresh
@@ -115,6 +117,12 @@ def test_watch_run_refuses_any_tui(watched, tmp_path, monkeypatch):
     assert watched == [] and not (tmp_path / "d").exists()
 
 
+def test_watch_run_refuses_driving_an_app_directly(watched, tmp_path):
+    with pytest.raises(demo_shot.Refused):
+        demo_shot.drive(Flip(), ["shot:x"], tmp_path / "d", (40, 10))
+    assert not (tmp_path / "d").exists()
+
+
 def test_watch_run_refuses_another_checkout(watched, tmp_path):
     out = tmp_path / "shot.svg"
     rc = demo_shot.main(["cli", "--out", str(out), "--cwd", str(tmp_path), "--", "uv", "run", "twiddle", "status"])
@@ -131,7 +139,7 @@ ALLOWED = [
     "uv run twiddle status",
     "uv run twiddle status --room roam --json",
     "uv run twiddle rooms",
-    "twiddle rooms --json",
+    "uv run twiddle rooms --json",
     "uv run twiddle alarm list",
     "uv run twiddle alarm list --json",
     "uv run twiddle alarm status --room Kitchen",

@@ -56,7 +56,7 @@ KEY = re.compile(r"[a-z0-9][a-z0-9_-]*")
 # Left out on purpose: `snapshot` (it overwrites logs/snapshots/<room>.json,
 # which `restore` reads), `np -d` (it writes once you pick a track),
 # `scene list --refresh` (a build), `stations probe/search` (not needed).
-TWIDDLE = (("uv", "run", "twiddle"), ("twiddle",))
+TWIDDLE = (("uv", "run", "twiddle"),)   # never a bare `twiddle`: PATH could find any build
 SDLC = (("uv", "run", "python", "tools/sdlc.py"),)
 WATCH = (("uv", "run", "python", "tools/sdlc_watch.py"),)
 SPEAKER = {"--json": None, "--room": NAME, "--anchor": NAME}
@@ -175,6 +175,8 @@ def shot_cli(cmd: list[str], out: Path, title: str | None, width: int, cwd: str 
 
 def drive(app: Any, steps: list[str], out_dir: Path, size: tuple[int, int]) -> list[Path]:
     """Run a Textual app headless through `steps`, saving a masked SVG at each `shot:`."""
+    if watch_run():
+        raise Refused(f"{WATCH_ENV} is set: refusing a TUI (its keys can write); nothing was run")
     saved: list[Path] = []
 
     async def go() -> None:
