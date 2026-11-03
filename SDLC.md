@@ -106,6 +106,7 @@ ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every sk
 | `sdlc:planned`, `sdlc:in-progress` | the agent: `/work-slice <ready slice>`, `/milestone-demo N` once a milestone's units are all merged or an accepted one is due to ship, or `sync N` when `epic/N` is behind `main` and nothing else is going on (state's `next:`) |
 | `sdlc:demo-review` | the poster, until they reply to the demo; then the agent (`/milestone-demo N`) |
 | `sdlc:in-progress` after a demo's `/changes` | the agent: `/plan-issue N` plans them as new slices |
+| `sdlc:in-progress`, the poster's `/changes` with no demo in review | the agent: `demo-changes N --body-file ...` records it against the current milestone (state's action `record_changes`), then `/plan-issue N` plans it as new slices |
 | `sdlc:in-progress` with `lane:debt` (the debt epic) | the agent, from its tickets: `debt-epic` (open it, attach debt, end a pass), `debt-intake`, `/plan-issue D` (a pass), `/work-slice T --debt`, or `merge PR` (state's actions `pass_end`, `debt_intake`, `plan_pass`, `work_debt`, `merge_debt`); never the poster |
 | `tech-debt` issues | never triaged on their own; they move with the debt epic, and `state T` names it |
 | `plan:slice` / `plan:subtask` issues | never triaged; a slice's state is `slice-status N` |
@@ -118,7 +119,10 @@ ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every sk
 
 - **Reply in a comment** to answer a question or react to a PRD.
 - **`/approve`** on its own line signs off on the *latest* PRD/diagnosis revision, or accepts the latest milestone demo.
-- **`/changes <what>`** asks for changes. Any other reply is treated as feedback.
+- **`/changes <what>`** asks for changes. Any other reply is treated as feedback. On an epic being built with no
+  demo in review, it is recorded (`demo-changes`) and planned as new slices of the current milestone; it adds
+  nothing while changes already wait to be planned, and waits while an accepted milestone waits to ship (it is
+  recorded once that milestone has shipped).
 - A maintainer may instead add the **`sdlc:approved`** label; the next run records it as an approval comment.
 
 `/approve` counts only from the issue's author or someone who can write to the

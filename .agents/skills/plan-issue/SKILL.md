@@ -47,7 +47,7 @@ Dispatch on `action`:
 | `replan` | the poster answered your planning question: read the answer, revise (step 3), post (step 4), step 5 |
 | `ask_poster` | step 7 |
 | `create_plan_issues` | Codex approved the latest revision (or an earlier creation was cut short): step 6 |
-| any of these with `feedback: true` | the poster asked for changes at a milestone demo: "After demo feedback" below |
+| any of these with `feedback: true` | the poster asked for changes (at a milestone demo, or with none in review): "After demo feedback" below |
 | `plan_next_milestone` | the latest created milestone was accepted and the plan has more: "The next milestone" below |
 | `continue_plan` / `create_plan_issues` while `sdlc:in-progress` | an amendment is under review: steps 5-6 |
 | `escalate_plan` | an amendment (feedback, the next milestone) spent its Codex rounds: `transition N escalated --kind escalation --reason "..."`. The epic is being built, so a human settles it, not a question to the poster |
@@ -233,14 +233,15 @@ Then revise the plan before anything more is created:
 
 ## After demo feedback
 
-When the poster answers a milestone demo with changes, or the agent's own demo run
-finds the milestone broken (`demo-changes --found`, before any demo is posted),
+When the poster answers a milestone demo with changes, asks for changes with no demo in review
+(state's action `record_changes`, recorded `demo-changes ... found=poster` against the current milestone), or
+the agent's own demo run finds the milestone broken (`demo-changes --found`, before any demo is posted),
 `milestone-demo` records them (`demo-changes`) and the epic comes back here with `feedback: true` while it
 stays `sdlc:in-progress`. Amend the plan; don't start over:
 
 - Start from the latest posted plan JSON. **Keep every key**: `plan-post` refuses
   an amendment that drops one, because those issues already exist.
-- Add slices for the changes, in the milestone that was demoed, with fresh keys
+- Add slices for the changes, in the milestone that was demoed (or the one a `found=poster` record names), with fresh keys
   (`F1`, `F2`, ... so it's clear they came from feedback). A fix for something the
   demo found broken includes an offline test that reproduces it. They may be `blocked_by`
   merged slices. Leave the text of existing slices alone: changing it won't change

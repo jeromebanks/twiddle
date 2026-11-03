@@ -63,6 +63,7 @@ uv run python tools/sdlc.py demo-status N          # --json for the full brief
 | `next` says `... is accepted; ship it` | step 10 |
 | `demo_reply` | the poster replied: step 9 |
 | `demo_heard` | someone answered your `demo-request`: step 3 (record what they heard), then steps 4-7 |
+| `record_changes` | the poster asked for changes with no demo in review: step 9, "`/changes` with no demo in review" |
 | `turn` is `poster` | the demo is waiting on them: report it and stop |
 | anything else | report the `next:` line and stop |
 
@@ -245,6 +246,13 @@ Read their reply as an end user's, not a reviewer's.
   The epic returns to `in-progress`, and **Next:** is `/plan-issue N`, which plans
   the changes as new slices. After they merge, this skill runs again and posts demo rev 2.
 - **Unclear**: answer with a note that asks which they meant.
+
+**`/changes` with no demo in review.** The poster may ask for changes while the epic is being built
+(`sdlc:in-progress`, no demo posted). `state N` then says action `record_changes`, and its `next:` names the
+comment. Restate it as above, then
+`uv run python tools/sdlc.py demo-changes N --body-file <SCRATCH>/changes.md` (`--dry-run` first). It is
+recorded against the current milestone (no demo or acceptance is touched), the label stays `in-progress`,
+and **Next:** is `/plan-issue N`. Don't post a demo meanwhile: `demo-post` waits until it is recorded.
 
 ## 10. Ship the accepted milestone
 
