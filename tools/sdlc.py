@@ -5508,12 +5508,13 @@ def eval_status(fp: str, version: str | None, results: list[dict[str, Any]]) -> 
 
 
 def eval_gate(head_fp: str, base_fp: str | None, version: str | None, results: list[dict[str, Any]],
-              no_deferral: str | None = None) -> tuple[list[str], dict[str, str] | None]:
+              no_deferral: str | None = None, on_fail: str | None = None) -> tuple[list[str], dict[str, str] | None]:
     """(why the merge is refused, the eval it owes when a deferral lets it through) for a PR whose head has the
     review logic `head_fp` (`base_fp` its base's: only for the message) under `codex --version` `version`.
 
     `no_deferral`, for a PR straight into main (a quick change's, a debt group's): there is no milestone demo to
-    owe an eval to, so a deferral is a refusal too, and this says what to do instead of deferring."""
+    owe an eval to, so a deferral is a refusal too, and this says what to do instead of deferring. `on_fail`, with it:
+    the lane's own next step after a failed eval (its escalation), in place of the slice lane's "or escalate"."""
     v = real_version(version)
     pair = f"the review logic {codex_eval.short(head_fp)} on codex {v or EVAL_UNAVAILABLE}"
     why = "; ".join(w for w in ("this PR changes the review logic" if base_fp and base_fp != head_fp else
@@ -5527,6 +5528,9 @@ def eval_gate(head_fp: str, base_fp: str | None, version: str | None, results: l
     if state == "deferred":
         return [f"the review eval for {pair} was only deferred" + (f" ({r['url']})" if r.get("url") else "")
                 + f", and a deferral doesn't count here: {no_deferral}"], None
+    if state == "fail" and on_fail is not None:
+        return [f"the review eval FAILED for {pair}" + (f" ({r['url']})" if r.get("url") else "")
+                + f": a failed eval can't be deferred; fix the review logic and run `codex-eval` again, or {on_fail}"], None
     if state == "fail":
         return [f"the review eval FAILED for {pair}" + (f" ({r['url']})" if r.get("url") else "")
                 + ": fix the review logic and run `codex-eval` again, or escalate; a failed eval can't be deferred"], None
@@ -6041,7 +6045,9 @@ def main_eval_errors(pr: dict[str, Any], config: dict[str, Any], lane: str, n: i
                                                                config)
     except (SdlcError, OSError, ValueError) as exc:
         return [f"couldn't tell whether the review logic at the head has a passing eval ({exc}); {instead}"]
-    return eval_gate(head_fp, base_fp, version, results, no_deferral=instead)[0]
+    on_fail = (f"move the change to the full lane (`escalate-to-full {n}`)" if lane == "quick"
+               else f"hand the group to a person (`escalate-slice {n} --reason ...`); until then the group waits")
+    return eval_gate(head_fp, base_fp, version, results, no_deferral=instead, on_fail=on_fail)[0]
 
 
 def no_epic_error(pr: dict[str, Any], refs: list[int], slice_issue: dict[str, Any] | None) -> str:

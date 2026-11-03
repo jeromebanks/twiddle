@@ -124,7 +124,7 @@ def test_a_quick_pr_changing_the_review_logic_needs_a_pass_and_a_deferral_does_n
     assert code == 1 and "only deferred" in out and "no milestone demo to owe the eval to" in out
     pair.record("fail", head_fp)
     code, out = merge_dry_run(capsys, github=github)
-    assert code == 1 and "FAILED" in out
+    assert code == 1 and "FAILED" in out and "can't be deferred" in out and "escalate-to-full 12" in out
     pair.record("pass", head_fp)                                   # a pass for the pair lets it through
     code, out = merge_dry_run(capsys, github=github)
     assert code == 0 and "would squash-merge quick PR #50 (closes #12) into main" in out, out
@@ -148,6 +148,9 @@ def test_a_quick_pr_with_unchanged_review_logic_waits_only_after_a_codex_upgrade
     root, pair, pr_editing, github = quick
     head_fp, base_fp = fingerprints(root, pr_editing(STATION))
     assert head_fp == base_fp                                      # an ordinary quick change
+    # unaffected only while its (fingerprint, codex) pair has a pass (plan rev 11's rule, as T6's): none yet
+    code, out = merge_dry_run(capsys, github=github)
+    assert code == 1 and "no review eval for" in out and "codex-eval" in out
     pair.record("pass", head_fp)
     code, out = merge_dry_run(capsys, github=github)
     assert code == 0, out                                          # a pair that passed: merges as before
@@ -200,7 +203,8 @@ def test_a_debt_pr_changing_the_review_logic_needs_a_pass_and_a_deferral_does_no
     assert code == 1 and "only deferred" in out and "no milestone demo to owe the eval to" in out
     pair.record("fail", head_fp)
     code, out = merge_dry_run(capsys, 300)
-    assert code == 1 and "FAILED" in out
+    assert code == 1 and "FAILED" in out and "can't be deferred" in out
+    assert f"escalate-slice {a} --reason" in out and "the group waits" in out and "escalate-to-full" not in out
     pair.record("pass", head_fp, V2)
     assert merge_dry_run(capsys, 300)[0] == 1
     pair.record("pass", head_fp)
@@ -213,6 +217,8 @@ def test_a_debt_pr_with_unchanged_review_logic_waits_only_after_a_codex_upgrade(
     epic, (a, b, _), pair, pr_editing = debt
     head_fp, base_fp = fingerprints(repo, pr_editing("code.py"))
     assert head_fp == base_fp
+    code, out = merge_dry_run(capsys, 300)                         # no pass for the pair yet: it waits
+    assert code == 1 and "no review eval for" in out and "codex-eval" in out
     pair.record("pass", head_fp)
     code, out = merge_dry_run(capsys, 300)
     assert code == 0, out
