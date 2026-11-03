@@ -2769,7 +2769,10 @@ def open_eval_owed(owed: dict[str, list[dict[str, str]]], results: list[dict[str
     An entry owed for (F, V) is cleared by a pass for exactly (F, V); one owed for F alone (`unavailable`) by a
     pass for F under any real version. Either is also cleared by a pass for the logic that reviews from now on:
     `head_fp` (the epic head's; F when unknown) under `version` (`codex --version` now), when that can be read.
-    So a pass recorded for an older `codex` never clears a deferral recorded after an upgrade."""
+    So a pass recorded for an older `codex` never clears a deferral recorded after an upgrade. When it can't be
+    read, the head's logic is judged as `merge` judges it then, by its fingerprint alone: an entry for logic the
+    head has moved past (`head_fp` known and not F) is cleared when the head's latest completed eval, under any
+    real version, is a pass. One for the head's own logic keeps its own rule above."""
     results, now = results or [], real_version(version)
     out = {}
     for m, entries in (owed or {}).items():
@@ -2779,6 +2782,8 @@ def open_eval_owed(owed: dict[str, list[dict[str, str]]], results: list[dict[str
             if passed(results, fp, v) if v else passed(results, fp):
                 continue
             if now and passed(results, head_fp or fp, now):
+                continue
+            if not now and head_fp and head_fp != fp and passed(results, head_fp):
                 continue
             left.append(e)
         if left:

@@ -1428,6 +1428,12 @@ def test_an_eval_owed_for_logic_the_epic_moved_past_is_cleared_by_a_pass_for_the
     heads = [result_comment(1, "pass", fingerprint=FP2, version=V2)]
     assert sdlc.bundle_state(epic_bundle(owed, heads), CONFIG, (FP2, V2))["eval_owed"] == {}
     assert sdlc.bundle_state(epic_bundle(owed, heads), CONFIG, (FP2, V))["eval_owed"]      # not the codex now
+    # with no `codex --version` to read, the head's logic is judged by its fingerprint, as `merge` judges it then
+    assert sdlc.bundle_state(epic_bundle(owed, heads), CONFIG, (FP2, None))["eval_owed"] == {}
+    later_fail = heads + [result_comment(2, "fail", fingerprint=FP2, version=V)]
+    assert sdlc.bundle_state(epic_bundle(owed, later_fail), CONFIG, (FP2, None))["eval_owed"]   # its latest failed
+    # an entry for the head's own logic keeps the pair rule: a pass under another codex doesn't clear it
+    assert sdlc.bundle_state(epic_bundle([owed_comment(fp=FP2)], heads), CONFIG, (FP2, None))["eval_owed"]
     assert sdlc.bundle_state(epic_bundle(owed, heads), CONFIG)["eval_owed"]               # the head unknown
     st = sdlc.bundle_state(epic_bundle(owed, []), CONFIG, (FP2, V2))                     # until then it stands
     assert st["eval_owed"]["M1"][0]["fp"] == FP
@@ -1467,6 +1473,11 @@ def test_demo_post_refuses_while_an_eval_is_owed(repo, tmp_path, monkeypatch, ca
     assert post([owed_comment(fp=FP)], [result_comment(1, "pass", fingerprint=FP2, version=V)])[0] == 1
     assert post([owed_comment(fp=FP)], [result_comment(1, "pass", fingerprint=FP, version=V)])[0] == 0
     assert post([owed_comment(fp=FP)], [result_comment(1, "pass", fingerprint=head_fp, version=V)])[0] == 0
+    # ... and once `codex --version` can't be read, by the head's fingerprint alone, as `merge` then accepts it
+    monkeypatch.setenv("PATH", only_git(tmp_path))
+    assert post([owed_comment(fp=FP)], [result_comment(1, "pass", fingerprint=head_fp, version=V)])[0] == 0
+    assert post([owed_comment(fp=FP)], [result_comment(1, "pass", fingerprint=head_fp, version=V),
+                                        result_comment(2, "fail", fingerprint=head_fp, version=V2)])[0] == 1
 
 
 def test_state_shows_an_owed_eval_and_clears_it_as_demo_post_does(repo, tmp_path, monkeypatch, capsys):

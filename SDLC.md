@@ -416,7 +416,10 @@ blocks until a later pass for that pair. Results live on the eval issue, so post
   that pair is a pass; a pass for F under an older `codex` doesn't count, so an upgrade's deferral stays owed. One
   owed for F alone (`unavailable`) is cleared by a pass for F under any real version. Either is also cleared by a
   pass for the logic that reviews from now on: `epic/N`'s head's fingerprint (F, when the head can't be read) under
-  the `codex --version` in use now. Rounds already run keep their recorded provenance.
+  the `codex --version` in use now. When that version can't be read, an eval owed for logic the head has moved
+  past is cleared, as `merge` would then judge the head, when the head's fingerprint's latest completed eval (any
+  real version) is a pass; one owed for the head's own logic keeps the rules above. Rounds already run keep their
+  recorded provenance.
 - `merge --dry-run --from-file` judges a saved bundle (`pr`, `pr_comments`, `trusted`, `slice`, `epic`, `progress`,
   `behind_by`, `head`, `base`, `eval`) in the repo it runs in, with no GitHub; without `--dry-run` it refuses.
 
