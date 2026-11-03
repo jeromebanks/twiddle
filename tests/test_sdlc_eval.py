@@ -1269,6 +1269,12 @@ def test_a_fail_then_no_codex_keeps_the_merge_blocked_until_a_pass(repo, tmp_pat
         code, out = g.merge(capsys, failed + later)
         assert code == 1 and "FAILED" in out
     assert g.merge(capsys, failed + [result_comment(3, "pass", fingerprint=g.head_fp, version=V2)])[0] == 0
+    # a fail recorded under an unreadable `codex --version` blocks the fingerprint the same way, deferral or not
+    unknown = [result_comment(1, "fail", fingerprint=g.head_fp, version=codex_eval.UNKNOWN),
+               result_comment(2, "deferred", fingerprint=g.head_fp, version=sdlc.EVAL_UNAVAILABLE)]
+    code, out = g.merge(capsys, unknown)
+    assert code == 1 and "FAILED" in out
+    assert g.merge(capsys, unknown + [result_comment(3, "pass", fingerprint=g.head_fp, version=V2)])[0] == 0
     # an older pass under another version doesn't cover a newer fail
     assert g.merge(capsys, [result_comment(1, "pass", fingerprint=g.head_fp, version=V2)] + failed[:0]
                    + [result_comment(2, "fail", fingerprint=g.head_fp, version=V)])[0] == 1
@@ -1327,6 +1333,10 @@ def test_defer_with_no_codex_records_unavailable_unless_the_fingerprint_failed(t
     assert code == 1 and "already FAILED" in out
     assert defer(tmp_path, capsys, failed + [result_comment(2, "pass", fingerprint=fp, version=V)])[0] == 1  # passed
     assert defer(tmp_path, capsys, [result_comment(1, "fail", fingerprint=FP2, version=V)])[0] == 0  # other logic
+    # a fail posted with an unreadable `codex --version` is a fail for the fingerprint too
+    unknown = [result_comment(1, "fail", fingerprint=fp, version=codex_eval.UNKNOWN)]
+    code, out = defer(tmp_path, capsys, unknown)
+    assert code == 1 and "already FAILED" in out
 
 
 def test_only_a_deferral_is_recorded_under_unavailable():
@@ -1334,6 +1344,13 @@ def test_only_a_deferral_is_recorded_under_unavailable():
         with pytest.raises(sdlc.SdlcError, match="only a deferral"):
             sdlc.eval_comment({"fingerprint": FP, "codex": sdlc.EVAL_UNAVAILABLE, "outcome": outcome}, CONFIG)
     assert sdlc.real_version("unknown") is None and sdlc.real_version(None) is None and sdlc.real_version(V) == V
+
+
+def test_a_fail_under_an_unknown_version_counts_for_the_fingerprint_not_for_a_pair():
+    unknown = sdlc.eval_records([result_comment(1, "fail", version=codex_eval.UNKNOWN)], TRUSTED)
+    assert sdlc.eval_status(FP, None, unknown)[0] == "fail"                     # no version: the fingerprint's
+    assert sdlc.eval_status(FP, V, unknown)[0] == "none"                        # a real version: the pair's
+    assert sdlc.eval_defer_errors(FP, None, unknown) and not sdlc.eval_defer_errors(FP, V, unknown)
 
 
 # --- an owed eval on the epic: shown, cleared by a pass, and holding the demo ---------------------------------
@@ -1502,15 +1519,25 @@ def test_fetch_bundle_reads_the_results_an_owed_eval_needs(monkeypatch, epic):
     owed, passed = owed_comment(), result_comment(30, "pass", fingerprint=FP, version=V)
     raw = lambda c: {"id": c["id"], "user": {"login": c["author"]}, "body": c["body"],  # noqa: E731
                      "created_at": c["created_at"], "html_url": c["url"]}
-    pages = {f"repos/{CONFIG['repository']}/issues/{epic}/comments":
-             [raw(c) for c in EPIC_HISTORY + [owed] + ([passed] if epic == CONFIG["codex_eval_issue"] else [])],
-             f"repos/{CONFIG['repository']}/issues/{CONFIG['codex_eval_issue']}/comments": [raw(passed)]}
+    own = epic == CONFIG["codex_eval_issue"]
+    epic_path = f"repos/{CONFIG['repository']}/issues/{epic}/comments"
+    ledger_path = f"repos/{CONFIG['repository']}/issues/{CONFIG['codex_eval_issue']}/comments"
+
+    def serve(results):        # one entry when the epic is the ledger's issue: its comments hold the owed eval and the results
+        if own:
+            return {epic_path: [raw(c) for c in EPIC_HISTORY + [owed] + results]}
+        return {epic_path: [raw(c) for c in EPIC_HISTORY + [owed]], ledger_path: [raw(c) for c in results]}
+
     asked = []
-    monkeypatch.setattr(sdlc, "gh_pages", lambda path: asked.append(path) or pages[path])
     monkeypatch.setattr(sdlc, "gh_json", lambda args: {"number": epic, "title": "x", "state": "OPEN",
                                                        "author": {"login": POSTER}, "labels": [], "createdAt": ""})
+    pages = serve([])
+    monkeypatch.setattr(sdlc, "gh_pages", lambda path: asked.append(path) or pages[path])
+    unpaid = sdlc.bundle_state(sdlc.fetch_bundle(epic, CONFIG, TRUSTED), CONFIG)["eval_owed"]
+    assert list(unpaid) == ["M1"] and unpaid["M1"][0]["fp"] == FP          # owed, with no pass yet
+    pages, asked[:] = serve([passed]), []
     b = sdlc.fetch_bundle(epic, CONFIG, TRUSTED)
-    assert len(asked) == 1 + (epic != CONFIG["codex_eval_issue"])
+    assert len(asked) == 1 + (not own)
     assert sdlc.bundle_state(b, CONFIG)["eval_owed"] == {}                 # the pass cleared it
     pages[asked[0]] = [raw(c) for c in EPIC_HISTORY]                        # no eval owed: nothing more fetched
     asked.clear()

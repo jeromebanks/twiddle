@@ -409,7 +409,7 @@ blocks until a later pass for that pair. Results live on the eval issue, so post
   on a deferral posts an `eval-owed` record on the epic; `state` and `demo-status` list it, and `demo-post` refuses
   while it is owed.
 - **When `codex --version` can't be read** (missing, not executable, or no usable answer), only the fingerprint
-  is checked: its latest completed result (`pass` or `fail`, any version) decides; failing that, a deferral recorded
+  is checked: its latest completed result (`pass` or `fail`, any version, and a `fail` posted as `unknown` too) decides; failing that, a deferral recorded
   as `unavailable` lets the merge through, owed. `--defer` there records `unavailable`, and is refused after a
   `fail` for that fingerprint under any version, until a pass. Once a version can be read again, the pair rule applies.
 - **Clearing what's owed**: an eval owed for a pair (F, V) is cleared when the latest completed eval of exactly

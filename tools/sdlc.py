@@ -2699,9 +2699,12 @@ def real_version(version: str | None) -> str | None:
 
 def latest_completed(results: list[dict[str, Any]], fp: str, version: str | None = None) -> dict[str, Any] | None:
     """The latest `pass` or `fail` for this fingerprint (results oldest first), under `version` or, with none,
-    under any real version; or None. A deferral never stands in for a completed eval."""
-    done = [r for r in results if r.get("fingerprint") == fp and r.get("outcome") in ("pass", "fail")
-            and real_version(r.get("codex")) and (version is None or r.get("codex") == version)]
+    under any version; or None. A deferral never stands in for a completed eval. A pass counts only under a real
+    version; a fail under any, `unknown` included (an eval that ran with an unreadable `codex --version`), so
+    without a version to pair it with, a fingerprint's failure still blocks its merge and its deferral."""
+    done = [r for r in results if r.get("fingerprint") == fp
+            and (r.get("outcome") == "fail" or (r.get("outcome") == "pass" and real_version(r.get("codex"))))
+            and (version is None or r.get("codex") == version)]
     return done[-1] if done else None
 
 
