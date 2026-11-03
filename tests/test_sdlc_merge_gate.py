@@ -171,6 +171,28 @@ def test_merge_from_main_s_code_goes_on_to_the_gate(primary, monkeypatch, capsys
     assert reached == [50] and "the PR gate was reached" in capsys.readouterr().err
 
 
+# --- `ship` runs main's gate code too: the demo's acceptance is judged by main's ledger -------------------------
+
+@pytest.mark.parametrize("flags", [[], ["--dry-run"]])
+def test_ship_from_a_differing_checkout_reads_and_writes_nothing(primary, monkeypatch, capsys, flags):
+    wt = worktree(primary, monkeypatch)
+    (wt / "tools/sdlc.py").write_bytes(REAL["tools/sdlc.py"] + b"\n")
+    no_github(monkeypatch)
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda *a, **k: pytest.fail("the epic was read before the check"))
+    assert sdlc.main(["ship", "12", *flags]) == 1
+    err = capsys.readouterr().err
+    assert "`ship` runs only main's gate code" in err and f"cd {primary.resolve()} && uv run python tools/sdlc.py ship 12" in err
+
+
+@pytest.mark.parametrize("flags", [[], ["--dry-run"]])
+def test_ship_from_main_s_code_goes_on_to_its_gates(primary, monkeypatch, capsys, flags):
+    def fetch_bundle(n, config, trusted=None):
+        raise sdlc.SdlcError(f"#{n} was read")
+    monkeypatch.setattr(sdlc, "fetch_bundle", fetch_bundle)
+    assert sdlc.main(["ship", "12", *flags]) == 1
+    assert "#12 was read" in capsys.readouterr().err
+
+
 # --- `merge PR` is named when it is due ---------------------------------------------------------------------
 
 def slice_bundle(labels=("plan:slice",), pr_comments=()):
