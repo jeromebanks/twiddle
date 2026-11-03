@@ -529,6 +529,7 @@ def test_a_milestone_needs_units_of_work():
 
 import re  # noqa: E402
 import subprocess  # noqa: E402
+import sys  # noqa: E402
 
 from tools import codex_review  # noqa: E402
 from tests.fake_codex import APPROVES, NO_VERDICT, QUICK, SETTINGS, SLOW, calls, install, no_real_codex_home  # noqa: E402,F401
@@ -547,9 +548,10 @@ def git_(*args, cwd):
 
 
 class PlanReview:
-    """A primary checkout whose origin/main may hold docs/prd/12-*.md, the fake `codex`, and the issue's bundle."""
+    """A primary checkout whose origin/main may hold docs/prd/12-*.md, the fake `codex`, and the issue's bundle.
+    `epic`: files committed on top of main as origin/epic/12 (an epic being built), its sha in `self.epic`."""
 
-    def __init__(self, tmp_path, monkeypatch, docs=None, plan=(APPROVES,), settings=SETTINGS):
+    def __init__(self, tmp_path, monkeypatch, docs=None, plan=(APPROVES,), settings=SETTINGS, epic=None):
         self.tmp, self.root = tmp_path, tmp_path / "primary"
         self.log, _, _ = install(tmp_path, monkeypatch, plan)
         for k in ("AUTHOR", "COMMITTER"):
@@ -565,6 +567,17 @@ class PlanReview:
         git_("commit", "-qm", "main", cwd=self.root)
         git_("update-ref", "refs/remotes/origin/main", "HEAD", cwd=self.root)
         self.main = git_("rev-parse", "HEAD", cwd=self.root)
+        self.epic = None
+        if epic is not None:
+            git_("checkout", "-q", "-b", "epic", cwd=self.root)
+            for name, text in epic.items():
+                (self.root / name).parent.mkdir(parents=True, exist_ok=True)
+                (self.root / name).write_text(text)
+            git_("add", ".", cwd=self.root)
+            git_("commit", "-q", "--allow-empty", "-m", "a slice merged into epic/12", cwd=self.root)
+            git_("update-ref", "refs/remotes/origin/epic/12", "HEAD", cwd=self.root)
+            self.epic = git_("rev-parse", "HEAD", cwd=self.root)
+            git_("checkout", "-q", "-", cwd=self.root)
         monkeypatch.setattr(sdlc, "primary_root", lambda: self.root)
         monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("codex-review --from-file must not call gh"))
         self.config = tmp_path / "config.json"
@@ -649,7 +662,7 @@ def test_round_two_takes_the_last_rounds_response_even_across_a_new_revision(tmp
 
 
 def test_no_verdict_is_retried_once_and_a_plan_not_under_review_is_refused(tmp_path, monkeypatch, capsys):
-    r = PlanReview(tmp_path, monkeypatch, plan=(NO_VERDICT, APPROVES))
+    r = PlanReview(tmp_path, monkeypatch, plan=(NO_VERDICT, APPROVES), epic={})
     assert r.run(APPROVED_555 + POSTED) == 0 and len(calls(r.log)) == 2
     r.log.unlink()
     (tmp_path / "plan.json").write_text(json.dumps([NO_VERDICT]))
@@ -685,3 +698,99 @@ def test_a_directory_in_the_checkouts_place_is_never_deleted(tmp_path, monkeypat
     (r.out / "main").rmdir()
     git_("worktree", "add", "-q", "--detach", str(r.out / "main"), r.main, cwd=r.root)
     assert r.run(APPROVED_555 + POSTED) == 0 and not (r.out / "main").exists()
+
+
+# --- an amendment to an epic being built is reviewed on epic/N (#216) -------------------------------------
+
+EPIC_ONLY = "NOTES-epic.md"
+# the epic built M1 and its demo was accepted; rev 2 amends the plan while the epic is in progress
+AMENDED = APPROVED_555 + [plan_comment(two_milestones(), 1, 5), review(1, 6, "approve"),
+                          agent("plan-created", 1, 7, created="M1"),
+                          agent("demo", 1, 20, milestone="M1", sha="d" * 40),
+                          agent("demo-approval", 1, 21, milestone="M1", by=POSTER),
+                          plan_comment({**two_milestones(), "lessons": {"milestone": "M1", "text": "t"}}, 2, 30)]
+
+
+def test_an_amendment_is_in_progress_and_under_review():
+    st = sdlc.derive_state(issue(["sdlc:in-progress"]), AMENDED, {OWNER}, CONFIG)
+    assert (st["state"], st["action"]) == ("in-progress", "continue_plan")
+
+
+def test_an_amendment_dry_run_reads_epic_n_and_says_it_is_ahead_of_main(tmp_path, monkeypatch, capsys):
+    r = PlanReview(tmp_path, monkeypatch, epic={EPIC_ONLY: "built on epic/12\n"})
+    assert r.run(AMENDED, "--dry-run", labels=("sdlc:in-progress",)) == 0
+    out, prompt = capsys.readouterr().out, r.prompt()
+    assert f"Codex reads epic/12 at {r.epic[:12]} (the epic's branch, ahead of main)" in out
+    assert f"cd {r.out / 'epic-12'} && codex exec" in out
+    assert "a checkout of `epic/12`)" in prompt and "the current directory is `epic/12`, the epic's own branch" in prompt
+    assert "ahead of `main`" in prompt and not re.search(r"<[A-Za-z/]", prompt)
+    assert calls(r.log) == [] and not (r.out / "epic-12").exists()
+
+
+@pytest.mark.parametrize("labels", [("sdlc:approved",), ("sdlc:planning",)])
+def test_a_first_plan_reads_main_even_when_an_epic_branch_exists(tmp_path, monkeypatch, capsys, labels):
+    r = PlanReview(tmp_path, monkeypatch, epic={EPIC_ONLY: "x\n"})
+    assert r.run(APPROVED_555 + POSTED, "--dry-run", labels=labels) == 0
+    out, prompt = capsys.readouterr().out, r.prompt()
+    assert f"Codex reads main at {r.main[:12]}" in out and "ahead of main" not in out
+    assert "a checkout of `main`)" in prompt and "epic's own branch" not in prompt
+
+
+def test_an_epic_being_built_without_its_branch_is_refused_not_read_as_main(tmp_path, monkeypatch, capsys):
+    r = PlanReview(tmp_path, monkeypatch)                      # no origin/epic/12
+    for flags in (("--dry-run",), ()):
+        assert r.run(AMENDED, *flags, labels=("sdlc:in-progress",)) == 1
+        err = capsys.readouterr().err
+        assert "no origin/epic/12" in err and "never main" in err and "epic-branch 12" in err
+    assert calls(r.log) == [] and not (r.out / "main").exists()
+
+
+def _origin(tmp_path, branches):
+    """A primary checkout with a local bare `origin` holding main and `branches`; no network."""
+    bare, root = tmp_path / "origin.git", tmp_path / "primary"
+    tmp_path.mkdir(parents=True)
+    git_("init", "-q", "--bare", str(bare), cwd=tmp_path)
+    root.mkdir()
+    git_("init", "-q", cwd=root)
+    git_("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "m", cwd=root)
+    git_("remote", "add", "origin", str(bare), cwd=root)
+    for b in ("main", *branches):
+        git_("push", "-q", "origin", f"HEAD:refs/heads/{b}", cwd=root)
+    return root, git_("rev-parse", "HEAD", cwd=root)
+
+
+def test_plan_base_fetches_epic_n_and_refuses_a_missing_or_unfetchable_one(tmp_path):
+    building, first = {"state": "in-progress"}, {"state": "approved"}
+    root, sha = _origin(tmp_path / "a", ["epic/12"])
+    assert sdlc.plan_base(12, building, CONFIG, root, fetch=True) == ("epic/12", sha)
+    assert sdlc.plan_base(12, {"state": "planned"}, CONFIG, root, fetch=True) == ("epic/12", sha)
+    assert sdlc.plan_base(12, first, CONFIG, root, fetch=True) == ("main", sha)
+    # origin has no epic/12: refused, never main
+    root, _ = _origin(tmp_path / "b", [])
+    with pytest.raises(sdlc.SdlcError, match="could not fetch origin/epic/12.*never main.*epic-branch 12"):
+        sdlc.plan_base(12, building, CONFIG, root, fetch=True)
+    # origin unreachable: refused even though a stale origin/epic/12 is still here
+    root, _ = _origin(tmp_path / "c", ["epic/12"])
+    git_("fetch", "-q", "origin", "+refs/heads/epic/12:refs/remotes/origin/epic/12", cwd=root)
+    git_("remote", "set-url", "origin", str(tmp_path / "gone.git"), cwd=root)
+    with pytest.raises(sdlc.SdlcError, match="could not fetch origin/epic/12"):
+        sdlc.plan_base(12, building, CONFIG, root, fetch=True)
+
+
+def test_a_real_amendment_round_runs_codex_in_a_checkout_of_epic_n(tmp_path, monkeypatch):
+    r = PlanReview(tmp_path, monkeypatch, epic={EPIC_ONLY: "only epic/12 has this\n"})
+    # the fake `codex`, wrapped: it reads a file only epic/12 has from its working directory, into its report
+    real, codex = tmp_path / "bin" / "codex-real", tmp_path / "bin" / "codex"
+    codex.rename(real)
+    codex.write_text(f"#!{sys.executable}\nimport os, pathlib, sys\n"
+                     f"if sys.argv[1:] != ['--version']:\n"
+                     f"    sys.stdout.write('read: ' + pathlib.Path({EPIC_ONLY!r}).read_text()); sys.stdout.flush()\n"
+                     f"os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])\n")
+    codex.chmod(0o755)
+    assert r.run(AMENDED, labels=("sdlc:in-progress",)) == 0
+    (call,) = calls(r.log)
+    saved = (r.out / "codex.md").read_text()
+    assert call["cwd"] == str((r.out / "epic-12").resolve())
+    assert saved.startswith(f"HEAD: {r.epic}\n") and r.epic != r.main
+    assert "read: only epic/12 has this" in saved and saved.rstrip().endswith("VERDICT: approve")
+    assert not (r.out / "epic-12").exists() and str(r.out / "epic-12") not in git_("worktree", "list", cwd=r.root)
