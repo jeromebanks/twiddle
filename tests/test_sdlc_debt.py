@@ -236,6 +236,50 @@ class FakeGitHub:
         return [p["sub_issue_id"] - 9000 for path, p in self.writes if path.endswith("/sub_issues")]
 
 
+# The git subcommands that change a checkout, its branches or its remote, or reach the network (`fetch`, `ls-remote`,
+# ...). A test runs them only inside its own tmp_path: a `claim` without the `repo` fixture would otherwise run them in
+# the real checkout, against the real origin.
+GIT_UNSAFE = frozenset({"fetch", "ls-remote", "remote", "worktree", "branch", "push", "pull", "checkout", "switch",
+                        "commit", "reset", "merge", "rebase", "revert", "cherry-pick", "stash", "tag", "update-ref",
+                        "clean", "rm", "mv", "add"})
+
+
+def git_unsafe_outside(tmp_path: Path, args: list[str], cwd) -> str | None:
+    """Why `git args` (run in `cwd`, else the working directory) is unsafe outside `tmp_path`; None when it isn't.
+    Leading global options are skipped to find the subcommand, and `-C <path>` moves where it runs."""
+    where = Path(cwd if cwd is not None else Path.cwd())
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        if args[i] in ("-C", "-c") and i + 1 < len(args):
+            if args[i] == "-C":
+                where = where / args[i + 1]
+            i += 2
+        else:
+            i += 1
+    if i >= len(args) or args[i] not in GIT_UNSAFE:   # a local read is never refused
+        return None
+    inside, where = tmp_path.resolve(), where.resolve()
+    if not where.is_relative_to(inside):
+        return f"`git {' '.join(args)}` would run in {where}, outside the test's {inside} (does it need the `repo` fixture?)"
+    for a in args[i + 1:]:
+        if Path(a).is_absolute() and not Path(a).resolve().is_relative_to(inside):
+            return f"`git {' '.join(args)}` names {a}, outside the test's {inside}"
+    return None
+
+
+@pytest.fixture(autouse=True)
+def git_stays_in_tmp_path(monkeypatch, tmp_path):
+    """Every test here, with or without `repo` or `gh`: a git write or network call outside tmp_path fails the test before git runs.
+    (The `git` fake fixture, where a test takes it, replaces this wrapper; it runs nothing.)"""
+    real_git = sdlc.git
+
+    def guarded_git(args, cwd=None, *a, **k):
+        if (why := git_unsafe_outside(tmp_path, list(args), cwd)) is not None:
+            pytest.fail(f"refused before it ran: {why}")
+        return real_git(args, cwd, *a, **k)
+    monkeypatch.setattr(sdlc, "git", guarded_git)
+
+
 @pytest.fixture
 def gh(monkeypatch):
     fake = FakeGitHub()
@@ -3068,3 +3112,62 @@ def test_a_slice_claims_refusal_still_names_resume(repo):
     with pytest.raises(sdlc.SdlcError) as exc:
         sdlc.add_slice_worktree(9, "main", False, CONFIG)
     assert "`claim 9 --resume`, or `cleanup 9 --force`" in str(exc.value)
+
+
+# --- the guard: a test without the `repo` fixture can't write into the real checkout (#296) ---------------------
+
+def test_a_claim_without_the_repo_fixture_is_refused_before_any_git_write(gh, capsys, monkeypatch, tmp_path):
+    """No `repo` fixture: the working directory is the real checkout, so `claim --debt` would fetch and add a
+    worktree there, asking the real origin first. The autouse guard fails the test before any of it: no write and no
+    network command ever reaches git."""
+    monkeypatch.chdir(Path(__file__).resolve().parent.parent)    # the checkout this suite runs in, never tmp_path
+    epic, (a, _b, _c) = posted_pass(gh, [((0,), "routine"), ((1,), "routine")], n=3)
+    reached, real_run = [], sdlc.subprocess.run
+
+    def run_git(cmd, *args, **kw):
+        if cmd[:1] == ["git"] and len(cmd) > 1 and cmd[1] in GIT_UNSAFE:
+            reached.append(cmd)     # had the guard missed it (a write, or the network): record it, never run it
+            return subprocess.CompletedProcess(cmd, 1, "", "refused by the test")
+        return real_run(cmd, *args, **kw)
+    monkeypatch.setattr(sdlc.subprocess, "run", run_git)
+    with pytest.raises(pytest.fail.Exception, match=r"`git (ls-remote|fetch) .*` would run in .*outside the test's"):
+        sdlc.main(["claim", str(a), "--debt"])
+    assert reached == [] and claims_on(gh, a) == []
+
+
+def test_a_helper_called_without_the_repo_fixture_is_refused_too(monkeypatch):
+    """The guard needs neither `gh` nor `repo`: a direct call to the worktree helper from the real checkout fails."""
+    monkeypatch.chdir(Path(__file__).resolve().parent.parent)
+    reached, real_run = [], sdlc.subprocess.run
+
+    def run_git(cmd, *args, **kw):
+        if cmd[:1] == ["git"] and len(cmd) > 1 and cmd[1] in GIT_UNSAFE:
+            reached.append(cmd)
+            return subprocess.CompletedProcess(cmd, 1, "", "refused by the test")
+        return real_run(cmd, *args, **kw)
+    monkeypatch.setattr(sdlc.subprocess, "run", run_git)
+    with pytest.raises(pytest.fail.Exception, match="outside the test's"):
+        sdlc.add_slice_worktree(99999, "main", False, CONFIG)
+    assert reached == []
+
+
+@pytest.mark.parametrize("args,cwd,refused", [
+    (["fetch", "origin", "main"], "outside", "would run in"),
+    (["worktree", "add", "IN/wt", "slice/1"], "inside", None),
+    (["worktree", "add", "OUT/wt", "slice/1"], "inside", "names"),
+    (["branch", "--list", "slice/1"], "outside", "would run in"),
+    (["rev-parse", "HEAD"], "outside", None),                     # a read is never refused
+    (["ls-remote", "--heads", "origin", "slice/1"], "outside", "would run in"),   # the network, like fetch
+    (["ls-remote", "--heads", "origin", "slice/1"], "inside", None),         # `repo`'s origin is inside tmp_path
+    (["push", "-u", "origin", "slice/1"], None, None),             # None: the working directory, here tmp_path
+    (["-C", "OUT", "worktree", "add", "IN/wt"], "inside", "would run in"),   # -C moves where it runs
+    (["-c", "user.name=t", "commit", "-m", "x"], "outside", "would run in"),  # a global option doesn't hide it
+    (["-c", "user.name=t", "log"], "outside", None),
+])
+def test_the_guard_refuses_only_a_git_write_or_network_call_outside_the_tests_tmp_path(tmp_path, monkeypatch, args, cwd, refused):
+    outside = Path(__file__).resolve().parent
+    monkeypatch.chdir(tmp_path)
+    args = [a.replace("IN", str(tmp_path)).replace("OUT", str(outside)) for a in args]
+    where = {"outside": outside, "inside": tmp_path, None: None}[cwd]
+    why = git_unsafe_outside(tmp_path, args, where)
+    assert (why is None) if refused is None else (refused in why), why
