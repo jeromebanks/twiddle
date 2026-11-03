@@ -90,7 +90,8 @@ def parse_verdict(report: str) -> str:
 
 # what a round ran under, the lines right below `HEAD:` (`stamp`); only that block is read back, so a report
 # can't claim a model of its own
-PROVENANCE = {"model": "Model", "effort": "Effort", "codex": "Codex", "prompt": "Prompt-SHA256"}
+# (and, for a quick change's PR, which approved brief it was given: the `Brief:` line, its comment id)
+PROVENANCE = {"brief": "Brief", "model": "Model", "effort": "Effort", "codex": "Codex", "prompt": "Prompt-SHA256"}
 
 
 def provenance(settings: dict[str, Any], version: str, prompt: str) -> dict[str, str]:
@@ -238,9 +239,14 @@ def fill_prompt(template: str, values: dict[str, str], keep: dict[str, bool]) ->
     return NAME_RE.sub(lambda m: values[m.group(1)] if m.group(1) in values else m.group(0), text)
 
 
-def fill_pr_prompt(template: str, slice_file: Path, base: str, epic: int, response_file: Path | None) -> str:
-    return fill_prompt(template, {"SLICE_FILE": str(slice_file), "BASE": base, "EPIC": str(epic),
-                                  "RESPONSE_FILE": str(response_file or "")}, {"ROUND2": bool(response_file)})
+def fill_pr_prompt(template: str, slice_file: Path, base: str, epic: int | None, response_file: Path | None,
+                   debt: bool = False) -> str:
+    """A slice PR's prompt (its epic's number), a quick change's (`epic` None: it merges into main), or a debt PR's
+    (`debt`: its tickets and its pass group's scope and files, into main)."""
+    values = {"SLICE_FILE": str(slice_file), "BASE": base, "RESPONSE_FILE": str(response_file or "")}
+    return fill_prompt(template, values | ({"EPIC": str(epic)} if epic is not None else {}),
+                       {"SLICE": epic is not None, "QUICK": epic is None and not debt, "DEBT": epic is None and debt,
+                        "ROUND2": bool(response_file)})
 
 
 def _write_response(rounds: list[dict[str, Any]], record: str, scratch: Path, files: dict[str, Path]) -> int:
@@ -252,20 +258,31 @@ def _write_response(rounds: list[dict[str, Any]], record: str, scratch: Path, fi
     return k + 1
 
 
-def prepare_pr_round(pr: dict[str, Any], slice_issue: dict[str, Any], epic: int, rounds: list[dict[str, Any]],
-                     scratch: Path, template: str | None = None) -> tuple[str, dict[str, Path]]:
-    """(the filled prompt, the files written for it) for one round on a slice PR.
+def prepare_pr_round(pr: dict[str, Any], brief: str, base: str, rounds: list[dict[str, Any]],
+                     scratch: Path, template: str | None = None, quick: bool = False,
+                     debt: bool = False) -> tuple[str, dict[str, Path]]:
+    """(the filled prompt, the files written for it) for one round on a slice PR, a quick change's or a debt PR's.
 
-    The base is the epic's branch the PR merges into; the brief and the previous round's response are
-    written to `scratch`, since Codex's sandbox has no network."""
-    base = f"epic/{epic}"
+    `base` is the branch the PR must merge into: a slice's epic branch (`epic/N`), or main for a quick change or
+    a debt PR. `brief` is what Codex holds it to: a slice issue's title and body, the quick change's approved
+    brief (never the poster's request), or a debt PR's tickets with its pass group's scope and files. It and the
+    previous round's response are written to `scratch`, since Codex's sandbox has no network."""
+    m = re.fullmatch(r"epic/(\d+)", base)
+    if quick and debt:
+        raise ReviewError("a PR is a quick change's or a debt group's, not both")
+    if not (quick or debt) and not m:
+        raise ReviewError(f"a slice PR's base is its epic's branch (epic/N), not {base}")
     if pr.get("baseRefName") != base:
-        raise ReviewError(f"PR #{pr.get('number')} targets {pr.get('baseRefName')}, not {base}: a slice merges into its epic's branch")
+        raise ReviewError(f"PR #{pr.get('number')} targets {pr.get('baseRefName')}, not {base}: "
+                          + ("a quick change merges straight into main" if quick
+                             else "a debt PR merges straight into main" if debt
+                             else "a slice merges into its epic's branch"))
+    epic = None if quick or debt else int(m.group(1))
     files = {"brief": scratch / "slice.md", "prompt": scratch / "prompt.md"}
-    files["brief"].write_text(f"{slice_issue.get('title', '')}\n\n{slice_issue.get('body', '')}\n")
+    files["brief"].write_text(brief)
     _write_response(rounds, "pr-review", scratch, files)
     prompt = fill_pr_prompt(PR_PROMPT.read_text() if template is None else template, files["brief"],
-                            f"origin/{base}", epic, files.get("response"))
+                            f"origin/{base}", epic, files.get("response"), debt=debt)
     files["prompt"].write_text(prompt)
     return prompt, files
 
@@ -767,14 +784,15 @@ def _unvouched(why: str, err: Path, log) -> tuple[int, None]:
 
 
 def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dict[str, Any],
-               log=print, on_version=None) -> tuple[int, Path | None]:
+               log=print, on_version=None, brief: str | None = None) -> tuple[int, Path | None]:
     """Run Codex on an isolated `CODEX_HOME`, retrying once when it times out or ends with no verdict.
     (status, the stamped report). `on_version(version)` is called with `codex --version` before Codex runs.
 
     The report is saved only when HEAD is where it was, and when the run's session log shows what the repo's
     settings say it was given (`check_run`): a review of a commit that moved under it, or one offered skills
     `codex.skills` suppresses, is no review. `UNAVAILABLE` is the status for "Codex can't run" (the skill then
-    defers the review): no `codex`, no sign-in, both found before Codex is started, or a run that can't be vouched for."""
+    defers the review): no `codex`, no sign-in, both found before Codex is started, or a run that can't be vouched for.
+    `brief`: the approved brief's comment id a quick change's round was given, stamped as its `Brief:` line."""
     report, err = scratch / "codex.md", scratch / "codex.err"
     report.unlink(missing_ok=True)
     err.write_text("")
@@ -787,7 +805,7 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
     # SIGTERM anywhere in here, not only while Codex runs, still reconciles the sign-in on the way out
     with _sigterm_interrupts(), isolated_home(scratch, settings, user_auth, log) as env:
         try:
-            prov = provenance(settings, codex_version(env), cmd[-1])
+            prov = ({"brief": brief} if brief else {}) | provenance(settings, codex_version(env), cmd[-1])
         except CannotStart as exc:
             log(f"codex can't be started ({exc}): Codex can't run (exit {UNAVAILABLE}: `review-defer`)")
             return UNAVAILABLE, None

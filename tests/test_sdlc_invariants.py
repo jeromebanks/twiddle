@@ -49,7 +49,7 @@ STORIES = ["none", "demoed", "accepted", "shipped", "voided", "found", "owed"]
 SLICES = ["open", "inflight", "done", "escalated"]
 
 
-def build(keys, created, stories, slice_states, debt, cleanup_in):
+def build(keys, created, stories, slice_states, legacy_in):
     """(epic state, progress, leaves) for one generated epic."""
     h = History()
     h.add("prd", 1)
@@ -76,7 +76,7 @@ def build(keys, created, stories, slice_states, debt, cleanup_in):
             h.add("plan", 2)
             h.add("plan-review", 2, verdict="approve", round="1")
             h.add("plan-created", 2, created=",".join(created))
-    if cleanup_in:   # the cleanup pass after M1 was planned and created (its slice sits in M2)
+    if legacy_in:   # a cleanup pass after M1, from before it was retired, was planned and created (its slice sits in M2)
         h.add("plan", 3)
         h.add("plan-review", 3, verdict="approve", round="1")
         h.add("plan-created", 3, created=",".join(created), cleanup="M1")
@@ -97,14 +97,13 @@ def build(keys, created, stories, slice_states, debt, cleanup_in):
                                 "state_reason": prev["state_reason"]}]
             leaves.append(leaf)
             prev = leaf
-        if k == cleanup_in:   # a cleanup slice of its own, not in the chain: ready at once
+        if k == legacy_in:   # that pass's slice, not in the chain: ready at once, and an ordinary slice now
             n += 1
-            # keyed to sort last: only the cleanup rule can put it first
+            # keyed to sort last: only a leftover cleanup rule would put it first
             leaves.append({"number": n, "key": f"Z{k}", "kind": "slice", "milestone": f"#{EPIC} {k}: {k}",
                            "state": "open", "state_reason": None, "assignees": [], "labels": ["plan:slice"],
                            "body": PAYS})
-    progress = {**sdlc.summarise_progress(leaves, blockers), "behind_main": 0, "debt": [81] if debt else [],
-                "cleanup_budget": 1}
+    progress = {**sdlc.summarise_progress(leaves, blockers), "behind_main": 0}
     return st, progress, leaves
 
 
@@ -141,18 +140,18 @@ def cases():
                     slice_states = {"M1": list(sl1), "M2": list(sl2)}
                     if not consistent(keys, created, stories, slice_states):
                         continue
-                    for debt, cleanup_in in ((False, None), (True, None), (True, "M2")):
-                        # an open cleanup slice means its milestone isn't complete: it can't be shown or shipped yet
-                        if cleanup_in and ("M2" not in created or stories["M2"] in ("demoed", "accepted", "shipped")):
+                    for legacy_in in (None, "M2"):
+                        # an open legacy slice means its milestone isn't complete: it can't be shown or shipped yet
+                        if legacy_in and ("M2" not in created or stories["M2"] in ("demoed", "accepted", "shipped")):
                             continue
-                        yield keys, created, stories, slice_states, debt, cleanup_in
+                        yield keys, created, stories, slice_states, legacy_in
 
 
 ALL = list(cases())
 
 
 def check(case):
-    keys, created, stories, slice_states, debt, cleanup_in = case
+    keys, created, stories, slice_states, legacy_in = case
     st, progress, leaves = build(*case)
     nxt = sdlc.next_command(st, progress)
     by_number = {l["number"]: l for l in leaves}
@@ -188,11 +187,13 @@ def check(case):
         leaf = by_number[int(m.group(1))]
         if sdlc.milestone_key(leaf["milestone"]) != cur:
             problems.append(f"next offers a slice of {sdlc.milestone_key(leaf['milestone'])}, but {cur} is current")
-        if cur == cleanup_in and not leaf["body"]:
-            problems.append("next offers ordinary work while the current milestone's cleanup slice is ready")
+        ready = sorted((l for l in leaves if sdlc.milestone_key(l["milestone"]) == cur and l["number"] in progress["ready"]),
+                       key=lambda l: sdlc.natural_key(l["key"]))
+        if ready and leaf is not ready[0]:   # in key order: an old Pays down slice doesn't jump the queue
+            problems.append(f"next offers {leaf['key']} before {ready[0]['key']}")
     if cur and st["action"] == "work_slices":
         complete = all(x == "done" for x in slice_states[cur])
-        has_cleanup = cur == cleanup_in        # its cleanup slice is open, so it isn't complete
+        has_cleanup = cur == legacy_in         # its legacy slice is open, so it isn't complete
         if complete and not has_cleanup and stories[cur] in ("none", "voided") and "/milestone-demo" not in nxt:
             problems.append(f"{cur} is complete and unshown, but next is {nxt!r}")
         if complete and not has_cleanup and stories[cur] == "owed" and "Codex hasn't reviewed" not in nxt:
@@ -200,10 +201,8 @@ def check(case):
         if complete and not has_cleanup and stories[cur] == "accepted" and "ship it" not in nxt:
             problems.append(f"{cur} is accepted and unshipped, but next is {nxt!r}")
 
-        prev = keys[keys.index(cur) - 1] if keys.index(cur) else None
-        if prev and debt and not cleanup_in and stories[prev] == "shipped" and stories[cur] == "none" \
-                and not complete and "--cleanup" not in nxt:
-            problems.append(f"{prev} shipped with open tech debt and no cleanup pass, but next is {nxt!r}")
+    if "cleanup" in nxt:   # the cleanup pass is gone: an accepted milestone never waits for one
+        problems.append(f"next still asks for a cleanup pass: {nxt!r}")
 
     # no deadlock: work exists, nobody holds it, nothing escalated, nobody to wait for
     stuck = (st["action"] == "work_slices" and nxt.startswith("nothing") and not progress["in_flight"]
@@ -219,9 +218,8 @@ def test_the_space_is_not_trivial():
 
 @pytest.mark.parametrize("helper,fake", [
     ("milestone_phases", lambda st, p: [{**m, "phase": "building"} for m in p["milestones"]]),   # no lifecycle
-    ("offered_slices", lambda p, cur: p["ready"]),            # any milestone, no cleanup-first
-    ("cleanup_owed", lambda st, p, phases, cur: None),        # no cleanup pass
-    ("is_cleanup", lambda leaf: False),
+    ("offered_slices", lambda p, cur: p["ready"]),            # any milestone
+    ("offered_slices", lambda p, cur: sorted(p["ready"], key=lambda n: n != max(p["ready"]))),   # a slice jumps the queue
 ])
 def test_the_checks_catch_a_broken_rule(monkeypatch, helper, fake):
     """Each rule, switched off, must make some case fail: the checks aren't vacuous."""
@@ -230,7 +228,7 @@ def test_the_checks_catch_a_broken_rule(monkeypatch, helper, fake):
 
 
 @pytest.mark.parametrize("case", ALL, ids=lambda c: f"{','.join(c[1])}|{c[2]['M1']},{c[2]['M2']}|"
-                         f"{'.'.join(c[3]['M1'])}/{'.'.join(c[3]['M2'])}|debt={c[4]}|cleanup={c[5]}")
+                         f"{'.'.join(c[3]['M1'])}/{'.'.join(c[3]['M2'])}|legacy={c[4]}")
 def test_next_and_the_gates_agree(case):
     st, progress, nxt, problems = check(case)
     assert st["action"] in sdlc.ALL_ACTIONS
@@ -245,7 +243,7 @@ def _phase(h, slices_done, total=2, keys=("M1", "M2"), created=("M1",)):
     leaves = [{"number": 100 + i, "key": f"T{i}", "kind": "slice", "milestone": f"#{EPIC} M1: M1",
                "state": "closed" if i < slices_done else "open", "state_reason": "completed" if i < slices_done else None,
                "assignees": [], "labels": ["plan:slice"], "body": ""} for i in range(total)]
-    p = {**sdlc.summarise_progress(leaves, {}), "debt": [], "cleanup_budget": 1}
+    p = sdlc.summarise_progress(leaves, {})
     return {m["key"]: m["phase"] for m in sdlc.milestone_phases(st, p)}
 
 

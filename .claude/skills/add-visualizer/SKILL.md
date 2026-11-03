@@ -17,6 +17,8 @@ A personal one can instead go in `~/.config/twiddle/viz/<name>.py`: same
 code, loaded at startup, and skipped with an on-screen warning if it fails
 to import. Built-ins are for ones worth keeping.
 
+**Under the SDLC, the build runs inside `work-slice`: do not open your own PR.**
+
 ## The contract (`viz/base.py`)
 
 ```python

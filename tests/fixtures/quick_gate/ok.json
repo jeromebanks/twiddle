@@ -1,0 +1,79 @@
+{
+ "pr": {
+  "number": 50,
+  "state": "OPEN",
+  "isDraft": false,
+  "baseRefName": "main",
+  "headRefName": "slice/12",
+  "headRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "mergeable": "MERGEABLE",
+  "body": "Adds a station.\n\nCloses #12"
+ },
+ "pr_comments": [
+  {
+   "id": 12,
+   "author": "owner",
+   "body": "<!-- sdlc:v1 kind=tests sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa result=pass passed=1300 -->\nx",
+   "created_at": "2026-10-02T00:07:00Z",
+   "url": "https://example/issues/12#issuecomment-1012"
+  },
+  {
+   "id": 13,
+   "author": "owner",
+   "body": "<!-- sdlc:v1 kind=pr-review sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa verdict=approve round=1 brief=1010 -->\nx",
+   "created_at": "2026-10-02T00:08:00Z",
+   "url": "https://example/issues/12#issuecomment-1013"
+  }
+ ],
+ "trusted": [
+  "owner"
+ ],
+ "behind_by": 0,
+ "files": [
+  {
+   "filename": "src/twiddle/stations/catalog/psyched.toml",
+   "status": "added",
+   "additions": 10,
+   "deletions": 0
+  },
+  {
+   "filename": "tests/test_stations.py",
+   "status": "added",
+   "additions": 5,
+   "deletions": 1
+  }
+ ],
+ "issue": {
+  "number": 12,
+  "title": "Add a station",
+  "state": "open",
+  "author": "poster",
+  "labels": [
+   "complexity:routine",
+   "sdlc:in-progress"
+  ]
+ },
+ "comments": [
+  {
+   "id": 10,
+   "author": "owner",
+   "body": "<!-- sdlc:v1 kind=prd rev=1 lane=quick -->\n> \ud83e\udd16 **twiddle triage** \u2014 PRD rev 1\n\n## Outcome\noutcome of the change\n\n## Scope\nscope of the change\n\n## Files\n- `src/twiddle/stations/catalog/*.toml`: the new station\n- tests/test_stations.py\n* `docs/STATIONS.md` (its row)\n\n## Acceptance criteria\nacceptance criteria of the change\n\n## Validation\nvalidation of the change\n\n## Non-goals\nnon-goals of the change\n\n## Context\ncontext of the change\n\n---\nReply `/approve` to sign off on this revision, `/changes <what>` to ask for changes, or just comment.\n",
+   "created_at": "2026-10-02T00:01:00Z",
+   "url": "https://example/issues/12#issuecomment-1010"
+  },
+  {
+   "id": 11,
+   "author": "owner",
+   "body": "<!-- sdlc:v1 kind=approval rev=1 by=poster via=comment -->\n> \ud83e\udd16 **twiddle triage** \u2014 approval recorded\n\ntext\n",
+   "created_at": "2026-10-02T00:02:00Z",
+   "url": "https://example/issues/12#issuecomment-1011"
+  },
+  {
+   "id": 1,
+   "author": "owner",
+   "body": "<!-- sdlc:v1 kind=claim branch=slice/12 base=main quick=1 -->\nx",
+   "created_at": "2026-10-02T00:05:00Z",
+   "url": "https://example/issues/12#issuecomment-1001"
+  }
+ ]
+}

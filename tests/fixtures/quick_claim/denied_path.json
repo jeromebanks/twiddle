@@ -1,0 +1,37 @@
+{
+  "issue": {
+    "number": 12,
+    "title": "Fix the play retry",
+    "state": "open",
+    "author": "poster",
+    "labels": [
+      "complexity:routine",
+      "sdlc:approved",
+      "lane:quick"
+    ],
+    "body": "the poster's request",
+    "assignees": []
+  },
+  "comments": [
+    {
+      "id": 1,
+      "author": "owner",
+      "body": "<!-- sdlc:v1 kind=prd rev=1 lane=quick -->\n> \ud83e\udd16 **twiddle triage** \u2014 PRD rev 1\n\n## Outcome\noutcome of the change\n\n## Scope\nscope of the change\n\n## Files\n- `src/twiddle/play.py`: the transport call it fixes\n- tests/test_play.py\n\n## Acceptance criteria\nacceptance criteria of the change\n\n## Validation\nvalidation of the change\n\n## Non-goals\nnon-goals of the change\n\n## Context\ncontext of the change\n\n---\nReply `/approve` to sign off on this revision, `/changes <what>` to ask for changes, or just comment.\n",
+      "created_at": "2026-10-02T00:01:00Z",
+      "url": "https://example/issues/12#issuecomment-1001"
+    },
+    {
+      "id": 2,
+      "author": "owner",
+      "body": "<!-- sdlc:v1 kind=approval rev=1 by=poster via=comment -->\n> \ud83e\udd16 **twiddle triage** \u2014 approval recorded\n\ntext\n",
+      "created_at": "2026-10-02T00:02:00Z",
+      "url": "https://example/issues/12#issuecomment-1002"
+    }
+  ],
+  "trusted": [
+    "owner"
+  ],
+  "blockers": [],
+  "pr": null,
+  "pr_comments": []
+}

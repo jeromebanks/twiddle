@@ -17,6 +17,8 @@ by `fetch`. Most stations are on a platform we already read, so adding them is
 data only. A station with its own one-off feed needs a fetcher written.
 That's the only part needing judgement, and it is Section 4.
 
+**Under the SDLC, the build runs inside `work-slice` (`/work-slice N --quick` for a data-only station with an approved brief): do not open your own PR.**
+
 Two read-only commands do the legwork. **Use them, don't hand-roll curl
 calls**:
 
@@ -234,7 +236,7 @@ modelled on `somafm.py` (JSON) or `spinitron.py` (HTML):
   known tags, a known fetcher, the blurb shape, and a key that works as a
   shell word. You don't need a new test for a data-only station.
 - Run `uv run pytest -q tests/test_catalog.py tests/test_stations.py tests/test_station_finding.py`,
-  then the full suite. Update the test count in `CLAUDE.md`.
+  then the full suite.
 
 ## 6. Check it for real, without touching a speaker
 

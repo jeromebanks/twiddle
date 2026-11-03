@@ -24,9 +24,33 @@ issue ─► sdlc:triage ─► sdlc:needs-info ◄─► (poster answers)
    any stage ─► sdlc:escalated  (a human is needed: no consensus, or the agent is stuck)
 ```
 
+A small, safe change takes a second road, the **quick lane** (see "The quick lane" below):
+
+```
+issue ─► sdlc:triage ─► sdlc:prd-review / sdlc:diagnosis-review   (a short brief, posted with --lane quick)
+                        │  poster: /approve      (the brief stays a comment on the issue)
+                        ▼
+                  sdlc:approved ─► claim --quick ─► sdlc:in-progress ─► PR into main ─► merge ─► sdlc:done
+                   (action work_quick)               (work-slice N --quick:     (tests + Codex on the head,
+                        ▲                             no plan, no epic)          issue closed, record posted)
+                        └── escalate-to-full N ◄── too big: change rounds, files or size
+                              (then commit-prd N puts the brief in docs/prd/, and /plan-issue N plans it)
+```
+
+Tech debt takes a third road, the **debt lane** (see "The debt lane" below): no PRD, no plan sign-off, no demo.
+One standing **debt epic** holds every open `tech-debt` issue, and its passes work them into `main`:
+
+```
+file-issue N --debt ─► joins the open debt epic ─► intake ─► pass plan ─► claim --debt ─► PR into main ─► merge ─► pass end
+ (a slice, a quick change,   (opened if none)      (an agent)  (no sign-off)  (work-slice T --debt)  (suite + Codex      (next pass, or the
+  a demo, a debt PR)                                                                                    on the head)        epic closes)
+```
+
 The skills: `triage-issue` (to `approved`), `plan-issue` (to `planned`), `work-slice`
 (builds the slices; the epic is `in-progress` from the first claim) and `milestone-demo`
 (shows the poster each finished milestone, then ships each accepted one to `main`; the last ship is `done`).
+The debt lane borrows three of them: `triage-issue` runs a debt epic's intake, `plan-issue` plans its
+passes and `work-slice T --debt` builds a ticket.
 
 ## Branches
 
@@ -76,10 +100,14 @@ ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every sk
 | none, `sdlc:triage` | the agent |
 | `sdlc:needs-info`, `sdlc:prd-review`, `sdlc:diagnosis-review` | the poster, until they reply; then the agent |
 | `sdlc:approved` | the agent: `plan-issue` (the poster is not asked to review the plan) |
+| `sdlc:approved` / `sdlc:in-progress` with `lane:quick` | the agent: `work-slice N --quick` (state's action `work_quick`); no plan |
+| `sdlc:approved`, a quick brief moved to the full lane | the agent: `commit-prd N` (state's action `commit_prd`), then `plan-issue` |
 | `sdlc:needs-info` after a PRD approval | the poster, answering a planning question; then the agent replans |
 | `sdlc:planned`, `sdlc:in-progress` | the agent: `/work-slice <ready slice>`, `/milestone-demo N` once a milestone's units are all merged or an accepted one is due to ship, or `sync N` when `epic/N` is behind `main` and nothing else is going on (state's `next:`) |
 | `sdlc:demo-review` | the poster, until they reply to the demo; then the agent (`/milestone-demo N`) |
 | `sdlc:in-progress` after a demo's `/changes` | the agent: `/plan-issue N` plans them as new slices |
+| `sdlc:in-progress` with `lane:debt` (the debt epic) | the agent, from its tickets: `debt-epic` (open it, attach debt, end a pass), `debt-intake`, `/plan-issue D` (a pass), `/work-slice T --debt`, or `merge PR` (state's actions `pass_end`, `debt_intake`, `plan_pass`, `work_debt`, `merge_debt`); never the poster |
+| `tech-debt` issues | never triaged on their own; they move with the debt epic, and `state T` names it |
 | `plan:slice` / `plan:subtask` issues | never triaged; a slice's state is `slice-status N` |
 | `sdlc:escalated` | a human |
 
@@ -122,12 +150,13 @@ Publishing a demo is gated by `demo-post`'s checks, not by a person's OK.
 `work-slice` files the non-blocking review findings and adjacent issues the same way
 when it merges.
 
-**Tech debt is budgeted.** After each accepted milestone, if the epic has open
-`tech-debt` issues, `next:` says `/plan-issue N --cleanup`. That plans up to
-`cleanup_slices_per_milestone` of them as slices in the next milestone, Codex-reviewed,
-before its other slices, and `merge` closes the debt they pay down. After the last
-milestone the rest stay filed for triage. Ready slices are always taken from the
-earliest milestone first, so fix slices go before later work.
+**Tech debt is not planned into the epic.** An accepted milestone goes straight on to the
+next one's slices; open `tech-debt` issues are worked in the debt epic. Ready slices are
+always taken from the earliest milestone first, so fix slices go before later work.
+A follow-up is tech debt because of what it is, not the lane it came from, so a quick change's
+`file-issue N --debt` files work it needed to support itself too, and it joins the debt epic
+like any other (`state` on it says so); if the change then escalates to the full lane,
+`escalate-to-full` rewrites that debt's first lines as the new epic's. Anything else goes without `--debt`, to triage.
 
 ## Rules the tooling enforces
 
@@ -136,10 +165,206 @@ earliest milestone first, so fix slices go before later work.
   from accounts that can't write to the repo are ignored. Anyone with write access can
   forge one: this is an audit trail, not a security boundary.
 - One `sdlc:*` label per issue, changed only by `tools/sdlc.py`. Two at once is a
-  conflict and needs a human.
+  conflict and needs a human. (`lane:quick` and `complexity:*` are not state labels.)
+- A quick change merges into `main` only through `merge`'s quick gate (the quick lane, above): a
+  recorded passing suite and Codex's approval on the head, never a review deferred to a milestone,
+  and a diff that stays inside `.sdlc/config.json`'s `quick` rules.
+- A debt PR merges into `main` only through `merge`'s debt gate (the debt lane, above): the base is
+  `main`, it closes only open tickets of one claimed group of the open pass, and a passing suite and
+  Codex's approval are recorded on the head, never deferred. `merge`, in any lane, runs only main's gate code:
+  its `tools/sdlc.py` and `tools/sdlc_quick.py` must be identical to `origin/main`'s, which in practice means the
+  primary checkout.
 - Each PRD/diagnosis revision is a new comment; the previous one is collapsed and
   linked to its successor. After `max_rounds` (`.sdlc/config.json`) the agent escalates.
 - Reproducing a bug uses read-only commands and `--dry-run` only (see `CLAUDE.md`).
+
+## The quick lane
+
+An issue whose change is small and read-only (a station or venue entry, a bug fixed in a few
+files) does not need a PRD, a plan, an epic, a milestone demo and a ship. Six sessions and three
+sign-offs for one file is a reason to skip the process, so the quick lane keeps the gates and
+drops the ceremony: **one short brief, signed off with `/approve`; one build with
+`work-slice N --quick`; one PR into `main`, with the full suite and Codex's approval recorded
+on its head.** The full lane is unchanged for everything else.
+
+1. **Triage** (`triage-issue`) decides it is eligible and rates it `routine`:
+   - one slice's worth of work;
+   - read-only: no speaker or Spotify write;
+   - no dependency;
+   - nothing under a denied path (`.sdlc/config.json`'s `quick` section: `tools/`, `.agents/`,
+     `.claude/`, `.sdlc/`, `.github/`, `SDLC.md`, `CLAUDE.md`, `docs/sdlc.html`, `pyproject.toml`,
+     `uv.lock` and the speaker-writing modules);
+   - a data-only catalog or venue entry, or a bug whose diagnosis names a few files.
+
+   It adds `complexity:routine` and posts the brief (`references/brief-template.md`: Outcome,
+   Scope, Files, Acceptance criteria, Validation, Non-goals, Context, Safety class; see
+   `.agents/skills/triage-issue/references/brief-template.md`) with
+   `transition N prd-review --kind prd --lane quick` (a bug: `diagnosis-review --kind diagnosis`).
+   The `lane:quick` label is added by that `transition`, as a non-state label for filtering: the
+   one-`sdlc:*`-label rule is untouched. `/approve` works as for a PRD, and `state N` then shows
+   `lane: quick` with action `work_quick` and `next: /work-slice N --quick`. The approved brief
+   stays a comment: no `docs/prd/` file, no PR.
+2. **Build.** `claim N --quick` makes `.worktrees/slice-N` on `slice/N` from `origin/main` and moves
+   the issue from `approved` to `in-progress`, which freezes the brief. It refuses an unapproved,
+   non-quick, escalated, unrated or already-claimed issue, and a brief that lacks a section. It
+   also applies the merge gate's mechanical rules before anything is built: a brief whose `## Files`
+   names a denied path, or a pattern that could reach one (its literal prefix overlaps a denied entry,
+   so `src/twiddle/a*/clock.py` and `*.py` are refused), or lists more than `quick.max_files`; and on
+   `--resume`, the work it carries on (the local branch, its worktree's uncommitted and untracked
+   changes, and `origin/slice/N`) read with the gate's diff rules. Each refusal ends with
+   `escalate-to-full N`; `claim` never escalates by itself. `claim N --quick --dry-run --from-file
+   <bundle>` checks a saved issue bundle's brief offline, with no git (not with `--resume`). The brief (not the poster's request) is what is
+   built, checked and reviewed.
+3. **Evidence** goes in the PR body in place of a demo: the read-only commands run and their
+   output. The PR targets `main` and closes exactly that one issue.
+4. **Review.** `test-record` records the full suite on the head. `codex-review --pr PR` reviews the
+   head against the approved brief, stamps the report `Brief: <approved comment id>` under
+   `HEAD:`, and `pr-review` records it as `brief=`. A quick PR's review is **never deferred to a
+   milestone** (there is none), so `review-defer` is refused; if Codex can't run, the PR stays open
+   and a person chooses between waiting and `escalate-to-full N`.
+5. **Merge.** `quick-gate PR` (read-only) lists every refusal; `merge PR` squash-merges when there
+   are none: base `main`; the PR closes exactly that open quick issue; a passing run and Codex's
+   approval of the current head, the latter recorded against the current approved brief; the head
+   up to date with `main`; mergeable; and the diff inside the quick rules (no denied path, at most
+   `max_files` files and `max_lines` lines, only files the brief's `## Files` list names). The
+   issue is then closed as completed (read back), moved to `sdlc:done`, and a record of the PR,
+   head, test run and review is posted on it. A change found wrong later is undone with an
+   ordinary revert PR.
+6. **Escalation.** A change that outgrows the lane goes to the full lane **with its approved
+   brief**, no new PRD: `escalate-to-full N` posts a `lane=full` record, returns the issue to
+   `sdlc:approved` (without `lane:quick`), readdresses open debt filed against N while it was quick
+   as N's epic debt, and runs `commit-prd N`, which commits the brief to
+   `docs/prd/N-*.md` through a docs-only PR and `merge-prd`, since planning reads the PRD there.
+   Until the file is merged `state` offers `commit_prd`; `commit-prd N` is safe to rerun. Then
+   `/plan-issue N`. The tool runs `escalate-to-full` itself when `pr-review` records one Codex round
+   asking for changes beyond `max_change_rounds`, or when `merge` finds a denied path, the size cap
+   or a file outside the brief; never from `quick-gate`, a dry run or an offline `--from-file`.
+   A person can run it any time before the merge. It leaves an open PR and the worktree alone.
+
+The numbers (`max_files` 5, `max_lines` 200, `max_change_rounds` 2) and the denied paths are in
+`.sdlc/config.json`'s `quick` section, so they can be tuned without code. `quick-gate` and `merge`
+read that section from `main`'s copy on GitHub, never the checkout's, so a PR can't loosen its own
+gate. `lane:quick` is created by `bootstrap-labels`. A quick change is never an epic's slice: `next`
+lists it as `/work-slice N --quick` (or, when its brief's `## Files` breaks the rules `claim` checks,
+`/triage-issue N` with why), and the epic-only commands (`epic-branch`, `sync`, `demo-status`,
+`demo-post`, `ship` and the milestone review) refuse it.
+
+## The debt lane
+
+Tech debt is work a slice, a quick change, a demo or a debt fix needed to support itself and left
+behind: "the helper should also take an empty list". It is filed with `file-issue N --debt`
+(label `tech-debt`), never planned into the epic that found it, and worked by one standing issue,
+the **debt epic** (label `lane:debt`), straight into `main`. There is no PRD, no sign-off on a
+plan, no demo and no ship: the poster is asked nothing and sees issues close. Anything that is not
+that kind of work (a bug that was already there, a feature) is filed without `--debt`, and goes
+through triage, which an agent may do. The definition is the test; the lane is not a shortcut for
+work that needs design choices.
+
+**The debt epic.** There is at most one open. `debt-epic` (`--dry-run`, safe to rerun) opens it when
+open debt exists and none is open, attaches every open `tech-debt` issue as a sub-issue, and, when a
+pass has ended, records it and closes or escalates the epic if that is due. `next` names it while
+some debt is attached to no epic. `file-issue N --debt` opens it too if none is open, and the new
+ticket joins at once, whatever filed it, with a **generation** in its marker. `state D` on the epic
+says what is due; `state T` on a ticket names its epic, its generation and anything it waits for,
+and `slice-status T` its pass and group.
+
+1. **Intake**, by an agent and with no poster (`triage-issue` runs it; `state D` says `debt_intake`).
+   Each ticket is held to the definition above, and `debt-intake T --verdict V --reason "..."`
+   records the verdict on the ticket and applies it, read back: `debt` (it stays); `not-debt` or
+   `novel` (it needs design choices): it loses `tech-debt`, leaves the epic and goes to `sdlc:triage`
+   with the reason, to be triaged like any issue (`/triage-issue T`); `fixed` (`--commit SHA`, a
+   commit on `main`): closed as completed, naming the commit; `duplicate` (`--of M`): closed as a
+   duplicate of M. A verdict cut short is finished by running the same command again.
+2. **A pass** is a plan of which tickets this round takes (`plan-issue` writes it; `state D` says
+   `plan_pass`): groups, each one PR, in build order, with a one-line scope, its files and a
+   `routine` or `judgment` rating. A pass takes at most `debt.pass_size` tickets (8), and a group at
+   most `debt.max_per_pr` (4). `debt-pass-validate D pass.json` checks it (read-only apart from one
+   bounded `git fetch`), and `debt-pass-post D pass.json` (`--dry-run`) posts it once it validates.
+   The advisor checks the order. There is no `/approve` and no Codex round: Codex reviews every PR.
+   The tool refuses a ticket that is closed, not `tech-debt`, not in this epic, without a `debt`
+   verdict, already in an open pass, waiting for a milestone to ship or on a person, or escalated;
+   a group over the size limit or rated `novel`; and a group whose files overlap what an epic being
+   built has changed or plans to (its branch, its open PRs, the Scope of its open slices), so debt
+   merging into `main` does not make that epic's next `sync` conflict.
+3. **Build** (`work-slice T --debt`). `claim T --debt` claims T's whole group (the claim is posted on
+   every member) and makes `.worktrees/slice-T` on `slice/T` from `origin/main`, T being the ticket it was first
+   claimed through (a resume through another member reattaches that same worktree and branch, which
+   `claim` prints as `BRANCH`). The tickets are the
+   spec. It is built like a slice with offline tests; the PR targets `main`, and its body has one
+   `Closes #T` for each ticket of the group and nothing else. `test-record PR` records the full suite
+   on the head. `codex-review --pr PR` reviews the head against the tickets and the group's scope
+   and files, and `pr-review` records the round. A debt PR's review is **never deferred**
+   (`review-defer` is refused: no milestone review follows). `max_pr_rounds` applies as for a slice,
+   and `escalate-slice T` hands the whole group to a human; the pass ends without it.
+4. **Merge** (`merge PR`, from the primary checkout on an up-to-date `main`; see "The merge
+   permission"). The gate checks that the base is `main` and the head is not behind it, that the PR
+   closes exactly the tickets of one claimed group of the open pass (each open and a sub-issue of the
+   epic) and GitHub will close the same ones, that a passing run and Codex's approval are recorded on
+   the exact head, and that the PR is mergeable. Then it squash-merges, deletes the branch on GitHub
+   and here, removes the group's worktree, closes the tickets as completed (read back), and posts a
+   record on each ticket and on the epic. Otherwise it lists every refusal and merges nothing.
+5. **A pass ends** when none of its groups has anything left to build: merged, closed by intake,
+   escalated, or waiting on a person. The last `merge` of a pass runs `debt-epic`'s pass-end check
+   (`state D` says `pass_end` if it was cut short): one record counts the debt that **joined** during
+   the pass and what it **closed**. Debt that joined waits for the next pass. With no open debt left,
+   the epic is closed and moved to `sdlc:done`; the next `file-issue --debt` opens a new one.
+
+**How the lane stops.** Fixing debt finds more debt, so three rules bound it:
+
+- **Scope.** A debt ticket's review is held to the ticket's scope and files. A finding inside it is
+  fixed in the same PR, not filed. A finding outside it (and not caused or touched by the diff) is not
+  debt of that ticket: it is dropped, or filed without `--debt` for triage when it matters.
+- **Generations.** Debt filed from a slice, a quick change or a demo is generation 1, and debt filed
+  from a debt PR is its ticket's generation plus 1. `file-issue --debt` refuses past
+  `debt.max_generation` (2) and says to file an ordinary issue instead, so a chain of debt has at
+  most two links.
+- **Passes.** A pass takes at most `debt.pass_size` tickets. If a pass ends with more debt joined than
+  closed and the pass before did too, the epic is escalated to a human instead of another pass being
+  planned; moving it back to `sdlc:in-progress` lets the next one go.
+
+All three numbers are in `.sdlc/config.json`'s `debt` section.
+
+**Debt that waits.** Debt a feature epic files against a milestone not yet on `main` is in the epic
+but in no pass until that milestone ships (`state T` says what it waits for, and the pass check
+refuses it). A ticket whose check needs a real speaker (verifying a form on one, say) is built as
+far as offline tests go, and the agent then asks on the ticket with `debt-request T --body-file F`
+(`--dry-run`): the step's own `--dry-run` output and the `snapshot` and `restore` around it. The
+ticket leaves its pass and waits for a reply from its author or a collaborator, which puts it back
+for a later pass; the pass never waits for it. **The agent never writes to a speaker**, in the lane or
+in its tests.
+
+**The merge permission.** Claude Code's permission check refuses a sub-agent's `gh pr merge` ("Merge
+Without Review"), and refuses an agent editing its own permissions. So no skill and no tool ever
+merges a PR with a bare `gh pr merge` (a test greps for it). Every merge, in every lane, is
+`uv run python tools/sdlc.py merge PR`, run from the primary checkout on `main`: the gate's own
+review of the exact head stands behind it, and `merge` first refuses to run unless its
+`tools/sdlc.py` and `tools/sdlc_quick.py` match `origin/main`'s (after one bounded `git fetch`), so a
+PR is never judged by a gate it changed. The same goes for `cleanup N`, which removes the worktree.
+
+For the session that built a PR to run them itself, sub-agent or not, the poster adds this rule once
+to `.claude/settings.json` by hand. `.claude/` is a denied path and an agent cannot edit its own
+permissions, by design:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run python tools/sdlc.py merge *)",
+      "Bash(uv run python tools/sdlc.py cleanup *)"
+    ]
+  }
+}
+```
+
+If the file already has a `permissions.allow` list, add the two entries to it. A skill runs the
+commands as `cd <PRIMARY> && uv run python tools/sdlc.py merge PR`; Claude Code is expected to
+check each part of a chained command separately, so the rule should cover the `uv run` part. It allows `merge PR` and `merge PR
+--dry-run` and `cleanup N`, and nothing else of `tools/sdlc.py`. That the rule clears the check for a
+sub-agent is expected, not yet shown: the first milestone of the debt lane's own epic confirms it with
+a real sub-agent merge. **Without the rule**, a session that is refused leaves the PR ready and says
+so, and `state` on the PR's issue (or on the debt epic) names `merge PR` with the gate's results;
+the orchestrating session, which the poster runs, then runs that one command. Nothing is ever merged
+around the gate.
 
 ## Planning (`plan-issue`)
 
@@ -174,7 +399,7 @@ the old behaviour, creating everything at once.
 No consensus within `max_plan_rounds` on the first plan means the planner asks the poster
 one plain-language question (`sdlc:needs-info`, marked `phase=plan`). Their answer earns a
 fresh set of rounds. An amendment while the epic is being built (demo changes, the next
-milestone, a cleanup pass) that runs out of rounds is escalated to a human instead
+milestone) that runs out of rounds is escalated to a human instead
 (`escalate_plan`). A plan revision never voids the PRD's sign-off.
 
 `uv run python tools/sdlc.py ready --epic N` lists the units of work whose
@@ -192,7 +417,8 @@ escalation, keeps the branch and PR, and gives the retry a fresh Codex budget.
 ## Building (`work-slice`)
 
 One slice per session, in its own git worktree (`.worktrees/slice-N`, branch `slice/N`), so
-several can run at once. A slice's state is read off GitHub:
+several can run at once. (A quick change is built the same way, from `origin/main`: see the
+quick lane above.) A slice's state is read off GitHub:
 
 `blocked → ready → claimed → in-review → merged`, plus `escalated`.
 
@@ -208,7 +434,7 @@ several can run at once. A slice's state is read off GitHub:
    the exact prompt (see "What a review runs under" below). The
    implementer fixes or rebuts each finding, and each round is posted with `pr-review`. After
    `max_pr_rounds` (5) without approval: `escalate-slice`, and the slice goes to a human.
-5. `merge` is the gate: the PR targets `epic/E` and isn't behind it, Codex's latest review approves
+5. `merge`, run from the primary checkout (see "The merge permission"), is the gate: the PR targets `epic/E` and isn't behind it, Codex's latest review approves
    the **current head** (or the review is owed to the milestone), a passing test run is recorded on the current head, the PR closes one open
    `plan:slice`, no other milestone is waiting for its demo or release, and it is mergeable. Then
    the agent squash-merges into `epic/E` and closes the slice itself (GitHub only acts on
@@ -439,7 +665,8 @@ makes it work in the worktree by writing every path out in full (`work-slice` §
 
 | Worktree | Made by | For | Removed by |
 |---|---|---|---|
-| `.worktrees/slice-S`, on `slice/S` from `origin/epic/N` | `claim S` | building one slice | `cleanup S` |
+| `.worktrees/slice-S`, on `slice/S` from `origin/epic/N` (a quick change: `origin/main`, `claim S --quick`) | `claim S` | building one slice | `cleanup S` |
+| `.worktrees/slice-T`, on `slice/T` from `origin/main`, for a debt ticket's whole group (`claim T --debt`) | `claim T --debt` | building one pass group | `merge` (it removes the group's worktree and branch) or `cleanup T` |
 | `.worktrees/epic-N`, detached at `origin/epic/N` | `sync N`, `revert-slice S` | merging `main` in, reverting a slice, Codex's milestone review (`codex-review --milestone N` reads it as `sync` left it: it never resets it, and refuses it dirty or behind `epic/N`) | nobody: `sync` and `revert-slice` reset it to `origin/epic/N` before each use |
 | `.worktrees/sdlc-demos`, on `sdlc-demos` | `demo-post` | committing a demo's pictures | nobody: kept |
 | `.worktrees/verify-main-N`, detached at `origin/main` | `verify-main N` | the suite on `main` after an untested release | `verify-main N`, when it's done |
@@ -476,7 +703,7 @@ each a different issue or slice: for example `/work-slice 35` in one terminal an
   started meanwhile refuses ("wait for it, then rerun") and doesn't queue.
 - **Only one session touches a speaker at a time.** Slices never touch one (tests are offline).
   A milestone demo writes to the real household with the user present, so run one demo at a time.
-- **The machine is shared.** Each full suite takes about two minutes, and parallel runs slow
+- **The machine is shared.** A full suite takes minutes, and parallel runs slow
   each other down. Give the Bash call `timeout: 600000`, as the skills say.
 
 ## Milestone demos (`milestone-demo`)

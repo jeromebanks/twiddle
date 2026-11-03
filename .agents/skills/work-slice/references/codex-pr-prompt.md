@@ -1,10 +1,12 @@
 # The Codex PR-review prompt
 
 `uv run python tools/sdlc.py codex-review --pr PR` fills this and runs it: the text
-below the line, `<SLICE_FILE>`, `<BASE>`, `<EPIC>` and `<RESPONSE_FILE>` replaced, and
-the `<ROUND2>` bullet kept only from round 2 on. Don't fill it by hand. The tool
-checks the worktree's HEAD itself and writes the report's `HEAD:` line, so the
-prompt doesn't ask Codex for it.
+below the line, `<SLICE_FILE>`, `<BASE>`, `<EPIC>` and `<RESPONSE_FILE>` replaced, the
+`<SLICE>` bullets kept for a slice PR, the `<QUICK>` bullets for a quick change's and
+the `<DEBT>` bullets for a debt PR's (neither has an epic, so no `<EPIC>`), and the
+`<ROUND2>` bullet kept only from round 2 on. Don't fill it by hand. The tool checks the worktree's HEAD itself and writes the
+report's `HEAD:` line (and, for a quick change, the `Brief:` line naming the approved
+brief it gave Codex), so the prompt asks Codex for neither.
 
 ---
 
@@ -14,10 +16,28 @@ did not write this code. Judge it on its merits, and do not assume any claim in
 the PR, the commits or a previous review is true.
 
 Read:
-- the slice's brief: `<SLICE_FILE>` (its Outcome, Scope, Acceptance criteria,
-  Validation, Demo, Non-goals and Context sections define the job);
-- the change: `git diff <BASE>...HEAD` and `git log <BASE>..HEAD` (`<BASE>` is
-  epic #<EPIC>'s branch, which this slice merges into);
+- <SLICE>the slice's brief: `<SLICE_FILE>` (its Outcome, Scope, Acceptance criteria,
+  Validation, Demo, Non-goals and Context sections define the job);</SLICE>
+- <SLICE>the change: `git diff <BASE>...HEAD` and `git log <BASE>..HEAD` (`<BASE>` is
+  epic #<EPIC>'s branch, which this slice merges into);</SLICE>
+- <QUICK>the approved brief of this quick change: `<SLICE_FILE>` (its Outcome, Scope,
+  Files, Acceptance criteria, Validation, Non-goals and Context sections define the job).
+  Its Files section bounds the change: a changed file it doesn't list is a blocking
+  finding;</QUICK>
+- <QUICK>the change: `git diff <BASE>...HEAD` and `git log <BASE>..HEAD` (`<BASE>` is
+  main: a quick change merges straight into main, with no epic, milestone or demo
+  after it, so this review is the last look anyone takes before it lands);</QUICK>
+- <DEBT>the brief of this debt PR: `<SLICE_FILE>`. Each tech-debt ticket it closes is
+  the spec, and its pass group's scope and files (from the pass plan, at the top)
+  bound the change. A problem inside that scope is fixed in this PR, so it can be
+  blocking; so can anything the diff itself changes or breaks, wherever it is. A
+  problem that was already there outside that scope, which the change neither causes
+  nor touches, is not this ticket's debt: report it as **non-blocking**, never as
+  blocking. It isn't filed as debt either: it is dropped, or filed as an ordinary
+  issue for triage when it matters;</DEBT>
+- <DEBT>the change: `git diff <BASE>...HEAD` and `git log <BASE>..HEAD` (`<BASE>` is
+  main: a debt PR merges straight into main, and no milestone review or demo follows,
+  so this review is the last look anyone takes before it lands);</DEBT>
 - the safety rules every change is held to: `.agents/skills/review-rules.md`;
 - the code around the change, as far as you need it;
 - <ROUND2>the implementer's answer to the previous round: `<RESPONSE_FILE>`. Where they

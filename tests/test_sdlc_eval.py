@@ -23,6 +23,13 @@ TRUSTED = {OWNER}
 _ids = iter(range(1, 10_000))
 
 
+@pytest.fixture(autouse=True)
+def _runs_main_gate_code(monkeypatch):
+    """`merge` first checks it runs origin/main's gate code (a git fetch): tests/test_sdlc_merge_gate.py tests that.
+    A `--from-file` bundle skips that check; the live merges here would otherwise fetch."""
+    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR": [])
+
+
 def git(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
 

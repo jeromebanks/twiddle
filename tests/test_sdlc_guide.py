@@ -156,3 +156,17 @@ def test_what_a_round_is_handed_comes_from_codex_review():
                         f"{fn.name}: `{param}` for {call.func.attr} is chosen in sdlc.py ({ast.unparse(v)})"
                 checked += 1
     assert checked >= 4          # the PR's, the plan's and the milestone's rounds, and the milestone's owed slices
+
+
+WORKFLOW_DOCS = ["SDLC.md", "CLAUDE.md", "docs/sdlc.html", *(str(p.relative_to(ROOT)) for p in sorted((ROOT / ".agents").rglob("*.md")))]
+
+
+@pytest.mark.parametrize("doc", WORKFLOW_DOCS)
+def test_no_workflow_doc_promises_the_retired_cleanup_pass(doc):
+    """The cleanup pass is gone (#250): no doc may still send debt to one, budget it, or have `merge` close it.
+    docs/prd/ keeps the history; a doc may say the pass was retired."""
+    text = re.sub(r"\s+", " ", (ROOT / doc).read_text())
+    stale = [m.group(0) for m in re.finditer(r"[^.]*\b(cleanup pass|cleanup slice|--cleanup|cleanup_slices_per_milestone|"
+                                             r"Pays down|budgeted)\b[^.]*", text, re.I)
+             if not re.search(r"retired|is gone|are gone", m.group(0))]
+    assert not stale, stale
