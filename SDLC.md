@@ -168,12 +168,14 @@ like any other (`state` on it says so); if the change then escalates to the full
   conflict and needs a human. (`lane:quick` and `complexity:*` are not state labels.)
 - A quick change merges into `main` only through `merge`'s quick gate (the quick lane, above): a
   recorded passing suite and Codex's approval on the head, never a review deferred to a milestone,
-  and a diff that stays inside `.sdlc/config.json`'s `quick` rules.
+  a diff that stays inside `.sdlc/config.json`'s `quick` rules, and a passing review eval for the head's
+  review logic on the current `codex`, never a deferred one (the eval gate, below).
 - A debt PR merges into `main` only through `merge`'s debt gate (the debt lane, above): the base is
   `main`, it closes only open tickets of one claimed group of the open pass, and a passing suite and
-  Codex's approval are recorded on the head, never deferred. `merge`, in any lane, runs only main's gate code:
-  its `tools/sdlc.py` and `tools/sdlc_quick.py` must be identical to `origin/main`'s, which in practice means the
-  primary checkout.
+  Codex's approval are recorded on the head, never deferred, and so is a passing review eval for the head's
+  review logic on the current `codex` (the eval gate, below). `merge`, in any lane, runs only main's gate code:
+  its `tools/sdlc.py`, `tools/sdlc_quick.py`, `tools/codex_review.py` and `tools/codex_eval.py` must be identical
+  to `origin/main`'s, which in practice means the primary checkout.
 - Each PRD/diagnosis revision is a new comment; the previous one is collapsed and
   linked to its successor. After `max_rounds` (`.sdlc/config.json`) the agent escalates.
 - Reproducing a bug uses read-only commands and `--dry-run` only (see `CLAUDE.md`).
@@ -636,6 +638,14 @@ blocks until a later pass for that pair. Results live on the eval issue, so post
   records a `deferred` result for the pair, and is refused once the pair's latest result is a `fail`. A slice merged
   on a deferral posts an `eval-owed` record on the epic; `state` and `demo-status` list it, and `demo-post` refuses
   while it is owed.
+- **A quick change's and a debt group's PR into `main` take the same gate, with no deferral.** `merge` (and
+  `--dry-run`), `quick-gate`, and `state` / `slice-status` where they show the gate read the PR's head and `main`
+  the same way (the PR's `refs/pull/N/head`, fetched from the primary checkout) and refuse until the pair has a
+  `pass`. These lanes have no milestone demo to owe an eval to, so a `deferred` result is a refusal too, and the
+  refusal says so. A PR that changes no fingerprint input merges as before only while its pair has a pass: after
+  a `codex` upgrade, an ordinary quick or debt PR waits for the new pair's eval too. When the eval can't run, a
+  debt group waits; a quick change waits, or moves to the full lane (`escalate-to-full N`). `quick-gate
+  --from-file` judges a saved bundle offline, with no eval gate (`merge` refuses a quick or debt bundle anyway).
 - **When `codex --version` can't be read** (missing, not executable, or no usable answer), only the fingerprint
   is checked: its latest completed result (`pass` or `fail`, any version, and a `fail` posted as `unknown` too) decides; failing that, a deferral recorded
   as `unavailable` lets the merge through, owed. `--defer` there records `unavailable`, and is refused after a

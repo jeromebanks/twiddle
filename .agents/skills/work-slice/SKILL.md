@@ -463,7 +463,10 @@ leaves the PR ready: `state N` and `slice-status N` then say `merge PR` is due, 
 the current head; Codex's approval of the current head, recorded against the issue's current
 approved brief; the head not behind `main` (rebase onto `origin/main`, push with
 `--force-with-lease`, then `test-record` and a new Codex round: a rebase voids both); a
-mergeable PR; and a diff that stays inside the quick rules. It squash-merges into `main`, makes
+mergeable PR; a diff that stays inside the quick rules; and a passing `codex-eval` for the head's review
+logic on the current `codex` (the eval gate, `SDLC.md`). A change to a fingerprint input, or a `codex`
+upgrade, needs a pass before `merge`, and there is **no deferral**: if the eval can't run, the change
+waits, or a person moves it to the full lane (`escalate-to-full N`). It squash-merges into `main`, makes
 sure the issue is closed as completed, moves it to `sdlc:done`, and posts a record on the issue
 (the PR, the head, the test and review records). `merge` and `claim` do those label moves; you
 never touch a label. File what you leave behind as in §9, with the quick issue's number, and by
@@ -577,7 +580,10 @@ cd <PRIMARY> && uv run python tools/sdlc.py merge PR
 The debt gate refuses unless the base is `main` and the head is not behind it; the PR closes only
 open tickets of one claimed group of the open pass (every active member, each a sub-issue of the
 epic) and GitHub will close the same ones; a passing run and Codex's approval are recorded on the
-exact head; and it is mergeable. It then squash-merges, deletes the branch on GitHub and here,
+exact head; it is mergeable; and the head's review logic has a passing `codex-eval` on the current
+`codex` (the eval gate, `SDLC.md`), with **no deferral**: after a change to a fingerprint input or a
+`codex` upgrade, run `codex-eval` before `merge`, and if it can't run, the group waits. It then
+squash-merges, deletes the branch on GitHub and here,
 removes the group's worktree, closes the tickets as completed and posts a record on each ticket
 and on the debt epic. If that was the pass's last work it also ends the pass (the next pass, or the
 epic closed). A separate `cleanup` is only needed when `merge` says a cleanup was left over. If a

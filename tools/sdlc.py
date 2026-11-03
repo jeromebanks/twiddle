@@ -4877,6 +4877,14 @@ def quick_gate_errors(b: dict[str, Any], config: dict[str, Any]) -> list[str]:
                                    codex_review.approved_brief(st) if st else None, quick, config.get("default_branch", "main"))
 
 
+def quick_eval_errors(b: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    """The eval gate's refusals of a live quick-gate bundle's PR (`main_eval_errors`). None until it closes one issue:
+    the quick gate refuses that PR already."""
+    pr = b.get("pr") or {}
+    refs = closes_refs(pr.get("body", ""))
+    return main_eval_errors(pr, config, "quick", refs[0]) if len(refs) == 1 else []
+
+
 def merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: dict[str, Any]) -> list[str]:
     """The gate's refusals of a PR whose records say it may merge, read online and read-only: the quick gate's
     for a quick change, the slice gate's (with its milestone hold) for a slice. A failed read is one refusal,
@@ -4889,7 +4897,8 @@ def merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: d
 
 def _merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: dict[str, Any]) -> list[str]:
     if quick:
-        return quick_gate_errors(quick_gate_bundle(st["pr"], config), config)
+        qb = quick_gate_bundle(st["pr"], config)
+        return quick_gate_errors(qb, config) + quick_eval_errors(qb, config)
     if st.get("lane") == DEBT_LANE:   # its `epic` is the debt epic: no epic branch, the debt gate onto main
         return debt_pr_gate(st["pr"], config, set(b["trusted"]))
     if not st.get("epic"):
@@ -4900,7 +4909,8 @@ def _merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: 
 def command_quick_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """May this quick PR merge into main? Prints each refusal (or `ok`); reads only, never escalates."""
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else quick_gate_bundle(args.pr, config)
-    errs = quick_gate_errors(b, config)
+    # a saved bundle (--from-file) is judged offline: it carries no commits to fingerprint, so no eval gate
+    errs = quick_gate_errors(b, config) + ([] if args.from_file else quick_eval_errors(b, config))
     for e in errs:
         print(f"refused: {e}")
     if not errs:
@@ -5497,10 +5507,14 @@ def eval_status(fp: str, version: str | None, results: list[dict[str, Any]]) -> 
     return ("deferred", deferred[-1]) if deferred else ("none", None)
 
 
-def eval_gate(head_fp: str, base_fp: str | None, version: str | None, results: list[dict[str, Any]]
-              ) -> tuple[list[str], dict[str, str] | None]:
+def eval_gate(head_fp: str, base_fp: str | None, version: str | None, results: list[dict[str, Any]],
+              no_deferral: str | None = None, on_fail: str | None = None) -> tuple[list[str], dict[str, str] | None]:
     """(why the merge is refused, the eval it owes when a deferral lets it through) for a PR whose head has the
-    review logic `head_fp` (`base_fp` its base's: only for the message) under `codex --version` `version`."""
+    review logic `head_fp` (`base_fp` its base's: only for the message) under `codex --version` `version`.
+
+    `no_deferral`, for a PR straight into main (a quick change's, a debt group's): there is no milestone demo to
+    owe an eval to, so a deferral is a refusal too, and this says what to do instead of deferring. `on_fail`, with it:
+    the lane's own next step after a failed eval (its escalation), in place of the slice lane's "or escalate"."""
     v = real_version(version)
     pair = f"the review logic {codex_eval.short(head_fp)} on codex {v or EVAL_UNAVAILABLE}"
     why = "; ".join(w for w in ("this PR changes the review logic" if base_fp and base_fp != head_fp else
@@ -5509,11 +5523,19 @@ def eval_gate(head_fp: str, base_fp: str | None, version: str | None, results: l
     state, r = eval_status(head_fp, version, results)
     if state == "pass":
         return [], None
-    if state == "deferred":
+    if state == "deferred" and no_deferral is None:
         return [], {"fp": head_fp, "codex": v or EVAL_UNAVAILABLE}
+    if state == "deferred":
+        return [f"the review eval for {pair} was only deferred" + (f" ({r['url']})" if r.get("url") else "")
+                + f", and a deferral doesn't count here: {no_deferral}"], None
+    if state == "fail" and on_fail is not None:
+        return [f"the review eval FAILED for {pair}" + (f" ({r['url']})" if r.get("url") else "")
+                + f": a failed eval can't be deferred; fix the review logic and run `codex-eval` again, or {on_fail}"], None
     if state == "fail":
         return [f"the review eval FAILED for {pair}" + (f" ({r['url']})" if r.get("url") else "")
                 + ": fix the review logic and run `codex-eval` again, or escalate; a failed eval can't be deferred"], None
+    if no_deferral is not None:
+        return [f"no review eval for {pair} ({why}): {no_deferral}"], None
     return [f"no review eval for {pair} ({why}): run `uv run python tools/sdlc.py codex-eval` "
             "(or, only if it can't run, `codex-eval --defer --reason \"...\"`)"], None
 
@@ -6008,6 +6030,26 @@ def merge_eval_errors(args: argparse.Namespace, pr: dict[str, Any], branch: str,
     return eval_gate(head_fp, base_fp, version, results)
 
 
+def main_eval_errors(pr: dict[str, Any], config: dict[str, Any], lane: str, n: int) -> list[str]:
+    """The eval gate for a PR straight into main (`lane` "quick" or "debt"; `n` its issue, or its group's first
+    ticket): T6's gate, read live against main (GATE_BRANCH), with no deferral. These lanes have no milestone demo
+    to owe an eval to, so a PR whose (fingerprint, `codex --version`) pair has no pass waits for one. That covers an
+    unchanged fingerprint after a `codex` upgrade too. Read-only; review logic that can't be read is a refusal."""
+    what = "a quick change" if lane == "quick" else "a debt PR"
+    then = (f"wait for it, or move the change to the full lane (`escalate-to-full {n}`)" if lane == "quick"
+            else "the group waits for it")
+    instead = (f"{what} merges straight into main, with no milestone demo to owe the eval to, so it needs a pass: run "
+               f"`uv run python tools/sdlc.py codex-eval`; if the eval can't run, {then}")
+    try:
+        head_fp, base_fp, version, results = merge_eval_inputs(argparse.Namespace(from_file=None), pr, GATE_BRANCH,
+                                                               config)
+    except (SdlcError, OSError, ValueError) as exc:
+        return [f"couldn't tell whether the review logic at the head has a passing eval ({exc}); {instead}"]
+    on_fail = (f"move the change to the full lane (`escalate-to-full {n}`)" if lane == "quick"
+               else f"hand the group to a person (`escalate-slice {n} --reason ...`); until then the group waits")
+    return eval_gate(head_fp, base_fp, version, results, no_deferral=instead, on_fail=on_fail)[0]
+
+
 def no_epic_error(pr: dict[str, Any], refs: list[int], slice_issue: dict[str, Any] | None) -> str:
     """The one reason `merge` can't take a PR that closes no slice of an epic (and no quick change): which issue
     it closes, and what that issue is not."""
@@ -6218,7 +6260,7 @@ def merge_quick(args: argparse.Namespace, config: dict[str, Any]) -> int:
     a failure after it says what is left to do by hand, since a rerun is refused (the PR is merged)."""
     repo, base = repo_of(config), config.get("default_branch", "main")
     b = quick_gate_bundle(args.pr, config)
-    if errs := quick_gate_errors(b, config):
+    if errs := quick_gate_errors(b, config) + quick_eval_errors(b, config):
         st = quick_issue_state(b, config) if b.get("issue") else None
         brief, rules = (codex_review.approved_brief(st) or "") if st else "", gate_rules(b, config)
         if args.dry_run or not st or not is_quick(st) or not sdlc_quick.diff_rule_broken(b.get("files"), brief, rules):
@@ -6386,8 +6428,10 @@ def debt_gate_read(pr_number: int, config: dict[str, Any], trusted: set[str]) ->
 def debt_pr_gate(pr_number: int, config: dict[str, Any], trusted: set[str]) -> list[str]:
     """The debt gate's refusals of a PR, read from GitHub (read-only), for `state` and `slice-status`."""
     pr, comments = fetch_pr(pr_number, config)
-    tickets = [dict(zip(("issue", "comments"), fetch_slice(r, config))) for r in closes_refs(pr.get("body", ""))]
-    return debt_merge_gate_errors(debt_gate_bundle(pr, comments, tickets, config, trusted), GATE_BRANCH)
+    refs = closes_refs(pr.get("body", ""))
+    tickets = [dict(zip(("issue", "comments"), fetch_slice(r, config))) for r in refs]
+    return (debt_merge_gate_errors(debt_gate_bundle(pr, comments, tickets, config, trusted), GATE_BRANCH)
+            + (main_eval_errors(pr, config, "debt", refs[0]) if refs else []))
 
 
 def remove_worktree(wt: Path, branch: str, root: Path, force: bool = False) -> None:
@@ -6412,7 +6456,8 @@ def merge_debt(args: argparse.Namespace, config: dict[str, Any], pr: dict[str, A
     rerun is refused (the PR is merged); a cleanup left over is named with its exact `cleanup` command."""
     repo, base = repo_of(config), GATE_BRANCH
     b = debt_gate_bundle(pr, comments, tickets, config, trusted)
-    if errs := debt_merge_gate_errors(b, base):
+    refs = closes_refs(pr.get("body", ""))
+    if errs := debt_merge_gate_errors(b, base) + (main_eval_errors(pr, config, "debt", refs[0]) if refs else []):
         raise SdlcError("; ".join(errs))
     ctx = debt_pr_context(pr, tickets, b["epic_comments"], trusted, b["others"])
     g, claim, epic = ctx["group"], ctx["claim"], b["debt_epic"]

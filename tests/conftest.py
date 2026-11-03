@@ -49,3 +49,25 @@ def _isolated_state_files(tmp_path, monkeypatch):
                         lambda url, timeout=1.0: url.replace("/stream.mp3", "/cover.jpg"))
     yield
     ratelimit.reset(flush=False)    # before the monkeypatches are undone and the atexit flush could reach the real file
+
+
+# The eval gate for a PR straight into main (tools/sdlc.py `main_eval_errors`, #100 F3) fetches the PR's head and
+# main from the primary checkout's origin and runs `codex --version`: no test's fake GitHub serves those, and none may
+# reach the real origin. So it answers "no refusal" everywhere, as the slice lane's tests stub `merge_eval_errors`;
+# a test of the gate itself takes the `real_eval_gate` fixture and gives it a scratch origin and a fake `codex`.
+_REAL_MAIN_EVAL_ERRORS = None
+
+
+@pytest.fixture(autouse=True)
+def _no_main_eval_gate(monkeypatch):
+    global _REAL_MAIN_EVAL_ERRORS
+    from tools import sdlc
+    _REAL_MAIN_EVAL_ERRORS = _REAL_MAIN_EVAL_ERRORS or sdlc.main_eval_errors
+    monkeypatch.setattr(sdlc, "main_eval_errors", lambda *a, **k: [])
+
+
+@pytest.fixture
+def real_eval_gate(monkeypatch, _no_main_eval_gate):
+    """The real `main_eval_errors`, for a test that sets up what it reads."""
+    from tools import sdlc
+    monkeypatch.setattr(sdlc, "main_eval_errors", _REAL_MAIN_EVAL_ERRORS)
