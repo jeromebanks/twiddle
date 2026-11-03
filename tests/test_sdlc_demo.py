@@ -190,6 +190,16 @@ def test_the_posters_changes_with_no_demo_are_recorded_then_planned():
     assert (built["action"], built["feedback"]) == ("work_slices", False)   # it doesn't fire again
 
 
+def test_the_posters_changes_clear_a_pending_demo_request():
+    ask = comment(POSTER, "/changes louder", 21)
+    request = [agent("demo-request", None, 20, milestone="M1"), ask]
+    assert derive(["sdlc:in-progress"], request)["action"] == "record_changes"
+    planned = derive(["sdlc:in-progress"], request + [_recorded(ask), agent("plan", 2, 31),
+                                                      agent("plan-review", 2, 32, verdict="approve", round="1"),
+                                                      agent("plan-created", 2, 33)])
+    assert (planned["action"], planned["demo_request"]) == ("work_slices", None)
+
+
 def test_the_posters_changes_count_only_from_the_poster_and_only_while_building():
     assert derive(["sdlc:in-progress"], [comment(STRANGER, "/changes make it purple", 20)])["action"] == "work_slices"
     # a /changes from PRD review, before the plan was created, is long answered

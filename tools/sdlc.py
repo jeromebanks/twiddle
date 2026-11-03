@@ -319,13 +319,13 @@ def _on_demo_approval(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) 
 
 
 def _on_demo_changes(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    if L.request and L.request["milestone"] == _ms(mk):
+        L.request = None   # its milestone gets new slices first: the demo (and any steps it asks for) comes later
     if mk.get("found") == "poster":
         # the poster's `/changes` with no demo in review: new slices, and no demo or acceptance is touched
         L.changes_done.add(mk.get("comment", ""))
         _replan(L)
         return
-    if L.request and L.request["milestone"] == _ms(mk):
-        L.request = None
     if mk.get("found") == "agent":
         # the agent's own demo found the milestone broken: fix slices, then a new demo (an acceptance is void)
         _replan(L)
