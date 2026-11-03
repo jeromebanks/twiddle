@@ -338,8 +338,8 @@ Without Review"), and refuses an agent editing its own permissions. So no skill 
 merges a PR with a bare `gh pr merge` (a test greps for it). Every merge, in every lane, is
 `uv run python tools/sdlc.py merge PR`, run from the primary checkout on `main`: the gate's own
 review of the exact head stands behind it, and `merge` first refuses to run unless its
-`tools/sdlc.py` and `tools/sdlc_quick.py` match `origin/main`'s (after one bounded `git fetch`), so a
-PR is never judged by a gate it changed. The same goes for `cleanup N`, which removes the worktree.
+`tools/sdlc.py`, `tools/sdlc_quick.py`, `tools/codex_review.py` and `tools/codex_eval.py` match `origin/main`'s
+(after one bounded `git fetch`), so a PR is never judged by a gate it changed. The same goes for `cleanup N`, which removes the worktree.
 
 For the session that built a PR to run them itself, sub-agent or not, the poster adds this rule once
 to `.claude/settings.json` by hand. `.claude/` is a denied path and an agent cannot edit its own
@@ -521,7 +521,9 @@ The fingerprint's inputs, by name (`codex-eval --status --inputs` lists them):
 - `.sdlc/config.json`'s `codex` section, as canonical JSON (not the rest of the file);
 - `tools/codex_review.py`, which fills and runs every round and also **chooses what a round is
   handed**: which requirements a plan round is held to, which slices and briefs a milestone round
-  lists, which of them are owed a review, and which response a round reads. `sdlc.py` only
+  lists, which of them are owed a review, which response a round reads, and the brief a debt or
+  quick PR round is held to (`debt_brief`; `approved_brief`, `approved_brief_id` and `quick_brief`,
+  whose brief id a quick round's approval is bound to). `sdlc.py` only
   fetches the bundle and passes it in, and a test fails if it defines a function that fills a
   prompt or picks its inputs;
 - `tools/codex_eval.py`, and everything under `tests/codex_eval/` (the eval's fixtures and scorer);

@@ -328,11 +328,69 @@ def section(body: str, name: str) -> str:
 MARKER_LINE_RE = re.compile(r"\A\s*<!--\s*sdlc:v1\s+[^>]*?\s*-->")   # `sdlc.MARKER_RE`: a line that starts with a marker
 
 
+def comment_anchor(doc: dict[str, Any]) -> str:
+    """A revision's comment id, as its `#issuecomment-` anchor (and `merge-prd`'s doc) gives it."""
+    m = re.search(r"#issuecomment-(\d+)$", doc.get("url") or "")
+    return m.group(1) if m else str(doc["id"])
+
+
 def approved_comment(doc: dict[str, Any]) -> str:
     """The approved PRD or diagnosis comment's id (`doc` is the state's `latest_doc`), as its `#issuecomment-`
     anchor (and `merge-prd`'s doc) gives it."""
-    m = re.search(r"#issuecomment-(\d+)$", doc.get("url") or "")
-    return m.group(1) if m else str(doc["id"])
+    return comment_anchor(doc)
+
+
+# --- a quick change's round: held to its approved brief, never the poster's request -------------
+
+SUPERSEDED_RE = re.compile(r"<details><summary>[^<]*\(superseded\)</summary>\n\n(.*)\n\n</details>\s*\Z", re.DOTALL)
+
+
+def approved_brief(st: dict[str, Any]) -> str | None:
+    """The approved revision's text (the latest one approved, even if a newer one is under review), without its
+    marker; a comment `render_superseded` collapsed is unwrapped. None: nothing approved. The quick lane's brief.
+    `st` is the issue's `derive_state`."""
+    doc = st.get("approved_doc")
+    if not doc:
+        return None
+    body = doc.get("body") or ""
+    if m := SUPERSEDED_RE.search(body):
+        body = m.group(1)
+    return "\n".join(l for l in body.splitlines() if not MARKER_LINE_RE.match(l.strip())).strip()
+
+
+def approved_brief_id(st: dict[str, Any]) -> str | None:
+    """The approved revision's comment id (see approved_brief), or None."""
+    doc = st.get("approved_doc")
+    return comment_anchor(doc) if doc else None
+
+
+def quick_brief(issue: dict[str, Any], brief_text: str) -> str:
+    """What a quick PR's round is handed as its brief: the issue's title, then the approved brief's text."""
+    return f"{issue.get('title', '')}\n\n{brief_text}\n"
+
+
+# --- a debt PR's round: held to its tickets and its pass group's scope and files -----------------
+
+def debt_brief(ctx: dict[str, Any]) -> str:
+    """What Codex holds a debt PR to: the pass group's scope and files, the rule for findings outside them, and
+    each ticket it closes (the spec)."""
+    g = ctx["group"]
+    out = [f"Debt PR: group `{g['key']}` of pass {g['pass']} on debt epic #{ctx['debt_epic']}, closing "
+           + ", ".join(f"#{t['number']}" for t in ctx["tickets"]) + ", into main.", "",
+           "## The group's scope (from the pass plan)", "", g["scope"] or "(none given)", "",
+           "## The group's files (from the pass plan)", "", *[f"- `{f}`" for f in g["files"]], "",
+           f"Rated `{g['complexity'] or '?'}` in the pass plan.", "",
+           "## Findings inside and outside the scope", "",
+           "Each ticket below is the spec, and the group's scope and files above bound the change. A problem inside "
+           "that scope is fixed in this PR, and so is anything the diff itself changes or breaks, wherever it is. A "
+           "problem that was already there outside that scope, which the change neither causes nor touches, is not "
+           "this ticket's debt: it doesn't hold this PR, and it isn't filed as debt either. It is dropped, or filed "
+           "as an ordinary issue for triage when it matters.", ""]
+    for t in ctx["tickets"]:
+        out += [f"## Ticket #{t['number']}: {t.get('title', '')}", "", (t.get("body") or "").strip(), ""]
+    return "\n".join(out)
+
+
 
 
 def _git_out(args: list[str], cwd: Path) -> str:

@@ -1302,7 +1302,7 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
             claim = claim_status(bundle["comments"], set(bundle["trusted"]))
             errs = quick_view_errors(bundle["issue"], st, claim, bool(claim), config)
         else:
-            errs = quick_claim_errors(st["number"], approved_brief(st) or "", False, config, offline=True)
+            errs = quick_claim_errors(st["number"], codex_review.approved_brief(st) or "", False, config, offline=True)
         if errs:
             nxt = f"/triage-issue {st['number']}: " + "; ".join(errs)
         elif bundle is not None and not offline and st["state"] == "in-progress":
@@ -1505,7 +1505,7 @@ def escalated_prd_errors(n: int, st: dict[str, Any], pr: dict[str, Any], text: s
                 f"(it changes: {', '.join(paths[:5]) or 'nothing'})"]
     if not st.get("doc_approved"):
         return [f"#{n}'s latest revision is not approved: there is no approved brief to commit"]
-    want = approved_brief_id(st)
+    want = codex_review.approved_brief_id(st)
     if text is None:
         return [f"could not read {paths[0]} at the PR's head"]
     if not header_links(text, want):
@@ -1525,7 +1525,7 @@ def pr_file_text(pr: dict[str, Any], path: str, root: Path) -> str | None:
 
 
 def record_prd_merged(n: int, st: dict[str, Any], path: str, pr: int | None, config: dict[str, Any]) -> None:
-    anchor = approved_brief_id(st)
+    anchor = codex_review.approved_brief_id(st)
     body = (f"The approved brief (rev {st['approved_doc']['rev']}) is `{path}` on "
             f"`{config.get('default_branch', 'main')}`" + (f", merged in PR #{pr}" if pr else "")
             + f". Next: planning (`/plan-issue {n}`).")
@@ -1598,7 +1598,7 @@ def render_prd_file(n: int, title: str, bundle: dict[str, Any], st: dict[str, An
     """docs/prd/N-*.md for an escalated brief: a header linking the approved comment, the sign-off and the
     approval record (what `approved_requirements` and `merge-prd` look for), then the brief as approved."""
     doc = st["approved_doc"]
-    anchor = approved_brief_id(st)
+    anchor = codex_review.approved_brief_id(st)
     url = lambda c: c.get("url") or f"https://github.com/{repo}/issues/{n}#issuecomment-{c.get('id')}"  # noqa: E731
     doc_url = doc.get("url") if (doc.get("url") or "").endswith(f"#issuecomment-{anchor}") else \
         f"https://github.com/{repo}/issues/{n}#issuecomment-{anchor}"
@@ -1608,7 +1608,7 @@ def render_prd_file(n: int, title: str, bundle: dict[str, Any], st: dict[str, An
         + ([f"[approval record]({url(record)})"] if record else [])
     when = f" on {record['created_at'][:10]}" if record and record.get("created_at") else ""
     how = "" if signoff or not record else " (label)"
-    text = BOT_TITLE_RE.sub("", approved_brief(st) or "", count=1).strip()
+    text = BOT_TITLE_RE.sub("", codex_review.approved_brief(st) or "", count=1).strip()
     if (foot := FOOTERS.get(doc["kind"])) and text.endswith(f"---\n{foot}"):
         text = text[: -len(f"---\n{foot}")].rstrip()
     moved = f" It was approved as a quick brief and moved to the full lane ([record]({url(st['to_full'])}))."
@@ -1650,7 +1650,7 @@ def commit_prd(n: int, config: dict[str, Any], dry_run: bool = False, root: Path
         raise SdlcError(f"#{n} is {st['state']}" + ("" if st.get("doc_approved") else " with an unapproved revision")
                         + f", not approved: {next_command(st)}")
     repo, root = repo_of(config), root or primary_root()
-    main, branch, anchor = config.get("default_branch", "main"), prd_branch(n), approved_brief_id(st)
+    main, branch, anchor = config.get("default_branch", "main"), prd_branch(n), codex_review.approved_brief_id(st)
     if not dry_run:
         git(["fetch", "-q", "origin", main], cwd=root)
     if found := merged_prd_path(n, anchor, f"origin/{main}", root):   # merged before; only its record is missing
@@ -2895,7 +2895,7 @@ def quick_merge_gate_errors(pr: dict[str, Any], issue_state: dict[str, Any] | No
         errs += sdlc_quick.eligibility_errors(issue, issue_state)
     t, r = head_records(pr, tests, reviews)
     head = (pr.get("headRefOid") or "")[:12]
-    want = approved_brief_id(issue_state) if issue_state else None
+    want = codex_review.approved_brief_id(issue_state) if issue_state else None
     if not r:
         errs.append(f"no Codex review of the current head {head} (a quick change's review is never deferred)")
     elif r["verdict"] != "approve":
@@ -4773,26 +4773,6 @@ def pr_debt(args: argparse.Namespace, pr: dict[str, Any], issue: dict[str, Any] 
     return debt_pr_context(pr, tickets, ec, trusted, others)
 
 
-def debt_brief(ctx: dict[str, Any]) -> str:
-    """What Codex holds a debt PR to: the pass group's scope and files, the rule for findings outside them, and
-    each ticket it closes (the spec)."""
-    g = ctx["group"]
-    out = [f"Debt PR: group `{g['key']}` of pass {g['pass']} on debt epic #{ctx['debt_epic']}, closing "
-           + ", ".join(f"#{t['number']}" for t in ctx["tickets"]) + ", into main.", "",
-           "## The group's scope (from the pass plan)", "", g["scope"] or "(none given)", "",
-           "## The group's files (from the pass plan)", "", *[f"- `{f}`" for f in g["files"]], "",
-           f"Rated `{g['complexity'] or '?'}` in the pass plan.", "",
-           "## Findings inside and outside the scope", "",
-           "Each ticket below is the spec, and the group's scope and files above bound the change. A problem inside "
-           "that scope is fixed in this PR, and so is anything the diff itself changes or breaks, wherever it is. A "
-           "problem that was already there outside that scope, which the change neither causes nor touches, is not "
-           "this ticket's debt: it doesn't hold this PR, and it isn't filed as debt either. It is dropped, or filed "
-           "as an ordinary issue for triage when it matters.", ""]
-    for t in ctx["tickets"]:
-        out += [f"## Ticket #{t['number']}: {t.get('title', '')}", "", (t.get("body") or "").strip(), ""]
-    return "\n".join(out)
-
-
 def slice_bundle(n: int, config: dict[str, Any]) -> dict[str, Any]:
     trusted = fetch_trusted(config)
     issue, comments = fetch_slice(n, config)
@@ -4826,7 +4806,7 @@ def quick_view_errors(issue: dict[str, Any], st: dict[str, Any], claim: dict[str
                       config: dict[str, Any]) -> list[str]:
     """What `claim N --quick` (or `--resume`) would refuse, read from the bundle alone: its checks of the issue
     and the brief's sections, then its `## Files` check offline (`quick_claim_errors`), which needs no git."""
-    brief = approved_brief(st)
+    brief = codex_review.approved_brief(st)
     errs = sdlc_quick.quick_check_errors(issue, st, brief, claim, resume)
     return errs or quick_claim_errors(issue["number"], brief or "", resume, config, offline=True)
 
@@ -4894,7 +4874,7 @@ def quick_gate_errors(b: dict[str, Any], config: dict[str, Any]) -> list[str]:
     tests, reviews = pr_records(b["pr_comments"], set(b["trusted"]))   # deferrals are never read
     st = quick_issue_state(b, config) if b.get("issue") else None
     return quick_merge_gate_errors(b["pr"], st, tests, reviews, b.get("behind_by"), b.get("files"),
-                                   approved_brief(st) if st else None, quick, config.get("default_branch", "main"))
+                                   codex_review.approved_brief(st) if st else None, quick, config.get("default_branch", "main"))
 
 
 def merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: dict[str, Any]) -> list[str]:
@@ -5145,10 +5125,10 @@ def claim_quick(args: argparse.Namespace, config: dict[str, Any], b: dict[str, A
         raise SdlcError("--retry takes over an escalated slice; a quick change is never retried on another model")
     is_slice = LEAF_LABEL in b["issue"].get("labels", [])
     st = bundle_issue_state(b, config) or {}
-    errs = sdlc_quick.quick_check_errors(b["issue"], st, approved_brief(st), claim, args.resume, is_slice)
+    errs = sdlc_quick.quick_check_errors(b["issue"], st, codex_review.approved_brief(st), claim, args.resume, is_slice)
     if errs:
         raise SdlcError("; ".join(errs))
-    if errs := quick_claim_errors(n, approved_brief(st) or "", args.resume, config, offline=bool(args.from_file)):
+    if errs := quick_claim_errors(n, codex_review.approved_brief(st) or "", args.resume, config, offline=bool(args.from_file)):
         raise SdlcError("; ".join(errs))
     if args.from_file:   # offline: the bundle's brief is all that was read (no worktree, branch or origin)
         print(f"would claim #{n}: a quick change, its brief inside the quick rules; from {args.from_file}, "
@@ -5337,7 +5317,7 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if quick and not stamped:
         raise SdlcError("the Codex report has no `Brief:` line: a quick change's review is bound to the approved brief "
                         "it read, so save it with `codex-review --pr`, which stamps it")
-    if quick and stamped != (want := approved_brief_id(quick)):
+    if quick and stamped != (want := codex_review.approved_brief_id(quick)):
         raise SdlcError(f"Codex reviewed against brief {stamped}, but #{quick['number']}'s approved brief is now {want}: "
                         "run `codex-review --pr` again on the approved brief")
     if not quick and stamped:
@@ -5812,12 +5792,12 @@ def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: 
     refs = closes_refs(pr.get("body", ""))
     debt = None if quick else pr_debt(args, pr, slice_issue, config, trusted)
     if debt:   # held to its tickets and its pass group's scope and files, in the worktree its claim recorded
-        brief, brief_id, base = debt_brief(debt), None, config.get("default_branch", "main")
+        brief, brief_id, base = codex_review.debt_brief(debt), None, config.get("default_branch", "main")
         wt = debt_place(debt["claim"], config)[0]
     elif quick:   # held to its approved brief, never the poster's request, and merged into main
-        if len(refs) != 1 or not (brief_text := approved_brief(quick)):
+        if len(refs) != 1 or not (brief_text := codex_review.approved_brief(quick)):
             raise SdlcError(f"PR #{pr['number']} must close exactly one quick change with an approved brief")
-        brief, brief_id, base = (f"{slice_issue.get('title', '')}\n\n{brief_text}\n", approved_brief_id(quick),
+        brief, brief_id, base = (codex_review.quick_brief(slice_issue, brief_text), codex_review.approved_brief_id(quick),
                                  config.get("default_branch", "main"))
     elif len(refs) != 1 or not slice_issue or (epic := slice_epic(slice_issue)) is None:
         raise SdlcError(f"PR #{pr['number']} must close exactly one slice of an epic (it closes {refs or 'none'})")
@@ -5849,31 +5829,12 @@ def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: 
                            lambda: eval_ledger(args, config), brief=brief_id, show_brief=bool(debt))
 
 
-def comment_anchor(doc: dict[str, Any]) -> str:
-    """A revision's comment id, as its `#issuecomment-` anchor (and `merge-prd`'s doc) gives it."""
-    m = re.search(r"#issuecomment-(\d+)$", doc.get("url") or "")
-    return m.group(1) if m else str(doc["id"])
-
-
-SUPERSEDED_RE = re.compile(r"<details><summary>[^<]*\(superseded\)</summary>\n\n(.*)\n\n</details>\s*\Z", re.DOTALL)
-
-
-def approved_brief(st: dict[str, Any]) -> str | None:
-    """The approved revision's text (the latest one approved, even if a newer one is under review), without its
-    marker; a comment `render_superseded` collapsed is unwrapped. None: nothing approved. The quick lane's brief."""
-    doc = st.get("approved_doc")
-    if not doc:
-        return None
-    body = doc.get("body") or ""
-    if m := SUPERSEDED_RE.search(body):
-        body = m.group(1)
-    return "\n".join(l for l in body.splitlines() if not MARKER_RE.match(l.strip())).strip()
-
-
-def approved_brief_id(st: dict[str, Any]) -> str | None:
-    """The approved revision's comment id (see approved_brief), or None."""
-    doc = st.get("approved_doc")
-    return comment_anchor(doc) if doc else None
+# what a quick round is handed (its brief and the brief's id) is review logic: tools/codex_review.py, fingerprinted.
+# These names stay bound here for callers that reach them through this module; sdlc.py's own calls go through
+# `codex_review.` (an alias is not a definition: test_sdlc_guide's guard allows it)
+comment_anchor = codex_review.comment_anchor
+approved_brief = codex_review.approved_brief
+approved_brief_id = codex_review.approved_brief_id
 
 
 def plan_round_errors(st: dict[str, Any]) -> list[str]:
@@ -6066,7 +6027,11 @@ def no_epic_error(pr: dict[str, Any], refs: list[int], slice_issue: dict[str, An
 # of the gate's code with origin/main's, byte for byte, and refuses on any difference or any doubt.
 
 GATE_CODE = {"tools/sdlc.py": Path(__file__).resolve(),           # repo path -> the file this process runs
-             "tools/sdlc_quick.py": Path(sdlc_quick.__file__).resolve()}
+             "tools/sdlc_quick.py": Path(sdlc_quick.__file__).resolve(),
+             # what a quick or debt round is handed and its brief binding (codex_review), and the eval gate's
+             # fingerprint and results (codex_eval): both decide what `merge` accepts
+             "tools/codex_review.py": Path(codex_review.__file__).resolve(),
+             "tools/codex_eval.py": Path(codex_eval.__file__).resolve()}
 GATE_FETCH_SECONDS = 60   # how long `merge` waits for `git fetch origin main` (and each `git show`) before refusing
 # literally main, never the config's default_branch: the config is the running checkout's own, so a branch could
 # otherwise name the branch its gate code is compared with
@@ -6255,7 +6220,7 @@ def merge_quick(args: argparse.Namespace, config: dict[str, Any]) -> int:
     b = quick_gate_bundle(args.pr, config)
     if errs := quick_gate_errors(b, config):
         st = quick_issue_state(b, config) if b.get("issue") else None
-        brief, rules = (approved_brief(st) or "") if st else "", gate_rules(b, config)
+        brief, rules = (codex_review.approved_brief(st) or "") if st else "", gate_rules(b, config)
         if args.dry_run or not st or not is_quick(st) or not sdlc_quick.diff_rule_broken(b.get("files"), brief, rules):
             raise SdlcError("; ".join(errs))
         # the diff has outgrown the lane (a denied path, the size cap, a file outside the brief): no fix within
@@ -6272,7 +6237,7 @@ def merge_quick(args: argparse.Namespace, config: dict[str, Any]) -> int:
     record = render_comment(
         "quick-merged", None, f"Merged PR #{args.pr} into `{base}` at `{head[:12]}`: tests {t['url']}, "
         f"Codex review {r['url']}.", config, pr=str(args.pr), sha=head,
-        tests=comment_anchor({"id": "?", **t}), review=comment_anchor({"id": "?", **r}))
+        tests=codex_review.comment_anchor({"id": "?", **t}), review=codex_review.comment_anchor({"id": "?", **r}))
     if args.dry_run:
         print(f"would squash-merge quick PR #{args.pr} (closes #{n}) into {base} at {head[:12]}, then close #{n} "
               f"as completed, move it to {PREFIX}done and post:\n{record}")
@@ -6471,8 +6436,8 @@ def merge_debt(args: argparse.Namespace, config: dict[str, Any], pr: dict[str, A
             "debt-merged", None, f"Merged PR #{args.pr} (debt group `{g['key']}` of pass {g['pass']}: {who}) into "
             f"`{base}` at `{head[:12]}`: tests {t['url']}, Codex review {r['url']}." + (f" {how}." if how else ""),
             config, pr=str(args.pr), sha=head, group=g["key"], **{"pass": str(g["pass"])},
-            tickets=",".join(map(str, refs)), debt_epic=str(epic), tests=comment_anchor({"id": "?", **t}),
-            review=comment_anchor({"id": "?", **r}))
+            tickets=",".join(map(str, refs)), debt_epic=str(epic), tests=codex_review.comment_anchor({"id": "?", **t}),
+            review=codex_review.comment_anchor({"id": "?", **r}))
 
     if args.dry_run:
         print(f"would squash-merge debt PR #{args.pr} (group `{g['key']}`: {who}) into {base} at {head[:12]}; delete "
@@ -6580,7 +6545,7 @@ def escalate_to_full(n: int, reason: str | None, trigger: str, config: dict[str,
         raise SdlcError("; ".join(errs))
     if not st.get("to_full") and not (reason or "").strip():   # finishing a half-done one needs no new reason
         raise SdlcError("--reason is required: why the change leaves the quick lane")
-    brief_id = approved_brief_id(st)
+    brief_id = codex_review.approved_brief_id(st)
     record = None if st.get("to_full") else render_comment(
         "lane", None, f"Moved to the full lane ({TRIGGER_WHY[trigger]}): {(reason or '').strip()}\n\n"
         f"The approved brief goes to `docs/prd/` (`commit-prd {n}`), then it is planned (`/plan-issue {n}`). "
@@ -6603,8 +6568,8 @@ def escalate_to_full(n: int, reason: str | None, trigger: str, config: dict[str,
         # read again before any label write: a human's escalation, or a brief approved meanwhile, stops it here
         issue = bundle["issue"]
         errs = sdlc_quick.escalation_errors(issue, st, False)
-        if approved_brief_id(st) != brief_id:
-            errs.append(f"the approved brief changed while the record was posted ({brief_id} -> {approved_brief_id(st)})")
+        if codex_review.approved_brief_id(st) != brief_id:
+            errs.append(f"the approved brief changed while the record was posted ({brief_id} -> {codex_review.approved_brief_id(st)})")
         if errs:
             raise SdlcError(f"posted the lane record on #{n}, then: " + "; ".join(errs)
                             + ". No label moved; a human decides")

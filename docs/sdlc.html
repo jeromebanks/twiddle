@@ -573,7 +573,7 @@ pass and waits; a reply from its author or a collaborator puts it back for a lat
 <p>Claude Code's permission check refuses a sub-agent's <code>gh pr merge</code> ("Merge Without Review"), and rightly refuses an agent editing its
 own permissions. So no skill and no tool ever merges with a bare <code>gh pr merge</code> (a test greps for it). Every merge, in every lane, is
 <code>uv run python tools/sdlc.py merge PR</code> from the primary checkout on <code>main</code>. The gate's own review of the exact head stands behind
-it, and <code>merge</code> first refuses unless its <code>tools/sdlc.py</code> and <code>tools/sdlc_quick.py</code> match <code>origin/main</code>'s, so a
+it, and <code>merge</code> first refuses unless its <code>tools/sdlc.py</code>, <code>tools/sdlc_quick.py</code>, <code>tools/codex_review.py</code> and <code>tools/codex_eval.py</code> match <code>origin/main</code>'s, so a
 PR is never judged by a gate it changed. The poster adds one rule to <code>.claude/settings.json</code>, once, by hand, so that the session that
 built a PR can run it, sub-agent or not (add the two entries to <code>permissions.allow</code> if the file already has one):</p>
 <pre><code>{
