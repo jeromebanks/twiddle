@@ -992,3 +992,203 @@ def test_plan_create_from_a_settled_question_moves_it_to_planned(tmp_path, capsy
     f = _bundle(tmp_path, comments[:-1], labels=("sdlc:needs-info",))
     assert sdlc.main(["plan-create", "12", "--from-file", f, "--dry-run"]) == 1
     assert "a `/approve` after it" in capsys.readouterr().err
+
+
+# --- plan-create never stops silently (#243 T14) -------------------------------------------
+
+def on_github(plan, keys=None):
+    """What a plan-create left on GitHub, as a fixture bundle carries it: the issues of `keys` (all: None) found by
+    marker, their sub-issue and blocked_by links, and the plan's milestones."""
+    items = [t for t in plan["subtasks"] if t.get("slices")] + sdlc.plan_leaves(plan)
+    keys = [i["key"] for i in items] if keys is None else keys
+    nums = {k: 100 + n for n, k in enumerate(keys)}
+    attached, blocked = {}, {}
+    for i in items:
+        if i["key"] not in nums:
+            continue
+        parent = 12 if not i.get("_parent") else nums.get(i["_parent"])
+        if parent:
+            attached.setdefault(str(parent), []).append(nums[i["key"]])
+        bs = [nums[b] for b in i.get("blocked_by") or [] if b in nums]
+        if bs:
+            blocked[str(nums[i["key"]])] = bs
+    records = [{"key": k, "number": n, "id": n, "kind": "slice"} for k, n in nums.items()]
+    return {"plan_issues": records, "plan_links": {"attached": attached, "blocked": blocked},
+            "plan_milestones": {f"#12 {m['key']}: {m['title']}": 900 + n for n, m in enumerate(plan["milestones"])}}
+
+
+class _Failing(_Posts):
+    """_Posts whose `fail_at`-th GitHub write (post_json) or whose label move raises, as GitHub does when cut off."""
+
+    def __init__(self, monkeypatch, fail_at=None, label_fails=False):
+        super().__init__(monkeypatch)
+        self.calls, self.fail_at = 0, fail_at
+        if label_fails:
+            def boom(n, cur, to, config, **k):
+                raise sdlc.SdlcError("gh: HTTP 502")
+            monkeypatch.setattr(sdlc, "set_state_label", boom)
+
+    def post_json(self, path, payload):
+        self.calls += 1
+        if self.calls == self.fail_at:
+            raise sdlc.SdlcError("gh: HTTP 502")
+        return super().post_json(path, payload)
+
+
+def test_a_plan_create_cut_short_says_what_it_made_and_the_rerun_finishes_it(tmp_path, capsys, monkeypatch):
+    plan = make_plan()
+    comments = APPROVED + [plan_comment(plan, 1, 3), review(1, 4, "approve")]
+    posts = _Failing(monkeypatch, fail_at=4)   # the milestone, T1, T1 under the epic; then creating T1.1 fails
+    assert sdlc.main(["plan-create", "12", "--from-file", _bundle(tmp_path, comments)]) == 1
+    err = capsys.readouterr().err
+    assert "plan-create stopped creating (gh: HTTP 502)" in err
+    assert "made by this run: milestone M1, #502 (T1), #502 under #12" in err
+    assert "still missing (8): create T1.1;" in err and "T2 blocked by T1.2" in err
+    assert "rerun `uv run python tools/sdlc.py plan-create 12`" in err
+    assert posts.comments == [] and posts.labels == []
+    # state: issues exist and no record -> finish the creation, never a fresh /plan-issue
+    made = {**on_github(plan, ["T1"]), "plan_milestones": {"#12 M1: read": 501}}
+    bundle = {"issue": issue(["sdlc:approved"]), "comments": comments, "trusted": [OWNER], **made}
+    st = sdlc.with_next(sdlc.bundle_state(bundle, CONFIG), CONFIG, offline=True, trusted={OWNER}, bundle=bundle)
+    assert st["action"] == "create_plan_issues"
+    assert st["next"].startswith("`uv run python tools/sdlc.py plan-create 12`: 1 issue(s) of the plan exist")
+    # the rerun does only the rest, then posts the record and moves the label
+    posts = _Posts(monkeypatch)
+    calls = []
+    monkeypatch.setattr(sdlc, "post_json", lambda path, payload: calls.append(path) or posts.post_json(path, payload))
+    assert sdlc.main(["plan-create", "12", "--from-file", _bundle(tmp_path, comments, **made)]) == 0
+    assert not any(p.endswith("/milestones") for p in calls) and len(calls) == 11 - 3
+    assert posts.labels == ["planned"] and sdlc.parse_marker(posts.comments[0])["kind"] == "plan-created"
+
+
+def test_state_finishes_a_creation_with_issues_and_no_record_and_only_then():
+    comments = APPROVED + [plan_comment(make_plan(), 1, 3), review(1, 4, "approve")]
+    made = on_github(make_plan())
+
+    def nxt(labels, comments, **extra):
+        bundle = {"issue": issue(labels), "comments": comments, "trusted": [OWNER], **extra}
+        return sdlc.with_next(sdlc.bundle_state(bundle, CONFIG), CONFIG, offline=True, trusted={OWNER}, bundle=bundle)
+
+    for labels in (["sdlc:approved"], ["sdlc:planned"]):   # planned: the label moved, the record never posted
+        st = nxt(labels, comments, **made)
+        assert (st["turn"], st["action"]) == ("agent", "create_plan_issues")
+        assert "plan-create 12" in st["next"] and "no plan-created record" in st["next"]
+    # no issues found: a fresh creation is /plan-issue's
+    for labels in (["sdlc:approved"], ["sdlc:planned"]):
+        assert nxt(labels, comments)["next"] == "/plan-issue 12"
+    # a plan not agreed, or a record already posted, is never offered to finish
+    assert nxt(["sdlc:approved"], comments[:-1], **made)["action"] == "continue_plan"
+    st = nxt(["sdlc:planned"], comments + [agent("plan-created", 1, 5)], **made)
+    assert st["action"] == "work_slices"
+    # the record posted, the label never moved: plan-create only finishes the branch and the label
+    st = nxt(["sdlc:approved"], comments + [agent("plan-created", 1, 5)])
+    assert st["action"] == "create_plan_issues" and "is posted; plan-create only makes epic/12" in st["next"]
+
+
+def test_plan_create_finishes_a_planned_epic_whose_record_was_never_posted(tmp_path, monkeypatch):
+    comments = APPROVED + [plan_comment(make_plan(), 1, 3), review(1, 4, "approve")]
+    posts = _Posts(monkeypatch)
+    f = _bundle(tmp_path, comments, labels=("sdlc:planned",), **on_github(make_plan()))
+    assert sdlc.main(["plan-create", "12", "--from-file", f]) == 0
+    assert posts.n == 500 and posts.labels == [] and len(posts.comments) == 1   # only the record; it stays planned
+
+
+def _settled_from(where):
+    """A person-settled plan in needs-info (the first plan) or escalated (an amendment): (comments, plan, label to)."""
+    if where == "needs-info":
+        plan = make_plan()
+        comments = (APPROVED + [plan_comment(plan, 1, 3)] + [review(1, 4 + i, "changes")
+                                                             for i in range(CONFIG["max_plan_rounds"])]
+                    + [agent("question", None, 10, phase="plan"), comment(POSTER, "/approve", 11)])
+        return comments, plan, "planned"
+    plan, comments = spent_amendment()
+    return comments + [agent("escalation", None, 40, phase="plan"), comment(POSTER, "/approve", 41)], plan, "in-progress"
+
+
+@pytest.mark.parametrize("where", ["needs-info", "escalated"])
+def test_a_settled_creation_cut_short_before_its_label_moves_is_finished_once(where, tmp_path, capsys, monkeypatch):
+    comments, plan, to = _settled_from(where)
+    labels = (f"sdlc:{where}",)
+    made = on_github(plan)
+    # creation fails after plan-created is posted, before the label moves
+    posts = _Failing(monkeypatch, label_fails=True)
+    assert sdlc.main(["plan-create", "12", "--from-file", _bundle(tmp_path, comments, labels=labels, **made)]) == 1
+    err = capsys.readouterr().err
+    assert "plan-created for plan rev" in err and "is posted" in err and "plan-create 12" in err
+    assert len(posts.comments) == 1 and posts.n == 500
+    record = posts.comments[0]
+    assert sdlc.parse_marker(record)["settled_by"] == POSTER
+    after = comments + [comment(OWNER, record, 50)]
+    # state offers to finish it: the record stands in for the /approve
+    bundle = {"issue": issue(labels), "comments": after, "trusted": [OWNER], **made}
+    st = sdlc.with_next(sdlc.bundle_state(bundle, CONFIG), CONFIG, offline=True, trusted={OWNER}, bundle=bundle)
+    assert (st["turn"], st["action"], st["plan_settled"]["by"]) == ("agent", "create_plan_issues", POSTER)
+    assert st["next"].startswith("`uv run python tools/sdlc.py plan-create 12`") and "is posted" in st["next"]
+    # the rerun: no issue, link or milestone, no second record, no new /approve; only the label
+    posts = _Posts(monkeypatch)
+    assert sdlc.main(["plan-create", "12", "--from-file", _bundle(tmp_path, after, labels=labels, **made)]) == 0
+    assert posts.n == 500 and posts.comments == [] and posts.labels == [to]
+
+
+def test_a_later_escalation_after_a_settled_record_stays_a_humans():
+    comments, _, _ = _settled_from("escalated")
+    record = agent("plan-created", 2, 50, settled_by=POSTER, created="M1,M2")
+    for esc in (agent("escalation", None, 51, phase="sync"), agent("escalation", None, 51, phase="plan"),
+                agent("escalation", None, 51)):
+        assert derive(["sdlc:escalated"], comments + [record, esc])["action"] == "human"
+    # a record for an older revision doesn't finish the latest
+    old = comments[:-2] + [agent("escalation", None, 40, phase="plan"), comment(POSTER, "/approve", 41),
+                           agent("plan-created", 1, 50, settled_by=POSTER, created="M1")]
+    assert derive(["sdlc:escalated"], old)["action"] == "human"
+
+
+def test_the_read_back_looks_again_before_it_gives_up(monkeypatch, capsys):
+    slept, seen = [], iter([({}, [("create", "T1")]), ({}, [("create", "T1")]), ({"T1": {}}, [])])
+    monkeypatch.setattr(sdlc.time, "sleep", slept.append)
+    assert sdlc.plan_read_back(12, lambda: next(seen)) == ({"T1": {}}, [])
+    assert slept == list(sdlc.READBACK_WAITS[:2])
+    slept.clear()
+    by_key, left = sdlc.plan_read_back(12, lambda: ({}, [("block", "T2", "T1")]))
+    assert left and slept == list(sdlc.READBACK_WAITS) and sum(slept) < 60   # bounded, then it stops
+
+
+def test_the_rerun_keeps_the_milestone_it_was_asked_for(tmp_path, capsys, monkeypatch):
+    plan = two_milestones()
+    _Failing(monkeypatch, fail_at=2)   # M2's milestone, then T3 fails
+    made = on_github(plan, ["T1", "T1.1", "T1.2", "T2"])
+    made["plan_milestones"] = {"#12 M1: read": 900}
+    f = _bundle(tmp_path, created_m1(plan), **made)
+    assert sdlc.main(["plan-create", "12", "--from-file", f, "--milestone", "M2"]) == 1
+    err = capsys.readouterr().err
+    assert "made by this run: milestone M2\n" in err and "still missing (3): create T3; attach T3 to the epic; T3 blocked by T2" in err
+    assert "rerun `uv run python tools/sdlc.py plan-create 12 --milestone M2`" in err
+
+
+def test_a_read_back_that_fails_says_what_was_made_and_the_rerun(tmp_path, capsys, monkeypatch):
+    """Online (every GitHub read stubbed): the writes go out, then the read-back itself fails."""
+    comments = APPROVED + [plan_comment(make_plan(), 1, 3), review(1, 4, "approve")]
+    bundle = {"issue": issue(["sdlc:approved"]), "comments": comments, "trusted": [OWNER]}
+    posts = _Posts(monkeypatch)
+    reads = iter([[]])
+
+    def fetch(epic, config, trusted):
+        try:
+            return next(reads)
+        except StopIteration:
+            raise sdlc.SdlcError("gh: HTTP 502") from None
+
+    monkeypatch.setattr(sdlc, "load_bundle", lambda args, config: bundle)
+    monkeypatch.setattr(sdlc, "planning_ref", lambda *a, **k: "origin/main")
+    monkeypatch.setattr(sdlc, "find_prd", lambda *a, **k: None)
+    monkeypatch.setattr(sdlc, "gh_json", lambda *a, **k: [{"name": l} for l in
+                                                         [sdlc.LEAF_LABEL, sdlc.CONTAINER_LABEL]
+                                                         + [sdlc.COMPLEXITY_PREFIX + c for c in sdlc.COMPLEXITY]])
+    monkeypatch.setattr(sdlc, "gh_pages", lambda *a, **k: [])
+    monkeypatch.setattr(sdlc, "fetch_plan_issues", fetch)
+    monkeypatch.setattr(sdlc, "fetch_links", lambda *a, **k: ({}, {}))
+    assert sdlc.main(["plan-create", "12"]) == 1
+    err = capsys.readouterr().err
+    assert "plan-create stopped at its read-back (gh: HTTP 502)" in err
+    assert "made by this run: milestone M1, #502 (T1)" in err
+    assert "rerun `uv run python tools/sdlc.py plan-create 12` in a minute" in err
+    assert posts.comments == [] and posts.labels == []
