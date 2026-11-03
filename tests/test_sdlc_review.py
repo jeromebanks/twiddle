@@ -15,7 +15,7 @@ _ids = iter(range(1, 10_000))
 @pytest.fixture(autouse=True)
 def _runs_main_gate_code(monkeypatch):
     """`merge` first checks it runs origin/main's gate code (a git fetch): tests/test_sdlc_merge_gate.py tests that."""
-    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR": [])
+    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR", command="merge": [])
 
 
 def comment(author, body, ts):
@@ -249,7 +249,7 @@ def test_ship_review_runs_before_the_demo_when_a_review_is_owed(tmp_path, capsys
     assert "isn't accepted" in capsys.readouterr().err
     # the same review on the same head serves the ship too
     ready = derive([OWED, APPROVE, agent("demo", 1, 30, milestone="M1", sha=HEAD),
-                    agent("demo-approval", 1, 31, milestone="M1", by=POSTER),
+                    comment(POSTER, "/approve", 31), agent("demo-approval", 1, 31, milestone="M1", by=POSTER),
                     agent("epic-tests", None, 32, sha=HEAD, result="pass", passed="9")])
     assert sdlc.ship_gate_errors(ready, "M1", HEAD, True, []) == []
     owed = {**ready, "review_owed": {"M1": [{"slice": "T1.2"}]}}

@@ -1896,7 +1896,7 @@ HEAD = "b" * 40
 @pytest.fixture
 def main_gate(monkeypatch):
     """`merge` runs main's gate code here: T1's check is its own test (the last of these), never the network."""
-    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR": [])
+    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR", command="merge": [])
 
 
 def due_group(gh, repo, capsys, groups=(((0, 1), "judgment"), ((2,), "routine")), builder=1, records=True):
@@ -2104,7 +2104,7 @@ def test_merge_debt_comes_before_intake_and_is_offline_without_a_gate():
 
 def test_merge_of_a_debt_pr_runs_main_s_gate_code_first(gh, repo, capsys, monkeypatch):
     due_group(gh, repo, capsys)
-    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR": ["tools/sdlc.py differs from origin/main's"])
+    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR", command="merge": ["tools/sdlc.py differs from origin/main's"])
     calls = []
     monkeypatch.setattr(sdlc, "gh", lambda args, **k: calls.append(args) or pytest.fail(f"gh {args} before the check"))
     code, _, err = run(capsys, "merge", 300)

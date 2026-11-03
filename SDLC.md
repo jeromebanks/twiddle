@@ -174,6 +174,13 @@ like any other (`state` on it says so); if the change then escalates to the full
   Codex's approval are recorded on the head, never deferred. `merge`, in any lane, runs only main's gate code:
   its `tools/sdlc.py` and `tools/sdlc_quick.py` must be identical to `origin/main`'s, which in practice means the
   primary checkout.
+- A person's decision counts only as read from GitHub. A milestone is accepted only when a person's real
+  `/approve` of that demo revision is among the issue's comments: unmarked, by a collaborator or the issue's
+  author, after that demo. `demo-accept` cites it in its record (`reply=<comment id>`), and a `demo-approval`
+  record without one accepts nothing, so `ship` refuses. `ship`, like `merge`, runs only `origin/main`'s gate code.
+  `demo-accept` and `transition --kind approval` take `--from-file` only with `--dry-run`. In a run the watcher
+  started (`TWIDDLE_SDLC_WATCH_RUN` set), `reconcile` takes neither `--by` nor `--from-file` without `--dry-run`:
+  it reads who added `sdlc:approved` from the issue's events. A person at a terminal keeps `--by`.
 - Each PRD/diagnosis revision is a new comment; the previous one is collapsed and
   linked to its successor. After `max_rounds` (`.sdlc/config.json`) the agent escalates.
 - Reproducing a bug uses read-only commands and `--dry-run` only (see `CLAUDE.md`).
