@@ -2562,7 +2562,8 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
     ms: dict[str, Any] = {}
     say = (lambda s: print("would " + s)) if args.dry_run else print  # noqa: E731
     made: list[str] = []   # what this run created on GitHub, for the summary of a run that stops partway
-    rerun = f"`uv run python tools/sdlc.py plan-create {epic}`"
+    asked_ms = getattr(args, "milestone", None)   # the rerun creates the same milestone, never a different target
+    rerun = f"`uv run python tools/sdlc.py plan-create {epic}" + (f" --milestone {asked_ms}" if asked_ms else "") + "`"
     step = 0
     try:
         have_ms = {} if not acts else dict(bundle.get("plan_milestones") or {}) if offline else {   # title -> number
@@ -2628,12 +2629,17 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
               + f", make {epic_branch(epic)} and {to}")
         return 0
     if not offline:
-        by_key, left = plan_read_back(epic, look)
+        try:
+            by_key, left = plan_read_back(epic, look)
+        except BaseException as exc:
+            plan_create_stopped(epic, f"at its read-back ({exc or type(exc).__name__}): every write above was sent, "
+                                "unchecked", made, [], rerun, wait=True)
+            raise
         if left:
             plan_create_stopped(epic, "at its read-back", made, [describe_create_step(a, numbers) for a in left],
                                 rerun, wait=True)
             raise SdlcError(f"read-back still finds {len(left)} missing step(s) after {sum(READBACK_WAITS)}s, e.g. "
-                            f"{describe_create_step(left[0], numbers)}: wait a minute, then rerun plan-create {epic}")
+                            f"{describe_create_step(left[0], numbers)}: wait a minute, then rerun {rerun}")
         numbers = {k: r["number"] for k, r in by_key.items()}
     rev = st["latest_plan"]["rev"]
     already = any((parse_marker(c["body"]) or {}).get("kind") == "plan-created" and c["author"] in trusted

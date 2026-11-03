@@ -1150,3 +1150,45 @@ def test_the_read_back_looks_again_before_it_gives_up(monkeypatch, capsys):
     slept.clear()
     by_key, left = sdlc.plan_read_back(12, lambda: ({}, [("block", "T2", "T1")]))
     assert left and slept == list(sdlc.READBACK_WAITS) and sum(slept) < 60   # bounded, then it stops
+
+
+def test_the_rerun_keeps_the_milestone_it_was_asked_for(tmp_path, capsys, monkeypatch):
+    plan = two_milestones()
+    _Failing(monkeypatch, fail_at=2)   # M2's milestone, then T3 fails
+    made = on_github(plan, ["T1", "T1.1", "T1.2", "T2"])
+    made["plan_milestones"] = {"#12 M1: read": 900}
+    f = _bundle(tmp_path, created_m1(plan), **made)
+    assert sdlc.main(["plan-create", "12", "--from-file", f, "--milestone", "M2"]) == 1
+    err = capsys.readouterr().err
+    assert "made by this run: milestone M2\n" in err and "still missing (3): create T3; attach T3 to the epic; T3 blocked by T2" in err
+    assert "rerun `uv run python tools/sdlc.py plan-create 12 --milestone M2`" in err
+
+
+def test_a_read_back_that_fails_says_what_was_made_and_the_rerun(tmp_path, capsys, monkeypatch):
+    """Online (every GitHub read stubbed): the writes go out, then the read-back itself fails."""
+    comments = APPROVED + [plan_comment(make_plan(), 1, 3), review(1, 4, "approve")]
+    bundle = {"issue": issue(["sdlc:approved"]), "comments": comments, "trusted": [OWNER]}
+    posts = _Posts(monkeypatch)
+    reads = iter([[]])
+
+    def fetch(epic, config, trusted):
+        try:
+            return next(reads)
+        except StopIteration:
+            raise sdlc.SdlcError("gh: HTTP 502") from None
+
+    monkeypatch.setattr(sdlc, "load_bundle", lambda args, config: bundle)
+    monkeypatch.setattr(sdlc, "planning_ref", lambda *a, **k: "origin/main")
+    monkeypatch.setattr(sdlc, "find_prd", lambda *a, **k: None)
+    monkeypatch.setattr(sdlc, "gh_json", lambda *a, **k: [{"name": l} for l in
+                                                         [sdlc.LEAF_LABEL, sdlc.CONTAINER_LABEL]
+                                                         + [sdlc.COMPLEXITY_PREFIX + c for c in sdlc.COMPLEXITY]])
+    monkeypatch.setattr(sdlc, "gh_pages", lambda *a, **k: [])
+    monkeypatch.setattr(sdlc, "fetch_plan_issues", fetch)
+    monkeypatch.setattr(sdlc, "fetch_links", lambda *a, **k: ({}, {}))
+    assert sdlc.main(["plan-create", "12"]) == 1
+    err = capsys.readouterr().err
+    assert "plan-create stopped at its read-back (gh: HTTP 502)" in err
+    assert "made by this run: milestone M1, #502 (T1)" in err
+    assert "rerun `uv run python tools/sdlc.py plan-create 12` in a minute" in err
+    assert posts.comments == [] and posts.labels == []
