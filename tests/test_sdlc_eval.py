@@ -1118,3 +1118,438 @@ def test_a_scratch_that_is_or_holds_someone_elses_checkout_is_never_replaced(tmp
     inside = tmp_path / "elsewhere" / "out"                                          # --out inside a checkout
     assert sdlc.main(["--config", str(e.config), "codex-eval", "--out", str(inside)]) == 1
     assert "inside a git checkout" in capsys.readouterr().err and calls(e.log) == []
+
+
+# --- the eval gate: `merge` needs a passing (or deferred) eval for the head's review logic ---------------
+
+V, V2 = "9.9.9-test", "10.0.0-test"       # what the fake `codex --version` says, and an upgrade
+PROMPT = codex_review.PR_PROMPT.relative_to(codex_review.ROOT).as_posix()
+SLICE_ISSUE = {"number": 28, "title": "#12 T1.1: t", "state": "open", "state_reason": None,
+               "labels": ["plan:slice", "complexity:judgment"], "assignees": [], "milestone": "#12 M1: x",
+               "body": sdlc.marker("slice", None, epic="12", key="T1.1") + "\n"}
+EPIC_HISTORY = [comment(OWNER, sdlc.marker(k, r, **x) + "\ntext", ts) for k, r, ts, x in (
+    ("prd", 1, 1, {}), ("approval", 1, 2, {"by": POSTER}), ("plan", 1, 3, {}),
+    ("plan-review", 1, 4, {"verdict": "approve", "round": "1"}), ("plan-created", 1, 5, {}))]
+
+
+def epic_issue(labels=("sdlc:in-progress",)):
+    return {"number": 12, "title": "Alarm manager", "state": "open", "author": POSTER, "labels": list(labels)}
+
+
+def only_git(tmp_path, codex_mode=None):
+    """A PATH with git and no runnable `codex`: none at all, or (`codex_mode`) one that isn't executable."""
+    d = tmp_path / "only-git"
+    d.mkdir(exist_ok=True)
+    if not (d / "git").exists():
+        (d / "git").symlink_to(shutil.which("git"))
+    if codex_mode is not None:
+        (d / "codex").write_text("#!/bin/sh\necho codex-cli 1.0\n")
+        (d / "codex").chmod(codex_mode)
+    return str(d)
+
+
+class Gate:
+    """A tmp repo whose base commit is `origin/epic/12` and whose head edits the PR prompt (the review logic), a
+    fake `codex` saying V, and a saved bundle of an approved, tested PR for `merge --dry-run --from-file`."""
+
+    def __init__(self, repo, tmp_path, monkeypatch, edit=PROMPT):
+        self.repo, self.tmp = repo, tmp_path
+        install(tmp_path, monkeypatch)
+        monkeypatch.chdir(repo)
+        monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("merge --from-file must not call gh"))
+        self.base = git(repo, "rev-parse", "HEAD")
+        git(repo, "update-ref", "refs/remotes/origin/epic/12", self.base)
+        target = repo / edit
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((target.read_text() if target.exists() else "") + "\nOne more thing to check.\n")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-qm", "the slice")
+        self.head = git(repo, "rev-parse", "HEAD")
+        self.head_fp = codex_eval.fingerprint(codex_eval.Commit(self.head, repo))
+        self.base_fp = codex_eval.fingerprint(codex_eval.Commit(self.base, repo))
+
+    def bundle(self, results=(), epic_comments=()):
+        records = [comment(OWNER, sdlc.marker("tests", None, sha=self.head, result="pass", passed="9") + "\nx", 1),
+                   comment(OWNER, sdlc.marker("pr-review", None, sha=self.head, verdict="approve", round="1") + "\nx", 2)]
+        pr = {"number": 50, "state": "OPEN", "isDraft": False, "baseRefName": "epic/12", "headRefName": "slice/28",
+              "headRefOid": self.head, "mergeable": "MERGEABLE", "body": "Closes #28"}
+        f = self.tmp / "merge.json"
+        f.write_text(json.dumps({
+            "pr": pr, "pr_comments": records, "trusted": [OWNER], "slice": SLICE_ISSUE, "behind_by": 0,
+            "epic": {"issue": epic_issue(), "comments": EPIC_HISTORY + list(epic_comments), "trusted": [OWNER]},
+            "progress": {"ready": [], "in_flight": [28], "escalated": [], "waiting": [], "open": 1,
+                         "milestones": [{"title": "#12 M1: x", "key": "M1", "done": 0, "total": 1}]},
+            "base": "origin/epic/12", "eval": list(results)}))
+        return str(f)
+
+    def merge(self, capsys, results=(), *extra):
+        code = sdlc.main(["merge", "50", "--dry-run", "--from-file", self.bundle(results), *extra])
+        cap = capsys.readouterr()
+        return code, cap.out + cap.err
+
+
+def test_a_prompt_change_with_no_eval_is_refused_naming_codex_eval_and_a_pass_lets_it_through(repo, tmp_path,
+                                                                                            monkeypatch, capsys):
+    g = Gate(repo, tmp_path, monkeypatch)
+    assert g.head_fp != g.base_fp                                 # the PR edits the review logic
+    code, out = g.merge(capsys)
+    assert code == 1 and "codex-eval" in out and "this PR changes the review logic" in out
+    assert codex_eval.short(g.head_fp) in out and g.head_fp not in out          # never the full hash on screen
+    old_pass = [result_comment(1, "pass", fingerprint=g.base_fp, version=V)]    # the base's pass doesn't count
+    assert g.merge(capsys, old_pass)[0] == 1
+    code, out = g.merge(capsys, old_pass + [result_comment(2, "pass", fingerprint=g.head_fp, version=V)])
+    assert code == 0 and "would squash-merge PR #50" in out and "owed" not in out
+    assert g.merge(capsys, [result_comment(1, "pass", fingerprint=g.head_fp, version=V2)])[0] == 1   # another codex's
+
+
+def test_a_pr_on_a_pair_that_passed_is_unaffected_until_codex_is_upgraded(repo, tmp_path, monkeypatch, capsys):
+    g = Gate(repo, tmp_path, monkeypatch, edit="src/unrelated.py")
+    assert g.head_fp == g.base_fp                                 # an ordinary slice: the review logic is unchanged
+    passed = [result_comment(1, "pass", fingerprint=g.head_fp, version=V)]
+    assert g.merge(capsys, passed)[0] == 0
+    upgraded = tmp_path / "bin" / "codex"                         # a faked upgrade: `codex --version` says V2
+    upgraded.write_text(upgraded.read_text().replace(f"codex-cli {V}", f"codex-cli {V2}"))
+    code, out = g.merge(capsys, passed)
+    assert code == 1 and f"codex is now {V2}" in out and "codex-eval" in out
+    assert g.merge(capsys, passed + [result_comment(2, "deferred", fingerprint=g.head_fp, version=V2)])[0] == 0
+    assert g.merge(capsys, passed + [result_comment(2, "pass", fingerprint=g.head_fp, version=V2)])[0] == 0
+
+
+def test_a_deferral_lets_the_merge_through_owed_and_a_fail_blocks(repo, tmp_path, monkeypatch, capsys):
+    g = Gate(repo, tmp_path, monkeypatch)
+    code, out = g.merge(capsys, [result_comment(1, "deferred", fingerprint=g.head_fp, version=V)])
+    assert code == 0 and "review eval" in out and "owed before the milestone's demo" in out
+    failed = [result_comment(1, "fail", fingerprint=g.head_fp, version=V)]
+    code, out = g.merge(capsys, failed)
+    assert code == 1 and "FAILED" in out and "can't be deferred" in out
+    # a deferral that lands after the fail (a `--defer` that read the results before it was posted) doesn't
+    # unblock it: a completed eval outranks a deferral. A pass after the fail does
+    code, out = g.merge(capsys, failed + [result_comment(2, "deferred", fingerprint=g.head_fp, version=V)])
+    assert code == 1 and "FAILED" in out
+    assert g.merge(capsys, failed + [result_comment(2, "pass", fingerprint=g.head_fp, version=V)])[0] == 0
+
+
+def test_merge_from_a_saved_bundle_never_merges(repo, tmp_path, monkeypatch, capsys):
+    g = Gate(repo, tmp_path, monkeypatch)
+    assert sdlc.main(["merge", "50", "--from-file", g.bundle()]) == 1
+    assert "add --dry-run" in capsys.readouterr().err
+
+
+def test_review_logic_that_cant_be_read_is_a_refusal(repo, tmp_path, monkeypatch, capsys):
+    g = Gate(repo, tmp_path, monkeypatch)
+    b = json.loads(Path(g.bundle([result_comment(1, "pass", fingerprint=g.head_fp, version=V)])).read_text())
+    b["head"] = "f" * 40                                          # a head that isn't in the repo
+    Path(g.tmp / "merge.json").write_text(json.dumps(b))
+    assert sdlc.main(["merge", "50", "--dry-run", "--from-file", str(g.tmp / "merge.json")]) == 1
+    assert "couldn't tell whether the review logic" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode", [None, 0o644], ids=["missing", "not-executable"])
+def test_with_no_codex_to_ask_a_deferral_for_the_fingerprint_lets_it_through(repo, tmp_path, monkeypatch, capsys, mode):
+    g = Gate(repo, tmp_path, monkeypatch)
+    monkeypatch.setenv("PATH", only_git(tmp_path, mode))
+    assert codex_eval.current_version() is None
+    code, out = g.merge(capsys)
+    assert code == 1 and "can't be read here" in out and "codex-eval --defer" in out
+    unavailable = [result_comment(1, "deferred", fingerprint=g.head_fp, version=sdlc.EVAL_UNAVAILABLE)]
+    code, out = g.merge(capsys, unavailable)
+    assert code == 0 and f"on codex {sdlc.EVAL_UNAVAILABLE} owed" in out
+    # a deferral under a real version is the pair rule's, not this one
+    assert g.merge(capsys, [result_comment(1, "deferred", fingerprint=g.head_fp, version=V)])[0] == 1
+    # a pass for the fingerprint under any real version counts: nothing is owed
+    code, out = g.merge(capsys, unavailable + [result_comment(2, "pass", fingerprint=g.head_fp, version=V2)])
+    assert code == 0 and "owed" not in out
+
+
+def test_a_fail_then_no_codex_keeps_the_merge_blocked_until_a_pass(repo, tmp_path, monkeypatch, capsys):
+    g = Gate(repo, tmp_path, monkeypatch)
+    monkeypatch.setenv("PATH", only_git(tmp_path))
+    failed = [result_comment(1, "fail", fingerprint=g.head_fp, version=V)]
+    for later in ([], [result_comment(2, "deferred", fingerprint=g.head_fp, version=sdlc.EVAL_UNAVAILABLE)]):
+        code, out = g.merge(capsys, failed + later)
+        assert code == 1 and "FAILED" in out
+    assert g.merge(capsys, failed + [result_comment(3, "pass", fingerprint=g.head_fp, version=V2)])[0] == 0
+    # a fail recorded under an unreadable `codex --version` blocks the fingerprint the same way, deferral or not
+    unknown = [result_comment(1, "fail", fingerprint=g.head_fp, version=codex_eval.UNKNOWN),
+               result_comment(2, "deferred", fingerprint=g.head_fp, version=sdlc.EVAL_UNAVAILABLE)]
+    code, out = g.merge(capsys, unknown)
+    assert code == 1 and "FAILED" in out
+    assert g.merge(capsys, unknown + [result_comment(3, "pass", fingerprint=g.head_fp, version=V2)])[0] == 0
+    # an older pass under another version doesn't cover a newer fail
+    assert g.merge(capsys, [result_comment(1, "pass", fingerprint=g.head_fp, version=V2)] + failed[:0]
+                   + [result_comment(2, "fail", fingerprint=g.head_fp, version=V)])[0] == 1
+
+
+# --- `codex-eval --defer` ---------------------------------------------------------------------------------
+
+def defer(tmp_path, capsys, results=(), *extra):
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"eval": list(results), "trusted": [OWNER]}))
+    code = sdlc.main(["codex-eval", "--defer", "--reason", "codex: 429 Too Many Requests", "--dry-run",
+                      "--from-file", str(ledger), *extra])
+    cap = capsys.readouterr()
+    return code, cap.out + cap.err
+
+
+def here_fp():
+    return codex_eval.fingerprint(codex_eval.Worktree(ROOT), section=CONFIG["codex"])
+
+
+def test_defer_records_a_deferral_for_the_pair_and_is_refused_after_a_fail(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("--dry-run must not call gh"))
+    log, _, _ = install(tmp_path, monkeypatch)
+    fp = here_fp()
+    code, out = defer(tmp_path, capsys)
+    mk = sdlc.parse_marker(out[out.index("<!--"):])
+    assert code == 0 and (mk["kind"], mk["fp"], mk["codex"], mk["outcome"]) == ("codex-eval", fp, V, "deferred")
+    assert "429 Too Many Requests" in out and calls(log) == []                  # never `codex exec`
+    # an availability failure posts nothing (T7), so a deferral after one is accepted: the ledger is still empty
+    code, out = defer(tmp_path, capsys, [result_comment(1, "fail", fingerprint=fp, version=V)])
+    assert code == 1 and "already FAILED" in out and "never deferred" in out
+    # a miss and then an outage: T7 posts a `fail`, so the deferral is refused the same way
+    assert defer(tmp_path, capsys, [result_comment(1, "fail", fingerprint=fp, version=V,
+                                                   reason="1 missed, 2 not run: codex unavailable")])[0] == 1
+    assert "already passed" in defer(tmp_path, capsys, [result_comment(1, "pass", fingerprint=fp, version=V)])[1]
+    assert "already deferred" in defer(tmp_path, capsys, [result_comment(1, "deferred", fingerprint=fp, version=V)])[1]
+    # a fail for another codex is another pair
+    assert defer(tmp_path, capsys, [result_comment(1, "fail", fingerprint=fp, version=V2)])[0] == 0
+    ledger = tmp_path / "ledger.json"
+    assert sdlc.main(["codex-eval", "--defer", "--from-file", str(ledger), "--dry-run"]) == 1     # no --reason
+    assert "--reason is required" in capsys.readouterr().err
+    assert sdlc.main(["codex-eval", "--defer", "--reason", "x", "--from-file", str(ledger)]) == 1   # can't post
+    assert "can't post" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode", [None, 0o644], ids=["missing", "not-executable"])
+def test_defer_with_no_codex_records_unavailable_unless_the_fingerprint_failed(tmp_path, monkeypatch, capsys, mode):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("--dry-run must not call gh"))
+    monkeypatch.setenv("PATH", only_git(tmp_path, mode))
+    fp = here_fp()
+    code, out = defer(tmp_path, capsys)
+    mk = sdlc.parse_marker(out[out.index("<!--"):])
+    assert code == 0 and (mk["fp"], mk["codex"], mk["outcome"]) == (fp, sdlc.EVAL_UNAVAILABLE, "deferred")
+    failed = [result_comment(1, "fail", fingerprint=fp, version=V)]             # under any version
+    code, out = defer(tmp_path, capsys, failed)
+    assert code == 1 and "already FAILED" in out
+    assert defer(tmp_path, capsys, failed + [result_comment(2, "pass", fingerprint=fp, version=V)])[0] == 1  # passed
+    assert defer(tmp_path, capsys, [result_comment(1, "fail", fingerprint=FP2, version=V)])[0] == 0  # other logic
+    # a fail posted with an unreadable `codex --version` is a fail for the fingerprint too
+    unknown = [result_comment(1, "fail", fingerprint=fp, version=codex_eval.UNKNOWN)]
+    code, out = defer(tmp_path, capsys, unknown)
+    assert code == 1 and "already FAILED" in out
+
+
+def test_only_a_deferral_is_recorded_under_unavailable():
+    for outcome in ("pass", "fail"):
+        with pytest.raises(sdlc.SdlcError, match="only a deferral"):
+            sdlc.eval_comment({"fingerprint": FP, "codex": sdlc.EVAL_UNAVAILABLE, "outcome": outcome}, CONFIG)
+    assert sdlc.real_version("unknown") is None and sdlc.real_version(None) is None and sdlc.real_version(V) == V
+
+
+def test_a_fail_under_an_unknown_version_counts_for_the_fingerprint_not_for_a_pair():
+    unknown = sdlc.eval_records([result_comment(1, "fail", version=codex_eval.UNKNOWN)], TRUSTED)
+    assert sdlc.eval_status(FP, None, unknown)[0] == "fail"                     # no version: the fingerprint's
+    assert sdlc.eval_status(FP, V, unknown)[0] == "none"                        # a real version: the pair's
+    assert sdlc.eval_defer_errors(FP, None, unknown) and not sdlc.eval_defer_errors(FP, V, unknown)
+
+
+# --- an owed eval on the epic: shown, cleared by a pass, and holding the demo ---------------------------------
+
+def owed_comment(fp=FP, version=V, ts=20):
+    return comment(OWNER, sdlc.marker("eval-owed", None, milestone="M1", slice="T1.1", number="28", pr="50",
+                                      fp=fp, codex=version) + "\ntext", ts)
+
+
+def epic_bundle(comments, results=None, **extra):
+    b = {"issue": epic_issue(), "comments": EPIC_HISTORY + list(comments), "trusted": [OWNER], **extra}
+    if results is not None:
+        b["eval"] = list(results)
+    return b
+
+
+def test_merge_records_an_owed_eval_on_the_epic_before_the_squash(monkeypatch):
+    from tests import test_sdlc_review as r
+    gh = r.GitHub(monkeypatch)
+    r.stub_merge(monkeypatch, r.JUDGMENT, r.TESTED + [r.agent("pr-review", None, 2, sha=r.HEAD, verdict="approve",
+                                                              round="1")])
+    monkeypatch.setattr(sdlc, "merge_eval_errors", lambda *a, **k: ([], {"fp": FP, "codex": V}))
+    assert sdlc.main(["merge", "50"]) == 0
+    (n, body), = gh.posted
+    assert n == 12 and f"kind=eval-owed milestone=M1 slice=T1.1 number=28 pr=50 fp={FP} codex={V}" in body
+    assert FP[:12] in body.split("-->", 1)[1] and FP not in body.split("-->", 1)[1]
+    assert ["posted so far", 1] in gh.calls
+
+
+def test_an_owed_eval_shows_on_the_epic_until_a_pass_clears_it():
+    p = {"ready": [], "in_flight": [], "escalated": [], "waiting": [], "open": 0,
+         "milestones": [{"title": "#12 M1: x", "key": "M1", "done": 1, "total": 1}]}
+    st = sdlc.bundle_state(epic_bundle([owed_comment()]), CONFIG)            # results not read: it stands
+    assert st["eval_owed"]["M1"][0]["fp"] == FP
+    view = sdlc.epic_view(st, p)
+    assert view["due"] == "demo" and "review eval is owed first" in view["next"] and "codex-eval" in view["next"]
+    assert FP[:12] in view["next"] and FP not in view["next"]
+    for results, cleared in (([], False), ([result_comment(1, "pass", fingerprint=FP, version=V)], True),
+                             ([result_comment(1, "pass", fingerprint=FP, version=V2)], False),   # another codex's
+                             ([result_comment(1, "pass", fingerprint=FP2, version=V)], False),
+                             ([result_comment(1, "fail", fingerprint=FP, version=V)], False),
+                             ([result_comment(1, "pass", fingerprint=FP, version=V),
+                               result_comment(2, "fail", fingerprint=FP, version=V)], False)):
+        st = sdlc.bundle_state(epic_bundle([owed_comment()], results), CONFIG)
+        assert (st["eval_owed"] == {}) is cleared, results
+
+
+def test_a_pass_for_an_older_codex_never_clears_a_deferral_made_after_an_upgrade():
+    owed = [owed_comment(version=V2)]                     # (FP, V) passed, codex went to V2, its eval was deferred
+    older = [result_comment(1, "pass", fingerprint=FP, version=V)]
+    assert sdlc.bundle_state(epic_bundle(owed, older), CONFIG)["eval_owed"]["M1"][0]["codex"] == V2
+    assert sdlc.bundle_state(epic_bundle(owed, older), CONFIG, (FP, V2))["eval_owed"]         # V2 now: still owed
+    # (were codex back at V, the pair reviewing from now on would be one that passed: that clears it)
+    assert sdlc.bundle_state(epic_bundle(owed, older), CONFIG, (FP, V))["eval_owed"] == {}
+    assert sdlc.bundle_state(epic_bundle(owed, older + [result_comment(2, "pass", fingerprint=FP, version=V2)]),
+                             CONFIG)["eval_owed"] == {}
+    # codex moved on again, to V3: a pass for the head's logic under the codex reviewing from now on clears it
+    v3 = older + [result_comment(2, "pass", fingerprint=FP, version="11.0.0-test")]
+    assert sdlc.bundle_state(epic_bundle(owed, v3), CONFIG)["eval_owed"]
+    assert sdlc.bundle_state(epic_bundle(owed, v3), CONFIG, (FP, "11.0.0-test"))["eval_owed"] == {}
+
+
+def test_an_unavailable_deferral_is_cleared_by_a_pass_for_its_fingerprint_only():
+    owed = [owed_comment(version=sdlc.EVAL_UNAVAILABLE)]
+    # the epic head is still at the deferred fingerprint, so only a pass for it may clear it
+    for results, cleared in (([result_comment(1, "pass", fingerprint=FP, version=V)], True),
+                             ([result_comment(1, "pass", fingerprint=FP2, version=V)], False)):
+        for context in ((FP, None), (FP, V2), (None, None)):
+            st = sdlc.bundle_state(epic_bundle(owed, results), CONFIG, context)
+            assert (st["eval_owed"] == {}) is cleared, (results, context)
+
+
+def test_an_eval_owed_for_logic_the_epic_moved_past_is_cleared_by_a_pass_for_the_heads():
+    owed = [owed_comment(fp=FP)]
+    heads = [result_comment(1, "pass", fingerprint=FP2, version=V2)]
+    assert sdlc.bundle_state(epic_bundle(owed, heads), CONFIG, (FP2, V2))["eval_owed"] == {}
+    assert sdlc.bundle_state(epic_bundle(owed, heads), CONFIG, (FP2, V))["eval_owed"]      # not the codex now
+    # with no `codex --version` to read, the head's logic is judged by its fingerprint, as `merge` judges it then
+    assert sdlc.bundle_state(epic_bundle(owed, heads), CONFIG, (FP2, None))["eval_owed"] == {}
+    later_fail = heads + [result_comment(2, "fail", fingerprint=FP2, version=V)]
+    assert sdlc.bundle_state(epic_bundle(owed, later_fail), CONFIG, (FP2, None))["eval_owed"]   # its latest failed
+    # an entry for the head's own logic keeps the pair rule: a pass under another codex doesn't clear it
+    assert sdlc.bundle_state(epic_bundle([owed_comment(fp=FP2)], heads), CONFIG, (FP2, None))["eval_owed"]
+    assert sdlc.bundle_state(epic_bundle(owed, heads), CONFIG)["eval_owed"]               # the head unknown
+    st = sdlc.bundle_state(epic_bundle(owed, []), CONFIG, (FP2, V2))                     # until then it stands
+    assert st["eval_owed"]["M1"][0]["fp"] == FP
+
+
+def test_demo_post_refuses_while_an_eval_is_owed(repo, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("a dry run must not call gh"))
+    install(tmp_path, monkeypatch)                                            # `codex --version` says V
+    for k in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{k}_NAME", "t")
+    monkeypatch.chdir(repo)
+    head = git(repo, "rev-parse", "HEAD")
+    head_fp = codex_eval.fingerprint(codex_eval.Commit(head, repo))
+    d = tmp_path / "demo"
+    d.mkdir()
+    (d / "README.md").write_text("# M1\n")
+    body = tmp_path / "comment.md"
+    body.write_text("You can now see the gate.\n")
+    p = {"ready": [], "in_flight": [], "escalated": [], "waiting": [], "open": 0,
+         "milestones": [{"title": "#12 M1: x", "key": "M1", "done": 1, "total": 1}]}
+
+    def post(comments, results=None):
+        f = tmp_path / "demo.json"
+        f.write_text(json.dumps(epic_bundle(comments, results, progress=p, epic_head=head)))
+        code = sdlc.main(["demo-post", "12", "--milestone", "M1", "--dir", str(d), "--body-file", str(body),
+                          "--from-file", str(f), "--dry-run"])
+        cap = capsys.readouterr()
+        return code, cap.out + cap.err
+
+    assert post([])[0] == 0                                                   # nothing owed
+    code, out = post([owed_comment(fp=head_fp)])
+    assert code == 1 and "review eval is owed for M1" in out and "weren't read" in out
+    code, out = post([owed_comment(fp=head_fp)], [])
+    assert code == 1 and "review eval is owed for M1" in out and "weren't read" not in out
+    assert post([owed_comment(fp=head_fp)], [result_comment(1, "pass", fingerprint=head_fp, version=V)])[0] == 0
+    # owed for logic the head has moved past: a pass for the head's under the codex now clears it (as its own would)
+    assert post([owed_comment(fp=FP)], [result_comment(1, "pass", fingerprint=FP2, version=V)])[0] == 1
+    assert post([owed_comment(fp=FP)], [result_comment(1, "pass", fingerprint=FP, version=V)])[0] == 0
+    assert post([owed_comment(fp=FP)], [result_comment(1, "pass", fingerprint=head_fp, version=V)])[0] == 0
+    # ... and once `codex --version` can't be read, by the head's fingerprint alone, as `merge` then accepts it
+    monkeypatch.setenv("PATH", only_git(tmp_path))
+    assert post([owed_comment(fp=FP)], [result_comment(1, "pass", fingerprint=head_fp, version=V)])[0] == 0
+    assert post([owed_comment(fp=FP)], [result_comment(1, "pass", fingerprint=head_fp, version=V),
+                                        result_comment(2, "fail", fingerprint=head_fp, version=V2)])[0] == 1
+
+
+def test_state_shows_an_owed_eval_and_clears_it_as_demo_post_does(repo, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("--from-file must not call gh"))
+    install(tmp_path, monkeypatch)
+    monkeypatch.chdir(repo)
+    head = git(repo, "rev-parse", "HEAD")
+    head_fp = codex_eval.fingerprint(codex_eval.Commit(head, repo))
+    f = tmp_path / "state.json"
+    for results, owed in (([], True), ([result_comment(1, "pass", fingerprint=head_fp, version=V)], False)):
+        f.write_text(json.dumps(epic_bundle([owed_comment(fp=FP)], results, epic_head=head)))
+        assert sdlc.main(["state", "12", "--from-file", str(f)]) == 0
+        out = capsys.readouterr().out
+        assert ("review eval owed for M1" in out) is owed and FP not in out
+
+
+# --- the live gate reads the PR's head and the epic branch from origin ------------------------------------
+
+def test_the_live_gate_fetches_the_pull_ref_and_the_epic_branch(repo, tmp_path, monkeypatch):
+    origin = tmp_path / "origin.git"
+    git(tmp_path, "init", "-q", "--bare", str(origin))
+    git(repo, "remote", "add", "origin", str(origin))
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "push", "-q", "origin", "HEAD:refs/heads/epic/12")
+    (repo / PROMPT).write_text((repo / PROMPT).read_text() + "\nOne more thing.\n")
+    git(repo, "commit", "-qam", "the slice")
+    head = git(repo, "rev-parse", "HEAD")
+    git(repo, "push", "-q", "origin", "HEAD:refs/pull/50/head")
+    git(repo, "reset", "-q", "--hard", base)
+    git(repo, "update-ref", "-d", "refs/remotes/origin/epic/12")
+    clone = tmp_path / "primary"
+    git(tmp_path, "clone", "-q", str(origin), str(clone))
+    monkeypatch.setattr(sdlc, "primary_root", lambda: clone)
+    install(tmp_path, monkeypatch)
+    passed = [result_comment(1, "pass", fingerprint=codex_eval.fingerprint(codex_eval.Commit(head, repo)), version=V)]
+    monkeypatch.setattr(sdlc, "eval_ledger", lambda args, config, bundle=None: sdlc.eval_records(passed, TRUSTED))
+    pr = {"number": 50, "headRefOid": head}
+    args = sdlc.argparse.Namespace(from_file=None)
+    head_fp, base_fp, version, _ = sdlc.merge_eval_inputs(args, pr, "epic/12", CONFIG)
+    assert (head_fp, base_fp, version) == (codex_eval.fingerprint(codex_eval.Commit(head, repo)),
+                                           codex_eval.fingerprint(codex_eval.Commit(base, repo)), V)
+    assert sdlc.merge_eval_errors(args, pr, "epic/12", CONFIG) == ([], None)
+    errs, owed = sdlc.merge_eval_errors(args, {"number": 51, "headRefOid": head}, "epic/12", CONFIG)   # no such ref
+    assert owed is None and "couldn't tell whether the review logic" in errs[0] and "refs/pull/51/head" in errs[0]
+
+
+@pytest.mark.parametrize("epic", [12, CONFIG["codex_eval_issue"]], ids=["another-epic", "the-ledgers-own-issue"])
+def test_fetch_bundle_reads_the_results_an_owed_eval_needs(monkeypatch, epic):
+    """Only for an epic that owes one; and when the epic is `codex_eval_issue` (#100), its own comments are them."""
+    owed, passed = owed_comment(), result_comment(30, "pass", fingerprint=FP, version=V)
+    raw = lambda c: {"id": c["id"], "user": {"login": c["author"]}, "body": c["body"],  # noqa: E731
+                     "created_at": c["created_at"], "html_url": c["url"]}
+    own = epic == CONFIG["codex_eval_issue"]
+    epic_path = f"repos/{CONFIG['repository']}/issues/{epic}/comments"
+    ledger_path = f"repos/{CONFIG['repository']}/issues/{CONFIG['codex_eval_issue']}/comments"
+
+    def serve(results):        # one entry when the epic is the ledger's issue: its comments hold the owed eval and the results
+        if own:
+            return {epic_path: [raw(c) for c in EPIC_HISTORY + [owed] + results]}
+        return {epic_path: [raw(c) for c in EPIC_HISTORY + [owed]], ledger_path: [raw(c) for c in results]}
+
+    asked = []
+    monkeypatch.setattr(sdlc, "gh_json", lambda args: {"number": epic, "title": "x", "state": "OPEN",
+                                                       "author": {"login": POSTER}, "labels": [], "createdAt": ""})
+    pages = serve([])
+    monkeypatch.setattr(sdlc, "gh_pages", lambda path: asked.append(path) or pages[path])
+    unpaid = sdlc.bundle_state(sdlc.fetch_bundle(epic, CONFIG, TRUSTED), CONFIG)["eval_owed"]
+    assert list(unpaid) == ["M1"] and unpaid["M1"][0]["fp"] == FP          # owed, with no pass yet
+    pages, asked[:] = serve([passed]), []
+    b = sdlc.fetch_bundle(epic, CONFIG, TRUSTED)
+    assert len(asked) == 1 + (not own)
+    assert sdlc.bundle_state(b, CONFIG)["eval_owed"] == {}                 # the pass cleared it
+    pages[asked[0]] = [raw(c) for c in EPIC_HISTORY]                        # no eval owed: nothing more fetched
+    asked.clear()
+    assert "eval" not in sdlc.fetch_bundle(epic, CONFIG, TRUSTED) and len(asked) == 1

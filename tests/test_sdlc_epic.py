@@ -400,6 +400,8 @@ def stub_merge(monkeypatch, gh, reads, base="epic/12"):
     monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted=None: epic_bundle())
     monkeypatch.setattr(sdlc, "epic_progress", lambda n, cfg, trusted: progress(ms("M1", 1, 3)))
     monkeypatch.setattr(sdlc, "with_next", lambda st, cfg, offline=False, trusted=None: {**st, "next": "x", "progress": None})
+    # the review logic at the head has a passing eval (the eval gate's own tests are in test_sdlc_eval.py)
+    monkeypatch.setattr(sdlc, "merge_eval_errors", lambda *a, **k: ([], None))
 
 
 def test_merge_squashes_into_the_epic_then_closes_and_reads_back(monkeypatch, capsys):
