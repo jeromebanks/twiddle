@@ -636,6 +636,14 @@ blocks until a later pass for that pair. Results live on the eval issue, so post
   records a `deferred` result for the pair, and is refused once the pair's latest result is a `fail`. A slice merged
   on a deferral posts an `eval-owed` record on the epic; `state` and `demo-status` list it, and `demo-post` refuses
   while it is owed.
+- **A quick change's and a debt group's PR into `main` take the same gate, with no deferral.** `merge` (and
+  `--dry-run`), `quick-gate`, and `state` / `slice-status` where they show the gate read the PR's head and `main`
+  the same way (the PR's `refs/pull/N/head`, fetched from the primary checkout) and refuse until the pair has a
+  `pass`. These lanes have no milestone demo to owe an eval to, so a `deferred` result is a refusal too, and the
+  refusal says so. A PR that changes no fingerprint input merges as before only while its pair has a pass: after
+  a `codex` upgrade, an ordinary quick or debt PR waits for the new pair's eval too. When the eval can't run, a
+  debt group waits; a quick change waits, or moves to the full lane (`escalate-to-full N`). `quick-gate
+  --from-file` judges a saved bundle offline, with no eval gate (`merge` refuses a quick or debt bundle anyway).
 - **When `codex --version` can't be read** (missing, not executable, or no usable answer), only the fingerprint
   is checked: its latest completed result (`pass` or `fail`, any version, and a `fail` posted as `unknown` too) decides; failing that, a deferral recorded
   as `unavailable` lets the merge through, owed. `--defer` there records `unavailable`, and is refused after a
