@@ -5302,7 +5302,8 @@ def review_body(head: str, summary: str, report: str, response: str) -> tuple[st
 
 def wasted_round(spent: int, limit: int, approved: bool, what: str, head: str, escalate: str, onward: str) -> None:
     """Refuse a `codex-review` round that `pr-review` / `ship-review` would refuse, or that changes nothing: the
-    change rounds are spent, or Codex already approved this exact head. Checked before Codex starts, so no run is paid for."""
+    change rounds are spent, or Codex already approved this exact head (a quick PR's: against the brief approved now).
+    Checked before Codex starts, so no run is paid for."""
     if spent >= limit:
         raise SdlcError(f"Codex rounds on {what} spent ({spent}/{limit} asked for changes): a round now couldn't be "
                         f"recorded; {escalate}")
@@ -5830,7 +5831,11 @@ def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: 
         pr = wait_for_pr_head(pr["number"], git(["rev-parse", "HEAD"], cwd=wt), config)   # a push GitHub hasn't shown yet
     _, reviews = pr_records(comments, trusted)
     on_head = [r for r in reviews if r["sha"] == pr["headRefOid"]]
-    wasted_round(changes_rounds(reviews), config.get("max_pr_rounds", 5), bool(on_head) and on_head[-1]["verdict"] == "approve",
+    # an approval stands only on this head and, for a quick change, against the brief approved now: what its merge
+    # gate accepts (`quick_merge_gate_errors`), so a re-approved brief on an unchanged head gets its re-review
+    approved = (bool(on_head) and on_head[-1]["verdict"] == "approve"
+                and (not quick or on_head[-1].get("brief") == brief_id))
+    wasted_round(changes_rounds(reviews), config.get("max_pr_rounds", 5), approved,
                  f"PR #{pr['number']}", pr["headRefOid"], f"`escalate-slice {refs[0]} --reason ...`",
                  f"go on to `merge {pr['number']}`")
     head = codex_review.check_worktree(wt, pr["headRefOid"])

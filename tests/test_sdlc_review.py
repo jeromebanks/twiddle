@@ -892,6 +892,32 @@ def test_pr_review_refuses_a_brief_reapproved_since_the_review(tmp_path, monkeyp
     assert code == 1 and f"against brief {c.brief_id}" in err and f"approved brief is now {new_id}" in err
 
 
+def test_an_approval_against_an_earlier_brief_does_not_stand_on_an_unchanged_head(tmp_path, monkeypatch, capsys):
+    # what `merge`'s quick gate accepts: an approval of this head against the brief approved *now*
+    c = QuickCodex(tmp_path, monkeypatch)
+    a = c.brief_id
+    c.comments = c.comments + [q.quick_brief(ts=40, rev=2, body=q.GATE_BRIEF), q.agent("approval", 2, 41, by=q.POSTER)]
+    b = sdlc.approved_brief_id(sdlc.derive_state(c.issue, c.comments, TRUSTED, CONFIG))
+    assert a and b and a != b
+
+    def approval(brief):
+        return [agent("pr-review", None, 5, "**Review**", sha=c.head, verdict="approve", round="1", brief=brief)]
+
+    # bound to brief A, with B approved since: the re-review runs, against B
+    assert c.run("--dry-run", comments=approval(a)) == 0 and c.calls() == []
+    assert f"Brief: {b}" in capsys.readouterr().out
+    assert c.run(comments=approval(a)) == 0 and len(c.calls()) == 1
+    assert c.report().read_text().splitlines()[1] == f"Brief: {b}"
+    capsys.readouterr()
+    # bound to the brief approved now: that approval stands, and Codex never runs
+    c.log.unlink()
+    for extra in ((), ("--dry-run",)):
+        assert c.run(*extra, comments=approval(b)) == 1
+        err = capsys.readouterr().err
+        assert "already approved" in err and "stands" in err and "merge 50" in err
+    assert c.calls() == []
+
+
 def test_a_slice_report_naming_a_brief_is_refused(tmp_path, capsys):
     report = tmp_path / "r.md"
     report.write_text((GOLDEN / "slice-report.md").read_text().replace("\nModel:", "\nBrief: 123\nModel:", 1))
