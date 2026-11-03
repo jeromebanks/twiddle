@@ -193,7 +193,11 @@ issue as a sub-issue, adds the `blocked_by` links, reads them all back, posts a
 key → issue table on the epic, creates the epic's branch `epic/N` from `main`
 (slices land there, and each accepted milestone ships to `main`), and moves it to
 `sdlc:planned`. If it fails
-partway, run it again: it finds what exists by marker and does only the rest.
+partway, it prints what it made, what is still missing and the command to rerun: run that (after a
+minute, if the read-back is what stopped it). It finds what exists by marker and does only the rest.
+It posts its record before the branch and the label, so a run cut short after it is finished by the
+rerun alone: `state` then says `create_plan_issues` with `next:` naming `plan-create N` (and why),
+not `/plan-issue N`, and you run that command, nothing else.
 
 **A plan settled by a person.** Once a plan's Codex rounds are spent (counted across revisions, and still spent
 after your planning question until a new Codex round is recorded), the issue author or a collaborator can reply

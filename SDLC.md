@@ -396,6 +396,18 @@ Ordering is **native `blocked_by`** links. All of it is created from the
 reviewed comment, so what was reviewed is what was built. A rerun finishes a
 partial creation instead of duplicating it.
 
+**`plan-create` never stops silently.** It reads what it made back from GitHub, and looks again
+after a few seconds while steps still seem missing (a new issue can take that long to be listed).
+Whenever it stops partway (a failed write, a read-back that still finds gaps, a failed branch or
+label move) it prints what this run made, what is still missing, and the `plan-create N` to rerun.
+It posts the `plan-created` record before it makes `epic/N` and moves the label, an escalated
+amendment's included. So `state` can always tell how far it got: an epic whose plan is agreed and
+whose issues exist (found by marker) with no record, or whose record is posted while its label never
+moved (still `sdlc:approved`, `sdlc:needs-info` or `sdlc:escalated`), says `create_plan_issues`
+with `next:` naming `plan-create N` and why, never a fresh `/plan-issue N`. The rerun creates no
+duplicate issue, posts no second record and needs no new `/approve`: a settled record
+(`settled_by=`) stands in for the person's.
+
 **One milestone at a time.** The plan covers the whole epic, but by default
 (`"create": "milestone"` in `.sdlc/config.json`, or per plan) only the first milestone's
 issues are created. Later milestones depend on what earlier ones teach. When a
