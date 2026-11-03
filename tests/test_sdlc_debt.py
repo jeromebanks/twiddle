@@ -236,11 +236,38 @@ class FakeGitHub:
         return [p["sub_issue_id"] - 9000 for path, p in self.writes if path.endswith("/sub_issues")]
 
 
+# The git subcommands that change a checkout, its branches or its remote (or reach the network). A test runs them
+# only inside its own tmp_path: a `claim` without the `repo` fixture would otherwise run them in the real checkout.
+GIT_WRITES = frozenset({"fetch", "worktree", "branch", "push", "pull", "checkout", "switch", "commit", "reset", "merge",
+                        "rebase", "revert", "cherry-pick", "stash", "tag", "update-ref", "clean", "rm", "mv", "add"})
+
+
+def git_write_outside(tmp_path: Path, args: list[str], cwd) -> str | None:
+    """Why `git args` (run in `cwd`, else the working directory) would write outside `tmp_path`; None when it wouldn't."""
+    if not args or args[0] not in GIT_WRITES:
+        return None
+    inside = tmp_path.resolve()
+    where = Path(cwd if cwd is not None else Path.cwd()).resolve()
+    if not where.is_relative_to(inside):
+        return f"`git {' '.join(args)}` would run in {where}, outside the test's {inside} (does it need the `repo` fixture?)"
+    for a in args[1:]:
+        if Path(a).is_absolute() and not Path(a).resolve().is_relative_to(inside):
+            return f"`git {' '.join(args)}` names {a}, outside the test's {inside}"
+    return None
+
+
 @pytest.fixture
-def gh(monkeypatch):
+def gh(monkeypatch, tmp_path):
     fake = FakeGitHub()
     monkeypatch.setattr(sdlc, "gh", fake)
     monkeypatch.setattr(sdlc.time, "sleep", lambda s: None)
+    real_git = sdlc.git
+
+    def guarded_git(args, cwd=None, *a, **k):
+        if (why := git_write_outside(tmp_path, list(args), cwd)) is not None:
+            pytest.fail(f"refused before it ran: {why}")
+        return real_git(args, cwd, *a, **k)
+    monkeypatch.setattr(sdlc, "git", guarded_git)
     return fake
 
 
@@ -3068,3 +3095,41 @@ def test_a_slice_claims_refusal_still_names_resume(repo):
     with pytest.raises(sdlc.SdlcError) as exc:
         sdlc.add_slice_worktree(9, "main", False, CONFIG)
     assert "`claim 9 --resume`, or `cleanup 9 --force`" in str(exc.value)
+
+
+# --- the guard: a test without the `repo` fixture can't write into the real checkout (#296) ---------------------
+
+def test_a_claim_without_the_repo_fixture_is_refused_before_any_git_write(gh, capsys, monkeypatch, tmp_path):
+    """No `repo` fixture: the working directory is the real checkout, so `claim --debt` would fetch and add a
+    worktree there. The `gh` fixture's guard fails the test first; nothing that writes ever reaches git."""
+    monkeypatch.chdir(Path(__file__).resolve().parent.parent)    # the checkout this suite runs in, never tmp_path
+    epic, (a, _b, _c) = posted_pass(gh, [((0,), "routine"), ((1,), "routine")], n=3)
+    reached, real_run = [], sdlc.subprocess.run
+
+    def run_git(cmd, *args, **kw):
+        if cmd[:1] == ["git"] and len(cmd) > 1 and cmd[1] in GIT_WRITES:
+            reached.append(cmd)     # had the guard missed it: record it, and never run it here
+            return subprocess.CompletedProcess(cmd, 1, "", "refused by the test")
+        return real_run(cmd, *args, **kw)
+    monkeypatch.setattr(sdlc.subprocess, "run", run_git)
+    with pytest.raises(pytest.fail.Exception, match=r"`git fetch origin main` would run in .*outside the test's"):
+        sdlc.main(["claim", str(a), "--debt"])
+    assert reached == [] and claims_on(gh, a) == []
+
+
+@pytest.mark.parametrize("args,cwd,refused", [
+    (["fetch", "origin", "main"], "outside", "would run in"),
+    (["worktree", "add", "IN/wt", "slice/1"], "inside", None),
+    (["worktree", "add", "OUT/wt", "slice/1"], "inside", "names"),
+    (["branch", "--list", "slice/1"], "outside", "would run in"),
+    (["rev-parse", "HEAD"], "outside", None),                     # a read is never refused
+    (["ls-remote", "--heads", "origin", "slice/1"], "outside", None),
+    (["push", "-u", "origin", "slice/1"], None, None),             # None: the working directory, here tmp_path
+])
+def test_the_guard_refuses_only_a_git_write_outside_the_tests_tmp_path(tmp_path, monkeypatch, args, cwd, refused):
+    outside = Path(__file__).resolve().parent
+    monkeypatch.chdir(tmp_path)
+    args = [a.replace("IN", str(tmp_path)).replace("OUT", str(outside)) for a in args]
+    where = {"outside": outside, "inside": tmp_path, None: None}[cwd]
+    why = git_write_outside(tmp_path, args, where)
+    assert (why is None) if refused is None else (refused in why), why
