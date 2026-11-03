@@ -194,6 +194,7 @@ class Ledger:
     # the rounds the planning cycle had spent when a `phase=plan` question reset plan_rounds: the cycle still reads as
     # spent (a person's /approve may settle it) until a new Codex round is recorded
     plan_spent: int = 0
+    plan_review_index: int = -1          # where the latest Codex round sits: a settling /approve is after it too
     plan_after_created: bool = False     # a plan revision posted since the last plan-created: an amendment
     created: set[str] | None = field(default_factory=set)   # milestones whose issues exist (None: all, legacy)
     plan_created: bool = False           # a plan-created record exists (with no milestones, `created` can't say so)
@@ -290,6 +291,7 @@ def _on_plan_review(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) ->
     L.plan_rounds += 1
     L.plan_spent = 0   # a new Codex round: the cycle a question reset is over, and with it any settling
     L.plan_review = {"id": c.get("id"), "verdict": mk.get("verdict"), "response": mk.get("response")}
+    L.plan_review_index = i
     if L.latest_plan and _rev(mk) == L.latest_plan["rev"]:
         L.plan_verdict = mk.get("verdict")
 
@@ -474,18 +476,23 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     if (latest_plan and L.plan_index is not None and plan_verdict != "approve" and cycle_rounds >= max_plan_rounds
             and doc_approved and L.lane != QUICK):
         # the rounds are spent: a person's `/approve` after the latest plan revision settles it (#146's plan half).
-        # Only the issue author or a collaborator counts, and never a comment that carries a marker (an agent's).
+        # It must also come after the latest Codex round, the one that spent the cycle: an /approve from before
+        # it was given with rounds left (or in a window a newer round closed). Only the issue author or a
+        # collaborator counts, and never a comment that carries a marker (an agent's); their later `/changes`
+        # withdraws it.
         reply_ids = {c.get("id") for c in replies}
-        for c in ordered[L.plan_index + 1:]:
+        for c in ordered[max(L.plan_index, L.plan_review_index) + 1:]:
             if c.get("id") in marked_ids or parse_marker(c.get("body", "")):
                 continue
-            if not any(a == "approve" for a, _ in keyword_lines(c.get("body", ""))):
-                continue
-            if c.get("author") in allowed:
-                settled = {"by": c.get("author"), "comment_id": c.get("id"), "url": c.get("url"),
-                           "rev": latest_plan["rev"]}
-            elif c.get("id") not in reply_ids:   # a reply's is listed already
-                ignored.append({"by": c.get("author", ""), "action": "approve"})
+            for a, _ in keyword_lines(c.get("body", "")):
+                if c.get("author") not in allowed:
+                    if a == "approve" and c.get("id") not in reply_ids:   # a reply's is listed already
+                        ignored.append({"by": c.get("author", ""), "action": "approve"})
+                elif a == "approve":
+                    settled = {"by": c.get("author"), "comment_id": c.get("id"), "url": c.get("url"),
+                               "rev": latest_plan["rev"]}
+                else:
+                    settled = None
         if settled and decision and decision.get("comment_id") == settled["comment_id"]:
             # the same /approve settles the plan. It stays no PRD sign-off (`valid` is only that), so it can never be
             # recorded as an approval by `transition`

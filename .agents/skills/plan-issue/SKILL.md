@@ -194,7 +194,8 @@ partway, run it again: it finds what exists by marker and does only the rest.
 
 **A plan settled by a person.** Once a plan's Codex rounds are spent (counted across revisions, and still spent
 after your planning question until a new Codex round is recorded), the issue author or a collaborator can reply
-`/approve` after the latest plan revision instead of answering. `state` then says `create_plan_issues` with
+`/approve` after the latest plan revision (and the Codex round that spent them) instead of answering; their
+later `/changes` withdraws it. `state` then says `create_plan_issues` with
 `plan_settled` (who, which revision), in `sdlc:approved`, `sdlc:needs-info`, or on an amendment at `escalate_plan`
 or already `sdlc:escalated`. Run step 6 as usual: `plan-create` records `settled_by=` on its table, and moves an
 escalated epic back to `sdlc:in-progress` (an approved or needs-info one to `sdlc:planned`). Only the tool

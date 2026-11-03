@@ -403,13 +403,13 @@ milestone) that runs out of rounds is escalated to a human instead
 (`escalate_plan`). A plan revision never voids the PRD's sign-off.
 
 Spent rounds can also be settled by a person: a `/approve` from the issue author or a collaborator,
-posted after the latest plan revision, counts as consensus (`create_plan_issues`, with `plan_settled`
+posted after the latest plan revision and the Codex round that spent them, counts as consensus (`create_plan_issues`, with `plan_settled`
 in `state`), whether the issue is still `sdlc:approved`, waiting in `sdlc:needs-info` on the planning
 question, or an amendment at `escalate_plan` or already `sdlc:escalated`. The rounds are the planning
 cycle's, counted across revisions; the question resets them for the planner, but the cycle still reads
 as spent until a new Codex round is recorded. `plan-create` records `settled_by=` and moves a settled
-escalation back to `sdlc:in-progress`. Anyone else's `/approve` is listed as ignored, and an agent's
-(marked) comment never counts.
+escalation back to `sdlc:in-progress`. Their later `/changes` withdraws it. Anyone else's `/approve` is listed as ignored,
+and an agent's (marked) comment never counts.
 
 `uv run python tools/sdlc.py ready --epic N` lists the units of work whose
 blockers have all closed as completed.

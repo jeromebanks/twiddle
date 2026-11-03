@@ -717,6 +717,21 @@ def test_an_approve_before_the_latest_revision_or_with_rounds_left_changes_nothi
     left = APPROVED + [agent("plan", 1, 3), review(1, 4, "changes"), comment(POSTER, "/approve", 5)]
     st = derive(["sdlc:approved"], left)
     assert (st["action"], st["plan_settled"]) == ("continue_plan", None)
+    # given with rounds left, it stays void once later rounds spend them
+    st = derive(["sdlc:approved"], left + [review(1, 6, "changes"), review(1, 7, "changes")])
+    assert (st["action"], st["plan_settled"]) == ("ask_poster", None)
+
+
+def test_a_later_changes_withdraws_the_settling_approve():
+    st = derive(["sdlc:approved"], SPENT + [comment(POSTER, "/approve", 10), comment(POSTER, "/changes fix it first", 11)])
+    assert (st["action"], st["plan_settled"]) == ("ask_poster", None)
+    st = derive(["sdlc:approved"], SPENT + [comment(POSTER, "/approve", 10), comment(OWNER, "/changes not yet", 11)])
+    assert st["plan_settled"] is None
+    # a stranger's /changes withdraws nothing, and a new /approve after the /changes settles again
+    st = derive(["sdlc:approved"], SPENT + [comment(POSTER, "/approve", 10), comment(STRANGER, "/changes no", 11)])
+    assert st["plan_settled"]["by"] == POSTER
+    st = derive(["sdlc:approved"], SPENT + [comment(POSTER, "/changes x", 10), comment(POSTER, "/approve", 11)])
+    assert st["action"] == "create_plan_issues"
 
 
 def test_settled_after_the_poster_was_asked():
@@ -750,6 +765,11 @@ def test_rounds_spent_across_revisions_settle_before_and_after_the_question():
     # and an /approve inside the window is void once a new round is recorded, even on the same revision
     st = derive(["sdlc:approved"], asked + [comment(POSTER, "/approve", 11), review(3, 12, "changes")])
     assert (st["plan_settled"], st["action"]) == (None, "continue_plan")
+    # and stays void when that new cycle spends its rounds too
+    spent_again = asked + [comment(POSTER, "/approve", 11), review(3, 12, "changes"), review(3, 13, "changes"),
+                           review(3, 14, "changes")]
+    st = derive(["sdlc:approved"], spent_again)
+    assert (st["plan_settled"], st["action"]) == (None, "ask_poster")
     # an /approve posted just before the question still settles it
     st = derive(["sdlc:needs-info"], three_revisions() + [comment(POSTER, "/approve", 9),
                                                           agent("question", None, 10, phase="plan")])
