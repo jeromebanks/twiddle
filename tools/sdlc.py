@@ -112,7 +112,7 @@ DEMO_ACTIONS = {"record_demo_acceptance", "demo_reply", "demo_heard"}
 # every action derive_state can return (docs/sdlc.html explains each; tests hold both to this list)
 ALL_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label",
                "plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone", "escalate_plan",
-               "record_demo_acceptance", "demo_reply", "demo_heard",
+               "record_demo_acceptance", "demo_reply", "demo_heard", "record_changes",
                "work_slices", "work_quick", "commit_prd", "wait_for_poster", "human", "fix_conflict", "none",
                "debt_intake", "plan_pass", "debt_waiting", "work_debt", "merge_debt", "pass_end"}
 NO_MILESTONE = "all"     # an epic planned without milestones has one demo, for all of it
@@ -219,6 +219,10 @@ class Ledger:
     # after it: until that one, the brief is committed to docs/prd/ (`commit-prd`) before anything is planned
     to_full: dict[str, Any] | None = None
     prd_merged: dict[str, Any] | None = None
+    # the poster's `/changes` with no demo in review: read from after the latest plan-created or demo acceptance,
+    # skipping those a `demo-changes found=poster` record names
+    changes_from: int = -1
+    changes_done: set[str] = field(default_factory=set)
 
 
 def _rev(mk: dict[str, str]) -> int | None:
@@ -302,6 +306,7 @@ def _on_plan_review(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) ->
 
 def _on_plan_created(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     L.feedback = L.feedback_plan = L.plan_after_created = False
+    L.changes_from = i
     L.plan_rounds, L.plan_review, L.plan_spent = 0, None, 0   # the next amendment gets fresh rounds
     L.plan_created = True
     L.settled_record = {"by": mk["settled_by"], "rev": _rev(mk)} if mk.get("settled_by") else None
@@ -329,11 +334,17 @@ def _on_demo_approval(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) 
     d = L.demos.get(_ms(mk))
     if d and d["rev"] == _rev(mk):
         d["accepted"] = True
+        L.changes_from = i   # a `/changes` before the /approve was the demo's; one after it waits for the release
 
 
 def _on_demo_changes(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     if L.request and L.request["milestone"] == _ms(mk):
-        L.request = None
+        L.request = None   # its milestone gets new slices first: the demo (and any steps it asks for) comes later
+    if mk.get("found") == "poster":
+        # the poster's `/changes` with no demo in review: new slices, and no demo or acceptance is touched
+        L.changes_done.add(mk.get("comment", ""))
+        _replan(L)
+        return
     if mk.get("found") == "agent":
         # the agent's own demo found the milestone broken: fix slices, then a new demo (an acceptance is void)
         _replan(L)
@@ -468,6 +479,17 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
                 decision = {"action": action, "by": c.get("author"), "text": text, "comment_id": c.get("id")}
             else:
                 ignored.append({"by": c.get("author", ""), "action": action})
+    # the poster's `/changes` on an epic being built, with no demo in review (a later agent comment doesn't hide it)
+    poster_changes = None
+    if state in BUILD_STATES and L.plan_created and not debt_epic and not feedback:
+        for c in ordered[L.changes_from + 1:]:
+            if c.get("id") in marked_ids or c.get("author") not in allowed or str(c.get("id")) in L.changes_done:
+                continue
+            for action, text in keyword_lines(c.get("body", "")):
+                if action == "changes":
+                    poster_changes = {"by": c.get("author"), "text": text, "comment_id": c.get("id"), "url": c.get("url")}
+    if any(d.get("accepted") and m not in shipped for m, d in demos.items()):
+        poster_changes = None   # an accepted milestone ships first; the `/changes` is recorded once it has
     if decision and decision["action"] == "approve":
         if state == "demo-review":
             ok_state = latest_demo is not None
@@ -569,6 +591,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         turn, action = "later", "none"
     elif state in BUILD_STATES and quick:
         turn, action = "agent", "work_quick"   # the approved quick brief is being built (`work-slice N --quick`)
+    elif poster_changes:
+        turn, action = "agent", "record_changes"   # record it (`demo-changes N`), then plan it as new slices
     elif state in BUILD_STATES and (feedback or next_due or plan_after_created):
         # the plan is being amended: the poster's changes at a demo, or the next milestone's replan
         turn = "agent"
@@ -638,7 +662,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "conflicts": conflicts, "doc_approved": doc_approved, "latest_plan": latest_plan,
         "plan_verdict": plan_verdict, "plan_rounds": plan_rounds, "max_plan_rounds": max_plan_rounds,
         "plan_review": L.plan_review, "plan_cycle_rounds": cycle_rounds, "plan_settled": settled,
-        "demos": demos, "latest_demo": latest_demo, "feedback": feedback,
+        "demos": demos, "latest_demo": latest_demo, "feedback": feedback, "poster_changes": poster_changes,
         "shipped": shipped, "ship_reviews": ship_reviews, "epic_tests": epic_tests, "untested": untested,
         "review_owed": review_owed,
         "demo_request": request,
@@ -763,6 +787,10 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
         return f"/triage-issue {n}"
     if a in DEMO_ACTIONS:
         return f"/milestone-demo {n}"
+    if a == "record_changes":
+        pc = st["poster_changes"]
+        return (f"`uv run python tools/sdlc.py demo-changes {n} --body-file <what they asked, in plain words>`: "
+                f"@{pc['by']} asked for changes ({pc['url']}); then /plan-issue {n}")
     if a == "escalate_plan":
         return (f"/plan-issue {n}: the Codex rounds on this amendment are spent; escalate it "
                 f"(`transition {n} escalated --kind escalation --reason ...`)")
@@ -812,7 +840,8 @@ MILESTONE_FLOW = {
     "building": {"complete", "review"},     # its slices merge into epic/N
     "review": {"complete", "building"},     # slices merged without their own Codex review: the milestone's
                                             # review (ship-review) comes before its demo; or it finds fixes
-    "complete": {"demoed", "building"},     # demo-post; or the agent's demo finds it broken (fix slices)
+    "complete": {"demoed", "building"},     # demo-post; or the agent's demo finds it broken (fix slices),
+                                            # or the poster's /changes with no demo in review (new slices)
     "demoed": {"accepted", "building"},     # the poster's /approve; or /changes (fix slices)
     "accepted": {"shipped", "building"},    # ship; or a revert / later findings void the acceptance
     "shipped": set(),
@@ -7270,7 +7299,8 @@ def command_demo_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
     refuse_quick(st, "milestone to demo")
     n, key, offline = st["number"], args.milestone, bool(getattr(args, "from_file", None))
     errs = []
-    if st["conflicts"] or not (epic_building(st) or st["state"] == "demo-review") or st.get("feedback"):
+    if (st["conflicts"] or not (epic_building(st) or st["state"] == "demo-review") or st.get("feedback")
+            or st["action"] == "record_changes"):
         errs.append(f"#{n} is {st['state']} (action {st['action']}): not the time for a demo")
     elif st["state"] == "demo-review" and (st["latest_demo"] or {}).get("milestone") != key:
         errs.append(f"#{n} is already in review for {st['latest_demo']['milestone']}: that comes first")
@@ -7377,6 +7407,8 @@ def command_demo_changes(args: argparse.Namespace, config: dict[str, Any]) -> in
     n, demo = st["number"], st["latest_demo"]
     if args.found:
         return record_agent_findings(args, bundle, st, config)
+    if st["action"] == "record_changes":
+        return record_poster_changes(args, bundle, st, config)
     if st["state"] != "demo-review" or not demo or st["action"] not in DEMO_ACTIONS:
         raise SdlcError(f"#{n} has no reply to a demo to act on (state {st['state']}, action {st['action']})")
     if args.milestone and args.milestone != demo["milestone"]:
@@ -7390,6 +7422,34 @@ def command_demo_changes(args: argparse.Namespace, config: dict[str, Any]) -> in
     posted = post_comment(n, comment, config)
     set_state_label(n, bundle["issue"]["labels"], "in-progress", config)
     print(f"#{n}: demo-review -> in-progress  {posted.get('html_url', '')}\nnext: /plan-issue {n}")
+    return 0
+
+
+def record_poster_changes(args: argparse.Namespace, bundle: dict[str, Any], st: dict[str, Any],
+                          config: dict[str, Any]) -> int:
+    """The poster's `/changes` on an epic in progress with no demo in review: record it against the current
+    milestone, so plan-issue plans it as new slices. No demo or acceptance is touched."""
+    n, pc = st["number"], st["poster_changes"]
+    offline = bool(getattr(args, "from_file", None))
+    progress = bundle.get("progress") if offline else epic_progress(n, config, set(bundle["trusted"]))
+    cur = current_milestone(st, progress)
+    if not cur:
+        raise SdlcError(f"#{n} has no milestone left to change: every one has shipped")
+    key = cur["key"]
+    if args.milestone and args.milestone != key:
+        raise SdlcError(f"the milestone being built is {key}, not {args.milestone}")
+    body = Path(args.body_file).read_text().strip()
+    if hits := identifier_hits(body):
+        raise SdlcError("the changes contain " + ", ".join(hits) + ": the issue is public")
+    body = (f"@{pc['by']} asked for changes ({pc['url']}):\n\n{body}"
+            "\n\nNext: these become new slices in a revised plan (Codex reviews it).")
+    comment = render_comment("demo-changes", None, body, config, milestone=key, found="poster",
+                             comment=str(pc["comment_id"]), by=pc["by"])
+    if args.dry_run:
+        print(f"DRY RUN #{n}: the poster's changes for {key}\n{comment}")
+        return 0
+    posted = post_comment(n, comment, config)
+    print(f"#{n}: the poster's changes for {key} recorded  {posted.get('html_url', '')}\nnext: /plan-issue {n}")
     return 0
 
 
@@ -7881,7 +7941,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_demo_accept)
 
-    p = sub.add_parser("demo-changes", help="record the changes the poster asked for at a demo")
+    p = sub.add_parser("demo-changes", help="record the changes the poster asked for (at a demo, or with none in review)")
     p.add_argument("number", type=int)
     p.add_argument("--milestone")
     p.add_argument("--body-file", required=True, help="what they asked for, in plain words")

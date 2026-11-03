@@ -267,6 +267,10 @@ JOURNEYS = {
                          (("shipped", None, {"milestone": "M1", "sha": "e" * 40}), 2, 2)],
     "the poster asks for changes": [(None, 2, 2), (DEMO, 2, 2), (("demo-changes", 1, {"milestone": "M1"}), 2, 3),
                                     (None, 3, 3)],                       # a fix slice F1 is added, then merges
+    # the poster asks for changes while M1 is being built, with no demo in review (#243 criterion 18)
+    "the poster asks for changes with no demo": [(None, 2, 2), (("demo-changes", None, {"milestone": "M1", "found": "poster",
+                                                                                      "comment": "99", "by": POSTER}), 2, 3),
+                                                 (None, 3, 3), (DEMO, 3, 3), (ACCEPT, 3, 3)],
     "the agent finds it broken": [(None, 2, 2), (("demo-changes", None, {"milestone": "M1", "found": "agent"}), 2, 3),
                                   (None, 3, 3), (DEMO, 3, 3)],
     "a slice is reverted after acceptance": [(None, 2, 2), (DEMO, 2, 2), (ACCEPT, 2, 2),
