@@ -121,7 +121,8 @@ ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every sk
 - **`/approve`** on its own line signs off on the *latest* PRD/diagnosis revision, or accepts the latest milestone demo.
 - **`/changes <what>`** asks for changes. Any other reply is treated as feedback. On an epic being built with no
   demo in review, it is recorded (`demo-changes`) and planned as new slices of the current milestone; it adds
-  nothing while changes already wait to be planned, or while an accepted milestone waits to ship.
+  nothing while changes already wait to be planned, and waits while an accepted milestone waits to ship (it is
+  recorded once that milestone has shipped).
 - A maintainer may instead add the **`sdlc:approved`** label; the next run records it as an approval comment.
 
 `/approve` counts only from the issue's author or someone who can write to the

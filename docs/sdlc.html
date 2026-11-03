@@ -233,7 +233,7 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <td>A demo step would make a real speaker play, so the agent asks on the issue for someone to run it and say what they heard.</td>
 <td><code>wait_for_poster</code>, then <code>demo_heard</code> → <code>/milestone-demo N</code></td></tr>
 <tr><td><span class="chip">sdlc:in-progress</span> with the poster's <code>/changes</code></td><td class="turn agent">agent</td>
-<td>The poster asks for something different while the epic is being built and no demo is in review. The agent restates it in plain words and records it against the current milestone; it is then planned as new slices. A <code>/changes</code> while changes already wait to be planned, or while an accepted milestone waits to ship, adds nothing.</td>
+<td>The poster asks for something different while the epic is being built and no demo is in review. The agent restates it in plain words and records it against the current milestone; it is then planned as new slices. A <code>/changes</code> while changes already wait to be planned adds nothing; one while an accepted milestone waits to ship is recorded once it has shipped.</td>
 <td><code>record_changes</code> → <code>demo-changes N --body-file …</code>, then <code>/plan-issue N</code></td></tr>
 <tr><td><span class="chip">sdlc:demo-review</span></td><td class="turn poster">poster</td>
 <td>A milestone demo is posted, with real screenshots. The poster tries it.</td>

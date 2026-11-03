@@ -210,7 +210,7 @@ class Ledger:
     # after it: until that one, the brief is committed to docs/prd/ (`commit-prd`) before anything is planned
     to_full: dict[str, Any] | None = None
     prd_merged: dict[str, Any] | None = None
-    # the poster's `/changes` with no demo in review: read from after the latest plan-created or release,
+    # the poster's `/changes` with no demo in review: read from after the latest plan-created or demo acceptance,
     # skipping those a `demo-changes found=poster` record names
     changes_from: int = -1
     changes_done: set[str] = field(default_factory=set)
@@ -315,6 +315,7 @@ def _on_demo_approval(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) 
     d = L.demos.get(_ms(mk))
     if d and d["rev"] == _rev(mk):
         d["accepted"] = True
+        L.changes_from = i   # a `/changes` before the /approve was the demo's; one after it waits for the release
 
 
 def _on_demo_changes(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
@@ -346,7 +347,6 @@ def _on_demo_request(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -
 
 def _on_shipped(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     L.shipped[_ms(mk)] = mk.get("sha", "")
-    L.changes_from = i
     if mk.get("untested"):
         L.untested[_ms(mk)] = mk.get("sha", "")
 
@@ -470,7 +470,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
                 if action == "changes":
                     poster_changes = {"by": c.get("author"), "text": text, "comment_id": c.get("id"), "url": c.get("url")}
     if any(d.get("accepted") and m not in shipped for m, d in demos.items()):
-        poster_changes = None   # an accepted milestone ships first: `/changes` on it is the demo's business
+        poster_changes = None   # an accepted milestone ships first; the `/changes` is recorded once it has
     if decision and decision["action"] == "approve":
         if state == "demo-review":
             ok_state = latest_demo is not None

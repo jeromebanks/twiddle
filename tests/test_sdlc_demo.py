@@ -215,6 +215,17 @@ def test_the_posters_changes_count_only_from_the_poster_and_only_while_building(
                                             agent("shipped", None, 12, milestone="M1", sha="c" * 40),
                                             comment(POSTER, "/changes louder", 13)])
     assert shipped["action"] == "record_changes"
+    # one posted between the /approve and the release waits for the release, and is not lost there
+    waited = derive(["sdlc:in-progress"], [DEMO, agent("demo-approval", 1, 11, milestone="M1", by=POSTER),
+                                           comment(POSTER, "/changes louder", 12),
+                                           agent("shipped", None, 13, milestone="M1", sha="c" * 40)])
+    assert waited["action"] == "record_changes"
+    # one the poster overtook with an /approve at the demo was the demo's answer
+    overtaken = derive(["sdlc:in-progress"], [DEMO, comment(POSTER, "/changes louder", 11), agent("note", None, 12),
+                                              comment(POSTER, "/approve", 13),
+                                              agent("demo-approval", 1, 14, milestone="M1", by=POSTER),
+                                              agent("shipped", None, 15, milestone="M1", sha="c" * 40)])
+    assert overtaken["action"] == "work_slices"
 
 
 def test_the_posters_changes_are_recorded_against_the_current_milestone(tmp_path, capsys, monkeypatch):
