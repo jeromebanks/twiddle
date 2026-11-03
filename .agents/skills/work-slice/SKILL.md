@@ -132,10 +132,13 @@ The PR body must contain **exactly one** `Closes #N`. Include:
 gh pr create --base epic/E --head slice/N --title "<key>: <slice title>" --body-file <SCRATCH>/pr.md
 ```
 
-If this slice changed the review logic (a prompt, `review-rules.md`, the `codex` settings, `tools/codex_review.py`,
-`tools/codex_eval.py` or anything under `tests/codex_eval/`; `SDLC.md` lists the fingerprint's inputs), run the
-eval once the code is final, before `test-record` and `codex-review`: a later commit to those inputs voids its result, so
-run it again whenever self-review or a Codex round makes you change one.
+**`merge` needs a passing eval for the review logic at the PR's head**, under the `codex --version` it runs
+with, or a deferral. That bites when this slice changed the review logic (a prompt, `review-rules.md`, the `codex`
+settings, `tools/codex_review.py`, `tools/codex_eval.py` or anything under `tests/codex_eval/`; `SDLC.md` lists the
+fingerprint's inputs), and when `codex` itself was upgraded: once per change, never per commit.
+`uv run python tools/sdlc.py codex-eval --status` says whether this pair has a result. The order for such a PR:
+change, push, then the eval, then `test-record` and `codex-review`. A later commit to those inputs voids its result,
+so run it again whenever self-review or a Codex round makes you change one.
 Run the Bash call in the background (`run_in_background`); a full eval takes 10-15 minutes.
 
 ```bash
@@ -144,7 +147,19 @@ uv run python tools/sdlc.py codex-eval
 
 It posts its result, and runs nothing when this fingerprint and `codex` version already passed. A `fail`
 means Codex missed a planted bug or flagged the clean change: fix the review logic, not the fixture, unless the
-fixture is what is wrong. Exit 3 means Codex can't run: carry on, and `review-defer` applies as in §8.
+fixture is what is wrong, and run it again; if you can't, escalate (§8). A `fail` blocks the merge and can't be
+deferred.
+
+**Defer the eval only when it couldn't run**: exit 3 (Codex can't start, sign-in, quota, rate limit or network,
+or no verdict after the retry; the end of each fixture's `codex.err` says which), or no `codex` on the PATH:
+
+```bash
+uv run python tools/sdlc.py codex-eval --defer --reason "<the error, verbatim>"
+```
+
+It records a `deferred` result for the pair (for the fingerprint alone, as `unavailable`, when `codex --version`
+can't be read), so the slice can merge, and `merge` records the eval as owed by the milestone, before its demo.
+It is refused once the eval failed for this review logic. A Codex review that can't run is `review-defer`'s, in §8.
 
 Then record the tests:
 
@@ -257,9 +272,15 @@ cd <PRIMARY> && uv run python tools/sdlc.py cleanup N
 - a passing test run is recorded on that head;
 - the PR targets `epic/E`, and its head is **not behind `epic/E`**;
 - the slice belongs to the epic's current milestone, the earliest one not yet shipped;
+- the review logic at the head (its fingerprint, read from the commit) has a passing `codex-eval` for the
+  `codex --version` here, or a deferral (§7); a `fail` always blocks;
 - GitHub says the PR is mergeable.
 
 How to clear each refusal:
+
+- **No review eval** for the head's pair (it changed the review logic, or `codex` was upgraded): run
+  `codex-eval` from `WORKTREE` as §7 says, or `codex-eval --defer` only if it can't run. Its result lives on
+  the eval issue, not the PR, so it voids neither the test run nor the review.
 
 - **The head is behind `epic/E`.** Another slice merged first (or `sync` brought `main` in), and nobody has tested
   this branch with it. Rebase:

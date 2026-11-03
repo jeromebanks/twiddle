@@ -163,6 +163,8 @@ def stub_merge(monkeypatch, labels, pr_comments):
                                                                             "trusted": [OWNER]})
     monkeypatch.setattr(sdlc, "epic_progress", lambda n, cfg, trusted: progress(ms("M1", 1, 3)))
     monkeypatch.setattr(sdlc, "with_next", lambda st, cfg, offline=False, trusted=None: {**st, "next": "x", "progress": None})
+    # the review logic at the head has a passing eval (the eval gate's own tests are in test_sdlc_eval.py)
+    monkeypatch.setattr(sdlc, "merge_eval_errors", lambda *a, **k: ([], None))
 
 
 TESTED = [agent("tests", None, 1, sha=HEAD, result="pass", passed="9")]

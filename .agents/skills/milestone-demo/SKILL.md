@@ -58,6 +58,7 @@ uv run python tools/sdlc.py demo-status N          # --json for the full brief
 | action | do |
 |---|---|
 | `work_slices` and `next` says Codex hasn't reviewed some slices | step 1b, then steps 2-7 |
+| `next` says the review eval is owed first | step 1c, then steps 2-7 |
 | `work_slices` and `next` says `/milestone-demo` | steps 2-7 for the due milestone |
 | `record_demo_acceptance` | the poster said `/approve`: step 8, then step 10 |
 | `next` says `... is accepted; ship it` | step 10 |
@@ -90,6 +91,20 @@ review (`review-defer`) is too. `demo-status` lists them under "Codex review owe
 
 The review budget is `max_pr_rounds` (5) rounds asking for changes per milestone, shared
 with step 10.
+
+## 1c. An owed review eval, when a slice merged with its eval deferred
+
+A slice merges only when the review logic at its head has a passing `codex-eval` for the `codex` there, or a
+deferral (`codex-eval --defer`: the eval couldn't run). A deferral is owed before the demo: `state` and
+`demo-status` list it as "review eval owed", and `demo-post` refuses until a pass clears it.
+
+1. From `.worktrees/epic-N` (as `sync` left it, on `epic/N`'s head), run the eval in the background
+   (`run_in_background`, 10-15 minutes): `uv run python tools/sdlc.py codex-eval`. A pass for the head's
+   review logic clears every eval owed for it, and for logic the head has since moved past; an owed
+   `unavailable` deferral is cleared by a pass for its fingerprint under any `codex` that says its version.
+2. A `fail`: the review logic misses a planted bug. That is a demo finding: `demo-changes N --found`, and
+   `/plan-issue N` plans the fix.
+3. **Codex still can't run**: don't defer again. Report the `next:` line and stop: the demo waits for the eval.
 
 ## 2. Plan the demo
 
