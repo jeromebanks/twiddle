@@ -724,6 +724,9 @@ def test_settled_after_the_poster_was_asked():
     assert derive(["sdlc:needs-info"], asked)["plan_cycle_rounds"] == CONFIG["max_plan_rounds"]
     st = derive(["sdlc:needs-info"], asked + [comment(POSTER, "the first plan is fine\n/approve", 11)])
     assert (st["action"], st["plan_settled"]["by"]) == ("create_plan_issues", POSTER)
+    # the same /approve: `state` says it settles the plan, and it is never a PRD sign-off `transition` could record
+    assert st["decision"]["settles_plan"] and not st["decision"]["valid"]
+    assert "no valid /approve" in " ".join(sdlc.check_transition(st, "approved", "approval", CONFIG))
     # an answer without /approve is still a replan
     assert derive(["sdlc:needs-info"], asked + [comment(POSTER, "the quiet one", 11)])["action"] == "replan"
 
@@ -744,6 +747,13 @@ def test_rounds_spent_across_revisions_settle_before_and_after_the_question():
                      comment(POSTER, "/approve", 14)]
     st = derive(["sdlc:approved"], fresh)
     assert (st["action"], st["plan_settled"], st["plan_cycle_rounds"]) == ("continue_plan", None, 1)
+    # and an /approve inside the window is void once a new round is recorded, even on the same revision
+    st = derive(["sdlc:approved"], asked + [comment(POSTER, "/approve", 11), review(3, 12, "changes")])
+    assert (st["plan_settled"], st["action"]) == (None, "continue_plan")
+    # an /approve posted just before the question still settles it
+    st = derive(["sdlc:needs-info"], three_revisions() + [comment(POSTER, "/approve", 9),
+                                                          agent("question", None, 10, phase="plan")])
+    assert (st["turn"], st["action"]) == ("agent", "create_plan_issues")
 
 
 def spent_amendment(labels=("sdlc:in-progress",)):
@@ -765,6 +775,9 @@ def test_settled_amendment_at_escalate_plan_and_once_escalated():
     st = derive(["sdlc:escalated"], escalated + [comment(POSTER, "/approve", 41)])
     assert (st["turn"], st["action"], st["plan_settled"]["by"]) == ("agent", "create_plan_issues", POSTER)
     assert sdlc.next_command(st) == "/plan-issue 12"
+    # an escalation before anything was created stays a human's (only an amendment's is settled here)
+    first = SPENT + [agent("escalation", None, 10), comment(POSTER, "/approve", 11)]
+    assert derive(["sdlc:escalated"], first)["action"] == "human"
 
 
 class _Posts:

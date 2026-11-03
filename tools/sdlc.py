@@ -486,6 +486,10 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
                            "rev": latest_plan["rev"]}
             elif c.get("id") not in reply_ids:   # a reply's is listed already
                 ignored.append({"by": c.get("author", ""), "action": "approve"})
+        if settled and decision and decision.get("comment_id") == settled["comment_id"]:
+            # the same /approve settles the plan. It stays no PRD sign-off (`valid` is only that), so it can never be
+            # recorded as an approval by `transition`
+            decision["settles_plan"] = True
     reconcile = None
     if state in REVIEW_DOC and latest_doc and latest_doc["kind"] != REVIEW_DOC[state]:
         conflicts.append(f"label {PREFIX}{state} but the latest revision is a {latest_doc['kind']}")
@@ -527,8 +531,9 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         turn, action = "none", "none"
     elif conflicts:
         turn, action = "human", "fix_conflict"
-    elif state == "escalated" and settled and plan_after_created:
+    elif state == "escalated" and settled and plan_after_created and L.plan_created:
         # a plan amendment escalated with its rounds spent, settled by a person's /approve: plan-create resumes it
+        # (an escalation before anything was created is a human's, as before)
         turn, action = "agent", "create_plan_issues"
     elif state == "escalated":
         turn, action = "human", "human"
@@ -585,10 +590,12 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
             action = "ask_poster"
         else:
             action = "continue_plan"
+    elif state == "needs-info" and settled:
+        turn, action = "agent", "create_plan_issues"   # settled, even by a /approve posted just before the question
     elif replies:
         turn = "agent"
         if state == "needs-info" and doc_approved and L.lane != QUICK:   # a quick brief is never planned
-            action = "create_plan_issues" if settled else "replan"
+            action = "replan"
         elif decision and decision["action"] == "approve" and decision.get("valid"):
             action = "record_approval"
         else:
@@ -1165,7 +1172,8 @@ def print_state(st: dict[str, Any]) -> None:
         print("  replies since the last agent comment: " + ", ".join(f"{r['by']} ({r['url']})" for r in st["replies"]))
     if st["decision"]:
         d = st["decision"]
-        print(f"  decision: /{d['action']} by {d['by']}" + ("" if d.get("valid", True) else " (not valid in this state)")
+        print(f"  decision: /{d['action']} by {d['by']}" + ("" if d.get("valid", True) else " (settles the plan)"
+                                                            if d.get("settles_plan") else " (not valid in this state)")
               + (f": {d['text']}" if d["text"] else ""))
     for ig in st["ignored_keywords"]:
         print(f"  ignored /{ig['action']} from {ig['by']} (not the issue author or a collaborator)")

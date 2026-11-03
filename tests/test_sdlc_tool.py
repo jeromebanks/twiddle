@@ -223,3 +223,4 @@ def test_state_shows_a_plan_settled_by_a_person(capsys):
     assert f"settled: /approve by {POSTER} on plan rev 1" in out
     assert f"plan rounds: 0/{CONFIG['max_plan_rounds']} (this cycle spent {CONFIG['max_plan_rounds']})" in out
     assert f"ignored /approve from {STRANGER}" in out
+    assert f"decision: /approve by {POSTER} (settles the plan)" in out
