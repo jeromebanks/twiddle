@@ -380,7 +380,11 @@ Instead the agents review it:
 1. The planner checks it with its `advisor`.
 2. **Codex** reviews it read-only, ending in `VERDICT: approve` or `VERDICT: changes`.
    `codex-review --plan N` runs each round on the revision as posted, held to the currently
-   approved PRD or diagnosis, in a scratch checkout of `origin/main` it makes and removes.
+   approved PRD or diagnosis, in a scratch checkout of `origin/main` it makes and removes. While
+   the epic is being built (`planned` or `in-progress`, so an amendment: demo feedback, a fix
+   after a milestone review, the next milestone), it reads `origin/epic/N` instead, and the
+   prompt says that branch is ahead of `main`. A missing or unfetchable `epic/N` is a refusal,
+   never a fallback to `main`.
 3. The planner accepts or rebuts each finding, and each round is posted as a
    `plan-review` comment.
 4. When Codex approves the latest revision, that's consensus, and `plan-create`
@@ -532,7 +536,7 @@ makes it work in the worktree by writing every path out in full (`work-slice` §
 | `.worktrees/epic-N`, detached at `origin/epic/N` | `sync N`, `revert-slice S` | merging `main` in, reverting a slice, Codex's milestone review (`codex-review --milestone N` reads it as `sync` left it: it never resets it, and refuses it dirty or behind `epic/N`) | nobody: `sync` and `revert-slice` reset it to `origin/epic/N` before each use |
 | `.worktrees/sdlc-demos`, on `sdlc-demos` | `demo-post` | committing a demo's pictures | nobody: kept |
 | `.worktrees/verify-main-N`, detached at `origin/main` | `verify-main N` | the suite on `main` after an untested release | `verify-main N`, when it's done |
-| `<out>/main`, detached at `origin/main` | `codex-review --plan N` | Codex's plan review reads the repo there | `codex-review --plan N`, when the round ends (a left-over one is replaced on the next run) |
+| `<out>/main`, detached at `origin/main` (`<out>/epic-N` at `origin/epic/N` while the epic is being built) | `codex-review --plan N` | Codex's plan review reads the repo there | `codex-review --plan N`, when the round ends (a left-over one is replaced on the next run) |
 | `<scratchpad>/before` and `after`, detached | `milestone-demo` | the pictures of `main` and `epic/N` | the skill (`git worktree remove`) |
 | a throwaway worktree on `prd/N`, from `origin/main` | `triage-issue` | the approved PRD's one-file PR | the skill |
 
