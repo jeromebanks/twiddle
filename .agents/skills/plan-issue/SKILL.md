@@ -134,8 +134,11 @@ It does what used to be done by hand, so don't run Codex any other way:
   comment's text, written to `<REVIEW>/requirements.md`;
 - it fills `references/codex-plan-prompt.md`; from round 2 on, it adds your response from the
   latest recorded round. It refuses if that round asked for changes and has no response;
-- it runs Codex in a scratch checkout of `origin/main` that it makes and removes (never the
-  primary checkout, which other sessions share), with the model, effort, sandbox, flags and
+- it runs Codex in a scratch checkout that it makes and removes, of `origin/main`, or of
+  `origin/epic/N` while the epic is being built (`planned` or `in-progress`: an amendment is
+  judged against the slices already merged there, and the prompt says that branch is ahead of
+  `main`; a missing or unfetchable `epic/N` refuses, never falling back to `main`), never the
+  primary checkout (which other sessions share), with the model, effort, sandbox, flags and
   timeout from `.sdlc/config.json`'s `codex` section, never your own Codex config;
 - it retries once when Codex times out or ends with no verdict, and saves the report, with what
   the round ran under, to `<REVIEW>/codex.md`.

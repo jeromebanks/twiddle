@@ -5601,9 +5601,36 @@ def plan_round_errors(st: dict[str, Any]) -> list[str]:
     return []
 
 
+PLAN_FETCH_SECONDS = 60   # how long a plan review waits for its one `git fetch` of the branch Codex reads
+
+
+def plan_base(n: int, st: dict[str, Any], config: dict[str, Any], root: Path, fetch: bool) -> tuple[str, str]:
+    """(the branch a plan review reads, its sha on origin). An epic being built (planned or in-progress) is
+    reviewed on `epic/N`, where its merged slices are and main doesn't have them yet; anything else on main.
+    The branch is chosen by state, never by whether it exists: a missing or unfetchable `epic/N` refuses, and
+    is never read as main. `fetch`: one bounded `git fetch` of it first (`--from-file` never fetches)."""
+    building = st.get("state") in BUILD_STATES
+    branch = epic_branch(n) if building else config.get("default_branch", "main")
+    if not PLAN_FETCH_SECONDS > 0:
+        raise SdlcError(f"PLAN_FETCH_SECONDS must be positive (got {PLAN_FETCH_SECONDS})")
+    fix = (f"an epic being built is reviewed on {branch}, never main: check the network and origin, or run "
+           f"`uv run python tools/sdlc.py epic-branch {n}` if origin has no {branch}" if building
+           else f"check the network and origin, then `git fetch origin {branch}`")
+    if fetch:
+        try:
+            git(["fetch", "-q", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"], cwd=root,
+                timeout=PLAN_FETCH_SECONDS)
+        except SdlcError as exc:
+            raise SdlcError(f"could not fetch origin/{branch} ({exc}): {fix}") from None
+    if not (sha := git(["rev-parse", "--verify", "--quiet", f"origin/{branch}^{{commit}}"], cwd=root, check=False)):
+        raise SdlcError(f"there is no origin/{branch} to review the plan on: {fix}")
+    return branch, sha
+
+
 def codex_review_plan(args: argparse.Namespace, config: dict[str, Any], settings: dict[str, Any]) -> int:
-    """Codex on the latest posted plan revision, from a scratch checkout of origin/main (created and removed
-    here: the primary checkout is shared by other sessions), held to the currently approved revision."""
+    """Codex on the latest posted plan revision, from a scratch checkout (created and removed here: the primary
+    checkout is shared by other sessions) of origin/main, or of origin/epic/N while the epic is being built
+    (`plan_base`), held to the currently approved revision."""
     n = args.plan
     if args.from_file:
         bundle = json.loads(Path(args.from_file).read_text())
@@ -5622,9 +5649,7 @@ def codex_review_plan(args: argparse.Namespace, config: dict[str, Any], settings
     doc = next(c for c in bundle["comments"] if c["id"] == st["latest_doc"]["id"])
     root = primary_root()
     main = config.get("default_branch", "main")
-    if not args.from_file:
-        git(["fetch", "-q", "origin", main], cwd=root)
-    sha = git(["rev-parse", "--verify", f"origin/{main}^{{commit}}"], cwd=root)
+    base, sha = plan_base(n, st, config, root, fetch=not args.from_file)
     out = review_scratch(args, f"plan-{n}", root)
     used, requirements = approved_requirements(n, approved_comment(st), doc.get("body", ""), sha, root)
     rounds = []
@@ -5633,12 +5658,13 @@ def codex_review_plan(args: argparse.Namespace, config: dict[str, Any], settings
         rounds = [{"verdict": last["verdict"], "body": c.get("body", ""), "response": last.get("response")}]
     k = st["plan_rounds"]
     # `latest_response` numbers rounds by the list it's given: pad it to the rounds counted so far
-    prompt, files = codex_review.prepare_plan_round(n, plan, requirements, [{}] * (k - len(rounds)) + rounds, out)
-    checkout = out / "main"
-    if isinstance(requirements, Path):          # read by Codex from its checkout of main
+    prompt, files = codex_review.prepare_plan_round(n, plan, requirements, [{}] * (k - len(rounds)) + rounds, out,
+                                                    base=base, epic=base != main)
+    checkout = out / base.replace("/", "-")      # `main`, or `epic-N`
+    if isinstance(requirements, Path):          # read by Codex from its checkout of the base
         files["requirements"] = checkout / requirements
     title = (f"#{n} plan rev {st['latest_plan']['rev']} round {k + 1}, held to {used}; "
-             f"Codex reads {main} at {sha[:12]}")
+             f"Codex reads {base} at {sha[:12]}" + (f" (the epic's branch, ahead of {main})" if base != main else ""))
     record = f"plan-review {n} --plan {files['plan']} --report {out / 'codex.md'} --response <your answers>"
     if args.dry_run:
         return run_codex_round(title, prompt, files, checkout, sha, out, settings, True, record)
