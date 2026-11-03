@@ -1094,11 +1094,12 @@ def fetch_bundle(n: int, config: dict[str, Any], trusted: set[str] | None = None
             "trusted": sorted(trusted if trusted is not None else fetch_trusted(config))}
 
 
-WATCH_RUN_ENV = "TWIDDLE_SDLC_WATCH_RUN"   # set (non-empty) in a run the watcher started: no person is at the keyboard
+WATCH_RUN_ENV = "TWIDDLE_SDLC_WATCH_RUN"   # set in a run the watcher started: no person is at the keyboard
 
 
 def watch_run() -> bool:
-    return bool(os.environ.get(WATCH_RUN_ENV))
+    """Set to anything, even empty, counts (as for tools/demo_shot.py): a doubt is a watched run."""
+    return WATCH_RUN_ENV in os.environ
 
 
 def refuse_offline_decision(args: argparse.Namespace, command: str) -> None:

@@ -239,7 +239,7 @@ def test_a_watched_run_cannot_name_the_approver(tmp_path, capsys, monkeypatch, f
     _no_github(monkeypatch)
     b = _saved(tmp_path, ["sdlc:approved"], [agent("prd", 1, 1)])
     flags = [b if f == "B" else f for f in flags]
-    monkeypatch.setenv(sdlc.WATCH_RUN_ENV, "1")
+    monkeypatch.setenv(sdlc.WATCH_RUN_ENV, "")   # set, even empty, is a watched run
     assert sdlc.main(["reconcile", "12", *flags]) == 1
     assert "go with --dry-run only" in capsys.readouterr().err
     if len(flags) == 4:   # offline, with an approver named: a dry run still shows what it would record
