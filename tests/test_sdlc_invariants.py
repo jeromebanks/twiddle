@@ -321,7 +321,7 @@ def _spent_plan_histories():
             for i in range(CONFIG["max_plan_rounds"]):
                 h.add("plan-review", rev, verdict="changes", round=str(i + 1))
             if amend and asked:
-                h.add("escalation")
+                h.add("escalation", phase="plan")
                 labels = ["sdlc:escalated"]
             elif asked:
                 h.add("question", phase="plan")

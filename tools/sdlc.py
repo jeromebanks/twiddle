@@ -195,6 +195,10 @@ class Ledger:
     # spent (a person's /approve may settle it) until a new Codex round is recorded
     plan_spent: int = 0
     plan_review_index: int = -1          # where the latest Codex round sits: a settling /approve is after it too
+    # a `plan-created` record that a person's /approve settled ({by, rev}): plan-create, cut short after posting it,
+    # may still finish that revision (the epic branch, the label), as a Codex `approve` lets it
+    settled_record: dict[str, Any] | None = None
+    escalation: dict[str, Any] | None = None   # the latest escalation: where, and `phase=plan` for escalate_plan's
     plan_after_created: bool = False     # a plan revision posted since the last plan-created: an amendment
     created: set[str] | None = field(default_factory=set)   # milestones whose issues exist (None: all, legacy)
     plan_created: bool = False           # a plan-created record exists (with no milestones, `created` can't say so)
@@ -300,10 +304,15 @@ def _on_plan_created(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -
     L.feedback = L.feedback_plan = L.plan_after_created = False
     L.plan_rounds, L.plan_review, L.plan_spent = 0, None, 0   # the next amendment gets fresh rounds
     L.plan_created = True
+    L.settled_record = {"by": mk["settled_by"], "rev": _rev(mk)} if mk.get("settled_by") else None
     if "created" not in mk:
         L.created = None
     elif L.created is not None:
         L.created |= {x for x in mk["created"].split(",") if x}
+
+
+def _on_escalation(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    L.escalation = {"index": i, "phase": mk.get("phase")}
 
 
 def _on_demo(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
@@ -382,7 +391,7 @@ MARKERS = {
     "demo-void": _on_demo_void, "demo-request": _on_demo_request,
     "shipped": _on_shipped, "ship-review": _on_ship_review, "epic-tests": _on_epic_tests,
     "main-tests": _on_main_tests, "review-owed": _on_review_owed,
-    "lane": _on_lane, "prd-merged": _on_prd_merged,
+    "lane": _on_lane, "prd-merged": _on_prd_merged, "escalation": _on_escalation,
 }
 
 
@@ -497,6 +506,14 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
             # the same /approve settles the plan. It stays no PRD sign-off (`valid` is only that), so it can never be
             # recorded as an approval by `transition`
             decision["settles_plan"] = True
+    if (settled is None and L.settled_record and latest_plan and L.settled_record["rev"] == latest_plan["rev"]
+            and plan_verdict != "approve" and not plan_after_created):
+        # plan-create recorded this revision as settled, then was cut short (the branch, the label): it may finish
+        settled = {**L.settled_record, "comment_id": None, "url": None}
+    # an escalation a settled /approve may lift: escalate_plan's (`phase=plan`), after the round that spent the cycle;
+    # any other (a sync conflict, a failing suite) stays a human's
+    spent_at = max(-1 if L.plan_index is None else L.plan_index, L.plan_review_index)
+    plan_escalation = bool(L.escalation and L.escalation["phase"] == "plan" and L.escalation["index"] > spent_at)
     reconcile = None
     if state in REVIEW_DOC and latest_doc and latest_doc["kind"] != REVIEW_DOC[state]:
         conflicts.append(f"label {PREFIX}{state} but the latest revision is a {latest_doc['kind']}")
@@ -538,7 +555,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         turn, action = "none", "none"
     elif conflicts:
         turn, action = "human", "fix_conflict"
-    elif state == "escalated" and settled and plan_after_created and L.plan_created:
+    elif state == "escalated" and settled and plan_after_created and L.plan_created and plan_escalation:
         # a plan amendment escalated with its rounds spent, settled by a person's /approve: plan-create resumes it
         # (an escalation before anything was created is a human's, as before)
         turn, action = "agent", "create_plan_issues"
@@ -1218,7 +1235,8 @@ def print_state(st: dict[str, Any]) -> None:
               + (f" (this cycle spent {st['plan_cycle_rounds']})" if st.get("plan_cycle_rounds", 0) > st["plan_rounds"]
                  else ""))
         if s := st.get("plan_settled"):
-            print(f"  settled: /approve by {s['by']} on plan rev {s['rev']}, its Codex rounds spent ({s['url']})")
+            print(f"  settled: /approve by {s['by']} on plan rev {s['rev']}, its Codex rounds spent"
+                  + (f" ({s['url']})" if s.get("url") else " (recorded by plan-create)"))
     for m in (st.get("progress") or {}).get("milestones", []):
         print(f"  milestone {m['title']}: {m['done']}/{m['total']} merged" + ("  (complete)" if m["done"] == m["total"] else ""))
     if st.get("demo_request"):
@@ -1418,6 +1436,8 @@ def command_transition(args: argparse.Namespace, config: dict[str, Any]) -> int:
         raise SdlcError("--body-file is required")
     extra = {"by": st["decision"]["by"], "via": "comment"} if kind == "approval" else {}
     if kind == "question" and st.get("doc_approved") and st.get("lane") != QUICK:   # a quick brief's is triage
+        extra = {"phase": "plan"}
+    if kind == "escalation" and st.get("action") == "escalate_plan":   # a person's /approve may settle this one
         extra = {"phase": "plan"}
     if kind in DOC_KINDS and lane:
         extra = {"lane": lane}

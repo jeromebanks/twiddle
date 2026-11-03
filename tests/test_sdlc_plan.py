@@ -901,15 +901,48 @@ def test_settled_amendment_at_escalate_plan_and_once_escalated():
     assert derive(["sdlc:in-progress"], comments)["action"] == "escalate_plan"
     st = derive(["sdlc:in-progress"], comments + [comment(POSTER, "/approve", 40)])
     assert (st["action"], st["plan_settled"]["by"]) == ("create_plan_issues", POSTER)
-    escalated = comments + [agent("escalation", None, 40)]
+    escalated = comments + [agent("escalation", None, 40, phase="plan")]
     assert derive(["sdlc:escalated"], escalated)["action"] == "human"
     assert derive(["sdlc:escalated"], escalated + [comment(STRANGER, "/approve", 41)])["action"] == "human"
     st = derive(["sdlc:escalated"], escalated + [comment(POSTER, "/approve", 41)])
     assert (st["turn"], st["action"], st["plan_settled"]["by"]) == ("agent", "create_plan_issues", POSTER)
     assert sdlc.next_command(st) == "/plan-issue 12"
     # an escalation before anything was created stays a human's (only an amendment's is settled here)
-    first = SPENT + [agent("escalation", None, 10), comment(POSTER, "/approve", 11)]
+    first = SPENT + [agent("escalation", None, 10, phase="plan"), comment(POSTER, "/approve", 11)]
     assert derive(["sdlc:escalated"], first)["action"] == "human"
+    # an escalation that isn't escalate_plan's (a sync conflict after the settling /approve) stays a human's,
+    # and so does one with no phase (from before this) or one from before the round that spent the cycle
+    st = derive(["sdlc:in-progress"], comments + [comment(POSTER, "/approve", 40)])
+    assert st["action"] == "create_plan_issues"
+    for esc in (agent("escalation", None, 41), agent("escalation", None, 41, phase="sync")):
+        assert derive(["sdlc:escalated"], comments + [comment(POSTER, "/approve", 40), esc])["action"] == "human"
+    early = comments[:-1] + [agent("escalation", None, 32, phase="plan"), comments[-1], comment(POSTER, "/approve", 41)]
+    assert derive(["sdlc:escalated"], early)["action"] == "human"
+
+
+def test_the_escalation_at_escalate_plan_is_marked_phase_plan(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    _, comments = spent_amendment()
+    f = _bundle(tmp_path, comments, labels=("sdlc:in-progress",))
+    assert sdlc.main(["transition", "12", "escalated", "--kind", "escalation", "--reason", "no consensus",
+                      "--from-file", f, "--dry-run"]) == 0
+    assert "kind=escalation phase=plan" in capsys.readouterr().out
+
+
+def test_a_settled_creation_cut_short_after_its_record_can_finish(tmp_path, monkeypatch):
+    plan_c = comment(OWNER, sdlc.render_comment("plan", 1, sdlc.render_plan(make_plan()), CONFIG), 3)
+    settled = (APPROVED + [plan_c] + [review(1, 4 + i, "changes") for i in range(CONFIG["max_plan_rounds"])]
+               + [comment(POSTER, "/approve", 10)])
+    record = agent("plan-created", 1, 11, settled_by=POSTER)
+    for labels in (["sdlc:approved"], ["sdlc:needs-info"]):
+        st = derive(labels, settled + [record])
+        assert (st["action"], st["plan_settled"]["by"]) == ("create_plan_issues", POSTER)
+    f = _bundle(tmp_path, settled + [record])
+    posts = _Posts(monkeypatch)
+    assert sdlc.main(["plan-create", "12", "--from-file", f]) == 0
+    assert posts.labels == ["planned"] and posts.comments == []          # the record is not posted twice
+    # a record without settled_by (an old one, or Codex's approve) grants nothing more than before
+    assert derive(["sdlc:approved"], settled + [agent("plan-created", 1, 11)])["action"] == "continue_plan"
 
 
 class _Posts:
@@ -931,7 +964,7 @@ class _Posts:
 
 def test_plan_create_from_a_settled_escalation_resumes_building_and_names_who_settled(tmp_path, capsys, monkeypatch):
     _, comments = spent_amendment()
-    settled = comments + [agent("escalation", None, 40), comment(POSTER, "/approve", 41)]
+    settled = comments + [agent("escalation", None, 40, phase="plan"), comment(POSTER, "/approve", 41)]
     f = _bundle(tmp_path, settled, labels=("sdlc:escalated",))
     posts = _Posts(monkeypatch)
     assert sdlc.main(["plan-create", "12", "--from-file", f, "--dry-run"]) == 0
