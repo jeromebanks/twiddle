@@ -13,6 +13,7 @@ and every label change and agent comment. Config is `.sdlc/config.json`.
     uv run python tools/sdlc.py escalate-to-full 12 --reason "needs a new fetcher" --dry-run   # quick -> full lane
     uv run python tools/sdlc.py commit-prd 12 --dry-run   # a quick brief moved to the full lane -> docs/prd/
     uv run python tools/sdlc.py plan-validate plan.json
+    uv run python tools/sdlc.py debt-pass-validate 250 pass.json && uv run python tools/sdlc.py debt-pass-post 250 pass.json
     uv run python tools/sdlc.py plan-post 12 plan.json --dry-run
     uv run python tools/sdlc.py codex-review --plan 12 --out review       # Codex on the posted plan revision
     uv run python tools/sdlc.py plan-review 12 --plan review/plan.json --report review/codex.md --response response.md
@@ -59,6 +60,7 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.parse
 import sys
 import tempfile
 import time
@@ -97,6 +99,8 @@ BUILD_STATES = {"planned", "in-progress"}     # the epic's slices are being buil
 QUICK = sdlc_quick.QUICK                        # the lane of a small, safe change: one brief, no epic
 QUICK_LABEL = f"lane:{QUICK}"
 FULL = "full"            # a `kind=lane lane=full` record: an approved quick brief moved to the full lane
+DEBT_LANE = "debt"                              # the debt lane: one open debt epic holding every open tech-debt ticket
+DEBT_EPIC_LABEL = f"lane:{DEBT_LANE}"           # marks the debt epic (its tickets carry `tech-debt`, DEBT_LABEL)
 TRIAGE_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label"}
 PLAN_ACTIONS = {"plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone",
                 "escalate_plan"}
@@ -109,7 +113,8 @@ DEMO_ACTIONS = {"record_demo_acceptance", "demo_reply", "demo_heard"}
 ALL_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label",
                "plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone", "escalate_plan",
                "record_demo_acceptance", "demo_reply", "demo_heard",
-               "work_slices", "work_quick", "commit_prd", "wait_for_poster", "human", "fix_conflict", "none"}
+               "work_slices", "work_quick", "commit_prd", "wait_for_poster", "human", "fix_conflict", "none",
+               "debt_intake", "plan_pass", "debt_waiting", "work_debt", "merge_debt", "pass_end"}
 NO_MILESTONE = "all"     # an epic planned without milestones has one demo, for all of it
 # from-state -> states the triage skill may move to. `escalated` is open from anywhere.
 TRANSITIONS = {
@@ -187,7 +192,7 @@ class Ledger:
     plan_review: dict[str, Any] | None = None   # the latest round counted in plan_rounds: its response feeds the next
     plan_after_created: bool = False     # a plan revision posted since the last plan-created: an amendment
     created: set[str] | None = field(default_factory=set)   # milestones whose issues exist (None: all, legacy)
-    cleanups: set[str] = field(default_factory=set)         # milestones whose tech-debt cleanup is planned
+    plan_created: bool = False           # a plan-created record exists (with no milestones, `created` can't say so)
     feedback: bool = False               # demo changes (the poster's or the agent's) not yet turned into issues
     feedback_plan: bool = False          # a plan revision posted since that feedback
     demos: dict[str, dict[str, Any]] = field(default_factory=dict)   # milestone -> its latest demo
@@ -284,8 +289,7 @@ def _on_plan_review(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) ->
 def _on_plan_created(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     L.feedback = L.feedback_plan = L.plan_after_created = False
     L.plan_rounds, L.plan_review = 0, None   # the next amendment (a milestone's replan, demo changes) gets fresh rounds
-    if mk.get("cleanup"):
-        L.cleanups.add(mk["cleanup"])
+    L.plan_created = True
     if "created" not in mk:
         L.created = None
     elif L.created is not None:
@@ -401,8 +405,10 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
               "action": "none", "plan_kind": plan_kind, "conflicts": []}
         if plan_kind == "debt":   # where it came from, from its own marker: issue N is never looked up (it may be closed)
             mk = parse_marker(issue.get("body", "")) or {}
-            st.update(debt_of=mk.get("epic"), debt_lane=mk.get("lane"))
+            st.update(debt_of=mk.get("epic"), debt_lane=mk.get("lane"), debt_generation=debt_generation(mk),
+                      debt_waits=mk.get("waits"), debt_legacy="generation" not in mk)
         return st
+    debt_epic = DEBT_EPIC_LABEL in issue.get("labels", [])
     all_labels = state_labels(config)
     found = [l for l in issue.get("labels", []) if l in all_labels]
     conflicts: list[str] = []
@@ -424,7 +430,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     latest_plan, plan_verdict, plan_rounds, plan_body = L.latest_plan, L.plan_verdict, L.plan_rounds, L.plan_body
     demos, latest_demo, request = L.demos, L.latest_demo, L.request
     feedback, feedback_plan, plan_after_created = L.feedback, L.feedback_plan, L.plan_after_created
-    created, cleanups = L.created, L.cleanups
+    created = L.created
     shipped, ship_reviews, epic_tests = L.shipped, L.ship_reviews, L.epic_tests
     review_owed = L.review_owed
     untested = L.untested
@@ -497,6 +503,10 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         turn, action = "human", "fix_conflict"
     elif state == "escalated":
         turn, action = "human", "human"
+    elif debt_epic:
+        # the debt epic is never triaged and never a feature epic: what is due comes from its tickets on
+        # GitHub (debt_view, applied by with_next), so "none" here only until that is read
+        turn, action = "agent", "none"
     elif state in LATER_STATES:
         turn, action = "later", "none"
     elif state in BUILD_STATES and quick:
@@ -560,7 +570,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     type_label = next((t for t in ("bug", "enhancement") if t in issue.get("labels", [])), None)
     return {
         "number": issue.get("number"), "title": issue.get("title"), "state": state, "turn": turn,
-        "action": action, "type": type_label, "lane": L.lane, "latest_doc": latest_doc, "approved_rev": approved_rev,
+        "action": action, "type": type_label, "lane": DEBT_LANE if debt_epic else L.lane, "latest_doc": latest_doc, "approved_rev": approved_rev,
         "approved_doc": L.approved_doc, "to_full": L.to_full, "prd_merged": L.prd_merged,
         "approval_by": approval_by, "rounds": rounds, "max_rounds": config.get("max_rounds", 5),
         "replies": [{"id": c.get("id"), "by": c.get("author"), "url": c.get("url")} for c in replies],
@@ -571,22 +581,105 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "demos": demos, "latest_demo": latest_demo, "feedback": feedback,
         "shipped": shipped, "ship_reviews": ship_reviews, "epic_tests": epic_tests, "untested": untested,
         "review_owed": review_owed,
-        "demo_request": request, "cleanups": sorted(cleanups),
+        "demo_request": request,
         "planned_milestones": planned_ms, "created_milestones": sorted(created_ms, key=natural_key),
         "uncreated_milestones": uncreated, "create_mode": latest_plan_json.get("create") or config.get("create", "milestone"),
+        "plan_created": L.plan_created, "issue_closed": issue.get("state", "open").lower() == "closed",
     }
 
 
 is_quick = sdlc_quick.is_quick     # a quick change: its latest or its approved revision is in the quick lane
 
 
+def debt_generation(mk: dict[str, str]) -> int | None:
+    """A debt marker's generation: 1 from a feature, a quick change or a demo, its ticket's + 1 from a debt PR. An
+    old marker (no `generation=`) is generation 1; one that isn't a positive whole number is None, never a guess."""
+    g = mk.get("generation", "1")
+    return int(g) if g.isdigit() and int(g) > 0 else None
+
+
+def unshipped_milestone(src: dict[str, Any]) -> str | None:
+    """The feature epic's earliest created milestone not yet shipped to main (the one `merge` builds now), from its
+    state alone: debt filed against it waits for that ship. An open, not-done epic whose plan was created with no
+    named milestones has one release, `all` (NO_MILESTONE), until it ships. None for a quick change, a debt ticket
+    or epic, an unplanned epic, a closed or done one with no named milestones, or one whose milestones have all
+    shipped."""
+    if src.get("plan_kind") or is_quick(src) or is_debt_epic(src):
+        return None
+    shipped = src.get("shipped") or {}
+    if created := src.get("created_milestones"):
+        return next((m for m in created if m not in shipped), None)
+    return NO_MILESTONE if no_milestone_building(src) and NO_MILESTONE not in shipped else None
+
+
+def no_milestone_building(src: dict[str, Any]) -> bool:
+    """An epic whose plan was created with no named milestones, still open and not done: its one release, `all`,
+    holds its debt back until it ships. Closed or done, it holds nothing back, whatever a ticket's `waits=` says."""
+    return bool(src.get("plan_created") and not src.get("issue_closed") and src.get("state") not in LATER_STATES)
+
+
+def wait_target(epic: Any, milestone: str) -> str:
+    """What a debt ticket waits on to ship: `#12's M1`, or `#12` itself for an epic with no named milestones."""
+    return f"#{epic}" if milestone == NO_MILESTONE else f"#{epic}'s {milestone}"
+
+
+def debt_wait_source(st: dict[str, Any]) -> int | None:
+    """The epic whose state says whether this debt ticket still waits: the one its `waits=` names, or, for an old
+    marker (no generation) that isn't a quick change's, its source epic. A new marker without `waits=` never waits."""
+    if st.get("debt_waits"):
+        epic = st["debt_waits"].split(":", 1)[0]
+        return int(epic) if epic.isdigit() else None
+    if st.get("debt_legacy") and st.get("debt_lane") != QUICK and (st.get("debt_of") or "").isdigit():
+        return int(st["debt_of"])
+    return None
+
+
+def debt_waiting_for(st: dict[str, Any], src: dict[str, Any] | None) -> dict[str, Any] | None:
+    """{epic, milestone} a debt ticket waits for (no pass takes it until that milestone ships to main), or None.
+    `src` is the state of debt_wait_source's epic; without it an explicit `waits=` is taken as still waiting (its
+    ship can't be seen), and an old marker as not waiting (nothing to derive it from)."""
+    epic = debt_wait_source(st)
+    if epic is None:
+        return None
+    if st.get("debt_waits"):
+        ms = st["debt_waits"].split(":", 1)[1] if ":" in st["debt_waits"] else ""
+        if not ms:
+            return None
+        if src is not None and (ms in (src.get("shipped") or {}) or ms == NO_MILESTONE and not no_milestone_building(src)):
+            return None
+        return {"epic": epic, "milestone": ms}
+    ms = unshipped_milestone(src) if src is not None else None
+    return {"epic": epic, "milestone": ms} if ms else None
+
+
+def debt_ticket_next(st: dict[str, Any]) -> str:
+    """`next` for a tech-debt ticket: its debt epic works it (or `debt-epic` attaches it to one first)."""
+    n, held = st["number"], st.get("debt_epic")
+    if not held:
+        return f"`uv run python tools/sdlc.py debt-epic` (#{n} is tech debt in no open debt epic: it attaches it)"
+    w, asked = st.get("waiting_for"), st.get("person_request")
+    return (f"nothing for #{n} alone: it is tech debt in debt epic #{held}"
+            + (f", waiting for {wait_target(w['epic'], w['milestone'])} to ship to main" if w else "")
+            + (f", waiting on a person ({asked['url']}): a reply from its author or a collaborator puts it back for "
+               "a later pass" if asked else "")
+            + f" (`uv run python tools/sdlc.py state {held}` says what is due)")
+
+
+def is_debt_epic(st: dict[str, Any]) -> bool:
+    """The debt epic (`lane:debt`): its tickets are worked through passes, never through a feature epic's plan."""
+    return st.get("lane") == DEBT_LANE
+
+
 def epic_building(st: dict[str, Any]) -> bool:
     """An epic whose slices are being built: `planned` or `in-progress`, and not a quick change."""
-    return st["state"] in BUILD_STATES and not is_quick(st)
+    return st["state"] in BUILD_STATES and not is_quick(st) and not is_debt_epic(st)
 
 
 def refuse_quick(st: dict[str, Any], what: str) -> None:
-    """Epic-only commands stop here for a quick change, before they look up any plan or progress."""
+    """Epic-only commands stop here for a quick change (or the debt epic), before they look up any plan or progress."""
+    if is_debt_epic(st):
+        raise SdlcError(f"#{st['number']} is the debt epic, not a feature epic: it has no {what} "
+                        f"(`uv run python tools/sdlc.py state {st['number']}` says what is due)")
     if is_quick(st):
         raise SdlcError(f"#{st['number']} is a quick change, not an epic: it has no {what} "
                         f"(`/work-slice {st['number']} --quick` builds it)")
@@ -598,11 +691,12 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
     `progress` (from epic_progress) is needed for an epic whose slices are being built.
     """
     n, a = st["number"], st["action"]
-    if st.get("plan_kind") == "debt" and st.get("debt_lane") == QUICK:
-        return (f"nothing: #{n} is tech debt from quick change #{st.get('debt_of')}, waiting in the open `{DEBT_LABEL}` "
-                f"list (a quick change has no epic and no cleanup pass; remove `{DEBT_LABEL}` to triage it alone)")
     if st.get("plan_kind") == "debt":
-        return f"nothing: #{n} is tech debt, planned by its epic's cleanup pass (remove `{DEBT_LABEL}` to triage it alone)"
+        return debt_ticket_next(st)
+    if is_debt_epic(st) and st.get("debt") is not None:   # debt_view, applied by with_next
+        return st["debt"]["next"]
+    if is_debt_epic(st) and a == "none" and st["turn"] == "agent":   # debt_view not applied: its tickets are needed
+        return f"`uv run python tools/sdlc.py state {n}` (needs the debt epic's tickets)"
     if st.get("plan_kind"):
         return f"`uv run python tools/sdlc.py slice-status {n}`"
     if a in TRIAGE_ACTIONS:
@@ -648,7 +742,7 @@ def done_phrase(m: dict[str, Any]) -> str:
 # --- the epic view: one answer to "where is this epic, and what may happen now?" ------
 #
 # Every gate (claim, merge, ship) and `next` read this view, so they can't disagree.
-# It joins the ledger (derive_state: demos, releases, cleanup passes) with the
+# It joins the ledger (derive_state: demos, releases) with the
 # slices' progress on GitHub. A milestone moves through MILESTONE_FLOW; the epic
 # works on one milestone at a time, the earliest one not shipped, and what's due
 # for it decides the next command.
@@ -692,51 +786,24 @@ def milestone_phases(st: dict[str, Any], progress: dict[str, Any]) -> list[dict[
     return out
 
 
-def cleanup_owed(st: dict[str, Any], progress: dict[str, Any], phases: list[dict[str, Any]],
-                 cur: dict[str, Any]) -> str | None:
-    """The shipped milestone just before `cur` whose budgeted tech-debt cleanup isn't planned yet.
-
-    Only with open debt and a budget; after the last milestone there's nowhere to put it, so it stays filed.
-    """
-    i = phases.index(cur)
-    prev = phases[i - 1] if i else None
-    if prev and prev["phase"] == "shipped" and progress.get("debt") and progress.get("cleanup_budget") \
-            and prev["key"] not in (st.get("cleanups") or []):
-        return prev["key"]
-    return None
-
-
 def offered_slices(progress: dict[str, Any], cur: dict[str, Any] | None) -> list[int]:
-    """The ready slices the epic may start now: the current milestone's, its cleanup pass first
-    (and whatever open work a cleanup slice itself waits on)."""
+    """The ready slices the epic may start now: the current milestone's."""
     if not cur:
         return []
     units = progress.get("units") or {}
-    mine = [r for r in progress["ready"] if (units.get(r) or {}).get("milestone", cur["key"]) == cur["key"]]
-    cleanup = [n for n in progress.get("cleanup_open") or [] if (units.get(n) or {}).get("milestone", cur["key"]) == cur["key"]]
-    if cleanup:
-        allowed = set(cleanup) | set(progress.get("cleanup_needs") or [])
-        mine = [r for r in mine if r in allowed]
-    return mine
-
-
-def current_cleanup(progress: dict[str, Any], cur: dict[str, Any] | None) -> list[int]:
-    units = progress.get("units") or {}
-    return [n for n in progress.get("cleanup_open") or []
-            if cur and (units.get(n) or {}).get("milestone", cur["key"]) == cur["key"]]
+    return [r for r in progress["ready"] if (units.get(r) or {}).get("milestone", cur["key"]) == cur["key"]]
 
 
 def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
-    """{phases, current, due, cleanup, offered, next}: due is one of verify, done, plan_next, review, demo, ship,
-    cleanup, sync, build."""
+    """{phases, current, due, offered, next}: due is one of verify, done, plan_next, review, demo, ship,
+    sync, build."""
     n = st["number"]
     if is_quick(st):   # no milestones, demos or slices: never offer an epic's next step for it
-        return {"number": n, "phases": [], "current": None, "due": "quick", "cleanup": None, "offered": [],
-                "cleanup_open": [], "cleanup_needs": [], "next": f"/work-slice {n} --quick: a quick change is no epic"}
+        return {"number": n, "phases": [], "current": None, "due": "quick", "offered": [],
+                "next": f"/work-slice {n} --quick: a quick change is no epic"}
     phases = milestone_phases(st, progress)
     cur = next((m for m in phases if m["phase"] != "shipped"), None)
     offered = offered_slices(progress, cur)
-    cleanup = cleanup_owed(st, progress, phases, cur) if cur and cur["phase"] == "building" else None
     behind = progress.get("behind_main")
     units = progress.get("units") or {}
     if st.get("untested"):
@@ -749,10 +816,7 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
                else f"/milestone-demo {n}: every unit of work is merged")
     elif cur["phase"] == "uncreated":
         due = "plan_next"
-        debt = progress.get("debt") or []
-        nxt = (f"/plan-issue {n}: plan {cur['key']} with what earlier milestones taught"
-               + (f" (and up to {progress['cleanup_budget']} of its {len(debt)} tech-debt issue(s))"
-                  if debt and progress.get("cleanup_budget") else ""))
+        nxt = f"/plan-issue {n}: plan {cur['key']} with what earlier milestones taught"
     elif cur["phase"] == "review":
         due = "review"
         owed = (st.get("review_owed") or {}).get(cur["key"]) or []
@@ -767,10 +831,6 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
         later = any(m["phase"] == "uncreated" for m in phases)
         nxt = f"/milestone-demo {n}: {cur['key']} is accepted; ship it to main" + (
             ", then plan the next milestone" if later and st.get("action") == "plan_next_milestone" else " (new slices wait)")
-    elif cleanup:
-        due = "cleanup"
-        nxt = (f"/plan-issue {n} --cleanup: {cleanup} is accepted and #{n} has {len(progress['debt'])} open tech-debt "
-               f"issue(s); plan up to {progress['cleanup_budget']} before the next milestone's slices")
     elif behind and not offered and not progress["in_flight"]:
         due = "sync"
         nxt = f"`uv run python tools/sdlc.py sync {n}`: {epic_branch(n)} is {behind} commit(s) behind main"
@@ -789,9 +849,7 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
             nxt = "nothing for an agent: escalated " + ", ".join(f"#{x}" for x in progress["escalated"])
         else:
             nxt = f"nothing ready: the open units of work on #{n} are all blocked"
-    return {"number": n, "phases": phases, "current": cur, "due": due, "cleanup": cleanup, "offered": offered,
-            "cleanup_open": current_cleanup(progress, cur), "cleanup_needs": progress.get("cleanup_needs") or [],
-            "next": nxt}
+    return {"number": n, "phases": phases, "current": cur, "due": due, "offered": offered, "next": nxt}
 
 
 def pause_errors(view: dict[str, Any]) -> list[str]:
@@ -809,15 +867,9 @@ def pause_errors(view: dict[str, Any]) -> list[str]:
     return []
 
 
-def claim_errors(view: dict[str, Any], number: int, milestone: str | None, cleanup: bool) -> list[str]:
-    """Why a fresh claim of this slice must wait: a paused epic, a later milestone, or the cleanup pass first."""
-    errs = pause_errors(view) or merge_errors(view, milestone)
-    if not errs and view["due"] == "cleanup" and not cleanup:
-        errs.append(f"the cleanup pass after {view['cleanup']} is owed: `/plan-issue {view['number']} --cleanup` first")
-    held = [x for x in view["cleanup_open"] if x != number]
-    if not errs and held and not cleanup and number not in view["cleanup_needs"]:
-        errs.append("the cleanup pass comes first: " + ", ".join(f"#{x}" for x in held))
-    return errs
+def claim_errors(view: dict[str, Any], milestone: str | None) -> list[str]:
+    """Why a fresh claim of this slice must wait: a paused epic, or a later milestone."""
+    return pause_errors(view) or merge_errors(view, milestone)
 
 
 def merge_errors(view: dict[str, Any], milestone: str | None) -> list[str]:
@@ -839,10 +891,6 @@ def due_milestone(demos: dict[str, dict[str, Any]], progress: dict[str, Any],
 
 def current_milestone(epic: dict[str, Any], progress: dict[str, Any] | None) -> dict[str, Any] | None:
     return epic_view(epic, progress)["current"] if progress else None
-
-
-def cleanup_due(st: dict[str, Any], progress: dict[str, Any]) -> str | None:
-    return epic_view(st, progress)["cleanup"]
 
 
 def claim_pause_errors(epic: dict[str, Any], progress: dict[str, Any] | None) -> list[str]:
@@ -926,6 +974,7 @@ HEADERS = {
     "demo-changes": "changes requested",
     "demo-void": "demo voided",
     "demo-request": "demo steps for you to run",
+    "debt-request": "a check for you to run",
     "epic-branch": "epic branch",
     "epic-tests": "test run on the epic branch",
     "ship-review": "Codex review of the milestone",
@@ -936,8 +985,12 @@ HEADERS = {
     "review-deferred": "Codex review deferred to the milestone",
     "review-owed": "Codex review owed at the milestone",
     "quick-merged": "merged to main",
+    "debt-merged": "debt PR merged to main",
     "lane": "moved to the full lane",
     "prd-merged": "PRD merged",
+    "intake": "debt intake",
+    "debt-pass": "debt pass plan",
+    "debt-pass-end": "debt pass ended",
 }
 FOOTERS = {
     "question": "Reply in a comment. Anything you leave unanswered, I will assume the stated default.",
@@ -947,6 +1000,8 @@ FOOTERS = {
              "or just ask a question."),
     "demo-request": ("Run them when you can, then reply here with what you heard and saw, in your own words. "
                      "The demo continues from your reply."),
+    "debt-request": ("Run it when you can, then reply here with what you heard and saw, in your own words. Your reply "
+                     "puts this ticket back for the next debt pass."),
     "plan": ("Nothing for you to sign off: Claude and Codex review this plan until they agree. "
              "If they can't, I'll ask you here in plain terms."),
 }
@@ -1058,7 +1113,17 @@ def set_state_label(n: int, current: list[str], to: str, config: dict[str, Any],
 
 def print_state(st: dict[str, Any]) -> None:
     if st.get("plan_kind"):
-        print(f"#{st['number']} {st['title']}\n  a plan:{st['plan_kind']} issue\n  next: {st.get('next')}")
+        print(f"#{st['number']} {st['title']}\n  a plan:{st['plan_kind']} issue"
+              + (f"\n  in debt epic #{st['debt_epic']}" if st.get("debt_epic") else ""))
+        if st["plan_kind"] == "debt":
+            w = st.get("waiting_for")
+            print(f"  tech debt of #{st.get('debt_of') or '?'}, generation {st.get('debt_generation') or '? (a bad marker)'}"
+                  + (f"; waits for {wait_target(w['epic'], w['milestone'])} to ship to main" if w else "")
+                  + (f"; waits on a person ({st['person_request']['url']})" if st.get("person_request") else ""))
+        if g := st.get("group"):   # an open pass holds it: `slice-status`'s group and rating, outside `next`
+            print(f"  in pass {st['pass']}, group `{g['key']}` (" + ", ".join(f"#{t}" for t in g["tickets"]) + ")"
+                  + (f"   complexity: {st['complexity']} (model {st['model']})" if st.get("complexity") else ""))
+        print(f"  next: {st.get('next')}")
         return
     doc = st["latest_doc"]
     print(f"#{st['number']} {st['title']}")
@@ -1077,6 +1142,23 @@ def print_state(st: dict[str, Any]) -> None:
         print(f"  ignored /{ig['action']} from {ig['by']} (not the issue author or a collaborator)")
     for c in st["conflicts"]:
         print(f"  CONFLICT: {c}")
+    if (dv := st.get("debt")) is not None:
+        none = [t["number"] for t in dv["tickets"] if t.get("intake") not in INTAKE_VERDICTS]
+        short = [f"#{t['number']} ({t['intake']})" for t in dv["tickets"]
+                 if t.get("intake") in INTAKE_VERDICTS and t["intake"] != "debt"]
+        print(f"  debt epic: {len(dv['tickets'])} open ticket(s)"
+              + (f", without an intake verdict: {', '.join(f'#{t}' for t in none)}" if none else "")
+              + (f", intake cut short: {', '.join(short)}" if short else ""))
+        for p in dv.get("passes") or []:
+            print(f"  pass {p['pass']}: " + (", ".join(f"#{t}" for t in p["tickets"]) or "no readable tickets")
+                  + ("   (open)" if p["open"] else "   (ended" + (f": {p['end']['joined']} joined, {p['end']['closed']} "
+                                                                 "closed" if p.get("end") else "")
+                     + ("; escalated" if p.get("escalated") else "") + ")")
+                  + (f"  {p['url']}" if p.get("url") else ""))
+        waits = [f"#{t['number']} {ticket_wait_text(t)}" for t in dv["tickets"]
+                 if t.get("intake") == "debt" and (t.get("waiting_for") or t.get("waits_on_person"))]
+        if waits:
+            print("  waiting: " + "; ".join(waits))
     if st["reconcile"]:
         print(f"  needs reconcile ({st['reconcile']}): run `reconcile`")
     for d in (st.get("demos") or {}).values():
@@ -1091,8 +1173,6 @@ def print_state(st: dict[str, Any]) -> None:
               f"   plan rounds: {st['plan_rounds']}/{st['max_plan_rounds']}")
     for m in (st.get("progress") or {}).get("milestones", []):
         print(f"  milestone {m['title']}: {m['done']}/{m['total']} merged" + ("  (complete)" if m["done"] == m["total"] else ""))
-    if (st.get("progress") or {}).get("debt"):
-        print("  open tech debt: " + ", ".join(f"#{d}" for d in st["progress"]["debt"]))
     if st.get("demo_request"):
         r = st["demo_request"]
         print(f"  demo steps asked of a person for {r['milestone']}: {r['url']}"
@@ -1122,7 +1202,63 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
     progress = None
     if st["action"] in ("work_slices", "plan_next_milestone") and not offline:
         progress = epic_progress(st["number"], config, trusted if trusted is not None else fetch_trusted(config))
+    if st.get("plan_kind") == "debt":   # the ticket's debt epic, if one holds it (offline: the bundle's `debt_epic`)
+        held_by = ((bundle or {}).get("debt_epic") if offline else
+                   ticket_debt_epic(st["number"], config, trusted if trusted is not None else fetch_trusted(config)))
+        # what it waits for, from the epic its marker points at (offline: the bundle's `source`, that epic's bundle)
+        src = None
+        if (wait_on := debt_wait_source(st)) is not None:
+            sb = ((bundle or {}).get("source") if offline else
+                  fetch_bundle(wait_on, config, trusted if trusted is not None else fetch_trusted(config)))
+            src = bundle_state({"trusted": (bundle or {}).get("trusted", []), **sb}, config) if sb else None
+        asked = (person_request(bundle["comments"], set(bundle["trusted"]), bundle["issue"].get("author", ""))
+                 if bundle else None)
+        st = {**st, "debt_epic": held_by, "waiting_for": debt_waiting_for(st, src), "person_request": asked}
+    held = is_debt_epic(st) and st["state"] == "escalated" and st["action"] == "human"
+    if is_debt_epic(st) and (held or (st["action"] == "none" and st["turn"] == "agent")):
+        # what the debt epic has due comes from its tickets (offline: the bundle's `debt`, {"tickets": [...]}); one a
+        # person holds (escalated) only reports a pass end `debt-epic` has to write (its close, most of all)
+        dp = ((bundle or {}).get("debt") if offline else
+              debt_progress(st["number"], config, trusted if trusted is not None else fetch_trusted(config)))
+        if dp is not None:
+            if "passes" not in dp:   # offline: the passes posted on the epic, from the bundle's comments
+                dp = {**dp, "passes": debt_passes((bundle or {}).get("comments") or [],
+                                                  set((bundle or {}).get("trusted") or []))}
+            view = debt_view(st, dp, load_debt(config), config.get("models"))
+            if held and view["action"] != "pass_end":
+                view = None
+            if view and view["action"] == "merge_debt" and not offline:   # what the gate says now (read-only)
+                view["gate"] = debt_gate_read(view["merge_due"][0]["pr"], config,
+                                              trusted if trusted is not None else fetch_trusted(config))
+                view["next"] = debt_merge_next(view["merge_due"], view["gate"], view["also"])
+            if view:
+                st = {**st, "action": view["action"], "turn": view["turn"], "debt": view}
+                progress = dp
     nxt = next_command(st, progress)
+    if st.get("plan_kind") == "debt" and st.get("debt_epic") and bundle is not None:
+        # a ticket an open pass holds is built as `slice-status` says (derive_debt's `next`, its group's PR due to
+        # merge included). Offline reads the passes from the bundle's `epic_comments`; a failed online read leaves
+        # `next` as it was
+        dst = None
+        if offline:
+            if "epic_comments" in bundle:
+                dst = derive_debt({"members": [], "pr": None, "pr_comments": [], **bundle,
+                                   "debt_epic": st["debt_epic"]}, config)
+        else:
+            trusted = trusted if trusted is not None else set(bundle["trusted"])
+            try:
+                issue, comments = fetch_slice(st["number"], config)
+                dst = derive_debt(debt_bundle(st["number"], config, trusted, issue, comments), config)
+                if dst["merge_due"]:
+                    dst["next"] = merge_next(dst["pr"], debt_gate_read(dst["pr"], config, trusted))
+            except SdlcError as exc:
+                print(f"could not read #{st['number']}'s group PR ({exc}): `next` doesn't say whether it may merge",
+                      file=sys.stderr)
+        if dst and dst["state"] in ("ready", "claimed", "in-review", "escalated") and not st.get("waiting_for"):
+            nxt = dst["next"]   # a claim its ended pass kept included: its release
+            if dst["group"] and dst["group"]["open_pass"]:   # only an open pass is the ticket's pass
+                st = {**st, "pass": dst["pass"], "group": dst["group"], "complexity": dst["complexity"],
+                      "model": dst["model"]}
     # a quick change that claim refuses is not offered to /work-slice (read offline: no git). The bundle gives
     # claim's issue checks too (the rating, the brief's sections); without one, only the brief's `## Files`
     if st["action"] == "work_quick":
@@ -1133,6 +1269,17 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
             errs = quick_claim_errors(st["number"], approved_brief(st) or "", False, config, offline=True)
         if errs:
             nxt = f"/triage-issue {st['number']}: " + "; ".join(errs)
+        elif bundle is not None and not offline and st["state"] == "in-progress":
+            # its PR may be due to merge: read its records, then the gate. A failed read leaves `next` as it was
+            try:
+                pr = find_slice_pr(st["number"], config)
+                b = {**bundle, "pr": pr, "pr_comments": fetch_pr(pr["number"], config)[1] if pr else []}
+            except SdlcError as exc:
+                print(f"could not read #{st['number']}'s PR ({exc}): `next` doesn't say whether it may merge",
+                      file=sys.stderr)
+                pr = None
+            if pr and derive_quick(b, st, config)["merge_due"]:
+                nxt = merge_next(pr["number"], merge_due_gate(b, {"pr": pr["number"]}, True, config))
     return {**st, "progress": progress, "next": nxt}
 
 
@@ -1152,24 +1299,43 @@ def command_state(args: argparse.Namespace, config: dict[str, Any]) -> int:
 
 def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
     repo = repo_of(config)
-    issues = gh_json(["issue", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json",
+    issues = gh_json(["issue", "list", "--repo", repo, "--state", "open", "--limit", str(NEXT_LIMIT), "--json",
                       "number,title,state,author,labels,createdAt"])
     trusted = fetch_trusted(config)
     out = []
+
+    def consider(n: int) -> None:
+        b = fetch_bundle(n, config, trusted)
+        st = bundle_state(b, config)
+        # a debt epic a person holds may still have a pass end due (its close): with_next says
+        if st["turn"] == "agent" or (is_debt_epic(st) and st["state"] == "escalated" and st["action"] == "human"):
+            st = with_next(st, config, trusted=trusted, bundle=b)
+            if st["turn"] == "agent":   # the debt epic's turn comes from its tickets, in with_next
+                out.append(st)
+
     for raw in sorted(issues, key=lambda i: i["number"]):
         if any(l["name"] in ("plan:slice", "plan:subtask", DEBT_LABEL) for l in raw.get("labels", [])):
             continue   # an epic's units of work, or its tech debt: reached through the epic's `next`
-        b = fetch_bundle(raw["number"], config, trusted)
-        st = bundle_state(b, config)
-        if st["turn"] == "agent":
-            out.append(with_next(st, config, trusted=trusted, bundle=b))
+        consider(raw["number"])
+    loose, debt_epics = unattached_debt(issues, config, trusted)
+    for e in sorted(set(debt_epics) - {i["number"] for i in issues}):   # a debt epic behind a list cut at its limit
+        consider(e)
+    if len(debt_epics) > 1:
+        out.append({"number": None, "state": DEBT_LANE, "turn": "human", "debt_epics": debt_epics,
+                    "title": "more than one open debt epic: " + ", ".join(f"#{e}" for e in debt_epics),
+                    "next": "nothing for an agent: a person closes all but one, moving its sub-issues to the one kept"})
+    elif loose:   # debt no epic holds yet: nobody has to remember to run debt-epic
+        out.append({"number": None, "state": DEBT_LANE, "turn": "agent", "unattached": loose,
+                    "title": "open tech debt in no debt epic: " + ", ".join(f"#{d}" for d in loose),
+                    "next": "`uv run python tools/sdlc.py debt-epic`"})
     if args.json:
         print(json.dumps(out, indent=2))
     elif not out:
         print("nothing waiting on the agent")
     else:
         for st in out:
-            print(f"#{st['number']:<4} {st['state']:<17} {st['title']}\n      next: {st['next']}")
+            num = f"#{st['number']}" if st["number"] is not None else "-"
+            print(f"{num:<5} {st['state']:<17} {st['title']}\n      next: {st['next']}")
     return 0
 
 
@@ -1672,11 +1838,12 @@ def _text(v: Any) -> bool:
     return isinstance(v, str) and bool(v.strip())
 
 
-def validate_plan(plan: Any, criteria: set[int] | None = None) -> list[str]:
+def validate_plan(plan: Any, criteria: set[int] | None = None, kept: set[str] | frozenset[str] = frozenset()) -> list[str]:
     """Reasons a plan can't be posted or created (empty list = fine).
 
     `criteria` are the PRD's numbered acceptance criteria: each must be covered
-    by some leaf, and no leaf may claim one that doesn't exist.
+    by some leaf, and no leaf may claim one that doesn't exist. `kept` are the slices that
+    already carried the retired `debt` field (`kept_debt_keys`): they may keep it, ignored.
     """
     if not isinstance(plan, dict):
         return ["the plan is not a JSON object"]
@@ -1746,11 +1913,13 @@ def validate_plan(plan: Any, criteria: set[int] | None = None) -> list[str]:
     if all(isinstance(k, str) for k in mkeys) and mkeys != sorted(mkeys, key=natural_key):
         errs.append(f"list milestones in order ({', '.join(sorted(mkeys, key=natural_key))}): "
                     "they are built and shipped in that order")
-    if (co := plan.get("cleanup_of")) is not None and co not in mkeys:
-        errs.append(f"`cleanup_of` names the accepted milestone whose tech debt this pays down, not {co!r}")
+    # the cleanup pass is gone (tech debt has its own lane): a plan no longer pays debt down
+    if "cleanup_of" in plan:
+        errs.append("`cleanup_of` is gone with the cleanup pass: drop it (tech debt is worked in the debt epic)")
     for l in leaves:
-        if not all(isinstance(d, int) for d in l.get("debt") or []):
-            errs.append(f"{l.get('key')}: debt lists the tech-debt issue numbers it pays down")
+        if "debt" in l and l.get("key") not in kept:
+            errs.append(f"{l.get('key')}: `debt` is gone with the cleanup pass: drop it (tech debt is worked in the "
+                        "debt epic; only a slice that already carried it keeps it, ignored)")
     if plan.get("create") not in (None, "milestone", "all"):
         errs.append("`create` is `milestone` (one milestone's issues at a time) or `all`")
     if (lessons := plan.get("lessons")) is not None and not (
@@ -1843,16 +2012,26 @@ def plan_criteria(plan: dict[str, Any], ref: str | None = None,
     return (criteria or None), []
 
 
-def check_plan(plan: Any, ref: str | None = None, comment_id: str | None = None) -> list[str]:
+def check_plan(plan: Any, ref: str | None = None, comment_id: str | None = None,
+               kept: set[str] | frozenset[str] = frozenset()) -> list[str]:
     if not isinstance(plan, dict):
         return ["the plan is not a JSON object"]
     criteria, errs = plan_criteria(plan, ref, comment_id)
-    return errs + validate_plan(plan, criteria)
+    return errs + validate_plan(plan, criteria, kept)
 
 
-def plan_errors(plan: Any, ref: str | None, comment_id: str | None = None) -> list[str]:
+def plan_errors(plan: Any, ref: str | None, comment_id: str | None = None,
+                kept: set[str] | frozenset[str] = frozenset()) -> list[str]:
     """`check_plan`, also at `ref` when planning looks there; with no ref, exactly `check_plan(plan)` as before."""
-    return check_plan(plan, ref, comment_id) if ref else check_plan(plan)
+    return check_plan(plan, ref, comment_id, kept) if ref else check_plan(plan, kept=kept)
+
+
+def kept_debt_keys(bundle: dict[str, Any], st: dict[str, Any]) -> set[str]:
+    """The slices of the latest posted plan that carry `debt`, the retired cleanup pass's field. An amendment
+    keeps every key, so these may keep it (ignored: nothing renders or closes it); no other slice may add it."""
+    if not st.get("latest_plan"):
+        return set()
+    return {l["key"] for l in plan_leaves(latest_plan_of(bundle, st)[1]) if "debt" in l}
 
 
 def _fence(text: str) -> str:
@@ -1942,9 +2121,6 @@ def render_leaf_body(epic: int, leaf: dict[str, Any], parent: int | None, number
     for field, name in LEAF_SECTIONS.items():
         v = leaf[field]
         out += ["", f"## {name}", "", "\n".join(f"- [ ] {x}" for x in v) if field == "acceptance" else v.strip()]
-    if leaf.get("debt"):
-        out += ["", "## Pays down", "", ", ".join(f"#{d}" for d in leaf["debt"])
-                + ": tech debt filed against this epic. `merge` closes them with this slice."]
     if leaf.get("blocked_by"):
         refs = ", ".join(f"#{numbers[b]} ({b})" if b in numbers else b for b in leaf["blocked_by"])
         out += ["", "## Dependencies", "", f"Blocked by {refs}. GitHub's blocked-by links are the authority; "
@@ -2087,7 +2263,13 @@ def latest_plan_of(bundle: dict[str, Any], st: dict[str, Any]) -> tuple[dict[str
 
 def command_plan_validate(args: argparse.Namespace, config: dict[str, Any]) -> int:
     plan = json.loads(Path(args.file).read_text())
-    errs = plan_errors(plan, planning_ref(plan.get("issue") if isinstance(plan, dict) else None, config, offline=False))
+    kept: set[str] = set()
+    if isinstance(plan, dict) and isinstance(plan.get("issue"), int) and isinstance(plan.get("subtasks"), list) \
+            and all(isinstance(t, dict) for t in plan["subtasks"]) and any("debt" in l for l in plan_leaves(plan)):
+        bundle = fetch_bundle(plan["issue"], config)   # only then: which slices already carried it
+        kept = kept_debt_keys(bundle, bundle_state(bundle, config))
+    errs = plan_errors(plan, planning_ref(plan.get("issue") if isinstance(plan, dict) else None, config, offline=False),
+                       kept=kept)
     for e in errs:
         print(f"  - {e}")
     if errs:
@@ -2097,19 +2279,6 @@ def command_plan_validate(args: argparse.Namespace, config: dict[str, Any]) -> i
     print(f"{args.file}: ok — {len(plan['subtasks'])} subtasks, {len(leaves)} units of work, "
           f"can start at once: {', '.join(l['key'] for l in leaves if not l.get('blocked_by'))}")
     return 0
-
-
-def cleanup_budget_errors(plan: dict[str, Any], st: dict[str, Any], config: dict[str, Any]) -> list[str]:
-    """The whole plan's debt-paying slices fit the passes so far: `cleanup_slices_per_milestone` per pass
-    (the passes already created, plus this one if the plan is one). Counted from the plan, not from one
-    revision's additions, so a series of revisions can't add up past it."""
-    budget = config.get("cleanup_slices_per_milestone", 1)
-    passes = set(st.get("cleanups") or []) | ({plan["cleanup_of"]} if plan.get("cleanup_of") else set())
-    debt = [l["key"] for l in plan_leaves(plan) if l.get("debt")]
-    if len(debt) > budget * len(passes):
-        return [f"the plan has {len(debt)} debt-paying slice(s) ({', '.join(debt)}) but {len(passes)} cleanup pass(es) "
-                f"of {budget} (cleanup_slices_per_milestone): leave the rest filed"]
-    return []
 
 
 def lessons_errors(plan: dict[str, Any], st: dict[str, Any]) -> list[str]:
@@ -2129,13 +2298,12 @@ def command_plan_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
     plan = json.loads(Path(args.file).read_text())
-    cleanup = st["action"] == "work_slices" and plan.get("cleanup_of")   # a cleanup pass between milestones
-    if st["action"] not in ("plan", "continue_plan", "create_plan_issues", "replan", "plan_next_milestone") and not cleanup:
+    if st["action"] not in ("plan", "continue_plan", "create_plan_issues", "replan", "plan_next_milestone"):
         raise SdlcError(f"#{st['number']} is {st['state']} (action {st['action']}): not the time to post a plan"
                         + (" — the Codex rounds are spent; ask the poster (`transition N needs-info --kind question`)"
                            if st["action"] == "ask_poster" else ""))
     ref = planning_ref(plan.get("issue"), config, offline=bool(getattr(args, "from_file", None)))
-    errs = plan_errors(plan, ref, st.get("latest_doc") and approved_comment(st))
+    errs = plan_errors(plan, ref, st.get("latest_doc") and approved_comment(st), kept_debt_keys(bundle, st))
     if plan.get("issue") != st["number"]:
         errs.append(f"the plan is for #{plan.get('issue')}, not #{st['number']}")
     if st["state"] in BUILD_STATES and st["latest_plan"]:
@@ -2143,7 +2311,6 @@ def command_plan_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
         dropped = plan_keys(latest_plan_of(bundle, st)[1]) - plan_keys(plan)
         if dropped:
             errs.append(f"an amended plan keeps every key already created; it drops {', '.join(sorted(dropped, key=natural_key))}")
-    errs += cleanup_budget_errors(plan, st, config)
     errs += lessons_errors(plan, st)
     if errs:
         raise SdlcError("the plan does not validate (run plan-validate): " + "; ".join(errs))
@@ -2204,8 +2371,9 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
     epic = st["number"]
     ref = planning_ref(plan.get("issue"), config, offline=bool(getattr(args, "from_file", None)))
     cid = st.get("latest_doc") and approved_comment(st)
-    errs = plan_errors(plan, ref, cid) + ([] if plan.get("issue") == epic else [f"the plan is for #{plan.get('issue')}"])
-    errs += cleanup_budget_errors(plan, st, config)
+    # the plan's own `debt` keys pass: plan-post already held them to the revision before it
+    errs = plan_errors(plan, ref, cid, kept_debt_keys(bundle, st)) \
+        + ([] if plan.get("issue") == epic else [f"the plan is for #{plan.get('issue')}"])
     if errs:
         raise SdlcError("the reviewed plan no longer validates: " + "; ".join(errs))
     repo = repo_of(config)
@@ -2310,8 +2478,6 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
                 + (f"\n\n{', '.join(later)} will be planned again with what {created_after[-1]} teaches, "
                    "then created." if later and created_after else ""))
         extra = {"created": ",".join(created_after)} if target is not None else {}
-        if plan.get("cleanup_of") and plan["cleanup_of"] not in (st.get("cleanups") or []):
-            extra["cleanup"] = plan["cleanup_of"]
         post_comment(epic, render_comment("plan-created", rev, body, config, **extra), config)
     if st["state"] in BUILD_STATES:   # demo feedback or the next milestone: the epic is still being built
         if not offline:
@@ -2439,7 +2605,12 @@ def epic_branch(n: int) -> str:
 
 
 def slice_epic(issue: dict[str, Any]) -> int | None:
-    e = (parse_marker(issue.get("body", "")) or {}).get("epic", "")
+    """The epic a slice is built in, from its marker. None for a debt ticket: its marker's `epic=` is where the
+    debt came from, never an epic it is built in (it is built in the debt epic, onto main)."""
+    mk = parse_marker(issue.get("body", "")) or {}
+    if mk.get("kind") == "debt" or DEBT_LABEL in issue.get("labels", []):
+        return None
+    e = mk.get("epic", "")
     return int(e) if e.isdigit() else None
 
 
@@ -2453,11 +2624,15 @@ def _marked(comments: list[dict[str, Any]], trusted: set[str]) -> list[tuple[dic
 
 
 def claim_status(comments: list[dict[str, Any]], trusted: set[str]) -> dict[str, Any] | None:
-    """The active claim on a slice: the latest `claim` not followed by a `release`."""
+    """The active claim on a slice: the latest `claim` not followed by a `release`. A debt group's claim (`debt=1`)
+    also carries its group key, pass, debt epic and the worktree it recorded."""
     active = None
     for mk, c in _marked(comments, trusted):
         if mk.get("kind") == "claim":
             active = {"branch": mk.get("branch"), "url": c.get("url"), "at": c.get("created_at"), "model": mk.get("model")}
+            if mk.get("debt"):
+                active |= {"debt": True, "group": mk.get("group"), "pass": mk.get("pass"), "worktree": mk.get("worktree"),
+                           "debt_epic": mk.get("debt_epic"), "base": mk.get("base")}
         elif mk.get("kind") == "release":
             active = None
     return active
@@ -2552,8 +2727,12 @@ def slice_check_errors(issue: dict[str, Any], blockers: list[dict[str, Any]], cl
 
 def derive_slice(issue: dict[str, Any], comments: list[dict[str, Any]], trusted: set[str],
                  blockers: list[dict[str, Any]], pr: dict[str, Any] | None,
-                 pr_comments: list[dict[str, Any]]) -> dict[str, Any]:
-    """A slice's build state and the command to run next, from fetched JSON alone."""
+                 pr_comments: list[dict[str, Any]], mode: str = "slice") -> dict[str, Any]:
+    """A slice's build state and the command to run next, from fetched JSON alone.
+
+    `mode` is its review mode (`review_mode`): "milestone" counts a routine slice's review as owed. An open PR
+    with a passing run and an approving (or owed) review on its head is due to merge (`merge_due`): next is
+    `merge PR`, whose gate results the caller adds (`merge_next`)."""
     n = issue["number"]
     mk = parse_marker(issue.get("body", "")) or {}
     claim = claim_status(comments, trusted)
@@ -2574,7 +2753,11 @@ def derive_slice(issue: dict[str, Any], comments: list[dict[str, Any]], trusted:
         state = "blocked"
     else:
         state = "ready"
-    if state in ("ready", "claimed", "in-review"):
+    passed = bool(t) and t.get("result") == "pass"
+    due = state == "in-review" and passed and (r["verdict"] == "approve" if r else deferred or mode == "milestone")
+    if due:
+        nxt = merge_next(pr["number"], None)
+    elif state in ("ready", "claimed", "in-review"):
         nxt = f"/work-slice {n}"
     elif state == "blocked":
         nxt = "nothing yet: waiting on " + ", ".join(f"#{b}" for b in unmet)
@@ -2586,7 +2769,7 @@ def derive_slice(issue: dict[str, Any], comments: list[dict[str, Any]], trusted:
             "complexity": complexity_of(issue.get("labels", [])),
             "claim": claim, "unmet": unmet, "pr": (pr or {}).get("number"), "pr_state": (pr or {}).get("state"),
             "head": (pr or {}).get("headRefOid"), "tests_on_head": t, "review_on_head": r, "deferred_on_head": deferred,
-            "pr_rounds": changes_rounds(reviews), "next": nxt}
+            "pr_rounds": changes_rounds(reviews), "merge_due": due, "next": nxt}
 
 
 def merge_gate_errors(pr: dict[str, Any], slice_issue: dict[str, Any] | None, tests: list[dict[str, Any]],
@@ -2661,13 +2844,7 @@ def quick_merge_gate_errors(pr: dict[str, Any], issue_state: dict[str, Any] | No
     Codex must approve this head having read this brief (its record's `brief` is the approved comment's id),
     and a `review-defer` never stands in for it: a quick change has no milestone to owe a review to.
     """
-    errs = []
-    if pr.get("state") != "OPEN":
-        errs.append(f"PR is {pr.get('state')}, not OPEN")
-    if pr.get("isDraft"):
-        errs.append("PR is a draft")
-    if pr.get("baseRefName") != base:
-        errs.append(f"PR targets {pr.get('baseRefName')}, not {base}")
+    errs = sdlc_quick.pr_open_errors(pr, base)
     refs = closes_refs(pr.get("body", ""))
     issue = (issue_state or {}).get("issue")
     n = refs[0] if len(refs) == 1 else None
@@ -2689,20 +2866,7 @@ def quick_merge_gate_errors(pr: dict[str, Any], issue_state: dict[str, Any] | No
     elif not want or r.get("brief") != want:
         errs.append(f"Codex's approval of {head} was recorded against brief {r.get('brief') or 'none'}, not the "
                     f"approved brief {want or '(none)'}: a Codex round against the approved brief comes first")
-    if not t:
-        errs.append(f"no recorded test run on the current head {head} (`test-record`)")
-    elif t["result"] != "pass":
-        errs.append(f"the tests failed on {head}")
-    if behind_by is None:
-        errs.append(f"could not tell whether the head is up to date with {base}")
-    elif behind_by:
-        errs.append(f"the head is {behind_by} commit(s) behind {base}: rebase onto origin/{base}, "
-                    "push with --force-with-lease, then `test-record` and a Codex round on the new head")
-    mergeable = pr.get("mergeable")
-    if mergeable == "UNKNOWN":
-        errs.append("GitHub is still computing mergeability (UNKNOWN): wait a few seconds and try again")
-    elif mergeable != "MERGEABLE":
-        errs.append(f"GitHub says the PR conflicts ({mergeable}): rebase onto origin/{base}")
+    errs += sdlc_quick.head_errors(pr, t, behind_by, base)
     if n is not None:
         errs += sdlc_quick.diff_errors(n, files, brief or "", quick)
         if err := sdlc_quick.rounds_error(n, changes_rounds(reviews), quick):
@@ -2717,22 +2881,10 @@ def parse_pytest_summary(text: str) -> tuple[int, int]:
     return num("passed"), num("failed") + num("errors?")
 
 
-def is_cleanup(leaf: dict[str, Any]) -> bool:
-    return bool(leaf_section(leaf.get("body", ""), "Pays down"))
-
-
 def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[dict[str, Any]]]) -> dict[str, Any]:
     """An epic's units of work: what can start, what is in flight, and each milestone's count."""
     ready, waiting = ready_leaves(leaves, blockers)
     escalated = [l["number"] for l in leaves if l.get("state") == "open" and ESCALATED_LABEL in l.get("labels", [])]
-    # cleanup slices (they pay down tech debt) and the open work they wait on: epic_view puts them first
-    cleanup_open = [l["number"] for l in leaves if l.get("state", "open") == "open" and is_cleanup(l)]
-    needed, todo = set(cleanup_open), list(cleanup_open)
-    while todo:
-        for b in blockers.get(todo.pop(), []):
-            if b.get("state") != "closed" and b["number"] not in needed:
-                needed.add(b["number"])
-                todo.append(b["number"])
     by_order = lambda l: (natural_key(milestone_key(l.get("milestone"))), natural_key(l["key"]))  # noqa: E731
     free = [l["number"] for l in sorted(ready, key=by_order) if not l.get("assignees") and l["number"] not in escalated]
     in_flight = [l["number"] for l in ready + waiting if l.get("assignees") and l["number"] not in escalated]
@@ -2745,7 +2897,6 @@ def summarise_progress(leaves: list[dict[str, Any]], blockers: dict[int, list[di
     return {"ready": free, "in_flight": in_flight, "escalated": escalated,
             "units": {l["number"]: {"key": l["key"], "complexity": l.get("complexity"),
                                     "milestone": milestone_key(l.get("milestone"))} for l in leaves},
-            "cleanup_open": cleanup_open, "cleanup_needs": sorted(needed - set(cleanup_open)),
             "waiting": [l["number"] for l in waiting if l["number"] not in in_flight],
             "open": sum(1 for l in leaves if l.get("state") == "open"), "milestones": milestones}
 
@@ -2762,9 +2913,9 @@ def git(args: list[str], cwd: Path | None = None, check: bool = True, timeout: f
     return proc.stdout.strip()
 
 
-def primary_root() -> Path:
+def primary_root(cwd: Path | None = None) -> Path:
     """The main checkout, even when run from inside a slice's worktree."""
-    return Path(git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).parent
+    return Path(git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=cwd)).parent
 
 
 def worktree_path(n: int, config: dict[str, Any]) -> Path:
@@ -2798,7 +2949,12 @@ def fetch_pr(number: int, config: dict[str, Any]) -> tuple[dict[str, Any], list[
 
 def find_slice_pr(n: int, config: dict[str, Any]) -> dict[str, Any] | None:
     """The slice's pull request (branch slice/N): the open one, else the latest."""
-    prs = gh_json(["pr", "list", "--repo", repo_of(config), "--head", slice_branch(n), "--state", "all",
+    return find_branch_pr(slice_branch(n), config)
+
+
+def find_branch_pr(branch: str, config: dict[str, Any]) -> dict[str, Any] | None:
+    """The pull request from `branch`: the open one, else the latest."""
+    prs = gh_json(["pr", "list", "--repo", repo_of(config), "--head", branch, "--state", "all",
                    "--json", PR_FIELDS]) or []
     prs.sort(key=lambda p: (p["state"] == "OPEN", p["number"]))
     return prs[-1] if prs else None
@@ -2815,20 +2971,1796 @@ def epic_progress(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[
     progress = summarise_progress(leaves, blockers)
     for u in progress["units"].values():
         u["model"] = model_for(u["complexity"], config)
-    return {**progress, "behind_main": behind, "debt": open_debt(epic, config, trusted),
-            "cleanup_budget": config.get("cleanup_slices_per_milestone", 1)}
+    return {**progress, "behind_main": behind}
 
 
-def open_debt(epic: int, config: dict[str, Any], trusted: set[str]) -> list[int]:
-    """Open tech-debt issues filed against this epic (`file-issue --debt`)."""
-    raw = gh_pages(f"repos/{repo_of(config)}/issues?labels={DEBT_LABEL.replace(':', '%3A')}&state=open&per_page=100")
-    return sorted(r["number"] for r in raw if "pull_request" not in r and (r.get("user") or {}).get("login") in trusted
-                  and (parse_marker(r.get("body") or "") or {}).get("epic") == str(epic))
+# --- the debt lane: one open debt epic (`lane:debt`) holds every open tech-debt ticket as a sub-issue -------------
+#
+# It is found again by its label and its body's marker (`kind=debt-epic`, by a collaborator), never by its title.
+# What it has due comes from its tickets (debt_view): to begin with, intake for any ticket without a verdict.
+
+DEBT_EPIC_KIND = "debt-epic"     # the debt epic's body marker
+INTAKE_KIND = "intake"           # a ticket's intake verdict, a marked comment on the ticket (`verdict=...`)
+DEBT_DEFAULTS = {"pass_size": 8, "max_generation": 2, "max_per_pr": 4}
+
+
+@dataclass(frozen=True)
+class DebtRules:
+    """The debt lane's numbers: `.sdlc/config.json`'s `debt` section over DEBT_DEFAULTS, checked."""
+    pass_size: int        # tickets a pass plan may take
+    max_generation: int   # debt of debt of ... stops here: `file-issue --debt` refuses past it
+    max_per_pr: int       # tickets one PR may close
+
+
+def load_debt(config: dict[str, Any]) -> DebtRules:
+    """The `debt` section, each missing key at its default; a bad or unknown key is an SdlcError naming it."""
+    d = config.get("debt", {})
+    if not isinstance(d, dict):
+        raise SdlcError(f"config `debt` must be an object, not {d!r}")
+    if unknown := sorted(set(d) - set(DEBT_DEFAULTS)):   # a typo would silently keep the default
+        raise SdlcError(f"config debt has unknown key(s) {unknown}: it takes {sorted(DEBT_DEFAULTS)}")
+    vals = {k: d.get(k, v) for k, v in DEBT_DEFAULTS.items()}
+    for k, v in vals.items():
+        if type(v) is not int or v <= 0:   # not a bool, float or string
+            raise SdlcError(f"config debt.{k} must be a positive whole number, not {v!r}")
+    if vals["max_per_pr"] > vals["pass_size"]:
+        raise SdlcError(f"config debt.max_per_pr ({vals['max_per_pr']}) can't exceed debt.pass_size ({vals['pass_size']})")
+    return DebtRules(**vals)
+
+
+def _q(label: str) -> str:
+    return label.replace(":", "%3A")
+
+
+def find_debt_epics(config: dict[str, Any], trusted: set[str]) -> list[dict[str, Any]]:
+    """Open debt epics (label and marker, by a collaborator), oldest first: there should be at most one."""
+    raw = gh_pages(f"repos/{repo_of(config)}/issues?labels={_q(DEBT_EPIC_LABEL)}&state=open&per_page=100")
+    return sorted(({"number": r["number"], "id": r["id"], "title": r.get("title", "")} for r in raw
+                   if "pull_request" not in r and (r.get("user") or {}).get("login") in trusted
+                   and (parse_marker(r.get("body") or "") or {}).get("kind") == DEBT_EPIC_KIND),
+                  key=lambda e: e["number"])
+
+
+def the_debt_epic(config: dict[str, Any], trusted: set[str]) -> dict[str, Any] | None:
+    """The one open debt epic, or None; two open is a mess for a person to clear, never a choice made here."""
+    epics = find_debt_epics(config, trusted)
+    if len(epics) > 1:
+        raise SdlcError("more than one open debt epic (" + ", ".join(f"#{e['number']}" for e in epics)
+                        + "): close all but one, moving its sub-issues to the one kept")
+    return epics[0] if epics else None
+
+
+def open_debt_tickets(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every open `tech-debt` issue, whoever filed it: the label is the gate (no issue template applies it, so only
+    someone with triage access can), and intake judges each one before any is built."""
+    raw = gh_pages(f"repos/{repo_of(config)}/issues?labels={_q(DEBT_LABEL)}&state=open&per_page=100")
+    return sorted(({"number": r["number"], "id": r["id"], "title": r.get("title", ""),
+                    "created_at": r.get("created_at", "")} for r in raw
+                   if "pull_request" not in r), key=lambda t: t["number"])
+
+
+def sub_issues(n: int, config: dict[str, Any]) -> list[dict[str, Any]]:
+    return gh_pages(f"repos/{repo_of(config)}/issues/{n}/sub_issues?per_page=100")
+
+
+def intake_of(comments: list[dict[str, Any]], trusted: set[str]) -> str | None:
+    """A ticket's latest intake verdict, from its marked comments (None: not through intake yet)."""
+    verdicts = [mk.get("verdict") for mk, _ in _marked(comments, trusted) if mk.get("kind") == INTAKE_KIND]
+    return verdicts[-1] if verdicts else None
+
+
+def debt_progress(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str, Any]:
+    """The debt epic's open tickets (its open sub-issues), each one's intake verdict and what it waits for, every
+    sub-issue whatever its state (`members`: {number, state, created_at}, what a pass's end counts), and the passes
+    posted on the epic, read from GitHub."""
+    repo, tickets, sources, members = repo_of(config), [], {}, []
+    for s in sub_issues(epic, config):
+        if "pull_request" in s:
+            continue
+        members.append({"number": s["number"], "state": s.get("state", "open"), "created_at": s.get("created_at", "")})
+        if s.get("state", "open") != "open":
+            continue
+        comments = [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{s['number']}/comments")]
+        labels = [l["name"] for l in s.get("labels", [])]
+        asked = person_request(comments, trusted, (s.get("user") or {}).get("login", ""))
+        tickets.append({"number": s["number"], "title": s.get("title", ""), "labels": labels,
+                        "intake": intake_of(comments, trusted), "claim": claim_status(comments, trusted),
+                        "waits_on_person": asked is not None, "person_request": asked,
+                        "withdrawn": sorted(withdrawn_from(comments, trusted)),
+                        "waiting_for": ticket_waiting_for(s, labels, config, trusted, sources)})
+    epic_comments = [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{epic}/comments")]
+    passes = debt_passes(epic_comments, trusted)
+    return {"tickets": sorted(tickets, key=lambda t: t["number"]), "passes": passes,
+            "members": sorted(members, key=lambda m: m["number"]), "prs": debt_group_prs(passes, tickets, config, trusted)}
+
+
+def debt_group_prs(passes: list[dict[str, Any]], tickets: list[dict[str, Any]], config: dict[str, Any],
+                   trusted: set[str]) -> list[dict[str, Any]]:
+    """The open pass's claimed groups' open PRs, in build order, each {group, pass, pr, head, due}: `due` when a
+    passing run and Codex's approval are recorded on its head (what `merge_debt` waits for). Read from GitHub."""
+    open_pass = next((p for p in passes if p["open"]), None)
+    out = []
+    # pass_work's rule: a group with any member escalated needs a person, and its PR is never offered to merge
+    held = {g["key"] for g in pass_work(open_pass, tickets)["escalated"]} if open_pass else set()
+    for g in (open_pass or {}).get("groups") or []:
+        if g["key"] in held:
+            continue
+        claim = next((t["claim"] for t in tickets if t["number"] in g["tickets"] and (t.get("claim") or {}).get("debt")
+                      and t["claim"].get("group") == g["key"]), None)
+        pr = find_branch_pr(claim["branch"], config) if claim and claim.get("branch") else None
+        if not pr or pr.get("state") != "OPEN":
+            continue
+        t, r = head_records(pr, *pr_records(fetch_pr(pr["number"], config)[1], trusted))
+        out.append({"group": g["key"], "pass": g["pass"], "pr": pr["number"], "head": pr.get("headRefOid"),
+                    "due": bool(t) and t.get("result") == "pass" and bool(r) and r["verdict"] == "approve"})
+    return out
+
+
+def debt_merge_next(due: list[dict[str, Any]], gate: list[str] | None, also: str | None = None) -> str:
+    """state D's `next` while a group's PR may merge: `merge PR` (the first in build order) with the gate's results,
+    then any other PR due and, `also`, what the pass has to build meanwhile."""
+    p = due[0]
+    return (merge_next(p["pr"], gate) + f": debt group `{p['group']}` of pass {p['pass']}"
+            + ("; then " + ", ".join(f"PR #{q['pr']}" for q in due[1:]) if due[1:] else "")
+            + (f"; meanwhile: {also}" if also else ""))
+
+
+def ticket_waiting_for(raw: dict[str, Any], labels: list[str], config: dict[str, Any], trusted: set[str],
+                       sources: dict[int, dict[str, Any] | None]) -> dict[str, Any] | None:
+    """What a debt ticket (an issue as GitHub's REST API gives it) waits for, as `state T` reads it; `sources`
+    caches each source epic's state across tickets. A source that can't be read leaves an explicit `waits=`
+    waiting (its ship can't be seen)."""
+    if DEBT_LABEL not in labels:
+        return None
+    st = derive_state({"number": raw["number"], "title": raw.get("title", ""), "labels": labels,
+                       "body": raw.get("body") or ""}, [], trusted, config)
+    src = debt_wait_source(st)
+    if src is not None and src not in sources:
+        try:
+            sources[src] = bundle_state(fetch_bundle(src, config, trusted), config)
+        except SdlcError:
+            sources[src] = None
+    return debt_waiting_for(st, sources.get(src) if src is not None else None)
+
+
+def pass_work(open_pass: dict[str, Any], tickets: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """An open pass's groups by what they need, in build order: {todo, claimed, escalated}. `tickets` are the debt
+    epic's open tickets ({number, labels, claim}); a group none of whose tickets is open is done (merged, or gone
+    from the epic) and in none of them. A group with any member escalated needs a person, and the pass can end
+    without it; one with any member claimed is being built."""
+    open_t = {t["number"]: t for t in tickets}
+    out: dict[str, list[dict[str, Any]]] = {"todo": [], "claimed": [], "escalated": []}
+    for g in open_pass.get("groups") or []:
+        members = [open_t[t] for t in g["tickets"] if t in open_t and group_member(open_t[t], g["key"])]
+        if not members:
+            continue
+        g = {**g, "open": [m["number"] for m in members]}
+        if any(ESCALATED_LABEL in (m.get("labels") or []) for m in members):
+            out["escalated"].append(g)
+        elif any(m.get("claim") for m in members):
+            out["claimed"].append(g)
+        else:
+            out["todo"].append(g)
+    return out
+
+
+def group_text(g: dict[str, Any]) -> str:
+    return f"`{g['key']}` (" + ", ".join(f"#{t}" for t in g["open"]) + ")"
+
+
+# --- a pass's end: the next pass, closing the debt epic, or escalating it -----------------------------------------
+#
+# A pass ends once none of its groups has a ticket left to build: each one merged, closed by intake, escalated or
+# waiting on a person. `debt-epic` (which `merge` of a debt PR runs too) then posts one pass-end record on the epic,
+# its counts frozen in the marker (`joined=J closed=C`), and acts on what follows: with no open debt left, the epic
+# is closed as sdlc:done (the next `file-issue --debt` opens a new one); when this pass and the one before each
+# ended with more debt joined than closed, the epic is escalated instead of a pass being planned (once per pass:
+# a person who clears the label lets the next pass be planned); otherwise the next pass is planned as usual
+# (`plan_pass`, or `debt_waiting`). `state` only reports these writes as `pass_end`, due: it never makes them.
+
+def pass_end_due(open_pass: dict[str, Any], tickets: list[dict[str, Any]]) -> bool:
+    """Open pass `open_pass` has nothing left to build: every group's open members are all waiting on a person (a
+    group with a member escalated is pass_work's `escalated`, which never holds a pass open)."""
+    work = pass_work(open_pass, tickets)
+    return not (work["todo"] or work["claimed"])
+
+
+def pass_end_counts(p: dict[str, Any], progress: dict[str, Any]) -> dict[str, list[int]]:
+    """{joined, closed} of pass `p`, ending now. `closed`: the pass's tickets now closed. `joined`: the debt epic's
+    open sub-issues not in the pass that it didn't hold when the pass was posted (`held`), however they joined:
+    filed, labelled or reopened, then attached. One intake closed (`fixed`, `duplicate`) added no debt, as one it
+    sent to triage (detached) didn't. An older pass record without `held` falls back on when each was filed
+    (created at or after the pass was posted). Without
+    `members` (an offline view) its open tickets stand in, and a pass ticket no longer among them counts closed."""
+    tickets, members = progress.get("tickets") or [], progress.get("members")
+    if members is None:
+        members = [{"number": t["number"], "state": "open", "created_at": t.get("created_at", "")} for t in tickets]
+        closed = [t for t in p["tickets"] if t not in {x["number"] for x in tickets}]
+    else:
+        closed = [m["number"] for m in members if m["number"] in p["tickets"] and m.get("state") == "closed"]
+    since, held = p.get("posted_at") or "", p.get("held")
+    joined = [m["number"] for m in members if m["number"] not in p["tickets"] and m.get("state", "open") == "open"
+              and (m["number"] not in held if held is not None
+                   else bool(since) and (m.get("created_at") or "") >= since)]
+    return {"joined": joined, "closed": closed}
+
+
+def grew(p: dict[str, Any] | None) -> bool:
+    """Pass `p` ended with more debt joined during it than it closed (by its pass-end record's counts)."""
+    return bool(p and p.get("end")) and p["end"]["joined"] > p["end"]["closed"]
+
+
+def debt_pass_end(n: int, progress: dict[str, Any]) -> dict[str, Any] | None:
+    """What a pass's end has `debt-epic` write on debt epic #n, or None (nothing): {pass, end, close, escalate}.
+    `end` is the open pass's {joined, closed} tickets when its end is due (None: already recorded); `close`, no
+    open ticket is left after it; `escalate`, why the epic goes to a person (two passes in a row grew), or None."""
+    tickets, passes = progress.get("tickets") or [], progress.get("passes") or []
+    open_pass = next((p for p in passes if p["open"]), None)
+    end = None
+    if open_pass:
+        if not pass_end_due(open_pass, tickets):
+            return None
+        end = pass_end_counts(open_pass, progress)
+        last = {**open_pass, "open": False, "end": {k: len(v) for k, v in end.items()}}
+    elif passes:
+        last = passes[-1]
+    else:
+        return None   # no pass yet: nothing has ended
+    close = not tickets
+    prev = next((p for p in passes if p["pass"] == last["pass"] - 1), None)
+    escalate = None
+    if not close and grew(last) and grew(prev) and not last.get("escalated"):
+        escalate = (f"debt passes {prev['pass']} and {last['pass']} each ended with more debt joined than closed "
+                    f"(pass {prev['pass']}: {prev['end']['joined']} joined, {prev['end']['closed']} closed; "
+                    f"pass {last['pass']}: {last['end']['joined']} joined, {last['end']['closed']} closed), so the "
+                    f"lane stops instead of planning pass {last['pass'] + 1}. Open debt: "
+                    + ", ".join(f"#{t['number']}" for t in tickets) + ". A person decides what happens to it; "
+                    f"moving this epic back to {PREFIX}in-progress lets the next pass be planned")
+    if end is None and not close and escalate is None:
+        return None
+    return {"pass": last["pass"], "end": end, "close": close, "escalate": escalate}
+
+
+def pass_end_next(n: int, e: dict[str, Any]) -> str:
+    k, what = e["pass"], []
+    if e["end"]:
+        what.append(f"record the end of pass {k} ({len(e['end']['joined'])} joined, {len(e['end']['closed'])} closed)")
+    if e["close"]:
+        what.append(f"close debt epic #{n} as {PREFIX}done (no open debt is left)")
+    elif e["escalate"]:
+        what.append(f"escalate debt epic #{n} to a human: passes {k - 1} and {k} each ended with more debt joined "
+                    f"than closed, so no pass {k + 1} is planned")
+    return f"`uv run python tools/sdlc.py debt-epic`: pass {k} has ended: " + ", then ".join(what)
+
+
+def debt_view(st: dict[str, Any], progress: dict[str, Any], rules: "DebtRules | None" = None,
+              models: dict[str, str] | None = None) -> dict[str, Any]:
+    """{action, turn, next, ...}: what the debt epic has due, from its tickets and its passes: a group's PR to merge;
+    a pass's end (`pass_end`: its record, closing the epic or escalating it, debt_pass_end); intake; while a pass
+    is open, its groups in build order (`work_debt`; debt that joins during it waits for the next pass); then a
+    pass of the tickets through intake that nothing holds back, or, when every one of them waits, what each waits
+    for. `models` is the config's rating -> model map, named in `/work-slice T --debt (<model>)`."""
+    rules = rules or DebtRules(**DEBT_DEFAULTS)
+    n, tickets = st["number"], progress.get("tickets") or []
+    passes = progress.get("passes") or []
+    open_pass = next((p for p in passes if p["open"]), None)
+    # a verdict `debt-intake` doesn't know (a hand-made marker) counts as none
+    unjudged = [t["number"] for t in tickets if t.get("intake") not in INTAKE_VERDICTS]
+    # a verdict other than `debt` on a ticket still open here was cut short (it should have left or closed it):
+    # still intake, so a rerun of `debt-intake` finishes it rather than the ticket being silently dropped
+    unfinished = [t["number"] for t in tickets if t.get("intake") in INTAKE_VERDICTS and t["intake"] != "debt"]
+    pending = sorted(unjudged + unfinished)
+    judged = [t for t in tickets if t.get("intake") == "debt"]
+    # the debt epic's open sub-issues: open and attached by construction (an offline bundle may omit both)
+    eligible = [t for t in judged if not ticket_refusals({"state": "open", "attached": True, **t}, n, {})]
+    waiting = [t for t in judged if t.get("waiting_for") or t.get("waits_on_person")]
+    due = [p for p in progress.get("prs") or [] if p.get("due")]
+    ending = debt_pass_end(n, progress)
+    if ending:
+        turn, action = "agent", "pass_end"
+        nxt = pass_end_next(n, ending)
+        if open_pass and (human := pass_work(open_pass, tickets)["escalated"]):
+            nxt += ("; needs a human: " + ", ".join(group_text(e) for e in human)
+                    + " (escalated: the pass ends without it)")
+    elif pending:
+        turn, action = "agent", "debt_intake"
+        what = []
+        if unjudged:
+            what.append(f"{len(unjudged)} ticket(s) without a verdict (" + ", ".join(f"#{t}" for t in unjudged)
+                        + "): judge each against the definition of debt and record the verdict on the ticket "
+                        "(`debt-intake T`)")
+        if unfinished:
+            what.append(f"{len(unfinished)} ticket(s) whose verdict was cut short ("
+                        + ", ".join(f"#{t} {next(x['intake'] for x in tickets if x['number'] == t)}" for t in unfinished)
+                        + "): rerun `debt-intake T` with the same verdict to finish it")
+        nxt = f"intake on debt epic #{n}: " + "; ".join(what)
+    elif open_pass and (work := pass_work(open_pass, tickets)) and (work["todo"] or work["claimed"]):
+        turn, action = "agent", "work_debt"
+        k, human = open_pass["pass"], work["escalated"]
+        if work["todo"]:
+            g = work["todo"][0]
+            model = (models or {}).get(g["complexity"] or "")
+            nxt = (f"/work-slice {g['open'][0]} --debt" + (f" ({model}: {g['complexity']})" if model else "")
+                   + f": pass {k}'s group {group_text(g)}")
+        else:
+            g = work["claimed"][0]
+            model = (models or {}).get(g["complexity"] or "")
+            nxt = (f"nothing new to start in pass {k}: in progress " + ", ".join(group_text(c) for c in work["claimed"])
+                   + f" (`/work-slice {g['open'][0]} --debt`" + (f" ({model}: {g['complexity']})" if model else "")
+                   + " resumes one)")
+        if human:
+            nxt += "; needs a human: " + ", ".join(group_text(e) for e in human) + " (escalated)"
+    elif open_pass:   # not reached (an open pass is built, or its end is due): never planning another over it
+        turn, action = "none", "none"
+        nxt = f"nothing new: debt epic #{n}'s pass {open_pass['pass']} is open; the next pass waits until it ends"
+    elif eligible:
+        k = (passes[-1]["pass"] if passes else 0) + 1
+        turn, action = "agent", "plan_pass"
+        nxt = (f"/plan-issue {n}: plan debt pass {k} from {len(eligible)} eligible ticket(s) ("
+               + ", ".join(f"#{t['number']}" for t in eligible)
+               + f"; at most {rules.pass_size} in a pass, {rules.max_per_pr} in a PR), check it with "
+               f"`uv run python tools/sdlc.py debt-pass-validate {n} pass.json`, then `debt-pass-post {n} pass.json`")
+    elif waiting:
+        turn, action = "none", "debt_waiting"
+        nxt = (f"nothing yet: every ticket of debt epic #{n} through intake waits: "
+               + "; ".join(f"#{t['number']} {ticket_wait_text(t)}" for t in waiting))
+    else:
+        turn, action = "none", "none"
+        nxt = (f"nothing: debt epic #{n}'s {len(tickets)} open ticket(s) are all through intake" if tickets
+               else f"nothing: debt epic #{n} has no open tickets")
+    if not open_pass and (stuck := [t["number"] for t in judged if ESCALATED_LABEL in (t.get("labels") or [])]):
+        nxt += "; needs a human: " + ", ".join(f"#{t}" for t in stuck) + " (escalated)"
+    if not open_pass and (stale := [t for t in judged if ESCALATED_LABEL not in (t.get("labels") or [])
+                                    and (t.get("claim") or {}).get("debt")]):
+        nxt += "; needs a human: " + "; ".join(f"#{t['number']} {stale_claim_text(t)}" for t in stale)
+    also = None
+    if due:   # a group's PR has its records: merging it comes first (intake of new debt can't change the open pass);
+        # what the pass has to build meanwhile stays named, since the gate may still refuse the merge
+        also = nxt if action in ("work_debt", "debt_intake") and not nxt.startswith("nothing") else None
+        turn, action = "agent", "merge_debt"
+        nxt = debt_merge_next(due, None, also)
+    work = pass_work(open_pass, tickets) if open_pass and not pending else {}
+    return {"number": n, "action": action, "turn": turn, "tickets": tickets, "intake_pending": pending,
+            "merge_due": due, "also": also, "pass_end": ending,
+            "passes": passes, "open_pass": open_pass and open_pass["pass"],
+            "groups": {k: [g["key"] for g in v] for k, v in work.items()},
+            "eligible": [t["number"] for t in eligible] if not pending and not open_pass else [], "next": nxt}
+
+
+def ticket_debt_epic(n: int, config: dict[str, Any], trusted: set[str]) -> int | None:
+    """The open debt epic ticket #n is a sub-issue of, if any."""
+    for e in find_debt_epics(config, trusted):
+        if any(s["number"] == n for s in sub_issues(e["number"], config)):
+            return e["number"]
+    return None
+
+
+NEXT_LIMIT = 200   # the open issues `next` lists in one read
+
+
+def unattached_debt(open_issues: list[dict[str, Any]], config: dict[str, Any], trusted: set[str]
+                    ) -> tuple[list[int], list[int]]:
+    """(open tech-debt tickets no open debt epic holds, the open debt epics). The issue list `next` already read
+    answers when it is complete, so GitHub is read only when it has debt or a debt epic; a list cut at NEXT_LIMIT
+    may miss older debt or debt epics, so then every open tech-debt issue and debt epic is read, all pages. Never raises on two epics: `next` names them
+    for a person."""
+    if len(open_issues) >= NEXT_LIMIT:   # cut: the debt and the debt epics may be behind it
+        debt = [t["number"] for t in open_debt_tickets(config)]
+    else:
+        debt = sorted(i["number"] for i in open_issues if DEBT_LABEL in [l["name"] for l in i.get("labels", [])])
+        if not debt and not any(DEBT_EPIC_LABEL in [l["name"] for l in i.get("labels", [])] for i in open_issues):
+            return [], []
+    epics = [e["number"] for e in find_debt_epics(config, trusted)]
+    held = {s["number"] for e in epics for s in sub_issues(e, config)}
+    return [d for d in debt if d not in held], epics
+
+
+DEBT_EPIC_BODY = ("Tech debt: work a feature needed to support itself, filed with `file-issue --debt`. Every open "
+                  f"`{DEBT_LABEL}` issue is a sub-issue of this one. An agent runs intake on each, then works them "
+                  "in passes, each a PR into `main` with the full suite and Codex's approval on its head. "
+                  "`uv run python tools/sdlc.py state` on this issue says what is due.")
+
+
+def require_debt_epic_labels(config: dict[str, Any], *also: str) -> None:
+    """Refuse (before anything is written) when the debt epic's labels (and `also`) don't exist: without its label
+    a rerun can't find the epic, and would open a second one."""
+    have = {l["name"] for l in gh_json(["label", "list", "--repo", repo_of(config), "--limit", "200", "--json", "name"])}
+    if missing := [l for l in (DEBT_EPIC_LABEL, f"{PREFIX}in-progress", *also) if l not in have]:
+        raise SdlcError(f"labels {missing} do not exist: run `bootstrap-labels` first (nothing was created)")
+
+
+def open_debt_epic(config: dict[str, Any]) -> dict[str, Any]:
+    """Open the debt epic ({number, id}); the caller has checked none is open and its labels exist."""
+    made = post_json(f"repos/{repo_of(config)}/issues", {
+        "title": "Tech debt", "labels": [DEBT_EPIC_LABEL, f"{PREFIX}in-progress"],
+        "body": f"{marker(DEBT_EPIC_KIND)}\n{DEBT_EPIC_BODY}\n"})
+    print(f"opened debt epic #{made['number']}")
+    return {"number": made["number"], "id": made["id"]}
+
+
+def command_debt_epic(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Open the debt epic if open tech debt exists and none is open, and attach every open tech-debt ticket to it
+    as a sub-issue (read back); then, on the open one, what a pass's end writes (debt_epic_pass_end). Idempotent:
+    a rerun creates, attaches and posts nothing."""
+    load_debt(config)   # a bad `debt` section is refused before anything is written
+    debt_epic_reconcile(config, fetch_trusted(config), args.dry_run)
+    return 0
+
+
+def debt_epic_reconcile(config: dict[str, Any], trusted: set[str], dry_run: bool) -> None:
+    """`debt-epic`'s whole run, which `merge` of a debt PR runs too: attach every open tech-debt ticket first (so
+    a pass's end never closes the epic while debt it doesn't hold yet is open), then the pass end's writes."""
+    epic = the_debt_epic(config, trusted)
+    tickets = open_debt_tickets(config)
+    if not tickets:
+        print("no open tech-debt issues: nothing to attach" + (f" (debt epic #{epic['number']} is open)" if epic
+                                                               else ", and no debt epic is opened"))
+    else:
+        epic = attach_open_debt(epic, tickets, config, dry_run)
+    if epic is not None and epic["id"] is not None:   # a dry run's "new" epic has no pass to end
+        # a dry run attached nothing: the pass end it shows counts what it would attach, as the real run would
+        held = {s["number"] for s in sub_issues(epic["number"], config)} if dry_run and tickets else set()
+        debt_epic_pass_end(epic["number"], config, trusted, dry_run,
+                           projected=[t for t in tickets if t["number"] not in held] if dry_run else [])
+
+
+def attach_open_debt(epic: dict[str, Any] | None, tickets: list[dict[str, Any]], config: dict[str, Any],
+                     dry_run: bool) -> dict[str, Any]:
+    """Open the debt epic if none is (`epic` None), and attach every one of `tickets` it doesn't hold, read back:
+    the epic ({number, id}; id None for a dry run's new one)."""
+    repo = repo_of(config)
+    say = (lambda s: print("would " + s)) if dry_run else print  # noqa: E731
+    if epic is None:
+        if not dry_run:
+            require_debt_epic_labels(config)
+        say(f"open the debt epic 'Tech debt' [{DEBT_EPIC_LABEL}, {PREFIX}in-progress]")
+        epic = {"number": "new", "id": None} if dry_run else open_debt_epic(config)
+    held = set() if epic["id"] is None else {s["number"] for s in sub_issues(epic["number"], config)}
+    todo = [t for t in tickets if t["number"] not in held]
+    failed: list[str] = []
+    for t in todo:
+        say(f"attach #{t['number']} ({t['title']}) to debt epic #{epic['number']}")
+        if dry_run:
+            continue
+        try:   # never `replace_parent`: a ticket already under another issue is reported, not moved silently
+            post_json(f"repos/{repo}/issues/{epic['number']}/sub_issues", {"sub_issue_id": t["id"]})
+        except SdlcError as exc:
+            failed.append(f"#{t['number']}: {exc}")
+        time.sleep(0.5)   # GitHub's secondary rate limit on content creation
+    if dry_run:
+        return epic
+    if not todo:
+        print(f"debt epic #{epic['number']} already holds all {len(tickets)} open tech-debt ticket(s)")
+        return epic
+    now = {s["number"] for s in sub_issues(epic["number"], config)}
+    if missing_now := [t["number"] for t in tickets if t["number"] not in now]:
+        raise SdlcError(f"read-back: debt epic #{epic['number']} doesn't hold " + ", ".join(f"#{m}" for m in missing_now)
+                        + (" (" + "; ".join(failed) + ")" if failed else "") + ": fix that, then rerun `debt-epic`")
+    print(f"debt epic #{epic['number']}: attached {len(todo)}, holds all {len(tickets)} open tech-debt ticket(s)")
+    return epic
+
+
+def debt_epic_pass_end(n: int, config: dict[str, Any], trusted: set[str], dry_run: bool,
+                       projected: list[dict[str, Any]] = ()) -> None:
+    """On open debt epic #n, what a pass's end writes (debt_pass_end), each step checked against GitHub first so a
+    rerun (or one after a run cut short) posts nothing twice: the pass-end record; then, with no open debt left,
+    `sdlc:done` and the close (the label first: a closed epic is never found again to label), read back; or the
+    escalation, keyed by its record for that pass. An epic a person holds (escalated) with debt still open is only
+    given the record. `projected`: open tickets a dry run would have attached first, counted as attached."""
+    b = fetch_bundle(n, config, trusted)
+    if not debt_passes(b["comments"], trusted):
+        return   # no pass yet: nothing to end, and no more to read
+    progress = debt_progress(n, config, trusted)
+    if projected:   # not through intake yet, as a freshly attached ticket is
+        progress = {**progress,
+                    "tickets": progress["tickets"] + [{"number": t["number"], "title": t.get("title", ""),
+                                                       "labels": [DEBT_LABEL], "intake": None,
+                                                       "created_at": t.get("created_at", "")} for t in projected],
+                    "members": progress["members"] + [{"number": t["number"], "state": "open",
+                                                       "created_at": t.get("created_at", "")} for t in projected]}
+    e = debt_pass_end(n, progress)
+    if e is None:
+        return
+    k, labels = e["pass"], b["issue"]["labels"]
+    held = ESCALATED_LABEL in labels
+    if e["end"]:
+        j, c = e["end"]["joined"], e["end"]["closed"]
+        nums = lambda xs: ", ".join(f"#{x}" for x in xs) or "none"   # noqa: E731
+        body = (f"Pass {k} has ended: none of its tickets is left to build. Closed in it: {len(c)} ({nums(c)}). "
+                f"Joined during it: {len(j)} ({nums(j)}).")
+        comment = render_comment(DEBT_PASS_END_KIND, None, body, config, **{"pass": str(k)},
+                                 joined=str(len(j)), closed=str(len(c)))
+        if dry_run:
+            print(f"would post on debt epic #{n}:\n{comment}")
+        else:
+            post_comment(n, comment, config)
+            print(f"debt epic #{n}: pass {k} ended ({len(j)} joined, {len(c)} closed)")
+    if held and not e["close"] and not e["escalate"]:   # with no debt left, even a held epic is done
+        print(f"debt epic #{n} is {ESCALATED_LABEL}: a person decides what follows pass {k}")
+        return
+    if e["close"]:
+        if dry_run:
+            print(f"would label debt epic #{n} {PREFIX}done and close it as completed (no open debt is left)")
+            return
+        set_state_label(n, labels, "done", config)
+        gh(["issue", "close", str(n), "--repo", repo_of(config), "--reason", "completed", "--comment",
+            f"Pass {k} ended with no open tech debt left: this debt epic is done. The next `file-issue --debt` "
+            "opens a new one."])
+        back = fetch_bundle(n, config, trusted)["issue"]
+        if back["state"].lower() != "closed" or f"{PREFIX}done" not in back["labels"]:
+            raise SdlcError(f"read-back: debt epic #{n} is {back['state'].lower()} with {back['labels']}: close it as "
+                            f"completed with {PREFIX}done, or rerun `debt-epic`")
+        print(f"debt epic #{n}: closed as {PREFIX}done (no open debt is left)")
+    elif e["escalate"]:
+        if dry_run:
+            print(f"would label debt epic #{n} {ESCALATED_LABEL} and post: Needs a human: {e['escalate']}")
+            return
+        escalate_epic(n, e["escalate"], config, **{"pass": str(k)})
+        print(f"debt epic #{n}: escalated to a human ({e['escalate'].split(', so', 1)[0]})")
+
+
+# --- intake: an agent's verdict on each ticket the debt epic holds, applied by the tool and read back ----------
+#
+# `debt` stays for a pass. `not-debt` (not work a feature needed to support itself) and `novel` (it needs design
+# choices) leave the lane: `tech-debt` comes off, the ticket leaves the debt epic and goes to ordinary triage.
+# `fixed` closes it as completed, naming a commit on main; `duplicate` closes it as a duplicate of another issue.
+# The verdict is a marked comment on the ticket (INTAKE_KIND), written first: a run cut short after it is
+# finished by the same command again, and until then debt_view keeps the epic in intake.
+
+INTAKE_VERDICTS = ("debt", "not-debt", "novel", "fixed", "duplicate")
+INTAKE_CLOSE = {"fixed": "completed", "duplicate": "duplicate"}   # verdict -> the closed ticket's state_reason
+SHA_RE = re.compile(r"[0-9a-f]{7,40}")
+
+
+def latest_intake(comments: list[dict[str, Any]], trusted: set[str]) -> dict[str, str] | None:
+    """The marker of a ticket's latest intake record (by a collaborator), or None."""
+    marks = [mk for mk, _ in _marked(comments, trusted) if mk.get("kind") == INTAKE_KIND]
+    return marks[-1] if marks else None
+
+
+def delete_json(path: str, payload: dict[str, Any]) -> Any:
+    with tempfile.NamedTemporaryFile("w", suffix=".json") as fh:
+        json.dump(payload, fh)
+        fh.flush()
+        return gh_json(["api", "-X", "DELETE", path, "--input", fh.name])
+
+
+def commit_on_main(sha: str, config: dict[str, Any]) -> str:
+    """The full SHA of `sha` when origin's default branch contains it (GitHub's compare: `behind` or `identical`),
+    else an SdlcError. Read on GitHub, so no local fetch can be stale."""
+    repo, base = repo_of(config), config.get("default_branch", "main")
+    try:
+        cmp = gh_json(["api", f"repos/{repo}/compare/{base}...{sha}"]) or {}
+    except SdlcError as exc:
+        raise SdlcError(f"commit {sha} isn't known to GitHub ({exc}): name a commit on origin/{base}") from None
+    full = (cmp.get("merge_base_commit") or {}).get("sha") or ""
+    if cmp.get("status") not in ("behind", "identical") or not full.startswith(sha):
+        raise SdlcError(f"commit {sha} is not on origin/{base} (GitHub's compare says {cmp.get('status')!r}): "
+                        f"`fixed` names the commit on {base} that fixed the ticket")
+    return full
+
+
+def intake_note(verdict: str, reason: str, epic: int | None, sha: str | None, of: int | None) -> str:
+    leaves = f"debt epic #{epic}" if epic else "the debt epic"
+    return {
+        "debt": f"Intake: **tech debt**. It stays in {leaves} for a pass.\n\n{reason}",
+        "not-debt": (f"Intake: **not tech debt** (not work a feature needed to support itself). It leaves {leaves}, "
+                     f"loses `{DEBT_LABEL}` and goes to ordinary triage.\n\nWhy: {reason}"),
+        "novel": (f"Intake: **novel**: it needs design choices, which a debt pass doesn't make. It leaves {leaves}, "
+                  f"loses `{DEBT_LABEL}` and goes to ordinary triage.\n\nWhy: {reason}"),
+        "fixed": f"Intake: **already fixed** on `main` by {sha}. Closed as completed.\n\n{reason}",
+        "duplicate": f"Intake: **a duplicate**. Duplicate of #{of}.\n\n{reason}",
+    }[verdict]
+
+
+def command_debt_intake(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Record an agent's intake verdict on a debt ticket and apply it (labels, the sub-issue link, the close), each
+    read back. Everything is checked before the first write; a rerun with the same verdict finishes a cut-short one."""
+    load_debt(config)
+    n, v, reason = args.number, args.verdict, (args.reason or "").strip()
+    sha = args.commit.lower() if args.commit else None
+    errs = []
+    if not reason:
+        errs.append("--reason says why, on the ticket")
+    if (sha is not None) != (v == "fixed"):
+        errs.append("--commit SHA goes with --verdict fixed, and only with it")
+    elif sha is not None and not SHA_RE.fullmatch(sha):
+        errs.append(f"--commit {args.commit!r} isn't a commit SHA (7 to 40 hex digits)")
+    if (args.of is not None) != (v == "duplicate"):
+        errs.append("--of M goes with --verdict duplicate, and only with it")
+    elif args.of == n:
+        errs.append(f"#{n} can't be a duplicate of itself")
+    if hits := identifier_hits(reason):
+        errs.append("the reason would contain " + ", ".join(hits) + ": the repo is public")
+    if errs:
+        raise SdlcError("; ".join(errs))
+    repo, trusted = repo_of(config), fetch_trusted(config)
+    issue, comments = fetch_slice(n, config)
+    prior = latest_intake(comments, trusted)
+    epic = the_debt_epic(config, trusted)
+    link = next((s for s in sub_issues(epic["number"], config) if s["number"] == n), None) if epic else None
+    if sha is not None:
+        sha = commit_on_main(sha, config)
+    if args.of is not None:
+        try:
+            dup = gh_json(["api", f"repos/{repo}/issues/{args.of}"]) or {}
+        except SdlcError as exc:
+            raise SdlcError(f"#{args.of} isn't an issue here ({exc}): `--of` names the issue #{n} duplicates") from None
+        if "pull_request" in dup:
+            raise SdlcError(f"#{args.of} is a pull request: `--of` names the issue #{n} duplicates")
+    extra = {"verdict": v, **({"commit": sha} if sha else {}), **({"of": str(args.of)} if args.of is not None else {}),
+             **({"epic": str(epic["number"])} if epic else {})}
+    # the same verdict (same commit, same issue) already on record: finish what it left, never post it twice
+    resume = bool(prior) and all(prior.get(k) == extra.get(k) for k in ("verdict", "commit", "of"))
+    if issue["state"] == "closed":
+        if v in INTAKE_CLOSE and resume and issue.get("state_reason") == INTAKE_CLOSE[v]:
+            print(f"#{n}: intake `{v}` is already recorded and applied (closed as {INTAKE_CLOSE[v]})")
+            return 0
+        raise SdlcError(f"#{n} is closed ({issue.get('state_reason')}): intake judges open tickets")
+    if not resume:   # a fresh verdict: only on tech debt the debt epic holds
+        if DEBT_LABEL not in issue["labels"]:
+            raise SdlcError(f"#{n} isn't labelled `{DEBT_LABEL}`: intake judges tech debt only")
+        if link is None:
+            raise SdlcError(f"#{n} is in no open debt epic: run `debt-epic` first (it attaches every open "
+                            f"`{DEBT_LABEL}` issue), then intake")
+    leaving = v in ("not-debt", "novel")
+    # handed to triage once `tech-debt` is off and it has a state label: triage may have moved it on since
+    # (sdlc:prd-review, say), and a rerun must never pull it back
+    staged = [l for l in issue["labels"] if l in state_labels(config)]
+    relabel = leaving and (DEBT_LABEL in issue["labels"] or not staged)
+    steps = ([] if resume else [f"post the intake record on #{n} (verdict {v})"]) \
+        + ([f"label #{n} {PREFIX}triage and remove `{DEBT_LABEL}`"] if relabel else []) \
+        + ([f"detach #{n} from debt epic #{epic['number']}"] if leaving and link else []) \
+        + ([f"close #{n} as completed (fixed by {sha[:12]})"] if v == "fixed" else []) \
+        + ([f"close #{n} as a duplicate of #{args.of}"] if v == "duplicate" else [])
+    if not steps:
+        print(f"#{n}: intake `{v}` is already recorded and applied: nothing to do")
+        return 0
+    if args.dry_run:
+        for s in steps:
+            print(f"would {s}")
+        return 0
+    if not resume:
+        post_comment(n, render_comment(INTAKE_KIND, None, intake_note(v, reason, epic and epic["number"], sha, args.of),
+                                       config, **extra), config)
+    if relabel:
+        set_state_label(n, issue["labels"], "triage", config, remove=(DEBT_LABEL,))
+    if leaving and link:
+        delete_json(f"repos/{repo}/issues/{epic['number']}/sub_issue", {"sub_issue_id": link["id"]})
+    if v == "fixed":
+        gh(["issue", "close", str(n), "--repo", repo, "--reason", "completed"])
+    elif v == "duplicate":
+        gh(["issue", "close", str(n), "--repo", repo, "--duplicate-of", str(args.of)])
+    # read back: the record, then what the verdict does
+    issue, comments = fetch_slice(n, config)
+    got, bad = latest_intake(comments, trusted), []
+    if not got or any(got.get(k) != extra.get(k) for k in ("verdict", "commit", "of")):
+        bad.append(f"its latest intake record is {got!r}, not verdict {v}")
+    if leaving:
+        if DEBT_LABEL in issue["labels"] or (f"{PREFIX}triage" not in issue["labels"] if relabel else
+                                             not any(l in state_labels(config) for l in issue["labels"])):
+            bad.append(f"its labels are {issue['labels']}")
+        if epic and any(s["number"] == n for s in sub_issues(epic["number"], config)):
+            bad.append(f"debt epic #{epic['number']} still holds it")
+    if v in INTAKE_CLOSE and not (issue["state"] == "closed" and issue.get("state_reason") == INTAKE_CLOSE[v]):
+        bad.append(f"it reads back {issue['state']} ({issue.get('state_reason')}), not closed as {INTAKE_CLOSE[v]}")
+    if bad:
+        raise SdlcError(f"read-back of #{n}: " + "; ".join(bad) + f": rerun `debt-intake {n}` with the same verdict")
+    print(f"#{n}: intake `{v}` recorded" + {
+        "debt": "", "not-debt": f"; it left the debt epic and is in {PREFIX}triage (`/triage-issue {n}`)",
+        "novel": f"; it left the debt epic and is in {PREFIX}triage (`/triage-issue {n}`)",
+        "fixed": f"; closed as completed, fixed by {sha[:12] if sha else '?'}",
+        "duplicate": f"; closed as a duplicate of #{args.of}"}[v])
+    return 0
+
+
+# --- passes: a plan of which debt tickets to build, posted on the debt epic once the tool has checked it ----------
+#
+# A pass is a marked comment on the debt epic (DEBT_PASS_KIND, `pass=K`) carrying its JSON: groups of tickets, each
+# one PR, built in list order, with a one-line scope, the files it may change and a `routine`/`judgment` rating.
+# No poster sign-off and no Codex round: the tool checks the list, and Codex reviews every PR that builds it.
+# A pass stays open until a pass-end record (DEBT_PASS_END_KIND, posted when its last ticket is done) ends it;
+# only then is the next one planned, so debt that joins during a pass waits for the next.
+
+DEBT_PASS_KIND = "debt-pass"
+DEBT_PASS_END_KIND = "debt-pass-end"
+PASS_JSON_RE = re.compile(r"<!-- pass-json -->\s*(`{3,})json\n(.*?)\n\1", re.DOTALL)
+PASS_KEYS = ("epic", "pass", "groups")
+GROUP_KEYS = ("tickets", "scope", "files", "complexity", "complexity_reason")
+PASS_COMPLEXITY = ("routine", "judgment")     # `novel` needs design choices: the ticket goes to triage instead
+PASS_FETCH_SECONDS = 60   # the one `git fetch` a pass check makes (main and every epic branch)
+
+
+def extract_pass(body: str) -> dict[str, Any]:
+    m = PASS_JSON_RE.search((body or "").replace("\r\n", "\n"))
+    if not m:
+        raise SdlcError("the pass comment carries no pass JSON")
+    try:
+        return json.loads(m.group(2))
+    except ValueError as exc:
+        raise SdlcError(f"the pass comment's JSON does not parse: {exc}") from None
+
+
+def pass_ticket_numbers(plan: Any) -> list[int]:
+    """Every ticket number a pass lists, in order (each once), whatever else is wrong with it."""
+    out: list[int] = []
+    groups = plan.get("groups") if isinstance(plan, dict) else None
+    for g in groups if isinstance(groups, list) else []:
+        tickets = g.get("tickets") if isinstance(g, dict) else None
+        for t in tickets if isinstance(tickets, list) else []:
+            if type(t) is int and t > 0 and t not in out:
+                out.append(t)
+    return out
+
+
+def group_key(k: int, i: int) -> str:
+    """A pass group's identity, `debt-<pass>-<group index>` (1-based, in build order): its PR's, and its claim's."""
+    return f"debt-{k}-{i}"
+
+
+def pass_groups(plan: Any, k: int) -> list[dict[str, Any]]:
+    """A pass's groups in build order, each {key, tickets, scope, files, complexity}; a group the pass check would
+    refuse is kept as far as it reads (its tickets as pass_ticket_numbers reads them), so its key never shifts."""
+    groups = plan.get("groups") if isinstance(plan, dict) else None
+    out = []
+    for i, g in enumerate(groups if isinstance(groups, list) else [], 1):
+        g = g if isinstance(g, dict) else {}
+        files = g.get("files")
+        out.append({"key": group_key(k, i), "pass": k, "tickets": pass_ticket_numbers({"groups": [g]}),
+                    "scope": g["scope"].strip() if isinstance(g.get("scope"), str) else "",
+                    "files": [f for f in files if isinstance(f, str)] if isinstance(files, list) else [],
+                    "complexity": g.get("complexity") if g.get("complexity") in PASS_COMPLEXITY else None})
+    return out
+
+
+def debt_passes(comments: list[dict[str, Any]], trusted: set[str]) -> list[dict[str, Any]]:
+    """The passes posted on the debt epic, by number: {pass, url, posted_at, held, tickets, groups, open, end,
+    escalated}. `held`: the epic's open tickets when the pass was posted (None on an older pass record).
+    Only the tool posts them (by a collaborator, `pass=K`); the first record of each number counts, and a pass-end
+    record closes one: `end` is its frozen {joined, closed} counts (None without them, as on an older record).
+    `escalated`: the epic was escalated at that pass's end (the two-in-a-row rule), so it is never escalated again
+    for it."""
+    posted: dict[int, dict[str, Any]] = {}
+    ended: dict[int, dict[str, int] | None] = {}
+    escalated: set[int] = set()
+    for mk, c in _marked(comments, trusted):
+        k = mk.get("pass", "")
+        if not k.isdigit():
+            continue
+        if mk.get("kind") == DEBT_PASS_KIND and int(k) not in posted:
+            try:
+                plan = extract_pass(c.get("body", ""))
+            except SdlcError:
+                plan = {}
+            held = mk.get("held")
+            posted[int(k)] = {"pass": int(k), "url": c.get("url", ""), "posted_at": c.get("created_at", ""),
+                              "held": (None if held is None or not re.fullmatch(r"none|\d+(,\d+)*", held)
+                                       else [] if held == "none" else [int(x) for x in held.split(",")]),
+                              "tickets": pass_ticket_numbers(plan), "groups": pass_groups(plan, int(k))}
+        elif mk.get("kind") == DEBT_PASS_END_KIND and int(k) not in ended:
+            counts = (mk.get("joined", ""), mk.get("closed", ""))
+            ended[int(k)] = ({"joined": int(counts[0]), "closed": int(counts[1])}
+                             if all(x.isdigit() for x in counts) else None)
+        elif mk.get("kind") == "escalation":
+            escalated.add(int(k))
+    return [{**p, "open": p["pass"] not in ended, "end": ended.get(p["pass"]), "escalated": p["pass"] in escalated}
+            for _, p in sorted(posted.items())]
+
+
+DEBT_REQUEST_KIND = "debt-request"   # asks a person on the ticket (`debt-request`); the ticket waits for their reply
+
+
+def person_request(comments: list[dict[str, Any]], trusted: set[str], author: str) -> dict[str, Any] | None:
+    """A ticket's latest `debt-request` while it has no reply since, from its author or a collaborator (an unmarked
+    comment): {url, group, pass}; None when there is none, or it has been answered."""
+    ordered = sorted(comments, key=lambda c: (c.get("created_at", ""), c.get("id", 0)))
+    last = max((i for i, c in enumerate(ordered) if c.get("author") in trusted
+                and (parse_marker(c.get("body", "")) or {}).get("kind") == DEBT_REQUEST_KIND), default=None)
+    if last is None:
+        return None
+    if any(c.get("author") in trusted | {author} and not parse_marker(c.get("body", "")) for c in ordered[last + 1:]):
+        return None
+    mk = parse_marker(ordered[last]["body"]) or {}
+    return {"url": ordered[last].get("url", ""), "group": mk.get("group"), "pass": mk.get("pass")}
+
+
+def waits_on_person(comments: list[dict[str, Any]], trusted: set[str], author: str) -> bool:
+    """A ticket's latest `debt-request` has no reply since, from its author or a collaborator (an unmarked comment)."""
+    return person_request(comments, trusted, author) is not None
+
+
+def withdrawn_from(comments: list[dict[str, Any]], trusted: set[str]) -> set[str]:
+    """The pass groups a ticket left by a `debt-request` (its marker's `group=`). It never rejoins one, even once a
+    person replies: the reply puts it back for a later pass, under a new group key."""
+    return {mk["group"] for mk, _ in _marked(comments, trusted) if mk.get("kind") == DEBT_REQUEST_KIND and mk.get("group")}
+
+
+def ticket_wait_text(t: dict[str, Any]) -> str:
+    w = t.get("waiting_for")
+    if w:
+        return f"waits for {wait_target(w['epic'], w['milestone'])} to ship to main"
+    url = (t.get("person_request") or {}).get("url")
+    return "waits on a person" + (f" (asked in {url})" if url else "")
+
+
+def stale_claim_text(t: dict[str, Any]) -> str:
+    c, n = t["claim"], t["number"]
+    return (f"still holds debt group `{c.get('group')}`'s claim from pass {c.get('pass')}, which ended without it: "
+            f"a person releases it (`release {n}`; `cleanup {n}` removes its worktree, and its branch if unpushed "
+            "work is to go) before a pass takes it")
+
+
+def ticket_refusals(t: dict[str, Any], epic: int, in_open_pass: dict[int, int]) -> list[str]:
+    """Why ticket `t` can't be in a pass of debt epic `epic` (none: it can). `t` is {number, state, labels,
+    attached, intake, waiting_for, waits_on_person}; `in_open_pass` maps a ticket to the open pass holding it.
+    One rule for both `state` (which tickets a pass may take) and the pass check, so they never disagree."""
+    n, why = t["number"], []
+    if t.get("missing"):
+        return [f"#{n} can't be read ({t['missing']})"]
+    if t.get("state", "open") != "open":
+        why.append(f"#{n} is closed")
+    if DEBT_LABEL not in t.get("labels", [DEBT_LABEL]):
+        why.append(f"#{n} isn't labelled `{DEBT_LABEL}`")
+    if not t.get("attached", True):
+        why.append(f"#{n} isn't a sub-issue of debt epic #{epic} (`debt-epic` attaches open debt)")
+    if t.get("intake") is None:
+        why.append(f"#{n} has no intake verdict (`debt-intake {n}` first)")
+    elif t["intake"] != "debt":
+        why.append(f"#{n}'s intake verdict is `{t['intake']}`, not `debt`")
+    if n in in_open_pass:
+        why.append(f"#{n} is already in open pass {in_open_pass[n]}")
+    if ESCALATED_LABEL in t.get("labels", []):   # its group's escalation: a person clears it before a pass takes it
+        why.append(f"#{n} is escalated to a human")
+    if (c := t.get("claim")) and c.get("debt") and n not in in_open_pass:   # its group left unbuilt as its pass ended
+        why.append(f"#{n} {stale_claim_text(t)}")
+    if t.get("waiting_for") or t.get("waits_on_person"):
+        why.append(f"#{n} {ticket_wait_text(t)}")
+    return why
+
+
+def _bad_pass_path(p: Any) -> bool:
+    if not isinstance(p, str) or p != p.strip() or not p or p.startswith("/") or any(c in p for c in "*?["):
+        return True
+    return any(part in ("", ".", "..") for part in p.rstrip("/").split("/"))
+
+
+def pass_shape_errors(plan: Any, epic: int, next_pass: int, rules: DebtRules) -> list[str]:
+    """What is wrong with a pass's JSON itself, every reason listed (none: it is well formed)."""
+    if not isinstance(plan, dict):
+        return ["the pass is not a JSON object"]
+    errs = []
+    if unknown := sorted(set(plan) - set(PASS_KEYS)):
+        errs.append(f"unknown key(s) {unknown}: a pass takes {list(PASS_KEYS)}")
+    if plan.get("epic") != epic:
+        errs.append(f"the pass is for #{plan.get('epic')}, not debt epic #{epic}")
+    if type(plan.get("pass")) is not int or plan["pass"] != next_pass:
+        errs.append(f"`pass` is {plan.get('pass')!r}: debt epic #{epic}'s next pass is {next_pass}")
+    groups = plan.get("groups")
+    if not isinstance(groups, list) or not groups:
+        return errs + ["`groups` lists the pass's PRs in build order: at least one"]
+    seen: dict[int, list[int]] = {}
+    for i, g in enumerate(groups, 1):
+        where = f"group {i}"
+        if not isinstance(g, dict):
+            errs.append(f"{where} is not an object")
+            continue
+        if unknown := sorted(set(g) - set(GROUP_KEYS)):
+            errs.append(f"{where} has unknown key(s) {unknown}: a group takes {list(GROUP_KEYS)}")
+        tickets = g.get("tickets")
+        if not isinstance(tickets, list) or not tickets:
+            errs.append(f"{where} is empty: a group is one PR closing 1 to {rules.max_per_pr} ticket(s)")
+        else:
+            if len(tickets) > rules.max_per_pr:
+                errs.append(f"{where} has {len(tickets)} tickets, over debt.max_per_pr ({rules.max_per_pr}): split it")
+            for t in tickets:
+                if type(t) is not int or t <= 0:
+                    errs.append(f"{where}: {t!r} isn't an issue number")
+                else:
+                    seen.setdefault(t, []).append(i)
+        if not _text(g.get("scope")):
+            errs.append(f"{where} has no scope: one line saying what its PR changes")
+        elif re.search(r"[\r\n]", g["scope"].strip()):
+            errs.append(f"{where}'s scope is more than one line: say what its PR changes in one")
+        files = g.get("files")
+        if not isinstance(files, list) or not files:
+            errs.append(f"{where} has no files: the paths its PR may change")
+        elif bad := [f for f in files if _bad_pass_path(f)]:
+            errs.append(f"{where}: {bad!r} aren't repo-relative paths (a file or a directory; no pattern, "
+                        "no leading `/`, no `.` or `..`)")
+        c = g.get("complexity")
+        if c == "novel":
+            errs.append(f"{where} is rated `novel`: a pass makes no design choices, so its ticket(s) go to triage "
+                        "(`debt-intake T --verdict novel`)")
+        elif c not in PASS_COMPLEXITY:
+            errs.append(f"{where}'s complexity is {c!r}: `routine` or `judgment`")
+        if not _text(g.get("complexity_reason")):
+            errs.append(f"{where} has no complexity_reason: why it is rated so")
+    for t, gs in seen.items():
+        if len(gs) > 1:
+            at = sorted(set(gs))
+            errs.append(f"#{t} is listed {len(gs)} times (" + (f"in group {at[0]}" if len(at) == 1 else
+                        "in groups " + ", ".join(map(str, at))) + "): each ticket is in exactly one group, once")
+    if len(seen) > rules.pass_size:
+        errs.append(f"the pass takes {len(seen)} tickets, over debt.pass_size ({rules.pass_size}): "
+                    "leave the rest for the next pass")
+    return errs
+
+
+# --- the overlap check: a pass leaves alone the files an epic being built is working on ---------------------------
+
+# a path main may lack yet: one with a directory (`tools/new-helper`), or a file name with an extension (`NEW.md`)
+NEW_PATH_RE = re.compile(r"(?:[\w.-]+/)+[\w.-]+/?|[\w-][\w.-]*\.[A-Za-z][A-Za-z0-9]*")
+HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t#]*$")
+FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+
+
+def scope_text(body: str) -> str:
+    """A slice's Scope section(s): a heading `Scope` (any level, any case, any text after the word) up to the next
+    heading outside a code fence that is no deeper than it, so its own subheadings and a `#` line in a fenced
+    block stay in. Line endings are normalised. With no Scope heading at all, the whole body (an issue edited out
+    of shape still claims what it names)."""
+    lines = (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    found, level, fence, seen = [], None, None, False
+    for line in lines:
+        f = FENCE_RE.match(line)
+        if fence:
+            if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence):
+                fence = None
+        elif f:
+            fence = f.group(1)
+        elif h := HEADING_RE.match(line):
+            depth = len(h.group(1))
+            if re.match(r"scope\b", h.group(2), re.IGNORECASE):
+                level, seen = depth, True
+                continue
+            if level is not None and depth <= level:
+                level = None
+        if level is not None:
+            found.append(line)
+    return "\n".join(found if seen else lines)
+
+
+def scope_paths(text: str, tracked: set[str], named: tuple[str, ...] | list[str] = ()) -> set[str]:
+    """The path-shaped tokens of a slice's Scope: a file or directory tracked on main (`tools/sdlc.py`, `CLAUDE.md`,
+    `docs/`), or a path main lacks yet: one with a directory (`tests/test_new.py`, `tools/new-helper`) or a file
+    name with an extension (`NEW_GUIDE.md`). A `{a,b}` brace or a `*` keeps the tracked directory before it. A bare
+    word (`docs`) is not a path; prose that looks like one (`sdlc.py`, `epic/N`) is claimed, which only refuses more.
+    Markdown round a token (`**`, `__`, `~~`, `<code>`, a link, a table cell, `«»`) is taken off it. And each path of
+    `named` (a pass's files and directories) is claimed wherever the text holds it whole, whatever markup
+    surrounds it, as a backstop."""
+    dirs = {"/".join(parts[:i]) for f in tracked for parts in [f.split("/")] for i in range(1, len(parts))}
+    text = html.unescape(text or "")   # `&#47;`, `&lt;code&gt;`
+    text = re.sub(r"\\(?=[\\`*_{}\[\]()#+.!|~<>-])", "", text)   # markdown escapes: `tools/sdlc\_quick.py`
+    text = text.replace("\\", "/")   # any other backslash separates a path: `tools\sdlc.py`
+    # a URL is not a path, but a link to a file in the repo (`.../blob/main/tools/sdlc.py`) names that file
+    text = re.sub(r"[^\s()\[\]<>|]*://[^\s()\[\]<>|]*", lambda m: f" {link_path(m.group(0), tracked, dirs)} ", text)
+    # a file is held whole (no path character either side); a directory `g/` with its slash, so prose `tools` isn't
+    out = {f for f in named if isinstance(f, str) and f and ("/" in f or "." in f) and re.search(
+        rf"(?<![A-Za-z0-9./-]){re.escape(f)}" + ("" if f.endswith("/") else r"(?![A-Za-z0-9/-]|\.[A-Za-z0-9])"), text)}
+    # every run of path characters is a token, whatever surrounds it: backticks, quotes, `«»`, a link, an HTML tag, a
+    # table cell, `:120` or `#L3` after it
+    for raw in re.findall(r"[\w./*{}~+@-]+", text):
+        bare = raw.rstrip(".")
+        # `__tools/sdlc.py__` is `tools/sdlc.py`; a tracked `__init__.py` is itself
+        out |= ({bare} if bare in tracked else set()) or scope_token(bare.strip("*_~"), tracked, dirs) \
+            or scope_token(bare, tracked, dirs)
+    return out
+
+
+def link_path(url: str, tracked: set[str], dirs: set[str]) -> str:
+    """The repo path(s) a link to a file names (`.../blob/<ref>/<path>` or `/tree/`), space-separated, else "". A ref
+    may hold slashes (`epic/243`), so a known branch shape (`main`, `epic/N`, `slice/N`, a commit) is taken off;
+    for any other ref, or any other URL, the split can't be known, so every tail of the URL's path is claimed
+    (claiming too much only refuses more)."""
+    mark = lambda path: path + "/" if path in dirs else path   # noqa: E731  (a directory keeps its slash)
+    url = urllib.parse.unquote(url)   # `tools%2Fsdlc.py`, `my%20file.md`
+    if u := re.search(r"/(?:blob|tree)/([^?#]+)", url):
+        parts = [p for p in u.group(1).split("/") if p]
+        known = re.match(r"(?:main|(?:epic|slice)/\d+|[0-9a-f]{7,40})/", "/".join(parts) + "/")
+        if known and len(parts) > known.group(0).count("/"):
+            return mark("/".join(parts[known.group(0).count("/"):]))
+    # any other ref, or any other URL (raw files, a fork): where the path starts can't be known (a tail on main
+    # proves nothing), so every tail of the URL's path is claimed
+    parts = [p for p in re.sub(r"^[a-z]+://[^/]*", "", url.split("?")[0].split("#")[0]).split("/") if p]
+    return " ".join(mark("/".join(parts[i:])) for i in range(len(parts)))
+
+
+def scope_token(tok: str, tracked: set[str], dirs: set[str]) -> set[str]:
+    """What one Scope token claims (see scope_paths): nothing, a path, or a directory (`dir/`)."""
+    out: set[str] = set()
+    for _ in range(len(tok)):   # `./tools/sdlc.py` and `../tools/sdlc.py` are `tools/sdlc.py`
+        if tok.startswith("../"):
+            tok = tok[3:]
+        elif tok.startswith("./"):
+            tok = tok[2:]
+        elif tok.startswith("/"):
+            tok = tok[1:]
+        else:
+            break
+    if not tok:
+        return out
+    if cut := re.search(r"[{*]", tok):
+        tok = tok[:cut.start()].rsplit("/", 1)[0] if "/" in tok[:cut.start()] else ""
+        if tok in dirs:
+            out.add(tok + "/")
+    elif tok in tracked:
+        out.add(tok)
+    elif "/" in tok and tok.rstrip("/") in dirs:
+        out.add(tok.rstrip("/") + "/")
+    elif NEW_PATH_RE.fullmatch(tok):   # named, though main lacks it yet: claimed anyway (too much only refuses more)
+        out.add(tok)
+    return out
+
+
+def paths_overlap(a: str, b: str) -> bool:
+    """The same file, or one is a directory holding the other."""
+    a, b = a.rstrip("/"), b.rstrip("/")
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def building_epics(config: dict[str, Any], trusted: set[str]) -> list[int]:
+    """Feature epics whose slices are being built (`planned` or `in-progress`): not a quick change, not the debt epic."""
+    repo, found = repo_of(config), set()
+    for state in sorted(BUILD_STATES):
+        for r in gh_pages(f"repos/{repo}/issues?labels={_q(PREFIX + state)}&state=open&per_page=100"):
+            labels = {l["name"] for l in r.get("labels", [])}
+            if "pull_request" in r or labels & {DEBT_EPIC_LABEL, DEBT_LABEL, LEAF_LABEL, CONTAINER_LABEL}:
+                continue
+            found.add(r["number"])
+    # labelled planned/in-progress is enough: a label conflict or an escalation still has slices in flight
+    return [n for n in sorted(found)
+            if not is_quick(st := bundle_state(fetch_bundle(n, config, trusted), config)) and not is_debt_epic(st)]
+
+
+def epic_work_paths(config: dict[str, Any], trusted: set[str], named: list[str] | None = None,
+                    root: Path = ROOT) -> dict[int, set[str]]:
+    """Each epic being built, and the paths its work touches or names: what `epic/N` changes since main (`git diff
+    --name-only origin/main...origin/epic/N`), the files of its open PRs, and the Scope of each of its open slices
+    (claimed or not, PR or not). One bounded fetch of main and every epic branch first; a failed one refuses."""
+    if not PASS_FETCH_SECONDS > 0:
+        raise SdlcError(f"PASS_FETCH_SECONDS must be positive (got {PASS_FETCH_SECONDS})")
+    repo, main = repo_of(config), config.get("default_branch", "main")
+    try:   # a glob refspec: an epic with no branch yet doesn't fail the fetch
+        git(["fetch", "-q", "origin", f"+refs/heads/{main}:refs/remotes/origin/{main}",
+             "+refs/heads/epic/*:refs/remotes/origin/epic/*"], cwd=root, timeout=PASS_FETCH_SECONDS)
+    except SdlcError as exc:
+        raise SdlcError(f"{exc}: the overlap check needs origin's main and epic branches, so nothing was checked "
+                        "or posted") from None
+    epics = building_epics(config, trusted)
+    if not epics:
+        return {}
+    tracked = set(tracked_on(f"origin/{main}", root))
+    slices = [r for r in fetch_plan_issues(None, config, trusted) if r["kind"] == "slice" and r["state"] == "open"]
+    out: dict[int, set[str]] = {}
+    for e in epics:
+        paths: set[str] = set()
+        ref = f"origin/{epic_branch(e)}"
+        if git(["rev-parse", "--verify", "--quiet", f"refs/remotes/{ref}"], cwd=root, check=False):
+            diff = git(["diff", "--name-only", "--no-renames", "-z", f"origin/{main}...{ref}"], cwd=root,
+                       timeout=PASS_FETCH_SECONDS)
+            paths |= {p for p in diff.split("\0") if p}
+        for pr in gh_pages(f"repos/{repo}/pulls?base={epic_branch(e)}&state=open&per_page=100"):
+            for f in gh_pages(f"repos/{repo}/pulls/{pr['number']}/files?per_page=100"):
+                paths |= set(sdlc_quick.changed_paths(f))
+        for s in slices:
+            if s["epic"] == e:
+                paths |= scope_paths(scope_text(s["body"]), tracked, named or [])
+        out[e] = paths
+    return out
+
+
+def overlap_errors(plan: Any, claims: dict[int, set[str]]) -> list[str]:
+    """A group whose files overlap an epic being built: its PR into main would make that epic's next `sync`
+    conflict, so it waits for a later pass."""
+    errs = []
+    groups = plan.get("groups") if isinstance(plan, dict) else None
+    for i, g in enumerate(groups if isinstance(groups, list) else [], 1):
+        raw = g.get("files") if isinstance(g, dict) else None
+        files = [f for f in raw if isinstance(f, str)] if isinstance(raw, list) else []   # a bad shape: reported apart
+        for e, paths in sorted(claims.items()):
+            hits = sorted({p for f in files for p in paths if paths_overlap(f, p)})
+            if hits:
+                tickets = ", ".join(f"#{t}" for t in pass_ticket_numbers({"groups": [g]}))
+                errs.append(f"group {i} ({tickets}) overlaps epic #{e}, which is being built: "
+                            + ", ".join(f"`{h}`" for h in hits) + " (leave it for a pass after that epic ships)")
+    return errs
+
+
+# --- checking and posting a pass ----------------------------------------------------------------------------------
+
+def pass_check(n: int, plan: Any, config: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+    """(the debt epic's bundle, its passes, every reason the pass can't be posted). Read-only, apart from the one
+    bounded `git fetch` of the overlap check."""
+    rules = load_debt(config)
+    trusted = fetch_trusted(config)
+    bundle = fetch_bundle(n, config, trusted)
+    st = bundle_state(bundle, config)
+    if not is_debt_epic(st):
+        raise SdlcError(f"#{n} isn't the debt epic (`{DEBT_EPIC_LABEL}`): a pass is planned on the debt epic only")
+    if bundle["issue"]["state"].lower() != "open" or st["action"] in ("human", "fix_conflict"):
+        raise SdlcError(f"debt epic #{n} is {bundle['issue']['state'].lower()} (action {st['action']}): no pass now")
+    passes = debt_passes(bundle["comments"], trusted)
+    next_pass = (passes[-1]["pass"] if passes else 0) + 1
+    errs = pass_shape_errors(plan, n, next_pass, rules)
+    in_open = {t: p["pass"] for p in passes if p["open"] for t in p["tickets"]}
+    errs += [f"pass {p['pass']} is open: the next pass waits until it ends" for p in passes if p["open"]]
+    numbers = pass_ticket_numbers(plan)
+    attached = {s["number"] for s in sub_issues(n, config)} if numbers else set()
+    sources: dict[int, dict[str, Any] | None] = {}
+    for t in numbers:
+        try:
+            raw = gh_json(["api", f"repos/{repo_of(config)}/issues/{t}"]) or {}
+            comments = [norm_comment(c) for c in gh_pages(f"repos/{repo_of(config)}/issues/{t}/comments")]
+        except SdlcError as exc:
+            errs += ticket_refusals({"number": t, "missing": str(exc)}, n, in_open)
+            continue
+        if "pull_request" in raw:
+            errs.append(f"#{t} is a pull request, not a debt ticket")
+            continue
+        labels = [l["name"] for l in raw.get("labels", [])]
+        errs += ticket_refusals({"number": t, "state": raw.get("state", "open"), "labels": labels,
+                                 "attached": t in attached, "intake": intake_of(comments, trusted),
+                                 "claim": claim_status(comments, trusted),
+                                 "waits_on_person": waits_on_person(comments, trusted,
+                                                                    (raw.get("user") or {}).get("login", "")),
+                                 "waiting_for": ticket_waiting_for(raw, labels, config, trusted, sources)},
+                                n, in_open)
+    named = [f for g in (plan.get("groups") if isinstance(plan, dict) and isinstance(plan.get("groups"), list) else [])
+             if isinstance(g, dict) and isinstance(g.get("files"), list) for f in g["files"] if isinstance(f, str)]
+    errs += overlap_errors(plan, epic_work_paths(config, trusted, named))
+    return bundle, passes, errs
+
+
+def render_pass(plan: dict[str, Any]) -> str:
+    """The pass comment's body: each group in build order, and the JSON the tool reads back."""
+    groups = plan["groups"]
+    out = [f"## Pass {plan['pass']}", "",
+           f"**{len(pass_ticket_numbers(plan))} ticket(s) in {len(groups)} PR(s)**, built in this order. "
+           "The tool checked this list; Codex reviews every PR that builds it.", ""]
+    for i, g in enumerate(groups, 1):
+        out.append(f"{i}. `{group_key(plan['pass'], i)}` · " + ", ".join(f"#{t}" for t in g["tickets"])
+                   + f" · *{g['complexity']}*: {g['scope'].strip()}")
+        out.append("   Files: " + ", ".join(f"`{f}`" for f in g["files"]))
+    blob = json.dumps(plan, indent=1, ensure_ascii=False)
+    fence = _fence(blob)
+    out += ["", "<details><summary>pass.json (what the build reads)</summary>", "",
+            "<!-- pass-json -->", f"{fence}json", blob, fence, "", "</details>"]
+    return "\n".join(out)
+
+
+def load_pass_file(path: str) -> Any:
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:
+        raise SdlcError(f"can't read the pass {path}: {exc}") from None
+
+
+def command_debt_pass_validate(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Check a pass against the debt epic and every epic being built. Read-only, apart from one bounded fetch."""
+    plan = load_pass_file(args.file)
+    _, _, errs = pass_check(args.number, plan, config)
+    if errs:
+        print(f"the pass does not validate ({len(errs)}):\n" + "\n".join(f"  - {e}" for e in errs), file=sys.stderr)
+        return 1
+    print(f"pass {plan['pass']} of debt epic #{args.number}: ok ({len(pass_ticket_numbers(plan))} ticket(s) in "
+          f"{len(plan['groups'])} group(s))")
+    return 0
+
+
+def command_debt_pass_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Post a pass on the debt epic once it validates: no `/approve` and no Codex round is asked for."""
+    plan = load_pass_file(args.file)
+    n = args.number
+    _, _, errs = pass_check(n, plan, config)
+    if errs:
+        raise SdlcError(f"the pass does not validate, so nothing was posted ({len(errs)}):\n"
+                        + "\n".join(f"  - {e}" for e in errs))
+    # the epic's open tickets as the pass starts: debt that joins during it is any open ticket not among them at
+    # its end, however it joined (filed, labelled or reopened, then attached), never judged by when it was filed
+    held = sorted(x["number"] for x in sub_issues(n, config)
+                  if x.get("state", "open") == "open" and "pull_request" not in x)
+    comment = render_comment(DEBT_PASS_KIND, None, render_pass(plan), config, **{"pass": str(plan["pass"])},
+                             held=",".join(map(str, held)) or "none")
+    if len(comment) > COMMENT_LIMIT:
+        raise SdlcError(f"the pass comment is {len(comment)} characters, over GitHub's limit: tighten the scopes")
+    if args.dry_run:
+        print(f"DRY RUN debt epic #{n}: pass {plan['pass']}")
+        print(comment)
+        return 0
+    posted = post_comment(n, comment, config)
+    print(f"debt epic #{n}: pass {plan['pass']} posted  {posted.get('html_url', '')}\n"
+          f"  `uv run python tools/sdlc.py state {n}` says what is due")
+    return 0
+
+
+# --- building a debt ticket: one pass group, one PR into main, claimed as one ----------------------------------
+#
+# `claim T --debt` claims T's whole group of the open pass. The claim (`debt=1 pass=K group=debt-K-i
+# branch=slice/T worktree=.worktrees/slice-T base=main debt_epic=D`) is posted on every member, so each one shows
+# it, and the group keeps that branch, worktree and PR whichever member later leaves it. Everything that builds,
+# reviews, escalates or cleans up a group reads them from its claim (`debt_place`), never from a ticket's number,
+# and never from a ticket's marker `epic=` (where the debt came from). Its Codex review is on the PR, always: no
+# milestone review follows, so it is never deferred.
+
+def debt_place(claim: dict[str, Any], config: dict[str, Any]) -> tuple[Path, str]:
+    """(the worktree, the branch) a debt group's claim recorded, checked to be a slice's: `<worktree_dir>/slice-N`
+    under the primary checkout, and `slice/N`."""
+    wt, branch = claim.get("worktree") or "", claim.get("branch") or ""
+    wdir = config.get("worktree_dir", ".worktrees")
+    if not (re.fullmatch(rf"{re.escape(wdir)}/slice-\d+", wt) and re.fullmatch(r"slice/\d+", branch)):
+        raise SdlcError(f"the debt claim {claim.get('url') or ''} records worktree {wt!r} and branch {branch!r}, "
+                        f"not a slice's ({wdir}/slice-N on slice/N)")
+    return primary_root() / wt, branch
+
+
+def kept_from_ended_pass(claim: dict[str, Any] | None, g: dict[str, Any] | None) -> bool:
+    """A debt claim its group kept as the pass `g` is in ended (escalated, then cleared): a person releases it
+    (`stale_claim_text`). The one rule for the ticket's `next` (derive_debt) and its claim (debt_claim_errors)."""
+    return bool(claim and claim.get("debt") and g and not g["open_pass"])
+
+
+def debt_group(b: dict[str, Any]) -> dict[str, Any] | None:
+    """The pass group a debt ticket bundle's ticket is built in: its claim's (by key, whatever pass), else the one
+    of an open pass listing it, unless the ticket withdrew from it (`debt-request`); None when neither holds it."""
+    trusted, n = set(b["trusted"]), b["issue"]["number"]
+    passes = debt_passes(b.get("epic_comments") or [], trusted)
+    claim = claim_status(b["comments"], trusted)
+    if claim and claim.get("group"):
+        if g := next((g for p in passes for g in p["groups"] if g["key"] == claim["group"]), None):
+            return {**g, "open_pass": any(p["open"] and p["pass"] == g["pass"] for p in passes)}
+    left = withdrawn_from(b["comments"], trusted)
+    for p in passes:
+        if p["open"] and (g := next((g for g in p["groups"] if n in g["tickets"] and g["key"] not in left), None)):
+            return {**g, "open_pass": True}
+    return None
+
+
+def active_debt(issue: dict[str, Any]) -> bool:
+    """A group member still to be built: open and still tech debt. One that left the debt epic (for triage, say)
+    is no member any more, though the claim it carried still says where the group is built. The one membership
+    rule for `state D` (pass_work), the ticket's own state (derive_debt) and a debt PR (debt_pr_context); a
+    ticket read without its state or labels (an offline view's) counts as both."""
+    return issue.get("state", "open") == "open" and DEBT_LABEL in issue.get("labels", [DEBT_LABEL])
+
+
+def group_member(t: dict[str, Any], key: str | None) -> bool:
+    """Ticket `t` (an issue, with `waits_on_person` and `withdrawn` read from its comments: `member_flags`) is still
+    one to build in group `key`: active debt, not withdrawn from the group by a `debt-request`, and not waiting on a
+    person now. The one rule for `state D` (pass_work and a pass's end), the ticket's own state (derive_debt) and
+    a debt PR (debt_pr_context): a withdrawn ticket leaves the group's PR, and its claim, for good."""
+    return active_debt(t) and not t.get("waits_on_person") and (key is None or key not in (t.get("withdrawn") or ()))
+
+
+def member_flags(issue: dict[str, Any], comments: list[dict[str, Any]], trusted: set[str]) -> dict[str, Any]:
+    """`issue` with what group_member reads from its comments: whether it waits on a person, the request, and the
+    groups it withdrew from."""
+    asked = person_request(comments, trusted, issue.get("author", ""))
+    return {**issue, "waits_on_person": asked is not None, "person_request": asked,
+            "withdrawn": sorted(withdrawn_from(comments, trusted))}
+
+
+def debt_members(b: dict[str, Any]) -> dict[int, tuple[dict[str, Any], list[dict[str, Any]]]]:
+    """Every ticket of the bundle's group the bundle holds, this one first: number -> (issue, comments)."""
+    out = {b["issue"]["number"]: (b["issue"], b["comments"])}
+    for m in b.get("members") or []:
+        out.setdefault(m["issue"]["number"], (m["issue"], m.get("comments") or []))
+    return out
+
+
+def derive_debt(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    """A debt ticket's build state, read like a slice's from its bundle alone (`debt_bundle`): its debt epic and
+    base main, never the epic its marker names; its group's claim (posted on every member) and PR; its rating from
+    the pass plan (debt tickets carry no `complexity:*` label). Its review is on the PR, mandatory."""
+    issue, trusted, n = b["issue"], set(b["trusted"]), b["issue"]["number"]
+    g = debt_group(b)
+    members = debt_members(b)
+    flags = {t: member_flags(i, c, trusted) for t, (i, c) in members.items()}
+    claims = {t: claim_status(c, trusted) for t, (_, c) in members.items()}
+    asked = flags[n]["person_request"]
+    # a member that withdrew (or waits on a person) is no longer the group's, and its claim no longer says where the
+    # group is built: the members still in it do
+    claim = claims.get(n) or next((c for t, c in claims.items() if c and t != n and group_member(flags[t], c.get("group"))),
+                                  None)
+    group_open = [t for t in (g["tickets"] if g else [n]) if t in flags and group_member(flags[t], g and g["key"])]
+    escalated = [t for t in group_open if ESCALATED_LABEL in members[t][0].get("labels", [])]
+    pr, pr_comments = b.get("pr"), b.get("pr_comments") or []
+    tests, reviews = pr_records(pr_comments, trusted) if pr else ([], [])
+    t, r = head_records(pr, tests, reviews) if pr else (None, None)
+    epic = b.get("debt_epic")
+    if issue.get("state") == "closed":
+        state = "merged" if issue.get("state_reason") == "completed" else "closed"
+    elif asked:
+        state = "waiting on a person"
+    elif escalated:
+        state = "escalated"
+    elif pr and pr.get("state") == "OPEN":
+        state = "in-review"
+    elif claim:
+        state = "claimed"
+    elif not (g and g["open_pass"]):
+        state = "not-in-pass"
+    else:
+        state = "ready"
+    # its group kept the claim (or PR) as its pass ended (escalated, then cleared): a person releases it, as
+    # `state D` says; nobody builds or merges it for a pass that is over
+    stale = state in ("claimed", "in-review") and kept_from_ended_pass(claim, g)
+    if stale:
+        nxt = f"needs a human: #{n} {stale_claim_text({'number': n, 'claim': claim})}"
+    elif state in ("ready", "claimed", "in-review"):
+        nxt = f"/work-slice {n} --debt"
+    elif state == "waiting on a person":
+        nxt = (f"nothing for an agent: #{n} waits on a person ({asked['url']}): a reply from its author or a "
+               "collaborator puts it back for a later debt pass")
+    elif state == "escalated":
+        nxt = f"nothing for an agent: #{n}'s group needs a human (escalated: " + ", ".join(f"#{e}" for e in escalated) + ")"
+    elif state == "not-in-pass":
+        nxt = (f"nothing for #{n} alone: it is in no open pass of debt epic #{epic} (`uv run python tools/sdlc.py "
+               f"state {epic}` says what is due)" if epic else f"`uv run python tools/sdlc.py debt-epic` (#{n} is "
+               "tech debt in no open debt epic: it attaches it)")
+    else:
+        nxt = f"`uv run python tools/sdlc.py state {epic}` (the debt epic's next)" if epic else "nothing"
+    # the records allow the merge: next is `merge PR`, whose gate results the caller adds (`merge_next`)
+    due = not stale and state == "in-review" and bool(t) and t.get("result") == "pass" and bool(r) and r["verdict"] == "approve"
+    if due:
+        nxt = merge_next(pr["number"], None)
+    complexity = (g or {}).get("complexity")
+    return {"number": n, "title": issue.get("title"), "epic": epic, "debt_epic": epic, "lane": DEBT_LANE,
+            "base": config.get("default_branch", "main"), "key": (g or {}).get("key"), "pass": (g or {}).get("pass"),
+            "group": g and {"key": g["key"], "pass": g["pass"], "tickets": g["tickets"], "open": group_open,
+                            "scope": g["scope"], "files": g["files"], "open_pass": g["open_pass"]},
+            "state": state, "complexity": complexity, "model": model_for(complexity, config),
+            "claim": claim, "escalated": escalated, "person_request": asked, "unmet": [], "pr": (pr or {}).get("number"),
+            "pr_state": (pr or {}).get("state"), "head": (pr or {}).get("headRefOid"), "tests_on_head": t,
+            "review_on_head": r, "deferred_on_head": False, "pr_rounds": changes_rounds(reviews),
+            "merge_due": due,
+            "review": "slice", "review_mandatory": True, "next": nxt}
+
+
+def debt_claim_errors(b: dict[str, Any], resume: bool = False) -> list[str]:
+    """Why `claim T --debt` (or `--resume`) may not start the ticket's group now (empty list = go): a ticket
+    closed, in no open debt epic or open pass, its group's claim kept from a pass that ended (`release T`), its group
+    escalated, or the group already claimed (through any member) for a fresh claim. One rule for `claim --debt`,
+    `slice-check` and `slice-status`."""
+    issue, n = b["issue"], b["issue"]["number"]
+    if DEBT_LABEL not in issue.get("labels", []):
+        return [f"#{n} isn't labelled `{DEBT_LABEL}`: `claim {n} --debt` builds a debt ticket only"]
+    st = derive_debt(b, {})
+    errs = []
+    if issue.get("state") != "open":
+        errs.append(f"#{n} is closed")
+    if asked := st["person_request"]:
+        errs.append(f"#{n} waits on a person ({asked['url']}): a reply from its author or a collaborator puts it back "
+                    "for a later debt pass")
+    claim = st["claim"]
+    stale = kept_from_ended_pass(claim, st["group"])
+    if not b.get("debt_epic"):
+        errs.append(f"#{n} is in no open debt epic (`debt-epic` attaches open debt)")
+    elif stale:   # its pass ended with the claim kept: neither a fresh claim nor a resume builds it
+        errs.append(f"#{n} {stale_claim_text({'number': n, 'claim': claim})}")
+    elif not (st["group"] and (st["group"]["open_pass"] or st["claim"])):
+        errs.append(f"#{n} is in no open pass of debt epic #{b['debt_epic']}: `state {b['debt_epic']}` says what is due")
+    if st["escalated"]:
+        errs.append(f"#{n}'s group `{st['key']}` is escalated to a human ("
+                    + ", ".join(f"#{e}" for e in st["escalated"]) + "): a person clears it")
+    if claim and not resume and not stale:
+        whose = "" if claim_status(b["comments"], set(b["trusted"])) else f"its group `{st['key']}` is claimed: "
+        errs.append(f"#{n} is already claimed ({whose}{claim['url']}): `claim {n} --debt --resume` to continue it")
+    if resume and not claim:
+        errs.append(f"#{n} has no claim to resume: `claim {n} --debt`")
+    if claim and not claim.get("debt"):
+        errs.append(f"#{n}'s claim ({claim['url']}) isn't a debt group's: release it, then `claim {n} --debt`")
+    return errs
+
+
+def debt_bundle(n: int, config: dict[str, Any], trusted: set[str], issue: dict[str, Any],
+                comments: list[dict[str, Any]]) -> dict[str, Any]:
+    """A debt ticket's bundle, as slice-status, slice-check, claim --debt and escalate-slice read it: the ticket,
+    its debt epic and that epic's comments (the passes), its group's other members (each {issue, comments}), and
+    the group's PR, from the branch its claim recorded."""
+    repo = repo_of(config)
+    epic = ticket_debt_epic(n, config, trusted)
+    b = {"lane": DEBT_LANE, "issue": issue, "comments": comments, "trusted": sorted(trusted), "blockers": [],
+         "debt_epic": epic, "members": [], "pr": None, "pr_comments": [],
+         "epic_comments": [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{epic}/comments")] if epic else []}
+    for t in (debt_group(b) or {}).get("tickets") or []:
+        if t != n:
+            mi, mc = fetch_slice(t, config)
+            b["members"].append({"issue": mi, "comments": mc})
+    claim = derive_debt(b, config)["claim"]
+    if claim and claim.get("debt"):
+        b["pr"] = find_branch_pr(debt_place(claim, config)[1], config)
+        b["pr_comments"] = fetch_pr(b["pr"]["number"], config)[1] if b["pr"] else []
+    return b
+
+
+def claim_debt(args: argparse.Namespace, config: dict[str, Any], b: dict[str, Any]) -> int:
+    """Claim a debt ticket's group of the open pass: its worktree on slice/T from origin/main, the claim on every
+    member. Resuming (through any member) reattaches the worktree and branch the claim recorded, and posts the
+    claim on any member a cut-short claim missed."""
+    n = args.number
+    if args.quick:
+        raise SdlcError("--debt and --quick are different lanes: a debt ticket is claimed with --debt alone")
+    if args.retry:
+        raise SdlcError(f"--retry takes over an escalated slice; an escalated debt group stops for a person, "
+                        f"never retried (`state {b.get('debt_epic')}` lists it)")
+    if b.get("lane") != DEBT_LANE:
+        raise SdlcError(f"#{n} isn't a tech-debt ticket: `claim {n}` (or `--quick`) without --debt")
+    if errs := debt_claim_errors(b, args.resume):
+        raise SdlcError("; ".join(errs))
+    st = derive_debt(b, config)
+    g, claim, epic = st["group"], st["claim"], b["debt_epic"]
+    root, base = primary_root(), config.get("default_branch", "main")
+    members = [n] + [t for t in (g or {}).get("open", []) if t != n]
+    adopted = None
+    if claim:
+        wt, branch = debt_place(claim, config)
+        group, k, rel = claim["group"], claim["pass"], claim["worktree"]
+    elif adopted := adoptable(b, members, config):   # a group that left its pass for a person kept its place
+        wt, branch = debt_place(adopted, config)
+        group, k, rel = g["key"], str(g["pass"]), adopted["worktree"]
+    else:
+        wt, branch = worktree_path(n, config), slice_branch(n)
+        group, k, rel = g["key"], str(g["pass"]), f"{config.get('worktree_dir', '.worktrees')}/slice-{n}"
+        if branch_exists(branch, root):   # an earlier group's (one that kept #n's number) may still build in it
+            old = [c for c in debt_claims(b["comments"], set(b["trusted"])) if c.get("branch") == branch]
+            raise SdlcError(f"{branch} already exists" + (f": debt group `{old[-1]['group']}` (pass {old[-1]['pass']}) "
+                                                          f"was built in it ({old[-1]['url']})" if old else "")
+                            + f". A fresh claim never builds on top of it: once that work merges (its branch is then "
+                            f"deleted) or a person removes it (`cleanup {n} --force` discards it), claim #{n} again")
+    if not remote_has(base, root):
+        raise SdlcError(f"origin has no {base}")
+    if args.dry_run:
+        print(f"would {'resume' if args.resume else 'claim'} #{n}: worktree {wt} on {branch} from origin/{base}; "
+              f"debt group `{group}` (" + ", ".join(f"#{t}" for t in members) + f") of debt epic #{epic}"
+              + (f"; adopting debt group `{adopted['group']}`'s kept branch, worktree"
+                 + (f" and PR #{adopted['pr']}" if adopted.get("pr") else "") if adopted else ""))
+        return 0
+    add_slice_worktree(n, base, args.resume or bool(adopted), config, wt=wt, branch=branch, lane=DEBT_LANE)
+    trusted, have = set(b["trusted"]), debt_members(b)
+    model = {"model": args.model} if args.model else {}
+    for t in members:
+        if t in have and claim_status(have[t][1], trusted):
+            continue
+        body = (f"Building debt group `{group}` (" + ", ".join(f"#{m}" for m in members) + f") in `{branch}`, from "
+                f"`{base}`" + (f", with {args.model}." if model else "."))
+        if adopted:
+            body += (f" Adopted from debt group `{adopted['group']}` of pass {adopted['pass']} ({adopted['url']}): "
+                     "its branch and worktree" + (f", and PR #{adopted['pr']}" if adopted.get("pr") else "") + ".")
+        post_comment(t, render_comment("claim", None, body, config, branch=branch, base=base, debt="1", **{"pass": k},
+                                       group=group, worktree=rel, debt_epic=str(epic), **model,
+                                       **({"adopted": adopted["group"]} if adopted else {})), config)
+        gh(["issue", "edit", str(t), "--repo", repo_of(config), "--add-assignee", "@me"], check=False)
+    print(f"WORKTREE={wt}\nPRIMARY={root}\nBRANCH={branch}\nBASE=origin/{base}\nGROUP={group}"
+          + (f"\nADOPTED={adopted['group']}" + (f"\nPR={adopted['pr']}" if adopted.get("pr") else "") if adopted else ""))
+    return 0
+
+
+# --- debt that needs a person: ask on the ticket, leave the pass -------------------------------------------------
+#
+# When a ticket's own verification needs a real speaker write, the agent builds what it can offline and runs
+# `debt-request T`: a request on the ticket (the step's dry run and the snapshot/restore bracket), marked with the
+# group it leaves (`kind=debt-request group=debt-K-i pass=K`). The ticket then waits on a person and is in no group
+# any more: `group_member` drops it from state D's work, a pass's end, the ticket's own state and the gate (which
+# refuses a PR still closing it). If others of its group are left, they carry on with the group's key, claim,
+# branch, worktree and PR, and only T's own claim is released. If none is left, the group's claim is released on
+# every open member with a *kept* record (`kind=release kept=1 group= branch= worktree= pr=`), the branch pushed
+# first: a ticket that comes back in a later pass adopts that branch, worktree and PR under its new group key
+# (`claim T --debt`, recording `adopted=<old key>`), never a fresh worktree on top. The agent never runs the write.
+
+BRACKET_RE = {k: re.compile(rf"\btwiddle\s+(?:alarm\s+)?{k}\b") for k in ("snapshot", "restore")}
+
+
+def debt_request_lacks(body: str) -> list[str]:
+    """What a `debt-request` body is missing (none: it is complete): the step's dry run, and the bracket around the
+    write: `twiddle snapshot` (or `alarm snapshot`) before, `twiddle restore` (or `alarm restore`) after."""
+    out = [] if "--dry-run" in body else ["the step's `--dry-run` output"]
+    snap, rest = BRACKET_RE["snapshot"].search(body), BRACKET_RE["restore"].search(body)
+    if not snap:
+        out.append("the `twiddle snapshot` before it")
+    if not rest:
+        out.append("the `twiddle restore` after it")
+    if snap and rest and rest.start() < snap.start():
+        out.append("the `snapshot` first: `restore` comes after the write")
+    return out
+
+
+def debt_claims(comments: list[dict[str, Any]], trusted: set[str]) -> list[dict[str, Any]]:
+    """Every debt group claim ever posted on a ticket, oldest first: {group, pass, branch, url}."""
+    return [{"group": mk.get("group"), "pass": mk.get("pass"), "branch": mk.get("branch"), "url": c.get("url", "")}
+            for mk, c in _marked(comments, trusted) if mk.get("kind") == "claim" and mk.get("debt")]
+
+
+def kept_places(comments: list[dict[str, Any]], trusted: set[str]) -> list[dict[str, Any]]:
+    """The branches, worktrees and PRs a fully withdrawn group kept (its `release kept=1` records), oldest first:
+    {group, pass, branch, worktree, pr, tickets, debt_epic, at, url}."""
+    out = []
+    for mk, c in _marked(comments, trusted):
+        if mk.get("kind") == "release" and mk.get("kept") and mk.get("branch"):
+            out.append({"group": mk.get("group"), "pass": mk.get("pass"), "branch": mk.get("branch"),
+                        "worktree": mk.get("worktree"), "pr": mk.get("pr"), "debt_epic": mk.get("debt_epic"),
+                        "tickets": [int(t) for t in (mk.get("tickets") or "").split(",") if t.isdigit()],
+                        "at": c.get("created_at", ""), "url": c.get("url", "")})
+    return out
+
+
+def branch_exists(branch: str, root: Path) -> bool:
+    """`branch` is here (a local branch) or on origin."""
+    return bool(git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root, check=False)) \
+        or remote_has(branch, root)
+
+
+def debt_request_plan(n: int, config: dict[str, Any], trusted: set[str], issue: dict[str, Any],
+                      comments: list[dict[str, Any]]) -> dict[str, Any]:
+    """What `debt-request T` does, read (read-only): {asked, group, claim, remaining, release, keep, epic}. `group`
+    is the pass group T leaves (None: T is in none); `claim` the group's claim (None: unclaimed); `remaining` its
+    members still in it once T leaves; `release` the tickets whose claim goes (T alone while others remain, else
+    every open member holding it); `keep` the members to give a kept record (a fully withdrawn group's every open
+    member without one yet). A rerun of one cut short (the request posted, the rest not) finishes it."""
+    b = debt_bundle(n, config, trusted, issue, comments)
+    if not b.get("debt_epic"):
+        raise SdlcError(f"#{n} is in no open debt epic (`debt-epic` attaches open debt)")
+    asked = person_request(comments, trusted, issue.get("author", ""))
+    passes = debt_passes(b["epic_comments"], trusted)
+    if asked:   # a rerun: the group it already left, from its request
+        key = asked.get("group")
+    else:
+        g = debt_group(b)
+        claim = claim_status(comments, trusted)
+        key = g["key"] if g and (g["open_pass"] or (claim or {}).get("group") == g["key"]) else None
+    group = next((g for p in passes for g in p["groups"] if g["key"] == key), None) if key else None
+    flags, claims = {n: member_flags(issue, comments, trusted)}, {n: claim_status(comments, trusted)}
+    kept = {n: kept_places(comments, trusted)}
+    for t in (group or {}).get("tickets", []):
+        if t != n:
+            ti, tc = fetch_slice(t, config)
+            flags[t], claims[t], kept[t] = member_flags(ti, tc, trusted), claim_status(tc, trusted), kept_places(tc, trusted)
+    ours = {t: c for t, c in claims.items() if (c or {}).get("debt") and c.get("group") == key} if key else {}
+    claim = next(iter(ours.values()), None)
+    remaining = [t for t in (group or {}).get("tickets", []) if t != n and group_member(flags[t], key)]
+    release, keep = [], []
+    if claim and remaining:
+        release = [n] if n in ours else []
+    elif claim or any(k["group"] == key for ks in kept.values() for k in ks):
+        claim = claim or next(k for ks in kept.values() for k in ks if k["group"] == key)
+        release = sorted(ours)
+        keep = sorted({t for t in (group or {}).get("tickets", []) if active_debt(flags[t])
+                       and not any(k["group"] == key and k["branch"] == claim["branch"] for k in kept[t])} | set(release))
+    return {"asked": asked, "group": group, "claim": claim, "remaining": remaining, "release": release,
+            "keep": keep, "epic": b["debt_epic"]}
+
+
+def command_debt_request(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Ask a person, on debt ticket T, for the verification only they can run (a real speaker write), and take T out
+    of its pass: it waits on them, and their reply puts it back for a later pass. The group carries on without it, or,
+    when T was its last member, its claim is released and its branch (pushed), worktree and PR are kept for a later
+    claim to adopt. `--dry-run` reads, prints the request and the withdrawal, and writes nothing."""
+    n, root, trusted = args.number, primary_root(), fetch_trusted(config)
+    issue, comments = fetch_slice(n, config)
+    if DEBT_LABEL not in issue.get("labels", []):
+        raise SdlcError(f"#{n} isn't labelled `{DEBT_LABEL}`: `debt-request` asks on a debt ticket (a slice's demo "
+                        "steps are `demo-request`)")
+    if issue.get("state") != "open":
+        raise SdlcError(f"#{n} is closed")
+    body = Path(args.body_file).read_text().strip()
+    if hits := identifier_hits(body):
+        raise SdlcError("the request contains " + ", ".join(hits) + ": the issue is public")
+    if missing := debt_request_lacks(body):
+        raise SdlcError("the request lacks " + ", ".join(missing) + ": a person runs the write, bracketed by "
+                        "`uv run twiddle snapshot --room R` and `uv run twiddle restore --room R` (or `alarm snapshot` "
+                        "and `alarm restore`), after its dry run")
+    plan = debt_request_plan(n, config, trusted, issue, comments)
+    g, claim, asked = plan["group"], plan["claim"], plan["asked"]
+    if asked and not (plan["release"] or plan["keep"]):
+        raise SdlcError(f"#{n} already waits on a person: {asked['url']}")
+    extra = {"group": g["key"], "pass": str(g["pass"])} if g else {}
+    lead = (f"#{n} leaves debt group `{g['key']}` of pass {g['pass']} until you reply" if g
+            else f"#{n} waits for your reply before a debt pass takes it")
+    comment = render_comment(DEBT_REQUEST_KIND, None, f"{body}\n\n{lead}: the agent never runs this write itself.",
+                             config, **extra)
+    if len(comment) > COMMENT_LIMIT:
+        raise SdlcError("the request is over GitHub's comment limit")
+    wt, branch = debt_place(claim, config) if claim else (None, None)
+    pr = (find_branch_pr(branch, config) if branch else None) if plan["keep"] else None
+    pr_n = pr["number"] if pr and pr.get("state") == "OPEN" else None
+    if plan["keep"] and wt is not None and wt.exists() and git(["status", "--porcelain"], cwd=wt):
+        raise SdlcError(f"{wt} has uncommitted work: commit it (the branch is pushed and kept for #{n}'s return), "
+                        "then rerun. Nothing was posted")
+    local = bool(branch) and bool(git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root,
+                                      check=False))
+    kept_body = (f"Debt group `{g['key'] if g else claim['group']}` has no member left to build: its claim is released. "
+                 f"Its branch `{branch}`, worktree `{claim['worktree']}`" + (f" and PR #{pr_n}" if pr_n else "")
+                 + " are kept: a ticket of it that comes back in a later pass adopts them (`claim T --debt`)."
+                 if plan["keep"] else "")
+    kept_marker = dict(debt="1", kept="1", group=claim["group"], **{"pass": str(claim["pass"])}, branch=branch,
+                       worktree=claim["worktree"], debt_epic=str(plan["epic"]),
+                       tickets=",".join(map(str, (g or {}).get("tickets", [n]))),
+                       **({"pr": str(pr_n)} if pr_n else {})) if plan["keep"] else {}
+    if args.dry_run:
+        if not asked:
+            print(f"would post on #{n}:\n{comment}")
+        if plan["remaining"] and claim:
+            print(f"#{n} leaves debt group `{g['key']}`; it carries on with " + ", ".join(f"#{t}" for t in plan["remaining"])
+                  + f" in {branch} ({wt})" + (f"; would release #{n}'s claim" if plan["release"] else ""))
+        elif plan["keep"]:
+            print((f"would push {branch} to origin; " if local else "")
+                  + "would release the claim on " + (", ".join(f"#{t}" for t in plan["release"]) or "no ticket")
+                  + "; would post the kept record on " + ", ".join(f"#{t}" for t in plan["keep"]) + f":\n{kept_body}")
+        elif g:
+            print(f"#{n} leaves debt group `{g['key']}` (unclaimed)")
+        return 0
+    if not asked:
+        posted = post_comment(n, comment, config)
+        print(f"#{n}: asked a person  {posted.get('html_url', '')}")
+    if plan["keep"] and local:
+        git(["push", "-q", "origin", f"{branch}:refs/heads/{branch}"], cwd=root)   # never forced: the work survives
+    for t in plan["release"] if not plan["keep"] else []:
+        post_comment(t, render_comment("release", None, f"#{t} left debt group `{g['key']}` for a person "
+                                       f"(`debt-request`); the group carries on in `{branch}`.", config,
+                                       withdrawn="1", group=g["key"]), config)
+        gh(["issue", "edit", str(t), "--repo", repo_of(config), "--remove-assignee", "@me"], check=False)
+    for t in plan["keep"]:
+        post_comment(t, render_comment("release", None, kept_body, config, **kept_marker), config)
+        if t in plan["release"]:
+            gh(["issue", "edit", str(t), "--repo", repo_of(config), "--remove-assignee", "@me"], check=False)
+    if plan["remaining"] and claim:
+        print(f"#{n} left debt group `{g['key']}`: it carries on with " + ", ".join(f"#{t}" for t in plan["remaining"])
+              + f" in {branch}")
+    elif plan["keep"]:
+        print(f"debt group `{claim['group']}`: claim released; {branch}" + (" (pushed)" if local else "")
+              + f", {claim['worktree']}" + (f" and PR #{pr_n}" if pr_n else "") + " kept for a later pass")
+    print(f"next: nothing for #{n}: it waits on a person's reply; `uv run python tools/sdlc.py state {plan['epic']}` "
+          "says what is due")
+    return 0
+
+
+def adoptable(b: dict[str, Any], members: list[int], config: dict[str, Any]) -> dict[str, Any] | None:
+    """The kept place (`kept_places`) a fresh claim of `members` adopts, or None to start fresh (none is kept, or
+    its branch is gone: merged or removed). One claim never silently leaves a member's saved work behind, so it is
+    refused while a kept branch is held by an open ticket's claim (every open ticket of the debt epic and of the
+    group that kept it is read: a branch may have been adopted, and claimed, by tickets never in that group), and
+    when the members' work is kept on two branches (a person merges them or discards one first)."""
+    trusted, have, root = set(b["trusted"]), debt_members(b), primary_root()
+    found = sorted((k for t in members if t in have for k in kept_places(have[t][1], trusted)),
+                   key=lambda k: k["at"], reverse=True)
+    others: dict[int, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
+
+    def read(t: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if t not in others:
+            others[t] = have[t] if t in have else fetch_slice(t, config)
+        return others[t]
+
+    epic_open = ([s_["number"] for s_ in sub_issues(b["debt_epic"], config)
+                  if s_.get("state", "open") == "open" and "pull_request" not in s_] if b.get("debt_epic") and found
+                 else [])
+    live: dict[str, dict[str, Any]] = {}   # branch -> its latest adoptable kept record
+    for k in found:
+        if k["branch"] in live or not branch_exists(k["branch"], root):
+            continue   # merged and deleted, or removed by a person: nothing left to adopt
+        holder = None
+        for t in sorted(set(epic_open) | set(k["tickets"])):
+            if t in members:
+                continue
+            ti, tc = read(t)
+            c = claim_status(tc, trusted)
+            if ti.get("state", "open") == "open" and (c or {}).get("debt") and c.get("branch") == k["branch"]:
+                holder = (t, c)
+                break
+        if holder:   # saved work another claim is building on: never left behind for a fresh start
+            raise SdlcError(f"{k['branch']}, the work debt group `{k['group']}` kept for this group's tickets "
+                            f"({k['url']}), is held by #{holder[0]}'s claim ({holder[1]['url']}): a claim here would "
+                            "leave that work behind. Once that claim's work merges or a person releases it, claim "
+                            "again. Nothing was claimed")
+        live[k["branch"]] = k
+    if len(live) > 1:
+        raise SdlcError("this group's tickets hold work kept on more than one branch ("
+                        + "; ".join(f"{k['branch']} from debt group `{k['group']}` ({k['url']})" for k in live.values())
+                        + "): a claim adopts one, so a person merges them into one branch, or discards the others (deletes "
+                        "the branch here and on origin, and closes its PR), then claims again. Nothing was claimed")
+    return next(iter(live.values()), None)
+
+
+def debt_pr_context(pr: dict[str, Any], tickets: list[dict[str, Any]], epic_comments: list[dict[str, Any]],
+                    trusted: set[str], others: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    """A debt PR's group, from the issues it closes (each {issue, comments}) and the debt epic's comments: {tickets,
+    claim, group, debt_epic}. None when it closes no tech-debt ticket. Refused unless every issue it closes is a
+    ticket of one claimed group still in it (none withdrawn by a `debt-request`, or waiting on a person), and it
+    closes every such member of that group: `others` are the group's members it doesn't close (each {issue,
+    comments}, or an issue alone), as read."""
+    refs = closes_refs(pr.get("body", ""))
+    by_n = {t["issue"]["number"]: t for t in tickets}
+    debt = [r for r in refs if r in by_n and DEBT_LABEL in by_n[r]["issue"].get("labels", [])]
+    if not debt:
+        return None
+    if other := [r for r in refs if r not in debt]:
+        raise SdlcError(f"PR #{pr['number']} closes " + ", ".join(f"#{r}" for r in other) + " besides tech debt: "
+                        "a debt PR closes only its group's tickets")
+    flags = {r: member_flags(by_n[r]["issue"], by_n[r]["comments"], trusted) for r in refs}
+    claims = {r: claim_status(by_n[r]["comments"], trusted) for r in refs}
+    # the group, from a ticket still in it: a withdrawn one's claim is released, or names the group it left
+    key = next((c["group"] for r, c in claims.items() if (c or {}).get("debt") and group_member(flags[r], c.get("group"))),
+               None)
+    # a ticket the PR closes that isn't (or no longer is) in the group: what to drop from the body, said before the
+    # claims are checked (it carries none: released when it left, or never claimed in this group)
+    redo = "; if that changes the head, record the test run and the Codex review again on the new head"
+    if gone := [r for r in refs if flags[r]["waits_on_person"] or key in flags[r]["withdrawn"]]:
+        raise SdlcError(f"PR #{pr['number']} still closes " + ", ".join(f"#{r}" for r in gone) + ", which left its "
+                        "group for a person (`debt-request`) and stays open: edit the PR body to drop `Closes #T` for "
+                        + ", ".join(f"#{r}" for r in gone) + redo)
+    by_key = next((g for p in debt_passes(epic_comments, trusted) for g in p["groups"] if g["key"] == key), None)
+    if by_key and (out := [r for r in refs if not (claims[r] or {}).get("debt") and r not in by_key["tickets"]]):
+        raise SdlcError(f"PR #{pr['number']} closes " + ", ".join(f"#{r}" for r in out) + f", which isn't in group "
+                        f"`{key}` (another group's, or the group's an adopted PR was first opened for): edit the PR body to drop "
+                        "`Closes #T` for " + ", ".join(f"#{r}" for r in out) + redo)
+    keys = {(c or {}).get("group") for c in claims.values() if (c or {}).get("debt")}
+    if len(keys) != 1 or any(not (c or {}).get("debt") for c in claims.values()):
+        raise SdlcError(f"PR #{pr['number']}'s tickets (" + ", ".join(f"#{r}" for r in refs) + ") aren't one claimed "
+                        "debt group: each must carry its group's claim (`claim T --debt`)")
+    claim = claims[refs[0]]
+    group = next((g for p in debt_passes(epic_comments, trusted) for g in p["groups"] if g["key"] == claim["group"]), None)
+    if group is None:
+        raise SdlcError(f"debt group `{claim['group']}` isn't in any pass posted on debt epic #{claim.get('debt_epic')}")
+    if strays := [r for r in refs if r not in group["tickets"]]:
+        raise SdlcError(", ".join(f"#{r}" for r in strays) + f" isn't in group `{group['key']}`: a debt PR closes "
+                        "only its group's tickets")
+    seen = {i["number"]: i for i in (member_flags(o["issue"], o.get("comments") or [], trusted) if "issue" in o else o
+                                     for o in others or [])}
+    if missing := [t for t in group["tickets"] if t not in refs and (t not in seen or group_member(seen[t], group["key"]))]:
+        raise SdlcError(f"PR #{pr['number']} doesn't close " + ", ".join(f"#{t}" for t in missing) + f" of group "
+                        f"`{group['key']}`: a debt PR closes every open ticket of its group (`Closes #T` each)")
+    return {"tickets": [by_n[r]["issue"] for r in refs], "claim": claim, "group": group,
+            "debt_epic": claim.get("debt_epic")}
+
+
+def pr_debt(args: argparse.Namespace, pr: dict[str, Any], issue: dict[str, Any] | None, config: dict[str, Any],
+            trusted: set[str]) -> dict[str, Any] | None:
+    """`debt_pr_context` for the PR, read from GitHub (or `--from-file`'s `debt_tickets` and `epic_comments`).
+    `issue` is what pr_issue already read of a PR closing exactly one issue: no other is read for one that isn't
+    tech debt."""
+    if args.from_file:
+        b = json.loads(Path(args.from_file).read_text())
+        tickets = b.get("debt_tickets") or ([{"issue": b["slice"], "comments": b.get("comments") or []}]
+                                            if b.get("slice") else [])
+        return debt_pr_context(pr, tickets, b.get("epic_comments") or [], trusted, b.get("members") or [])
+    refs = closes_refs(pr.get("body", ""))
+    if not refs or len(refs) == 1 and issue is not None and DEBT_LABEL not in issue.get("labels", []):
+        return None
+    tickets = [dict(zip(("issue", "comments"), fetch_slice(r, config))) for r in refs]
+    if not any(DEBT_LABEL in t["issue"].get("labels", []) for t in tickets):
+        return None
+    epic = next((c.get("debt_epic") for t in tickets if (c := claim_status(t["comments"], trusted)) and c.get("debt")), "")
+    ec = [norm_comment(c) for c in gh_pages(f"repos/{repo_of(config)}/issues/{epic}/comments")] if (epic or "").isdigit() else []
+    key = next((c.get("group") for t in tickets if (c := claim_status(t["comments"], trusted)) and c.get("debt")), None)
+    group = next((g for p in debt_passes(ec, trusted) for g in p["groups"] if g["key"] == key), None)
+    others = [dict(zip(("issue", "comments"), fetch_slice(t, config))) for t in (group or {}).get("tickets", [])
+              if t not in refs]
+    return debt_pr_context(pr, tickets, ec, trusted, others)
+
+
+def debt_brief(ctx: dict[str, Any]) -> str:
+    """What Codex holds a debt PR to: the pass group's scope and files, the rule for findings outside them, and
+    each ticket it closes (the spec)."""
+    g = ctx["group"]
+    out = [f"Debt PR: group `{g['key']}` of pass {g['pass']} on debt epic #{ctx['debt_epic']}, closing "
+           + ", ".join(f"#{t['number']}" for t in ctx["tickets"]) + ", into main.", "",
+           "## The group's scope (from the pass plan)", "", g["scope"] or "(none given)", "",
+           "## The group's files (from the pass plan)", "", *[f"- `{f}`" for f in g["files"]], "",
+           f"Rated `{g['complexity'] or '?'}` in the pass plan.", "",
+           "## Findings inside and outside the scope", "",
+           "Each ticket below is the spec, and the group's scope and files above bound the change. A problem inside "
+           "that scope is fixed in this PR, and so is anything the diff itself changes or breaks, wherever it is. A "
+           "problem that was already there outside that scope, which the change neither causes nor touches, is not "
+           "this ticket's debt: it doesn't hold this PR, and it isn't filed as debt either. It is dropped, or filed "
+           "as an ordinary issue for triage when it matters.", ""]
+    for t in ctx["tickets"]:
+        out += [f"## Ticket #{t['number']}: {t.get('title', '')}", "", (t.get("body") or "").strip(), ""]
+    return "\n".join(out)
 
 
 def slice_bundle(n: int, config: dict[str, Any]) -> dict[str, Any]:
     trusted = fetch_trusted(config)
     issue, comments = fetch_slice(n, config)
+    if DEBT_LABEL in issue["labels"]:   # built as its pass group, onto main: read through its group's claim
+        return debt_bundle(n, config, trusted, issue, comments)
     pr = find_slice_pr(n, config)
     pr_comments = fetch_pr(pr["number"], config)[1] if pr else []
     return {"issue": issue, "comments": comments, "trusted": sorted(trusted),
@@ -2836,8 +4768,8 @@ def slice_bundle(n: int, config: dict[str, Any]) -> dict[str, Any]:
             "pr": pr, "pr_comments": pr_comments}
 
 
-def bundle_slice(b: dict[str, Any]) -> dict[str, Any]:
-    return derive_slice(b["issue"], b["comments"], set(b["trusted"]), b["blockers"], b["pr"], b["pr_comments"])
+def bundle_slice(b: dict[str, Any], mode: str = "slice") -> dict[str, Any]:
+    return derive_slice(b["issue"], b["comments"], set(b["trusted"]), b["blockers"], b["pr"], b["pr_comments"], mode)
 
 
 def bundle_issue_state(b: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
@@ -2875,9 +4807,14 @@ def derive_quick(b: dict[str, Any], st: dict[str, Any], config: dict[str, Any]) 
         out["next"] = next_command(st)
         if out["next"].startswith("/work-slice"):   # triage can't see these (the brief's sections, the rating)
             out["next"] = f"/triage-issue {n}: " + "; ".join(refusals)
-    elif building:
+    # no milestone to owe a review to: a deferral never counts, only Codex's approval of the head
+    r, t = out["review_on_head"], out["tests_on_head"]
+    out["merge_due"] = (not refusals and out["state"] == "in-review" and bool(t) and t.get("result") == "pass"
+                        and bool(r) and r["verdict"] == "approve")
+    if out["merge_due"]:
+        out["next"] = merge_next(out["pr"], None)
+    elif building and not refusals:
         out["next"] = f"/work-slice {n} --quick"
-    # no milestone to owe a review to: a deferral never counts, Codex reviews the PR
     return {**out, "deferred_on_head": False, "lane": QUICK, "refusals": refusals,
             "review": "slice", "review_mandatory": True}
 
@@ -2923,6 +4860,26 @@ def quick_gate_errors(b: dict[str, Any], config: dict[str, Any]) -> list[str]:
                                    approved_brief(st) if st else None, quick, config.get("default_branch", "main"))
 
 
+def merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: dict[str, Any]) -> list[str]:
+    """The gate's refusals of a PR whose records say it may merge, read online and read-only: the quick gate's
+    for a quick change, the slice gate's (with its milestone hold) for a slice. A failed read is one refusal,
+    never an exception: `state` and `next` must still answer."""
+    try:
+        return _merge_due_gate(b, st, quick, config)
+    except SdlcError as exc:
+        return [f"could not read the gate: {exc}"]
+
+
+def _merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: dict[str, Any]) -> list[str]:
+    if quick:
+        return quick_gate_errors(quick_gate_bundle(st["pr"], config), config)
+    if st.get("lane") == DEBT_LANE:   # its `epic` is the debt epic: no epic branch, the debt gate onto main
+        return debt_pr_gate(st["pr"], config, set(b["trusted"]))
+    if not st.get("epic"):
+        return [no_epic_error(b["pr"], closes_refs(b["pr"].get("body", "")), b["issue"])]
+    return slice_merge_errors(b["pr"], b["pr_comments"], b["issue"], st["epic"], config, set(b["trusted"]))[0]
+
+
 def command_quick_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """May this quick PR merge into main? Prints each refusal (or `ok`); reads only, never escalates."""
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else quick_gate_bundle(args.pr, config)
@@ -2936,11 +4893,16 @@ def command_quick_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
 
 def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> int:
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(args.number, config)
+    if b.get("lane") == DEBT_LANE:
+        return print_debt_status(b, config, args.json, offline=bool(args.from_file))
     quick = bundle_quick(b, config)
-    st = derive_quick(b, quick, config) if quick else bundle_slice(b)
+    st = derive_quick(b, quick, config) if quick else bundle_slice(b, review_mode(complexity_of(b["issue"].get("labels", [])), config))
     st["model"] = model_for(st["complexity"], config)
     if not quick:
         st["review"] = review_mode(st["complexity"], config)
+    if st["merge_due"]:   # the records allow it: what the gate says now (read-only; never offline)
+        st["gate"] = None if args.from_file else merge_due_gate(b, st, bool(quick), config)
+        st["next"] = merge_next(st["pr"], st["gate"])
     if args.json:
         print(json.dumps(st, indent=2))
         return 0
@@ -2965,9 +4927,39 @@ def command_slice_status(args: argparse.Namespace, config: dict[str, Any]) -> in
     return 0
 
 
+def print_debt_status(b: dict[str, Any], config: dict[str, Any], as_json: bool, offline: bool = False) -> int:
+    """`slice-status T` for a debt ticket: its debt epic, pass group and base main, its group's claim and PR, and
+    once its PR's records allow the merge, `merge PR` with the debt gate's results (read-only; never offline)."""
+    st = derive_debt(b, config)
+    st["refusals"] = debt_claim_errors(b, bool(st["claim"])) if st["state"] in ("ready", "claimed", "in-review") else []
+    if st["merge_due"]:
+        st["gate"] = None if offline else merge_due_gate(b, st, False, config)
+        st["next"] = merge_next(st["pr"], st["gate"])
+    if as_json:
+        print(json.dumps(st, indent=2))
+        return 0
+    g = st["group"]
+    print(f"#{st['number']} {st['title']}\n  state: {st['state']}   lane: {DEBT_LANE}   debt epic: "
+          + (f"#{st['debt_epic']}" if st["debt_epic"] else "none") + f"   base: {st['base']}"
+          + (f"   group: `{g['key']}` of pass {g['pass']} (" + ", ".join(f"#{t}" for t in g["tickets"]) + ")" if g else "")
+          + (f"   complexity: {st['complexity']} (model {st['model']})" if st["complexity"] else "")
+          + "   Codex review: on the PR (mandatory: a debt PR is never owed to a milestone)")
+    for e in st["refusals"]:
+        print(f"  refused: {e}")
+    if c := st["claim"]:
+        print(f"  claimed: {c['url']} (branch {c['branch']}" + (f", worktree {c['worktree']}" if c.get("worktree") else "")
+              + (f", group {c['group']}" if c.get("group") else "") + (f", model {c['model']})" if c.get("model") else ")"))
+    if st["pr"]:
+        t, r = st["tests_on_head"], st["review_on_head"]
+        print(f"  PR #{st['pr']} ({st['pr_state']}) head {(st['head'] or '')[:12]}: tests {t['result'] if t else 'not run'}, "
+              f"Codex {r['verdict'] if r else 'not yet'}, rounds {st['pr_rounds']}/{config.get('max_pr_rounds', 5)}")
+    print(f"  next: {st['next']}")
+    return 0
+
+
 def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -> list[str]:
     """Why a fresh claim of this slice must wait: its epic isn't being built (escalated, done...), main holds an
-    unverified release, a demo or release is due, a later milestone waits, or the cleanup pass comes first."""
+    unverified release, a demo or release is due, or a later milestone waits."""
     epic = (parse_marker(b["issue"].get("body", "")) or {}).get("epic", "")
     if resume or not epic.isdigit():
         return []
@@ -2983,14 +4975,16 @@ def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -
         return [f"main holds a release no recorded run saw ({', '.join(st['untested'])}): `verify-main {epic}` first"]
     errs = claim_pause_errors(st, progress)
     if progress and not errs:
-        errs = claim_errors(epic_view(st, progress), b["issue"]["number"], b["issue"].get("milestone"), is_cleanup(b["issue"]))
+        errs = claim_errors(epic_view(st, progress), b["issue"].get("milestone"))
     return errs
 
 
 def command_slice_check(args: argparse.Namespace, config: dict[str, Any]) -> int:
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(args.number, config)
     claim = claim_status(b["comments"], set(b["trusted"]))
-    if quick := bundle_quick(b, config):   # built from its approved brief, onto main: no epic to pause it
+    if b.get("lane") == DEBT_LANE:   # a pass group, onto main: no epic to pause it
+        errs = debt_claim_errors(b, args.resume)
+    elif quick := bundle_quick(b, config):   # built from its approved brief, onto main: no epic to pause it
         errs = quick_view_errors(b["issue"], quick, claim, args.resume, config)
     else:
         errs = slice_check_errors(b["issue"], b["blockers"], claim, args.resume)
@@ -3001,13 +4995,30 @@ def command_slice_check(args: argparse.Namespace, config: dict[str, Any]) -> int
     return 1 if errs else 0
 
 
-def add_slice_worktree(n: int, base: str, resume: bool, config: dict[str, Any]) -> None:
-    """Make (or, resuming, reattach) worktree `.worktrees/slice-N` on branch slice/N, new branches from origin/<base>."""
-    root, wt, branch = primary_root(), worktree_path(n, config), slice_branch(n)
+def registered_worktree(wt: Path, root: Path) -> bool:
+    """Whether git lists `wt` among the checkout's worktrees (a stray directory at the path is not one)."""
+    out = git(["worktree", "list", "--porcelain"], cwd=root, check=False)
+    return any(Path(l[len("worktree "):]).resolve() == wt.resolve() for l in out.splitlines() if l.startswith("worktree "))
+
+
+def add_slice_worktree(n: int, base: str, resume: bool, config: dict[str, Any], wt: Path | None = None,
+                       branch: str | None = None, lane: str | None = None) -> None:
+    """Make (or, resuming, reattach) worktree `.worktrees/slice-N` on branch slice/N, new branches from origin/<base>.
+    A debt group resumed under another member's number passes the worktree and branch its claim recorded. A debt
+    claim (`lane`) names the debt lane's recovery for a path that is in the way: `claim --resume` takes only a
+    recorded claim, and `cleanup` removes only a registered worktree."""
+    root = primary_root()
+    wt, branch = wt or worktree_path(n, config), branch or slice_branch(n)
     git(["fetch", "origin", base], cwd=root)
     local = bool(git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root, check=False))
     remote = bool(git(["ls-remote", "--heads", "origin", branch], cwd=root, check=False))
     if wt.exists():
+        if not resume and lane == DEBT_LANE:
+            if registered_worktree(wt, root):
+                raise SdlcError(f"{wt} is already a worktree and #{n} has no claim to resume: `cleanup {n} --force` "
+                                f"discards it, then `claim {n} --debt`")
+            raise SdlcError(f"{wt} exists but is not a git worktree, so `cleanup` can't remove it: a person moves "
+                            f"{wt} aside, then `claim {n} --debt`")
         if not resume:
             raise SdlcError(f"{wt} already exists: `claim {n} --resume`, or `cleanup {n} --force` to discard it")
     elif local:
@@ -3138,6 +5149,10 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
                         "the work resumed is in git, not the bundle), never claims")
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(n, config)
     claim = claim_status(b["comments"], set(b["trusted"]))
+    if args.debt:
+        return claim_debt(args, config, b)
+    if b.get("lane") == DEBT_LANE:
+        raise SdlcError(f"#{n} is a tech-debt ticket, built as its pass group: `claim {n} --debt`")
     if args.quick:
         return claim_quick(args, config, b, claim)
     if bundle_quick(b, config):
@@ -3323,6 +5338,10 @@ def command_review_defer(args: argparse.Namespace, config: dict[str, Any]) -> in
         (pr, comments), trusted = fetch_pr(args.pr, config), fetch_trusted(config)
         refs = closes_refs(pr.get("body", ""))
         slice_issue, issue_comments = fetch_slice(refs[0], config) if len(refs) == 1 else (None, [])
+    if debt := closes_debt(args, pr, slice_issue, config):
+        raise SdlcError(f"PR #{pr['number']} is a debt PR (it closes " + ", ".join(f"#{t}" for t in debt) + "): a debt "
+                        "PR's review can't be deferred, since no milestone review follows. The PR stays open: wait for "
+                        f"Codex, or `escalate-slice {debt[0]}` for a person")
     if slice_issue and bundle_quick({"issue": slice_issue, "comments": issue_comments, "trusted": trusted}, config):
         n = slice_issue["number"]
         raise SdlcError(f"PR #{pr['number']} is a quick change's (#{n}): its Codex review is never deferred, since there "
@@ -3355,6 +5374,21 @@ def command_review_defer(args: argparse.Namespace, config: dict[str, Any]) -> in
     return 0
 
 
+def closes_debt(args: argparse.Namespace, pr: dict[str, Any], issue: dict[str, Any] | None,
+                config: dict[str, Any]) -> list[int]:
+    """The tech-debt tickets a PR closes (none: it is no debt PR), whatever else is wrong with it: from
+    `--from-file`'s `debt_tickets` (or its `slice`), else each issue it closes, as GitHub labels it."""
+    if args.from_file:
+        b = json.loads(Path(args.from_file).read_text())
+        issues = [t["issue"] for t in b.get("debt_tickets") or []] + ([b["slice"]] if b.get("slice") else [])
+    else:
+        refs = closes_refs(pr.get("body", ""))
+        issues = [issue] if len(refs) == 1 and issue is not None else [
+            {"number": r, "labels": [l["name"] for l in (gh_json(["api", f"repos/{repo_of(config)}/issues/{r}"]) or {})
+                                     .get("labels", [])]} for r in refs]
+    return sorted({i["number"] for i in issues if DEBT_LABEL in i.get("labels", [])})
+
+
 def command_codex_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Run one Codex round (a slice PR's head, a posted plan revision, or a milestone's diff on epic/N) and save
     the report, stamped with the commit it read. How a round runs (prompt, settings, checks, retry) is
@@ -3375,9 +5409,11 @@ def review_scratch(args: argparse.Namespace, label: str, *inside: Path) -> Path:
 
 
 def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, head: str, out: Path,
-                    settings: dict[str, Any], dry_run: bool, record: str, brief: str | None = None) -> int:
+                    settings: dict[str, Any], dry_run: bool, record: str, brief: str | None = None,
+                    show_brief: bool = False) -> int:
     """Print what the round runs, then run it (or, with --dry-run, print the prompt). `brief`: a quick change's
-    approved brief comment id, stamped on the report as its `Brief:` line (and shown, with the brief, in a dry run)."""
+    approved brief comment id, stamped on the report as its `Brief:` line (and shown, with the brief, in a dry run).
+    `show_brief`: a dry run shows the brief file too (a debt PR's: its tickets and its group's scope and files)."""
     cmd = codex_review.codex_command(settings, prompt)
     print(f"{title}\n"
           + "".join(f"  {k}: {v}\n" for k, v in files.items())
@@ -3388,6 +5424,8 @@ def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, h
         print(f"\n{prompt}")
         if brief:
             print(f"Brief: {brief} (the approved brief Codex reads, {files['brief']}):\n\n{files['brief'].read_text()}")
+        elif show_brief:
+            print(f"The brief Codex reads ({files['brief']}):\n\n{files['brief'].read_text()}")
         return 0
     status, report = codex_review.run_review(cmd, wt, head, out, settings, brief=brief)
     if report:
@@ -3416,7 +5454,11 @@ def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: 
     if pr.get("state") != "OPEN":
         raise SdlcError(f"PR #{pr['number']} is {pr.get('state')}")
     refs = closes_refs(pr.get("body", ""))
-    if quick:   # held to its approved brief, never the poster's request, and merged into main
+    debt = None if quick else pr_debt(args, pr, slice_issue, config, trusted)
+    if debt:   # held to its tickets and its pass group's scope and files, in the worktree its claim recorded
+        brief, brief_id, base = debt_brief(debt), None, config.get("default_branch", "main")
+        wt = debt_place(debt["claim"], config)[0]
+    elif quick:   # held to its approved brief, never the poster's request, and merged into main
         if len(refs) != 1 or not (brief_text := approved_brief(quick)):
             raise SdlcError(f"PR #{pr['number']} must close exactly one quick change with an approved brief")
         brief, brief_id, base = (f"{slice_issue.get('title', '')}\n\n{brief_text}\n", approved_brief_id(quick),
@@ -3426,7 +5468,8 @@ def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: 
     else:
         brief, brief_id, base = (f"{slice_issue.get('title', '')}\n\n{slice_issue.get('body', '')}\n", None,
                                  epic_branch(epic))
-    wt = worktree_path(refs[0], config)
+    if not debt:
+        wt = worktree_path(refs[0], config)
     out = review_scratch(args, str(pr["number"]), wt)
     if not args.from_file and (wt / ".git").exists() and git(["rev-parse", "HEAD"], cwd=wt) != pr["headRefOid"]:
         pr = wait_for_pr_head(pr["number"], git(["rev-parse", "HEAD"], cwd=wt), config)   # a push GitHub hasn't shown yet
@@ -3435,10 +5478,10 @@ def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: 
     if not git(["rev-parse", "--verify", "--quiet", f"origin/{base}"], cwd=wt, check=False):
         raise SdlcError(f"the worktree has no origin/{base} to diff against: `git fetch origin {base}`")
     rounds = recorded_rounds(comments, trusted, "pr-review")
-    prompt, files = codex_review.prepare_pr_round(pr, brief, base, rounds, out, quick=bool(quick))
+    prompt, files = codex_review.prepare_pr_round(pr, brief, base, rounds, out, quick=bool(quick), debt=bool(debt))
     return run_codex_round(f"PR #{pr['number']} round {len(rounds) + 1} on {head[:12]}", prompt, files, wt, head, out,
                            settings, args.dry_run, f"pr-review {pr['number']} --report {out / 'codex.md'} --response <your answers>",
-                           brief=brief_id)
+                           brief=brief_id, show_brief=bool(debt))
 
 
 def comment_anchor(doc: dict[str, Any]) -> str:
@@ -3625,30 +5668,125 @@ def no_epic_error(pr: dict[str, Any], refs: list[int], slice_issue: dict[str, An
     return f"#{refs[0]} is a plan:slice issue with no epic in its marker: PR #{pr['number']} has no epic branch to merge into"
 
 
+# --- `merge` runs main's gate, never a branch's ------------------------------------------------------------
+#
+# A slice's or quick change's own worktree carries its own tools/sdlc.py: a PR that loosens the gate would
+# otherwise be merged by the loosened gate (#239). So `merge`, for every lane, first compares the running copies
+# of the gate's code with origin/main's, byte for byte, and refuses on any difference or any doubt.
+
+GATE_CODE = {"tools/sdlc.py": Path(__file__).resolve(),           # repo path -> the file this process runs
+             "tools/sdlc_quick.py": Path(sdlc_quick.__file__).resolve()}
+GATE_FETCH_SECONDS = 60   # how long `merge` waits for `git fetch origin main` (and each `git show`) before refusing
+# literally main, never the config's default_branch: the config is the running checkout's own, so a branch could
+# otherwise name the branch its gate code is compared with
+GATE_BRANCH = "main"
+
+
+def gate_code_drift(running: dict[str, bytes | None], on_main: dict[str, bytes | None]) -> list[str]:
+    """The gate's files (GATE_CODE's keys) whose running bytes aren't origin/main's; a missing copy is a difference."""
+    return [p for p in GATE_CODE if running.get(p) is None or on_main.get(p) is None or running[p] != on_main[p]]
+
+
+def git_blob(rev_path: str, cwd: Path, timeout: float) -> bytes:
+    """`git show <rev>:<path>`'s exact bytes (`git()` decodes and strips, which would hide a whitespace change)."""
+    try:
+        proc = subprocess.run(["git", "show", rev_path], cwd=cwd, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise SdlcError(f"git show {rev_path} timed out after {timeout}s") from None
+    if proc.returncode != 0:
+        raise SdlcError(f"git show {rev_path} failed: {proc.stderr.decode(errors='replace').strip()}")
+    return proc.stdout
+
+
+def read_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def gate_code_errors(config: dict[str, Any], pr: Any = "PR") -> list[str]:
+    """Why `merge` may not run from this checkout (empty list = it runs main's gate code). One bounded fetch of
+    origin/main, then the running GATE_CODE files against it; a failed fetch or an unreadable copy refuses."""
+    if not GATE_FETCH_SECONDS > 0:
+        raise SdlcError(f"GATE_FETCH_SECONDS must be positive (got {GATE_FETCH_SECONDS})")
+    main = GATE_BRANCH
+    try:
+        primary: Path | None = primary_root(ROOT).resolve()
+    except SdlcError:
+        primary = None
+    where = primary or "the primary checkout"
+    update = f"`git -C {where} pull --ff-only` (on {main})"
+    rerun = f"`cd {where} && uv run python tools/sdlc.py merge {pr}`"
+    try:
+        git(["fetch", "-q", "origin", main], cwd=ROOT, timeout=GATE_FETCH_SECONDS)
+        on_main: dict[str, bytes | None] = {p: git_blob(f"origin/{main}:{p}", ROOT, GATE_FETCH_SECONDS) for p in GATE_CODE}
+    except SdlcError as exc:
+        return [f"could not read origin/{main}'s gate code ({exc}), so `merge` won't run: nothing was merged. "
+                f"Check the network and origin, update the primary checkout ({where}) with {update}, then {rerun}"]
+    drift = gate_code_drift({p: read_bytes(f) for p, f in GATE_CODE.items()}, on_main)
+    if not drift:
+        return []
+    here = ROOT.resolve()
+    what = f"{' and '.join(drift)} in {here} differ{'s' if len(drift) == 1 else ''} from origin/{main}'s"
+    if primary == here:   # this is the primary checkout, and it is behind (or ahead of) main
+        return [f"{what}: `merge` runs only main's gate code, and nothing was merged. Update this, the primary "
+                f"checkout: {update}, then {rerun}"]
+    stale = primary is not None and gate_code_drift({p: read_bytes(primary / p) for p in GATE_CODE}, on_main)
+    return [f"{what}: `merge` runs only main's gate code, never a branch's, and nothing was merged. Run it from the "
+            f"primary checkout ({where}), not this one: " + (f"update it first with {update}, then " if stale else "")
+            + rerun]
+
+
+def slice_merge_errors(pr: dict[str, Any], comments: list[dict[str, Any]], slice_issue: dict[str, Any], epic: int,
+                       config: dict[str, Any], trusted: set[str]) -> tuple[list[str], str | None]:
+    """Every reason the slice gate refuses this PR now (read-only: GitHub's compare, the epic's milestones), and
+    why its review is owed to the milestone (owed_why), for `merge` and for `slice-status`'s merge-due line."""
+    tests, reviews = pr_records(comments, trusted)
+    deferrals = pr_deferrals(comments, trusted)
+    branch = epic_branch(epic)
+    try:
+        behind = gh_json(["api", f"repos/{repo_of(config)}/compare/{branch}...{pr['headRefOid']}"]).get("behind_by")
+    except SdlcError:
+        behind = None
+    mode = review_mode(complexity_of(slice_issue.get("labels", [])), config)
+    errs = merge_gate_errors(pr, slice_issue, tests, reviews, branch, behind, deferrals, mode)
+    est = bundle_state(fetch_bundle(epic, config, trusted), config)
+    errs += milestone_hold_errors(est, epic_progress(epic, config, trusted), slice_issue.get("milestone"))
+    return errs, owed_why(pr, reviews, deferrals, mode)
+
+
+def merge_next(pr: Any, gate: list[str] | None) -> str:
+    """The `next` line of a PR whose records say it may merge: the command, where to run it, and the gate's results
+    (None: not read, offline)."""
+    said = ("the gate isn't read offline" if gate is None else "gate: ok" if not gate
+            else "gate still refuses: " + "; ".join(gate))
+    return f"uv run python tools/sdlc.py merge {pr} (from the primary checkout, on an up-to-date main; {said})"
+
+
 def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """The merge gate: Codex approved this head, the tests passed on it, it closes one slice. Then squash-merge."""
+    # first, for every lane and under --dry-run too: only main's gate code may judge a PR (#239)
+    if errs := gate_code_errors(config, args.pr):
+        raise SdlcError("; ".join(errs))
     repo = repo_of(config)
     pr, comments = fetch_pr(args.pr, config)
     trusted = fetch_trusted(config)
-    tests, reviews = pr_records(comments, trusted)
-    deferrals = pr_deferrals(comments, trusted)
     refs = closes_refs(pr.get("body", ""))
     slice_issue, issue_comments = fetch_slice(refs[0], config) if len(refs) == 1 else (None, [])
+    # a debt PR (any ticket it closes is tech debt: a group PR closes 2 to max_per_pr) goes to the debt gate, onto main
+    if 1 < len(refs) <= load_debt(config).max_per_pr or slice_issue and DEBT_LABEL in slice_issue.get("labels", []):
+        tickets = ([{"issue": slice_issue, "comments": issue_comments}] if slice_issue else
+                   [dict(zip(("issue", "comments"), fetch_slice(r, config))) for r in refs])
+        if any(DEBT_LABEL in t["issue"].get("labels", []) for t in tickets):
+            return merge_debt(args, config, pr, comments, tickets, trusted)
     if slice_issue and bundle_quick({"issue": slice_issue, "comments": issue_comments, "trusted": trusted}, config):
         return merge_quick(args, config)   # onto main: no epic, no milestone hold, no review owed
     epic = slice_epic(slice_issue) if slice_issue else None
     if not epic:   # no slice of an epic (an escalated quick change's PR, say): no branch to compare or target
         raise SdlcError(no_epic_error(pr, refs, slice_issue))
     branch = epic_branch(epic)
-    try:
-        behind = gh_json(["api", f"repos/{repo}/compare/{branch}...{pr['headRefOid']}"]).get("behind_by")
-    except SdlcError:
-        behind = None
-    mode = review_mode(complexity_of((slice_issue or {}).get("labels", [])), config)
-    errs = merge_gate_errors(pr, slice_issue, tests, reviews, branch, behind, deferrals, mode)
-    why = owed_why(pr, reviews, deferrals, mode)
-    est = bundle_state(fetch_bundle(epic, config, trusted), config)
-    errs += milestone_hold_errors(est, epic_progress(epic, config, trusted), slice_issue.get("milestone"))
+    errs, why = slice_merge_errors(pr, comments, slice_issue, epic, config, trusted)
     if errs:
         raise SdlcError("; ".join(errs))
     n = refs[0]
@@ -3676,10 +5814,6 @@ def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
         raise SdlcError(f"merged PR #{args.pr}, but #{n} reads back {issue['state']} ({issue.get('state_reason')}): "
                         f"close it as completed (`gh issue close {n} --reason completed`)")
     print(f"merged PR #{args.pr} into {branch}; #{n} closed")
-    for d in re.findall(r"#(\d+)", leaf_section(issue["body"], "Pays down").split(":")[0]):
-        gh(["issue", "close", d, "--repo", repo, "--reason", "completed", "--comment",
-            f"Paid down by #{n} (PR #{args.pr})."], check=False)
-        print(f"#{d} (tech debt) closed")
     st = with_next(bundle_state(fetch_bundle(epic, config, trusted), config), config, trusted=trusted)
     for m in (st.get("progress") or {}).get("milestones", []):
         if m["done"] == m["total"] and m["key"] not in (st.get("shipped") or {}):
@@ -3743,9 +5877,241 @@ def merge_quick(args: argparse.Namespace, config: dict[str, Any]) -> int:
     return 0
 
 
+# --- a debt PR's merge: straight into main, through its own gate ------------------------------------------------
+#
+# A debt PR closes one pass group's tickets (1 to debt.max_per_pr) and targets main, so GitHub itself closes them
+# when it merges. The gate holds it to what the quick gate holds a quick PR to (base main and up to date, a passing
+# run and Codex's approval on the head, never a deferral, mergeable), plus the debt lane's own rule: it closes only
+# open tickets of the open pass, all of one claimed group, and GitHub's own list of what it will close is that set.
+
+def closing_refs(raw: Any, repo: str) -> list[str]:
+    """`gh pr view --json closingIssuesReferences` as sorted refs: `#N` in this repo, `owner/name#N` in another.
+    Anything unreadable is a ValueError: the gate then can't tell what the merge closes, and refuses."""
+    refs = (raw or {}).get("closingIssuesReferences") if isinstance(raw, dict) else None
+    if not isinstance(refs, list):
+        raise ValueError(f"no closingIssuesReferences in {raw!r}")
+    out = []
+    for i in refs:
+        if not isinstance(i, dict) or type(i.get("number")) is not int:
+            raise ValueError(f"unreadable closing reference {i!r}")
+        r = i.get("repository") or {}
+        where = f"{(r.get('owner') or {}).get('login', '')}/{r.get('name', '')}" if r else repo
+        out.append(f"#{i['number']}" if where.lower() == repo.lower() else f"{where}#{i['number']}")
+    return sorted(set(out))
+
+
+def debt_gate_bundle(pr: dict[str, Any], pr_comments: list[dict[str, Any]], tickets: list[dict[str, Any]],
+                     config: dict[str, Any], trusted: set[str]) -> dict[str, Any]:
+    """Everything the debt gate reads, fetched (read-only): the PR and its records, how far its head is behind main,
+    the issues GitHub will close when it merges, the tickets it closes (each {issue, comments}), their debt epic's
+    comments (the passes) and sub-issues, and the group's other members. The base is GATE_BRANCH, literally main,
+    never the running config's (a checkout could name another branch there)."""
+    repo, base = repo_of(config), GATE_BRANCH
+    try:
+        behind = gh_json(["api", f"repos/{repo}/compare/{base}...{pr['headRefOid']}"]).get("behind_by")
+    except SdlcError:
+        behind = None
+    try:   # what GitHub itself will close (a sidebar link or another repo's ref counts there, not in CLOSES_RE)
+        closing: list[str] | None = closing_refs(gh_json(["pr", "view", str(pr["number"]), "--repo", repo, "--json",
+                                                          "closingIssuesReferences"]), repo)
+    except (SdlcError, ValueError):
+        closing = None
+    claim = next((c for t in tickets if (c := claim_status(t["comments"], trusted)) and c.get("debt")), None)
+    epic = (claim or {}).get("debt_epic") or ""
+    epic_comments = ([norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{epic}/comments")]
+                     if epic.isdigit() else [])
+    attached = [s["number"] for s in sub_issues(int(epic), config)] if epic.isdigit() else []
+    group = next((g for p in debt_passes(epic_comments, trusted) for g in p["groups"]
+                  if g["key"] == (claim or {}).get("group")), None)
+    refs = closes_refs(pr.get("body", ""))
+    others = [dict(zip(("issue", "comments"), fetch_slice(t, config))) for t in (group or {}).get("tickets", [])
+              if t not in refs]
+    return {"pr": pr, "pr_comments": pr_comments, "trusted": sorted(trusted), "behind_by": behind,
+            "closing": closing, "tickets": tickets, "debt_epic": int(epic) if epic.isdigit() else None,
+            "epic_comments": epic_comments, "attached": attached, "others": others}
+
+
+def debt_merge_gate_errors(b: dict[str, Any], base: str = "main") -> list[str]:
+    """Why a debt PR may not merge into main (empty list = merge), every reason listed, from a `debt_gate_bundle`
+    alone. `merge_gate_errors`'s and `quick_merge_gate_errors`'s sibling: Codex's approval of this head is needed,
+    and a `review-defer` never stands in for it (a debt PR has no milestone to owe a review to)."""
+    pr, trusted = b["pr"], set(b["trusted"])
+    errs = sdlc_quick.pr_open_errors(pr, base)   # the quick gate's rules for a PR straight into main, shared
+    refs = closes_refs(pr.get("body", ""))
+    if not refs:
+        errs.append("PR closes no ticket (`Closes #T` for each ticket of its group)")
+    named = sorted(f"#{r}" for r in refs)
+    if b.get("closing") is None:
+        errs.append("could not read which issues GitHub will close when this merges (closingIssuesReferences)")
+    elif b["closing"] != named:
+        errs.append(f"GitHub will close {', '.join(b['closing']) or 'nothing'} when this merges, but the body's "
+                    f"`Closes` name {', '.join(named) or 'nothing'}: link exactly the group's tickets, each with "
+                    "`Closes #T` in the body, and nothing else")
+    by_n = {t["issue"]["number"]: t for t in b.get("tickets") or []}
+    epic = b.get("debt_epic")
+    passes = debt_passes(b.get("epic_comments") or [], trusted)
+    open_pass = next((p for p in passes if p["open"]), None)
+    for r in refs:
+        issue = (by_n.get(r) or {}).get("issue")
+        if not issue:
+            errs.append(f"#{r} could not be read")
+            continue
+        if issue.get("state", "open") != "open":
+            errs.append(f"#{r} is closed: a debt PR closes only open tickets")
+        if ESCALATED_LABEL in issue.get("labels", []):
+            errs.append(f"#{r} is escalated to a human")
+        if epic is not None and r not in (b.get("attached") or []):
+            errs.append(f"#{r} isn't a sub-issue of debt epic #{epic}")
+        if DEBT_LABEL in issue.get("labels", []) and not (open_pass and r in open_pass["tickets"]):
+            errs.append(f"#{r} isn't in the current pass of debt epic #{epic or '?'}"
+                        + (f" (pass {open_pass['pass']} is open)" if open_pass else " (no pass is open)"))
+    if refs:
+        try:   # one claimed group, every one of its active members, nothing else
+            ctx = debt_pr_context(pr, list(by_n.values()), b.get("epic_comments") or [], trusted, b.get("others"))
+        except SdlcError as exc:
+            errs.append(str(exc))
+            ctx = None
+        if ctx:
+            if open_pass and ctx["group"]["pass"] != open_pass["pass"]:
+                errs.append(f"group `{ctx['group']['key']}` is pass {ctx['group']['pass']}'s, which has ended")
+            if ctx["claim"].get("branch") != pr.get("headRefName"):
+                errs.append(f"PR's branch {pr.get('headRefName')} isn't the one group `{ctx['group']['key']}`'s claim "
+                            f"records ({ctx['claim'].get('branch')})")
+    t, r = head_records(pr, *pr_records(b.get("pr_comments") or [], trusted))
+    head = (pr.get("headRefOid") or "")[:12]
+    if not r:
+        errs.append(f"no Codex review of the current head {head} (a debt PR's review is never deferred)")
+    elif r["verdict"] != "approve":
+        errs.append(f"Codex's latest review of {head} asks for changes")
+    return errs + sdlc_quick.head_errors(pr, t, b.get("behind_by"), base)
+
+
+def debt_gate_read(pr_number: int, config: dict[str, Any], trusted: set[str]) -> list[str]:
+    """debt_pr_gate, a failed read being one refusal, never an exception: `state` must still answer."""
+    try:
+        return debt_pr_gate(pr_number, config, trusted)
+    except SdlcError as exc:
+        return [f"could not read the gate: {exc}"]
+
+
+def debt_pr_gate(pr_number: int, config: dict[str, Any], trusted: set[str]) -> list[str]:
+    """The debt gate's refusals of a PR, read from GitHub (read-only), for `state` and `slice-status`."""
+    pr, comments = fetch_pr(pr_number, config)
+    tickets = [dict(zip(("issue", "comments"), fetch_slice(r, config))) for r in closes_refs(pr.get("body", ""))]
+    return debt_merge_gate_errors(debt_gate_bundle(pr, comments, tickets, config, trusted), GATE_BRANCH)
+
+
+def remove_worktree(wt: Path, branch: str, root: Path, force: bool = False) -> None:
+    """Remove a slice's worktree and its local branch (`cleanup`'s work, and a debt merge's). Safe to rerun."""
+    if wt.exists():
+        git(["worktree", "remove", str(wt)] + (["--force"] if force else []), cwd=root)
+    git(["worktree", "prune"], cwd=root)
+    if git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root, check=False):
+        git(["branch", "-D", branch], cwd=root)
+
+
+def inside(path: Path, where: Path) -> bool:
+    path, where = path.resolve(), where.resolve()
+    return path == where or where in path.parents
+
+
+def merge_debt(args: argparse.Namespace, config: dict[str, Any], pr: dict[str, Any], comments: list[dict[str, Any]],
+               tickets: list[dict[str, Any]], trusted: set[str]) -> int:
+    """Squash a debt PR into main once its gate passes, then: delete its branch on GitHub (read back gone), remove
+    the group's worktree and local branch, close each ticket as completed if GitHub hasn't (read back), and post a
+    record on each ticket and on the debt epic. A failure after the squash says what is left to do by hand, since a
+    rerun is refused (the PR is merged); a cleanup left over is named with its exact `cleanup` command."""
+    repo, base = repo_of(config), GATE_BRANCH
+    b = debt_gate_bundle(pr, comments, tickets, config, trusted)
+    if errs := debt_merge_gate_errors(b, base):
+        raise SdlcError("; ".join(errs))
+    ctx = debt_pr_context(pr, tickets, b["epic_comments"], trusted, b["others"])
+    g, claim, epic = ctx["group"], ctx["claim"], b["debt_epic"]
+    root = primary_root()
+    wt, branch = debt_place(claim, config)
+    for where in {Path.cwd(), ROOT}:   # the group's worktree goes in this run: never from inside it
+        if inside(where, wt):
+            raise SdlcError(f"run `merge {args.pr}` from the primary checkout ({root}), not from inside {wt}: the "
+                            "group's worktree is removed once it merges. Nothing was merged")
+    head, refs = pr["headRefOid"], [t["number"] for t in ctx["tickets"]]
+    t, r = head_records(pr, *pr_records(comments, trusted))
+    who = ", ".join(f"#{n}" for n in refs)
+    # `git worktree remove` refused (files left in it, most often): only --force removes it, and the PR is merged
+    cleanup = (f"`cd {root} && uv run python tools/sdlc.py cleanup {refs[0]} --force` (it discards whatever is left "
+               "in the worktree: its work is merged)")
+
+    def record(closed_by: dict[int, str]) -> str:
+        # only what was read: a failure partway (the handler after the squash calls this too) never raises again
+        how = "; ".join(f"#{n} closed by {closed_by[n]}" for n in refs if n in closed_by)
+        return render_comment(
+            "debt-merged", None, f"Merged PR #{args.pr} (debt group `{g['key']}` of pass {g['pass']}: {who}) into "
+            f"`{base}` at `{head[:12]}`: tests {t['url']}, Codex review {r['url']}." + (f" {how}." if how else ""),
+            config, pr=str(args.pr), sha=head, group=g["key"], **{"pass": str(g["pass"])},
+            tickets=",".join(map(str, refs)), debt_epic=str(epic), tests=comment_anchor({"id": "?", **t}),
+            review=comment_anchor({"id": "?", **r}))
+
+    if args.dry_run:
+        print(f"would squash-merge debt PR #{args.pr} (group `{g['key']}`: {who}) into {base} at {head[:12]}; delete "
+              f"{branch} on GitHub; remove {wt} and {branch} here; close {who} as completed if GitHub hasn't; post on "
+              f"{who} and debt epic #{epic}:\n{record({})}\nthen end pass {g['pass']} if this was its last work "
+              f"(`debt-epic`'s pass-end check: `uv run python tools/sdlc.py debt-epic --dry-run` shows it)")
+        return 0
+    gh(["pr", "merge", str(args.pr), "--repo", repo, "--squash", "--match-head-commit", head])
+    left = []   # what is still to do once the merge has counted, said at the end
+    gh(["api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{branch}"], check=False)   # GitHub may have deleted it
+    try:
+        gh_json(["api", f"repos/{repo}/git/ref/heads/{branch}"])
+        left.append(f"{branch} is still on GitHub: `gh api -X DELETE repos/{repo}/git/refs/heads/{branch}`")
+    except SdlcError as exc:
+        if "404" not in str(exc):
+            left.append(f"could not confirm {branch} is gone on GitHub ({exc})")
+    try:
+        remove_worktree(wt, branch, root)
+    except SdlcError as exc:
+        left.append(f"the group's worktree and local branch weren't removed ({exc}): {cleanup}")
+    closed_by: dict[int, str] = {}
+    try:
+        for n in refs:
+            issue = fetch_slice(n, config)[0]
+            if issue["state"] != "closed":   # `Closes #T` on main usually closes it already: never close twice
+                gh(["issue", "close", str(n), "--repo", repo, "--reason", "completed", "--comment", f"Merged in #{args.pr}."])
+                issue, closed_by[n] = fetch_slice(n, config)[0], "`merge`"
+            else:
+                closed_by[n] = f"GitHub (`Closes #{n}`)"
+            if not (issue["state"] == "closed" and issue.get("state_reason") == "completed"):
+                raise SdlcError(f"#{n} reads back {issue['state']} ({issue.get('state_reason')}): close it as completed "
+                                f"(`gh issue close {n} --reason completed`)")
+        body = record(closed_by)
+        for n in refs + [epic]:
+            post_comment(n, body, config)
+    except Exception as exc:   # anything (a bad read-back too): the PR is merged, so say what is left by hand
+        with tempfile.NamedTemporaryFile("w", suffix=".md", prefix=f"debt-merged-{args.pr}-", delete=False) as fh:
+            fh.write(record(closed_by))
+        raise SdlcError(f"merged PR #{args.pr} into {base} at {head[:12]}, then: {exc}. Still to do, by hand: close "
+                        f"each of {who} as completed if it isn't (`gh issue close T --reason completed`); post the "
+                        f"record on each of {who} and on #{epic}: `gh issue comment N --body-file {fh.name}`"
+                        + "".join(f"; {x}" for x in left))
+    try:   # the pass's last work merged: its end, and what follows it (the next pass, the close, or a person)
+        debt_epic_reconcile(config, trusted, dry_run=False)
+    except SdlcError as exc:
+        left.append(f"the pass-end check failed ({exc}): `uv run python tools/sdlc.py debt-epic` finishes it")
+    if left:
+        raise SdlcError(f"merged PR #{args.pr} into {base} at {head[:12]}; {who} closed and recorded; still to do: "
+                        + "; ".join(left))
+    print(f"merged PR #{args.pr} into {base}; {who} closed; {branch} deleted on GitHub and here")
+    try:
+        st = with_next(bundle_state(fetch_bundle(epic, config, trusted), config), config, trusted=trusted)
+        print(f"next: {st['next']}")
+    except SdlcError as exc:
+        print(f"next: `uv run python tools/sdlc.py state {epic}` (could not read it now: {exc})")
+    return 0
+
+
 def command_escalate_slice(args: argparse.Namespace, config: dict[str, Any]) -> int:
     body = "Handing this slice to a human: " + args.reason
     b = slice_bundle_for_escalation(args.number, config)
+    if DEBT_LABEL in b["issue"].get("labels", []):
+        return escalate_debt_group(args, config, b)
     # a quick change carries an sdlc:* label: swap it, since two state labels at once are a conflict
     quick = bundle_quick(b, config) if b else None
     if args.dry_run:
@@ -3801,7 +6167,7 @@ def escalate_to_full(n: int, reason: str | None, trigger: str, config: dict[str,
         print(f"DRY RUN #{n}: {st['state']} -> approved, out of the quick lane")
         print(f"labels: add {PREFIX}approved, remove {stale}")
         print("----- comment -----\n" + record if record else f"the lane record is already posted ({st['to_full']['url']})")
-        print(f"then: readdress open `lane={QUICK}` {DEBT_LABEL} filed against #{n} to its cleanup pass; commit-prd {n}")
+        print(f"then: readdress open `lane={QUICK}` {DEBT_LABEL} filed against #{n} as an epic's debt; commit-prd {n}")
         return 0
     if record:
         post_comment(n, record, config)
@@ -3848,6 +6214,32 @@ def escalate_on_trigger(n: int, refusal: str, trigger: str, config: dict[str, An
     return 1
 
 
+def escalate_debt_group(args: argparse.Namespace, config: dict[str, Any], b: dict[str, Any]) -> int:
+    """Escalation stops a debt ticket's whole group: every open member is labelled sdlc:escalated, and the
+    escalation, naming the group, is recorded beside its claim on each. `claim --debt` of any member is then
+    refused, and `state D` lists the group as needing a human (the pass can end without it)."""
+    n = args.number
+    b = debt_bundle(n, config, set(b["trusted"]), b["issue"], b["comments"])
+    st = derive_debt(b, config)
+    g = st["group"]
+    members = [n] + [t for t in (g or {}).get("open", []) if t != n]
+    extra = {"group": g["key"]} if g else {}
+    body = (f"Handing debt group `{g['key']}` (" + ", ".join(f"#{t}" for t in members) + ") to a human: "
+            if g else "Handing this debt ticket to a human: ") + args.reason
+    comment = render_comment("escalation", None, body, config, **extra)
+    if args.dry_run:
+        print(comment)
+        print(f"would label {', '.join(f'#{t}' for t in members)} {ESCALATED_LABEL}")
+        return 0
+    have = debt_members(b)
+    for t in members:
+        post_comment(t, comment, config)
+        if ESCALATED_LABEL not in (have.get(t) or ({}, []))[0].get("labels", []):
+            gh(["issue", "edit", str(t), "--repo", repo_of(config), "--add-label", ESCALATED_LABEL])
+    print(", ".join(f"#{t}" for t in members) + ": escalated" + (f" (debt group `{g['key']}`)" if g else ""))
+    return 0
+
+
 def slice_bundle_for_escalation(n: int, config: dict[str, Any]) -> dict[str, Any]:
     """The issue and its comments, enough to tell a quick change (an sdlc:* label to swap) from a slice."""
     issue, comments = fetch_slice(n, config)
@@ -3862,16 +6254,17 @@ def command_cleanup(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Remove a slice's worktree and local branch, from the primary checkout. Safe to rerun."""
     n, root = args.number, primary_root()
     wt, branch = worktree_path(n, config), slice_branch(n)
+    debt = None
+    issue, comments = fetch_slice(n, config)   # a debt group is built under the member that claimed it: its claim says where
+    claim = claim_status(comments, fetch_trusted(config)) if DEBT_LABEL in issue["labels"] else None
+    if claim and claim.get("debt"):
+        (wt, branch), debt = debt_place(claim, config), claim
     if Path.cwd().resolve() == wt.resolve() or wt.resolve() in Path.cwd().resolve().parents:
         raise SdlcError(f"run cleanup from the primary checkout ({root}), not from inside {wt}")
-    pr = find_slice_pr(n, config)
+    pr = find_branch_pr(branch, config) if debt else find_slice_pr(n, config)
     if not args.force and not (pr and pr["state"] == "MERGED"):
-        raise SdlcError(f"slice/{n}'s PR is not merged: `--force` discards the work")
-    if wt.exists():
-        git(["worktree", "remove", str(wt)] + (["--force"] if args.force else []), cwd=root)
-    git(["worktree", "prune"], cwd=root)
-    if git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=root, check=False):
-        git(["branch", "-D", branch], cwd=root)
+        raise SdlcError(f"{branch}'s PR is not merged: `--force` discards the work")
+    remove_worktree(wt, branch, root, args.force)
     print(f"#{n}: removed {wt} and {branch}")
     return 0
 
@@ -4157,10 +6550,14 @@ def command_epic_branch(args: argparse.Namespace, config: dict[str, Any]) -> int
     return 0
 
 
-def escalate_epic(n: int, reason: str, config: dict[str, Any]) -> None:
+def escalate_epic(n: int, reason: str, config: dict[str, Any], **extra: str) -> None:
+    """Label epic #n escalated, then post why (`extra` in its marker). The label first: a run cut short between
+    the two leaves the epic with a person, never a recorded escalation on an epic that carries on (the debt epic's
+    pass end posts it once, keyed by that record)."""
     bundle = fetch_bundle(n, config)
-    post_comment(n, render_comment("escalation", None, f"Needs a human: {reason}", config), config)
-    set_state_label(n, bundle["issue"]["labels"], "escalated", config)
+    if ESCALATED_LABEL not in bundle["issue"]["labels"]:
+        set_state_label(n, bundle["issue"]["labels"], "escalated", config)
+    post_comment(n, render_comment("escalation", None, f"Needs a human: {reason}", config, **extra), config)
 
 
 def command_sync(args: argparse.Namespace, config: dict[str, Any]) -> int:
@@ -4313,6 +6710,8 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
     bundle = fetch_bundle(n, config)
     trusted = set(bundle["trusted"])
     st = bundle_state(bundle, config)
+    if is_debt_epic(st):
+        refuse_quick(st, "milestone to ship")
     if st["conflicts"] or st["state"] not in BUILD_STATES | {"done"} or is_quick(st):
         raise SdlcError(f"#{n} is {st['state']}" + (" (a quick change: it merges to main itself)" if is_quick(st) else "")
                         + ": nothing to ship")
@@ -4722,8 +7121,6 @@ def command_demo_status(args: argparse.Namespace, config: dict[str, Any]) -> int
                   + ", ".join(f"{o['slice']} ({o['why']})" for o in m["review_owed"]))
         if m["shipped"]:
             print(f"  shipped to main: {m['shipped'][:12]}")
-    if debt := (brief["progress"] or {}).get("debt"):
-        print("\nopen tech debt: " + ", ".join(f"#{d}" for d in debt))
     print(f"\nnext: {brief['next']}")
     return 0
 
@@ -4941,20 +7338,26 @@ def command_demo_request(args: argparse.Namespace, config: dict[str, Any]) -> in
     return 0
 
 
-def debt_head(n: int, source: str, quick: bool) -> str:
-    """A debt issue's first two lines: its marker, and where it waits (a quick change's open list, or #n's cleanup)."""
-    if quick:
-        return (f"{marker('debt', None, epic=str(n), source=source, lane=QUICK)}\n"
-                f"Tech debt from quick change #{n} ({source}): not blocking. A quick change has no epic and no cleanup "
-                f"pass, so it waits in the open `{DEBT_LABEL}` list (`gh issue list --label {DEBT_LABEL}`).")
-    return (f"{marker('debt', None, epic=str(n), source=source)}\n"
-            f"Tech debt from #{n} ({source}): not blocking, budgeted into a cleanup pass after a milestone is accepted.")
+def debt_head(n: int, source: str, *, generation: int = 1, quick: bool = False, of_debt: bool = False,
+              waits: str | None = None, debt_epic: int | None = None) -> str:
+    """A debt issue's first two lines: its marker (`epic=` is always where it came from, never the debt epic) and a
+    lead naming the debt epic it joins and, for debt of a feature milestone not yet on main, the ship it waits for."""
+    extra = {"lane": QUICK} if quick else {}
+    extra["generation"] = str(generation)
+    if waits:
+        extra["waits"] = f"{n}:{waits}"
+    origin = f"quick change #{n}" if quick else f"debt ticket #{n}" if of_debt else f"#{n}"
+    joins = f"debt epic #{debt_epic}" if debt_epic else "the debt epic"
+    return (f"{marker('debt', None, epic=str(n), source=source, **extra)}\n"
+            f"Tech debt from {origin} ({source}), generation {generation}: not blocking. It joins {joins}, whose "
+            f"passes work it into `main`" + (f", once {wait_target(n, waits)} has shipped to `main`." if waits else "."))
 
 
 def readdress_quick_debt(n: int, config: dict[str, Any], trusted: set[str]) -> None:
-    """#n has left the quick lane, so debt filed against it while it was quick waits for its cleanup pass now:
-    rewrite each open one's marker and lead line as an epic's (`debt_head`). Best effort, and safe to rerun: a
-    failure is printed, never raised, since #n's escalation itself is done."""
+    """#n has left the quick lane, so debt filed against it while it was quick is an epic's debt now: drop
+    `lane=quick` from each open one's marker (its generation is kept, so nothing is derived from #n's milestones)
+    and rewrite its lead (`debt_head`). Best effort, and safe to rerun: a failure is printed, never raised, since
+    #n's escalation itself is done."""
     try:
         raw = gh_pages(f"repos/{repo_of(config)}/issues?labels={DEBT_LABEL.replace(':', '%3A')}&state=open&per_page=100")
         for r in raw:
@@ -4962,50 +7365,115 @@ def readdress_quick_debt(n: int, config: dict[str, Any], trusted: set[str]) -> N
             if ("pull_request" in r or (r.get("user") or {}).get("login") not in trusted
                     or mk.get("kind") != "debt" or mk.get("epic") != str(n) or mk.get("lane") != QUICK):
                 continue
-            old, new = debt_head(n, mk.get("source", "?"), True), debt_head(n, mk.get("source", "?"), False)
+            kept = {k: v for k, v in mk.items() if k not in ("kind", "lane")}
+            kept.setdefault("generation", "1")   # quick debt is always generation 1: written, so it never derives
             lines = body.split("\n", 2)
-            fixed = (new + body[len(old):] if body.startswith(old)
-                     else "\n".join([new.split("\n")[0], *lines[1:]]))   # a lead edited by hand: only the marker
+            if len(lines) > 1 and lines[1].startswith(f"Tech debt from quick change #{n} ("):
+                held = ticket_debt_epic(r["number"], config, trusted)
+                head = debt_head(n, mk.get("source", "?"), generation=debt_generation(kept) or 1, debt_epic=held)
+                fixed = "\n".join([head, *lines[2:]])
+            else:   # a lead edited by hand: only the marker
+                fixed = "\n".join([marker("debt", None, **kept), *lines[1:]])
             with tempfile.NamedTemporaryFile("w", suffix=".md") as fh:
                 fh.write(fixed)
                 fh.flush()
                 gh(["issue", "edit", str(r["number"]), "--repo", repo_of(config), "--body-file", fh.name])
-            print(f"#{r['number']} (tech debt from #{n}) now waits for #{n}'s cleanup pass")
+            print(f"#{r['number']} (tech debt from #{n}) is now an epic's debt, no longer a quick change's")
     except Exception as exc:
-        print(f"warning: #{n}'s open quick-lane tech debt may still say it waits in the `{DEBT_LABEL}` list: {exc} "
+        print(f"warning: #{n}'s open quick-lane tech debt may still say it is a quick change's: {exc} "
               f"(by hand: drop ` lane={QUICK}` from each one's first line, the marker)", file=sys.stderr)
 
 
+def debt_origin(n: int, bundle: dict[str, Any], st: dict[str, Any], rules: DebtRules) -> dict[str, Any]:
+    """What `file-issue N --debt` records of where the debt came from: {generation, quick, of_debt, waits}.
+    Generation 1 from a feature epic, a quick change or a demo; N's generation + 1 when N is itself a debt ticket
+    (its PR found it), refused at debt.max_generation. Debt of a feature epic waits for its milestone being built."""
+    plain = f"`uv run python tools/sdlc.py file-issue {n} --title ... --body-file ...` (without --debt)"
+    if st.get("plan_kind") == "debt":
+        g = st.get("debt_generation")
+        if g is None:
+            raise SdlcError(f"#{n}'s debt marker has a bad generation: fix its first line, or file an ordinary "
+                            f"issue for triage with {plain}")
+        if g >= rules.max_generation:
+            raise SdlcError(f"#{n} is generation-{g} tech debt and debt.max_generation is {rules.max_generation}: "
+                            f"debt of it is not filed as debt. File an ordinary issue for triage with {plain}")
+        return {"generation": g + 1, "quick": False, "of_debt": True, "waits": None}
+    if st.get("plan_kind"):
+        epic = (parse_marker(bundle["issue"].get("body") or "") or {}).get("epic", "?")
+        raise SdlcError(f"#{n} is a plan:{st['plan_kind']} of epic #{epic}: file its debt against the epic "
+                        f"(`file-issue {epic} --debt ...`)")
+    if is_debt_epic(st):
+        raise SdlcError(f"#{n} is the debt epic: file debt against the debt ticket whose PR found it")
+    quick = st.get("lane") == QUICK
+    return {"generation": 1, "quick": quick, "of_debt": False, "waits": None if quick else unshipped_milestone(st)}
+
+
 def command_file_issue(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """File something found while building or demoing an epic or a quick change as its own issue: tech debt, or
-    new for triage. Debt from a quick change (by its current lane in the ledger: one escalated to the full lane is
-    an epic) has no cleanup pass to wait for, so it says it waits in the open tech-debt list, and its marker says
-    `lane=quick`."""
+    """File something found while building or demoing an epic, a quick change or a debt ticket as its own issue:
+    tech debt, or new for triage. Debt joins the open debt epic at once (one is opened if none), with its
+    generation and, for debt of a feature milestone not yet on main, what it waits for (`debt_origin`)."""
     title, body = args.title.strip(), Path(args.body_file).read_text().strip()
     if hits := identifier_hits(title + "\n" + body):
         raise SdlcError("the issue would contain " + ", ".join(hits) + ": the repo is public")
     if args.from_file and not args.dry_run:
         raise SdlcError("--from-file reads a saved bundle, not GitHub: use it with --dry-run")
-    kind = "debt" if args.debt else "finding"
-    quick = args.debt and bundle_state(load_bundle(args, config), config).get("lane") == QUICK
-    if args.debt:
-        head = debt_head(args.number, args.source, quick)
-    else:
-        head = (f"{marker(kind, None, epic=str(args.number), source=args.source)}\n"
-                f"Found while working on #{args.number} ({args.source}).")
-    full = f"{head}\n\n{body}\n"
-    cmd = ["issue", "create", "--repo", repo_of(config), "--title", title]
-    if args.debt:
-        cmd += ["--label", DEBT_LABEL]
-    if args.dry_run:
-        print(f"would run: gh {' '.join(cmd)} --body-file <body>\n{full}")
+    repo = repo_of(config)
+    cmd = ["issue", "create", "--repo", repo, "--title", title]
+    if not args.debt:
+        full = (f"{marker('finding', None, epic=str(args.number), source=args.source)}\n"
+                f"Found while working on #{args.number} ({args.source}).\n\n{body}\n")
+        if args.dry_run:
+            print(f"would run: gh {' '.join(cmd)} --body-file <body>\n{full}")
+            return 0
+        print(file_body(cmd, full).strip())
         return 0
-    with tempfile.NamedTemporaryFile("w", suffix=".md") as fh:
-        fh.write(full)
-        fh.flush()
-        url = gh(cmd + ["--body-file", fh.name])
-    print(url.strip())
+    rules = load_debt(config)
+    bundle = load_bundle(args, config)
+    origin = debt_origin(args.number, bundle, bundle_state(bundle, config), rules)
+    # the open debt epic (offline: the bundle's `debt_epic`); two open is refused here, before anything is written
+    if args.from_file:
+        epic = {"number": bundle["debt_epic"]} if bundle.get("debt_epic") else None
+    else:
+        epic = the_debt_epic(config, set(bundle["trusted"]))
+        if epic is None and not args.dry_run:   # tech-debt too: a ticket refused after the epic opened leaves it empty
+            require_debt_epic_labels(config, DEBT_LABEL)
+    cmd += ["--label", DEBT_LABEL]
+    if args.dry_run:
+        head = debt_head(args.number, args.source, debt_epic=epic and epic["number"], **origin)
+        print(f"would run: gh {' '.join(cmd)} --body-file <body>\n{head}\n\n{body}\n")
+        if epic is None:
+            print(f"would open the debt epic 'Tech debt' [{DEBT_EPIC_LABEL}, {PREFIX}in-progress]")
+        print(f"would attach the new issue to debt epic #{epic['number'] if epic else 'new'}")
+        return 0
+    if epic is None:
+        epic = open_debt_epic(config)
+    head = debt_head(args.number, args.source, debt_epic=epic["number"], **origin)
+    url = file_body(cmd, f"{head}\n\n{body}\n").strip()
+    print(url)
+    attach_debt(epic["number"], int(url.rsplit("/", 1)[1]), config)
     return 0
+
+
+def file_body(cmd: list[str], body: str) -> str:
+    """`gh issue create` with the body from a file; its URL."""
+    with tempfile.NamedTemporaryFile("w", suffix=".md") as fh:
+        fh.write(body)
+        fh.flush()
+        return gh(cmd + ["--body-file", fh.name])
+
+
+def attach_debt(epic: int, n: int, config: dict[str, Any]) -> None:
+    """Add the new debt ticket #n to the debt epic as a sub-issue, and read it back. The ticket is filed either way:
+    when it isn't held, the error names `debt-epic`, which attaches every open tech-debt ticket."""
+    repo, why = repo_of(config), ""
+    try:
+        post_json(f"repos/{repo}/issues/{epic}/sub_issues", {"sub_issue_id": gh_json(["api", f"repos/{repo}/issues/{n}"])["id"]})
+    except SdlcError as exc:
+        why = f" ({exc})"
+    if not any(s["number"] == n for s in sub_issues(epic, config)):
+        raise SdlcError(f"#{n} is filed, but debt epic #{epic} doesn't hold it{why}: "
+                        "run `uv run python tools/sdlc.py debt-epic` to attach it")
+    print(f"#{n} joined debt epic #{epic}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -5110,6 +7578,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("claim", help="claim a ready slice (or an approved quick change) and make its worktree")
     p.add_argument("number", type=int)
     p.add_argument("--quick", action="store_true", help="an approved quick change: its worktree from origin/main")
+    p.add_argument("--debt", action="store_true", help="a debt ticket of the open pass: claims its whole group, "
+                   "its worktree from origin/main")
     p.add_argument("--resume", action="store_true", help="reattach to this slice's existing claim and branch")
     p.add_argument("--model", help="the model building it (recorded on the claim)")
     p.add_argument("--retry", action="store_true",
@@ -5154,6 +7624,35 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="print the filled prompt and the exact codex command; run nothing")
     p.add_argument("--from-file")
     p.set_defaults(fn=command_codex_review)
+
+    p = sub.add_parser("debt-epic", help="open the debt epic if there is open tech debt and none is open, attach "
+                                         "every open tech-debt issue to it, and, when a pass has ended, record it "
+                                         "and close or escalate the epic if due (idempotent)")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=command_debt_epic)
+
+    p = sub.add_parser("debt-intake", help="record an agent's intake verdict on a debt ticket and apply it "
+                                           "(labels, the debt epic's link, the close), read back")
+    p.add_argument("number", type=int, help="the debt ticket")
+    p.add_argument("--verdict", required=True, choices=INTAKE_VERDICTS)
+    p.add_argument("--reason", required=True, help="why, posted on the ticket")
+    p.add_argument("--commit", help="with `fixed`: the commit on main that fixed it")
+    p.add_argument("--of", type=int, help="with `duplicate`: the issue it duplicates")
+    p.add_argument("--dry-run", action="store_true", help="check everything and print the writes, make none")
+    p.set_defaults(fn=command_debt_intake)
+
+    p = sub.add_parser("debt-pass-validate", help="check a debt pass plan against the debt epic and the epics being "
+                                                  "built (read-only, apart from one bounded git fetch)")
+    p.add_argument("number", type=int, help="the debt epic")
+    p.add_argument("file", help="the pass JSON")
+    p.set_defaults(fn=command_debt_pass_validate)
+
+    p = sub.add_parser("debt-pass-post", help="post a debt pass plan on the debt epic once it validates "
+                                              "(no sign-off, no Codex round)")
+    p.add_argument("number", type=int, help="the debt epic")
+    p.add_argument("file", help="the pass JSON")
+    p.add_argument("--dry-run", action="store_true", help="check it and print the comment, post nothing")
+    p.set_defaults(fn=command_debt_pass_post)
 
     p = sub.add_parser("merge", help="the merge gate, then squash-merge a slice's PR")
     p.add_argument("pr", type=int)
@@ -5243,6 +7742,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--from-file")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=command_demo_request)
+
+    p = sub.add_parser("debt-request", help="ask on a debt ticket for the check only a person can run (a speaker "
+                       "write); the ticket leaves its pass and waits for their reply")
+    p.add_argument("number", type=int)
+    p.add_argument("--body-file", required=True, help="the step: its --dry-run output, the snapshot/restore bracket, "
+                   "the command")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=command_debt_request)
 
     p = sub.add_parser("file-issue", help="file a finding as its own issue: tech debt of an epic or a quick change, "
                                           "or new for triage")

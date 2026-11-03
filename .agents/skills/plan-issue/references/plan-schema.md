@@ -56,10 +56,9 @@ Two optional top-level fields:
   from M1`, and is required on every revision after a milestone was created while
   others are still to come.
 
-A cleanup pass (`plan-issue --cleanup`) adds `"cleanup_of": "M1"`, the accepted
-milestone whose tech debt it pays down. Its new slices carry `"debt": [81, 84]`,
-the `tech-debt` issues they close (rendered as a `Pays down` section; `merge`
-closes them). It adds at most `cleanup_slices_per_milestone` new slices.
+`cleanup_of` and a slice's `debt` belonged to the retired cleanup pass: the validator
+refuses them, except `debt` on a slice an earlier revision already carried it on (an
+amendment keeps every key), where it is ignored.
 
 ## Rules the validator enforces
 
