@@ -521,7 +521,9 @@ The fingerprint's inputs, by name (`codex-eval --status --inputs` lists them):
 - `.sdlc/config.json`'s `codex` section, as canonical JSON (not the rest of the file);
 - `tools/codex_review.py`, which fills and runs every round and also **chooses what a round is
   handed**: which requirements a plan round is held to, which slices and briefs a milestone round
-  lists, which of them are owed a review, and which response a round reads. `sdlc.py` only
+  lists, which of them are owed a review, which response a round reads, and the brief a debt or
+  quick PR round is held to (`debt_brief`; `approved_brief`, `approved_brief_id` and `quick_brief`,
+  whose brief id a quick round's approval is bound to). `sdlc.py` only
   fetches the bundle and passes it in, and a test fails if it defines a function that fills a
   prompt or picks its inputs;
 - `tools/codex_eval.py`, and everything under `tests/codex_eval/` (the eval's fixtures and scorer);
