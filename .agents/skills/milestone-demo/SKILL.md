@@ -246,6 +246,13 @@ Read their reply as an end user's, not a reviewer's.
   the changes as new slices. After they merge, this skill runs again and posts demo rev 2.
 - **Unclear**: answer with a note that asks which they meant.
 
+**`/changes` with no demo in review.** The poster may ask for changes while the epic is being built
+(`sdlc:in-progress`, no demo posted). `state N` then says action `record_changes`, and its `next:` names the
+comment. Restate it as above, then
+`uv run python tools/sdlc.py demo-changes N --body-file <SCRATCH>/changes.md` (`--dry-run` first). It is
+recorded against the current milestone (no demo or acceptance is touched), the label stays `in-progress`,
+and **Next:** is `/plan-issue N`. Don't post a demo meanwhile: `demo-post` waits until it is recorded.
+
 ## 10. Ship the accepted milestone
 
 `main` gets the milestone now, as one merge commit of `epic/N`. Every step is a
