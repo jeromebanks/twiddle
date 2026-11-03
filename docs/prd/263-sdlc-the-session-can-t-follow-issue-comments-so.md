@@ -456,3 +456,5 @@ The watcher never runs `ship`, `merge` or a PRD commit on its own judgment. They
 36. **Resuming after a wait.** When the only agent move on an issue is resuming in-flight work (a slice in review, say), its `state`'s `next:` names that as a runnable command. A test shows a parked step (Codex or Max) being run again once its wait ends, with no person's comment and no other change of state.
 
 ## Open questions
+
+None. Rev 3's questions are settled. Answers 1–9 are folded in above, and question 10 takes its default: planned now, built after #243 M1 ships.
