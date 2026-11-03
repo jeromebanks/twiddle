@@ -63,6 +63,7 @@ uv run python tools/sdlc.py demo-status N          # --json for the full brief
 | `next` says `... is accepted; ship it` | step 10 |
 | `demo_reply` | the poster replied: step 9 |
 | `demo_heard` | someone answered your `demo-request`: step 3 (record what they heard), then steps 4-7 |
+| `record_changes` | the poster asked for changes with no demo in review: step 9, "`/changes` with no demo in review" |
 | `turn` is `poster` | the demo is waiting on them: report it and stop |
 | anything else | report the `next:` line and stop |
 
