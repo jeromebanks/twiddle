@@ -338,8 +338,8 @@ Without Review"), and refuses an agent editing its own permissions. So no skill 
 merges a PR with a bare `gh pr merge` (a test greps for it). Every merge, in every lane, is
 `uv run python tools/sdlc.py merge PR`, run from the primary checkout on `main`: the gate's own
 review of the exact head stands behind it, and `merge` first refuses to run unless its
-`tools/sdlc.py` and `tools/sdlc_quick.py` match `origin/main`'s (after one bounded `git fetch`), so a
-PR is never judged by a gate it changed. The same goes for `cleanup N`, which removes the worktree.
+`tools/sdlc.py`, `tools/sdlc_quick.py`, `tools/codex_review.py` and `tools/codex_eval.py` match `origin/main`'s
+(after one bounded `git fetch`), so a PR is never judged by a gate it changed. The same goes for `cleanup N`, which removes the worktree.
 
 For the session that built a PR to run them itself, sub-agent or not, the poster adds this rule once
 to `.claude/settings.json` by hand. `.claude/` is a denied path and an agent cannot edit its own

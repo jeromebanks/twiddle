@@ -279,9 +279,9 @@ cd <PRIMARY> && uv run python tools/sdlc.py cleanup N
 
 **Run `merge` from the primary checkout, never from `WORKTREE`.** The worktree holds the slice's
 own `tools/sdlc.py`, and a PR must never be judged by a gate it changed. So `merge` first
-compares its running `tools/sdlc.py` and `tools/sdlc_quick.py` with `origin/main`'s, byte for
-byte (after one bounded `git fetch`), and refuses, merging nothing, on any difference, a failed
-fetch or an unreadable copy. The refusal names the primary checkout, and says to update it
+compares its running `tools/sdlc.py`, `tools/sdlc_quick.py`, `tools/codex_review.py` and
+`tools/codex_eval.py` with `origin/main`'s, byte for byte (after one bounded `git fetch`), and
+refuses, merging nothing, on any difference, a failed fetch or an unreadable copy. The refusal names the primary checkout, and says to update it
 (`git -C <PRIMARY> pull --ff-only`) when it is behind too. `--dry-run` is checked the same way.
 
 **If `merge` itself is refused by a permission check** (not by the gate), don't work around it,

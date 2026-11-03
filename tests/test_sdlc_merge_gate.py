@@ -22,7 +22,7 @@ def _git(*args, cwd):
 
 @pytest.fixture
 def primary(tmp_path, monkeypatch):
-    """A primary checkout on main whose origin/main holds byte copies of the gate's two files, run from itself."""
+    """A primary checkout on main whose origin/main holds byte copies of the gate's files, run from itself."""
     origin, root = tmp_path / "origin.git", tmp_path / "repo"
     _git("init", "-q", "--bare", "-b", "main", str(origin), cwd=tmp_path)
     _git("init", "-q", "-b", "main", str(root), cwd=tmp_path)
@@ -123,8 +123,9 @@ def test_a_file_missing_on_main_is_a_refusal(primary):
 
 
 def test_a_missing_running_copy_is_a_difference():
-    assert sdlc.gate_code_drift({"tools/sdlc.py": b"x"}, {"tools/sdlc.py": b"x", "tools/sdlc_quick.py": b"y"}) \
-        == ["tools/sdlc_quick.py"]
+    on_main = {p: b"y" for p in REAL} | {"tools/sdlc.py": b"x"}
+    assert sdlc.gate_code_drift({p: b"y" for p in REAL if p != "tools/sdlc_quick.py"} | {"tools/sdlc.py": b"x"},
+                                on_main) == ["tools/sdlc_quick.py"]
     assert sdlc.gate_code_drift({p: b"x" for p in REAL}, {p: b"x" for p in REAL}) == []
 
 
@@ -142,13 +143,21 @@ def no_github(monkeypatch):
 
 
 @pytest.mark.parametrize("flags", [[], ["--dry-run"]])
-def test_merge_from_a_differing_checkout_reads_and_merges_nothing(primary, monkeypatch, capsys, flags):
+@pytest.mark.parametrize("path", ["tools/sdlc.py", "tools/codex_review.py", "tools/codex_eval.py"])
+def test_merge_from_a_differing_checkout_reads_and_merges_nothing(primary, monkeypatch, capsys, flags, path):
+    # the brief builders and the eval gate (F2) count too: sdlc.py and sdlc_quick.py can match main's while they don't
     wt = worktree(primary, monkeypatch)
-    (wt / "tools/sdlc.py").write_bytes(REAL["tools/sdlc.py"] + b"\n")
+    (wt / path).write_bytes(REAL[path] + b"\n")
     no_github(monkeypatch)   # neither a slice's PR nor a quick one is read, so neither lane can merge
     assert sdlc.main(["merge", "50", *flags]) == 1
     err = capsys.readouterr().err
-    assert "differs from origin/main's" in err and f"cd {primary.resolve()} && uv run python tools/sdlc.py merge 50" in err
+    assert f"{path} in {wt.resolve()} differs from origin/main's" in err
+    assert f"cd {primary.resolve()} && uv run python tools/sdlc.py merge 50" in err
+
+
+def test_the_gate_code_is_the_gate_s_files_and_the_review_logic_it_runs():
+    assert set(sdlc.GATE_CODE) == {"tools/sdlc.py", "tools/sdlc_quick.py", "tools/codex_review.py", "tools/codex_eval.py"}
+    assert all(f.is_file() and f.name == Path(p).name for p, f in sdlc.GATE_CODE.items())
 
 
 @pytest.mark.parametrize("flags", [[], ["--dry-run"]])

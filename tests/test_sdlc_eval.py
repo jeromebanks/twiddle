@@ -152,6 +152,25 @@ def test_every_input_changes_the_fingerprint_and_nothing_else_does(repo):
     assert fp(repo) == base
 
 
+@pytest.mark.parametrize("old,new", [
+    # one sentence of the debt brief's rule for findings inside and outside the scope
+    ("A problem inside \"\n           \"that scope is fixed in this PR", "A problem inside \"\n           \"that scope may wait"),
+    # the quick brief's `title + brief` assembly
+    ("return f\"{issue.get('title', '')}\\n\\n{brief_text}\\n\"", "return f\"{brief_text}\\n\""),
+])
+def test_what_a_debt_or_quick_round_is_handed_is_fingerprinted(repo, old, new):
+    from tools import codex_review
+    src = repo / "tools" / "codex_review.py"
+    text = src.read_text()
+    assert text.count(old) == 1, f"{old!r} isn't in codex_review.py once: the test must edit the real builder"
+    assert "def debt_brief" in text and "def quick_brief" in text
+    base = fp(repo)
+    src.write_text(text.replace(old, new))
+    assert fp(repo) != base
+    # and sdlc.py builds a round's brief only through those
+    assert codex_review.debt_brief.__module__ == codex_review.quick_brief.__module__ == codex_review.__name__
+
+
 def test_a_commit_and_a_checkout_of_it_have_one_fingerprint(repo, tmp_path):
     (repo / "src" / "deep").mkdir(parents=True)
     (repo / "src" / "deep" / "AGENTS.md").write_text("no trailing newline")

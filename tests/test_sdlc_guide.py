@@ -108,20 +108,39 @@ def test_every_prompt_holds_codex_to_review_rules_and_claude_md_only_for_layout(
     assert "(.agents/skills/review-rules.md)" in safety, "CLAUDE.md's safety table must link to review-rules.md"
 
 
-def test_sdlc_py_neither_fills_a_prompt_nor_chooses_what_goes_in_it():
-    """What a round is handed is review logic, fingerprinted with codex_review.py: sdlc.py only fetches and posts."""
+# what a debt or quick round is handed (F2): exact names, not a bare `brief` pattern (`demo_brief` only fetches)
+BRIEF_BUILDERS = {"debt_brief", "approved_brief", "approved_brief_id", "comment_anchor", "quick_brief"}
+
+
+def review_logic_in(source: str) -> list[str]:
+    """Why `source` (an sdlc.py) breaks the rule that what a round is handed lives in codex_review.py; [] = it doesn't."""
     import ast
     from tools import codex_review
-    tree = ast.parse(SOURCE)
+    tree = ast.parse(source)
     defined = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     review = {n for n, v in vars(codex_review).items() if callable(v) and getattr(v, "__module__", "") == codex_review.__name__}
-    assert not defined & review, f"sdlc.py redefines codex_review's {sorted(defined & review)}"
+    errs = [f"sdlc.py redefines codex_review's {sorted(defined & review)}"] if defined & review else []
     choosers = re.compile(r"prompt|requirements|milestone_slices|owed_slices|approved_comment|plan_rounds|latest_response")
-    assert not [d for d in defined if choosers.search(d)], "these belong in tools/codex_review.py: " + \
-        ", ".join(sorted(d for d in defined if choosers.search(d)))
+    if found := sorted({d for d in defined if choosers.search(d)} | (defined & BRIEF_BUILDERS)):
+        errs.append("these belong in tools/codex_review.py: " + ", ".join(found))
     used = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)} | {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-    assert not used & {"fill_prompt", "fill_pr_prompt", "PR_PROMPT", "PLAN_PROMPT", "MILESTONE_PROMPT"}, \
-        "sdlc.py reads or fills a prompt template itself"
+    if used & {"fill_prompt", "fill_pr_prompt", "PR_PROMPT", "PLAN_PROMPT", "MILESTONE_PROMPT"}:
+        errs.append("sdlc.py reads or fills a prompt template itself")
+    return errs
+
+
+def test_sdlc_py_neither_fills_a_prompt_nor_chooses_what_goes_in_it():
+    """What a round is handed is review logic, fingerprinted with codex_review.py: sdlc.py only fetches and posts."""
+    assert review_logic_in(SOURCE) == []
+
+
+@pytest.mark.parametrize("name", sorted(BRIEF_BUILDERS))
+def test_the_guard_refuses_a_brief_builder_defined_in_sdlc_py(name):
+    errs = review_logic_in(f"def {name}(x):\n    return x\n")
+    assert any("belong in tools/codex_review.py" in e and name in e for e in errs), errs
+    # an alias is not a definition, and `demo_brief` only fetches: neither is refused
+    assert review_logic_in(f"from tools import codex_review\n{name} = codex_review.{name}\n") == []
+    assert review_logic_in("def demo_brief(n):\n    return n\n") == []
 
 
 def test_what_a_round_is_handed_comes_from_codex_review():
