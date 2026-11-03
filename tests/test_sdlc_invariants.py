@@ -11,6 +11,7 @@ are done, in flight or ready, tech debt, a milestone not created yet) and check:
 
 No network: the histories are built from markers and progress dicts.
 """
+import copy
 import itertools
 import re
 
@@ -297,3 +298,54 @@ def test_every_generated_epic_only_uses_known_phases():
     for case in ALL[::37]:
         st, progress, _ = build(*case)
         assert {m["phase"] for m in sdlc.milestone_phases(st, progress)} <= set(sdlc.MILESTONE_FLOW)
+
+
+# --- who settles a plan whose Codex rounds are spent (#243 T12) ------------------------------------------------
+
+def _spent_plan_histories():
+    """(labels, history) for each place a plan's rounds run out: the first plan (approved, then needs-info after the
+    question) and an amendment (in-progress at escalate_plan, then escalated). Each ends on its last agent comment."""
+    out = []
+    for amend in (False, True):
+        for asked in (False, True):
+            h = _start() if amend else History()
+            if amend:
+                h.add(*DEMO[:2], **DEMO[2])
+                h.add(*ACCEPT[:2], **ACCEPT[2])
+                rev = 2
+            else:
+                h.add("prd", 1)
+                h.add("approval", 1, by=POSTER)
+                rev = 1
+            h.add("plan", rev)
+            for i in range(CONFIG["max_plan_rounds"]):
+                h.add("plan-review", rev, verdict="changes", round=str(i + 1))
+            if amend and asked:
+                h.add("escalation")
+                labels = ["sdlc:escalated"]
+            elif asked:
+                h.add("question", phase="plan")
+                labels = ["sdlc:needs-info"]
+            else:
+                labels = ["sdlc:in-progress" if amend else "sdlc:approved"]
+            out.append((labels, h))
+    return out
+
+
+@pytest.mark.parametrize("case", range(4))
+def test_only_a_person_who_may_settle_turns_spent_rounds_into_create(case):
+    labels, h = _spent_plan_histories()[case]
+    issue = {"number": EPIC, "title": "epic", "state": "open", "author": POSTER, "labels": labels}
+    base = sdlc.derive_state(issue, h.comments, TRUSTED, CONFIG)
+    assert base["action"] != "create_plan_issues" and base["plan_settled"] is None
+    for author, marked in (("stranger", False), (OWNER, True), ("stranger", True), (POSTER, True)):
+        h2 = copy.deepcopy(h)
+        h2.add("note" if marked else None, body="/approve", author=author)
+        st = sdlc.derive_state(issue, h2.comments, TRUSTED, CONFIG)
+        assert st["plan_settled"] is None and st["action"] in (base["action"], "replan", "respond_to_reply")
+    for author in (POSTER, OWNER):
+        h2 = copy.deepcopy(h)
+        h2.add(None, body="/approve", author=author)
+        st = sdlc.derive_state(issue, h2.comments, TRUSTED, CONFIG)
+        assert (st["turn"], st["action"], st["plan_settled"]["by"]) == ("agent", "create_plan_issues", author)
+        assert sdlc.next_command(st) == f"/plan-issue {EPIC}"

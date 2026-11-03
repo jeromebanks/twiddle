@@ -46,7 +46,7 @@ Dispatch on `action`:
 | `continue_plan` | a plan revision exists without consensus: read it and its review comments, then step 5 |
 | `replan` | the poster answered your planning question: read the answer, revise (step 3), post (step 4), step 5 |
 | `ask_poster` | step 7 |
-| `create_plan_issues` | Codex approved the latest revision (or an earlier creation was cut short): step 6 |
+| `create_plan_issues` | Codex approved the latest revision (or an earlier creation was cut short), or its rounds were spent and a person settled it (`plan_settled` in the JSON): step 6 |
 | any of these with `feedback: true` | the poster asked for changes at a milestone demo: "After demo feedback" below |
 | `plan_next_milestone` | the latest created milestone was accepted and the plan has more: "The next milestone" below |
 | `continue_plan` / `create_plan_issues` while `sdlc:in-progress` | an amendment is under review: steps 5-6 |
@@ -191,6 +191,15 @@ key → issue table on the epic, creates the epic's branch `epic/N` from `main`
 (slices land there, and each accepted milestone ships to `main`), and moves it to
 `sdlc:planned`. If it fails
 partway, run it again: it finds what exists by marker and does only the rest.
+
+**A plan settled by a person.** Once a plan's Codex rounds are spent (counted across revisions, and still spent
+after your planning question until a new Codex round is recorded), the issue author or a collaborator can reply
+`/approve` after the latest plan revision instead of answering. `state` then says `create_plan_issues` with
+`plan_settled` (who, which revision), in `sdlc:approved`, `sdlc:needs-info`, or on an amendment at `escalate_plan`
+or already `sdlc:escalated`. Run step 6 as usual: `plan-create` records `settled_by=` on its table, and moves an
+escalated epic back to `sdlc:in-progress` (an approved or needs-info one to `sdlc:planned`). Only the tool
+decides who counts: anyone else's `/approve` is listed as ignored, and an agent's comment never counts, so never
+post one yourself.
 
 ## 7. No consensus: ask the poster
 

@@ -190,6 +190,10 @@ class Ledger:
     plan_verdict: str | None = None
     plan_rounds: int = 0
     plan_review: dict[str, Any] | None = None   # the latest round counted in plan_rounds: its response feeds the next
+    plan_index: int | None = None        # where the latest plan revision sits in the issue: a settling /approve is after it
+    # the rounds the planning cycle had spent when a `phase=plan` question reset plan_rounds: the cycle still reads as
+    # spent (a person's /approve may settle it) until a new Codex round is recorded
+    plan_spent: int = 0
     plan_after_created: bool = False     # a plan revision posted since the last plan-created: an amendment
     created: set[str] | None = field(default_factory=set)   # milestones whose issues exist (None: all, legacy)
     plan_created: bool = False           # a plan-created record exists (with no milestones, `created` can't say so)
@@ -223,6 +227,7 @@ def _ms(mk: dict[str, str]) -> str:
 def _replan(L: Ledger) -> None:
     """Changes to plan (feedback): plan-issue amends the plan, with fresh Codex rounds."""
     L.feedback, L.feedback_plan, L.plan_rounds, L.plan_verdict, L.plan_review = True, False, 0, None, None
+    L.plan_spent = 0
 
 
 def _reopen(L: Ledger, m: str) -> None:
@@ -235,6 +240,7 @@ def _reopen(L: Ledger, m: str) -> None:
 
 def _on_question(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     if mk.get("phase") == "plan":
+        L.plan_spent = max(L.plan_spent, L.plan_rounds)
         L.plan_rounds, L.plan_verdict, L.plan_review = 0, None, None   # the poster's answer buys fresh Codex rounds
     else:
         L.rounds += 1
@@ -275,12 +281,14 @@ def _on_prd_merged(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> 
 def _on_plan(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     if (rev := _rev(mk)) is not None:
         L.latest_plan = {"rev": rev, "id": c.get("id"), "url": c.get("url")}
+        L.plan_index = i
         L.plan_body, L.plan_verdict = c.get("body", ""), None
         L.feedback_plan, L.plan_after_created = L.feedback, True
 
 
 def _on_plan_review(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     L.plan_rounds += 1
+    L.plan_spent = 0   # a new Codex round: the cycle a question reset is over, and with it any settling
     L.plan_review = {"id": c.get("id"), "verdict": mk.get("verdict"), "response": mk.get("response")}
     if L.latest_plan and _rev(mk) == L.latest_plan["rev"]:
         L.plan_verdict = mk.get("verdict")
@@ -288,7 +296,7 @@ def _on_plan_review(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) ->
 
 def _on_plan_created(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     L.feedback = L.feedback_plan = L.plan_after_created = False
-    L.plan_rounds, L.plan_review = 0, None   # the next amendment (a milestone's replan, demo changes) gets fresh rounds
+    L.plan_rounds, L.plan_review, L.plan_spent = 0, None, 0   # the next amendment gets fresh rounds
     L.plan_created = True
     if "created" not in mk:
         L.created = None
@@ -460,6 +468,24 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
 
     doc_approved = bool(latest_doc) and approved_rev == latest_doc["rev"]
     max_plan_rounds = config.get("max_plan_rounds", 3)
+    # the planning cycle's Codex rounds, across revisions, including those a `phase=plan` question reset
+    cycle_rounds = max(plan_rounds, L.plan_spent)
+    settled: dict[str, Any] | None = None
+    if (latest_plan and L.plan_index is not None and plan_verdict != "approve" and cycle_rounds >= max_plan_rounds
+            and doc_approved and L.lane != QUICK):
+        # the rounds are spent: a person's `/approve` after the latest plan revision settles it (#146's plan half).
+        # Only the issue author or a collaborator counts, and never a comment that carries a marker (an agent's).
+        reply_ids = {c.get("id") for c in replies}
+        for c in ordered[L.plan_index + 1:]:
+            if c.get("id") in marked_ids or parse_marker(c.get("body", "")):
+                continue
+            if not any(a == "approve" for a, _ in keyword_lines(c.get("body", ""))):
+                continue
+            if c.get("author") in allowed:
+                settled = {"by": c.get("author"), "comment_id": c.get("id"), "url": c.get("url"),
+                           "rev": latest_plan["rev"]}
+            elif c.get("id") not in reply_ids:   # a reply's is listed already
+                ignored.append({"by": c.get("author", ""), "action": "approve"})
     reconcile = None
     if state in REVIEW_DOC and latest_doc and latest_doc["kind"] != REVIEW_DOC[state]:
         conflicts.append(f"label {PREFIX}{state} but the latest revision is a {latest_doc['kind']}")
@@ -501,6 +527,9 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         turn, action = "none", "none"
     elif conflicts:
         turn, action = "human", "fix_conflict"
+    elif state == "escalated" and settled and plan_after_created:
+        # a plan amendment escalated with its rounds spent, settled by a person's /approve: plan-create resumes it
+        turn, action = "agent", "create_plan_issues"
     elif state == "escalated":
         turn, action = "human", "human"
     elif debt_epic:
@@ -518,7 +547,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
             action = "plan"
         elif not plan_after_created:
             action = "plan_next_milestone"
-        elif plan_verdict == "approve":
+        elif plan_verdict == "approve" or settled:
             action = "create_plan_issues"
         elif plan_rounds >= max_plan_rounds:
             action = "escalate_plan"   # the epic is being built: a human settles it, not a question to the poster
@@ -550,7 +579,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
             action = "commit_prd"   # the brief that left the quick lane goes to docs/prd/ first (`commit-prd N`)
         elif latest_plan is None:
             action = "plan"
-        elif plan_verdict == "approve":
+        elif plan_verdict == "approve" or settled:
             action = "create_plan_issues"
         elif plan_rounds >= max_plan_rounds:
             action = "ask_poster"
@@ -559,7 +588,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     elif replies:
         turn = "agent"
         if state == "needs-info" and doc_approved and L.lane != QUICK:   # a quick brief is never planned
-            action = "replan"
+            action = "create_plan_issues" if settled else "replan"
         elif decision and decision["action"] == "approve" and decision.get("valid"):
             action = "record_approval"
         else:
@@ -577,7 +606,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "decision": decision, "ignored_keywords": ignored, "reconcile": reconcile, "stale_labels": stale,
         "conflicts": conflicts, "doc_approved": doc_approved, "latest_plan": latest_plan,
         "plan_verdict": plan_verdict, "plan_rounds": plan_rounds, "max_plan_rounds": max_plan_rounds,
-        "plan_review": L.plan_review,
+        "plan_review": L.plan_review, "plan_cycle_rounds": cycle_rounds, "plan_settled": settled,
         "demos": demos, "latest_demo": latest_demo, "feedback": feedback,
         "shipped": shipped, "ship_reviews": ship_reviews, "epic_tests": epic_tests, "untested": untested,
         "review_owed": review_owed,
@@ -1170,7 +1199,11 @@ def print_state(st: dict[str, Any]) -> None:
         print("  demo feedback to plan: the poster asked for changes")
     if st.get("latest_plan"):
         print(f"  plan: rev {st['latest_plan']['rev']}   codex: {st['plan_verdict'] or 'not yet'}"
-              f"   plan rounds: {st['plan_rounds']}/{st['max_plan_rounds']}")
+              f"   plan rounds: {st['plan_rounds']}/{st['max_plan_rounds']}"
+              + (f" (this cycle spent {st['plan_cycle_rounds']})" if st.get("plan_cycle_rounds", 0) > st["plan_rounds"]
+                 else ""))
+        if s := st.get("plan_settled"):
+            print(f"  settled: /approve by {s['by']} on plan rev {s['rev']}, its Codex rounds spent ({s['url']})")
     for m in (st.get("progress") or {}).get("milestones", []):
         print(f"  milestone {m['title']}: {m['done']}/{m['total']} merged" + ("  (complete)" if m["done"] == m["total"] else ""))
     if st.get("demo_request"):
@@ -2366,7 +2399,9 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
     st = bundle_state(bundle, config)
     if st["action"] != "create_plan_issues":
         raise SdlcError(f"#{st['number']} is not ready to create: action is {st['action']} "
-                        "(it needs Codex's `approve` on the latest plan revision)")
+                        "(it needs Codex's `approve` on the latest plan revision, or, once its Codex rounds are "
+                        "spent, a `/approve` after it from the issue author or a collaborator)")
+    settled = st.get("plan_settled")   # None when Codex approved it
     plan_comment, plan = latest_plan_of(bundle, st)
     epic = st["number"]
     ref = planning_ref(plan.get("issue"), config, offline=bool(getattr(args, "from_file", None)))
@@ -2454,14 +2489,23 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
                 time.sleep(0.5)
     if not acts:
         print(f"#{epic}: every issue and link already exists")
+    resume = st["state"] in BUILD_STATES or (st["state"] == "escalated" and st.get("plan_created"))
     if args.dry_run:
-        print(f"then post the plan-created table on #{epic}, make {epic_branch(epic)} and move it to {PREFIX}planned")
+        to = (f"move it back to {PREFIX}in-progress" if st["state"] == "escalated" and resume
+              else f"leave it {PREFIX}{st['state']}" if resume else f"move it to {PREFIX}planned")
+        print(f"then post the plan-created table on #{epic}" + (f" (settled by @{settled['by']})" if settled else "")
+              + f", make {epic_branch(epic)} and {to}")
         return 0
     if not offline:
         by_key, left = look()
         if left:
             raise SdlcError(f"read-back still finds {len(left)} missing step(s), e.g. {left[0]}: rerun plan-create")
         numbers = {k: r["number"] for k, r in by_key.items()}
+    if resume and st["state"] == "escalated":
+        # the amendment's escalation is settled: building carries on. Moved before the record is posted, so a run
+        # cut short in between finds the epic in-progress with the settled /approve still due, and finishes it
+        set_state_label(epic, bundle["issue"]["labels"], "in-progress", config)
+        print(f"#{epic}: escalated -> in-progress (settled by @{settled['by'] if settled else '?'})")
     rev = st["latest_plan"]["rev"]
     already = any((parse_marker(c["body"]) or {}).get("kind") == "plan-created" and c["author"] in trusted
                   and (parse_marker(c["body"]) or {}).get("rev") == str(rev) for c in bundle["comments"])
@@ -2472,17 +2516,22 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
         rows += [f"| `{k}` | #{numbers[k]} | {items[k]['title']} |" for k in topo_order(leaves)]
         first = [f"#{numbers[l['key']]}" for l in leaves if not l.get("blocked_by")]
         later = [k for k in st.get("planned_milestones") or [] if k not in created_after]
-        body = (f"Created from [plan rev {rev}]({plan_comment.get('url', '')}) after Codex approved it.\n\n"
+        why = (f"after @{settled['by']} settled it with [`/approve`]({settled.get('url') or ''}): its Codex rounds "
+               "were spent" if settled else "after Codex approved it")
+        body = (f"Created from [plan rev {rev}]({plan_comment.get('url', '')}) {why}.\n\n"
                 "| key | issue | title |\n|---|---|---|\n" + "\n".join(rows) +
                 f"\n\nReady to start: {', '.join(first) or 'see `ready`'}. Each is one session of work (`work-slice`)."
                 + (f"\n\n{', '.join(later)} will be planned again with what {created_after[-1]} teaches, "
                    "then created." if later and created_after else ""))
         extra = {"created": ",".join(created_after)} if target is not None else {}
+        if settled:
+            extra["settled_by"] = settled["by"]
         post_comment(epic, render_comment("plan-created", rev, body, config, **extra), config)
-    if st["state"] in BUILD_STATES:   # demo feedback or the next milestone: the epic is still being built
+    if resume:   # demo feedback or the next milestone: the epic is still being built
         if not offline:
             ensure_epic_branch(epic, config)
-        print(f"#{epic}: the new issues are created; it stays {PREFIX}{st['state']}")
+        now = "in-progress" if st["state"] == "escalated" else st["state"]
+        print(f"#{epic}: the new issues are created; it stays {PREFIX}{now}")
         return 0
     if not offline:
         sha, created = ensure_epic_branch(epic, config)
