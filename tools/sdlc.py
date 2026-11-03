@@ -2568,7 +2568,52 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
         have_ms = {} if not acts else dict(bundle.get("plan_milestones") or {}) if offline else {   # title -> number
             m["title"]: m["number"] for m in gh_pages(f"repos/{repo}/milestones?state=all&per_page=100")}
         for step, act in enumerate(acts):
-            _plan_create_step(act, epic, plan, items, numbers, ids, ms, have_ms, prd_url, repo, args.dry_run, say, made)
+            if act[0] == "milestone":
+                m = next(m for m in plan["milestones"] if m["key"] == act[1])
+                title = f"#{epic} {m['key']}: {m['title']}"
+                if title in have_ms:
+                    ms[m["key"]] = have_ms[title]
+                    continue
+                say(f"create milestone {title!r}")
+                ms[m["key"]] = None if args.dry_run else post_json(
+                    f"repos/{repo}/milestones", {"title": title, "description": m["demo"]})["number"]
+                if not args.dry_run:
+                    made.append(f"milestone {m['key']}")
+            elif act[0] == "create":
+                item = items[act[1]]
+                container = bool(item.get("slices"))
+                body = (render_container_body(epic, item) if container else
+                        render_leaf_body(epic, item, numbers.get(item["_parent"]) if item.get("_parent") else None,
+                                         numbers, prd_url))
+                payload: dict[str, Any] = {"title": issue_title(epic, item), "body": body,
+                                           "labels": [CONTAINER_LABEL if container else LEAF_LABEL]}
+                if not container and item.get("complexity"):
+                    payload["labels"].append(COMPLEXITY_PREFIX + item["complexity"])
+                mkey = item.get("milestone") if container else item.get("_milestone")
+                if mkey and ms.get(mkey):
+                    payload["milestone"] = ms[mkey]
+                say(f"create {payload['title']!r} [{payload['labels'][0]}]" + (f" in milestone {mkey}" if mkey else ""))
+                if args.dry_run:
+                    numbers[act[1]] = f"new:{act[1]}"
+                    continue
+                new_issue = post_json(f"repos/{repo}/issues", payload)
+                numbers[act[1]], ids[act[1]] = new_issue["number"], new_issue["id"]
+                made.append(f"#{new_issue['number']} ({act[1]})")
+                time.sleep(1)   # GitHub's secondary rate limit on content creation
+            elif act[0] == "attach":
+                parent = epic if act[1] is None else numbers[act[1]]
+                say(f"attach #{numbers[act[2]]} as a sub-issue of #{parent}")
+                if not args.dry_run:
+                    post_json(f"repos/{repo}/issues/{parent}/sub_issues", {"sub_issue_id": ids[act[2]]})
+                    made.append(f"#{numbers[act[2]]} under #{parent}")
+                    time.sleep(0.5)
+            elif act[0] == "block":
+                say(f"mark #{numbers[act[1]]} ({act[1]}) blocked by #{numbers[act[2]]} ({act[2]})")
+                if not args.dry_run:
+                    post_json(f"repos/{repo}/issues/{numbers[act[1]]}/dependencies/blocked_by",
+                              {"issue_id": ids[act[2]]})
+                    made.append(f"#{numbers[act[1]]} blocked by #{numbers[act[2]]}")
+                    time.sleep(0.5)
     except BaseException as exc:
         plan_create_stopped(epic, f"creating ({exc or type(exc).__name__})", made,
                             [describe_create_step(a, numbers) for a in acts[step:]], rerun)
@@ -2681,59 +2726,6 @@ def plan_create_stopped(epic: int, where: str, made: list[str], missing: list[st
         print(f"  still missing ({len(steps)}): " + "; ".join(steps), file=sys.stderr)
     print(f"  rerun {rerun}" + (" in a minute (GitHub may still be listing what was made)" if wait else "")
           + ": it finds what exists by marker and does only the rest", file=sys.stderr)
-
-
-def _plan_create_step(act: tuple[Any, ...], epic: int, plan: dict[str, Any], items: dict[str, Any],
-                      numbers: dict[str, Any], ids: dict[str, Any], ms: dict[str, Any], have_ms: dict[str, Any],
-                      prd_url: str | None, repo: str, dry_run: bool, say: Any, made: list[str]) -> None:
-    """One step of plan-create (a milestone, an issue, a sub-issue link or a blocked_by link). Fills `numbers`,
-    `ids` and `ms` as it goes, and adds what it created on GitHub to `made`."""
-    if act[0] == "milestone":
-        m = next(m for m in plan["milestones"] if m["key"] == act[1])
-        title = f"#{epic} {m['key']}: {m['title']}"
-        if title in have_ms:
-            ms[m["key"]] = have_ms[title]
-            return
-        say(f"create milestone {title!r}")
-        if not dry_run:
-            ms[m["key"]] = post_json(f"repos/{repo}/milestones", {"title": title, "description": m["demo"]})["number"]
-            made.append(f"milestone {m['key']}")
-        else:
-            ms[m["key"]] = None
-    elif act[0] == "create":
-        item = items[act[1]]
-        container = bool(item.get("slices"))
-        body = (render_container_body(epic, item) if container else
-                render_leaf_body(epic, item, numbers.get(item["_parent"]) if item.get("_parent") else None,
-                                 numbers, prd_url))
-        payload: dict[str, Any] = {"title": issue_title(epic, item), "body": body,
-                                   "labels": [CONTAINER_LABEL if container else LEAF_LABEL]}
-        if not container and item.get("complexity"):
-            payload["labels"].append(COMPLEXITY_PREFIX + item["complexity"])
-        mkey = item.get("milestone") if container else item.get("_milestone")
-        if mkey and ms.get(mkey):
-            payload["milestone"] = ms[mkey]
-        say(f"create {payload['title']!r} [{payload['labels'][0]}]" + (f" in milestone {mkey}" if mkey else ""))
-        if dry_run:
-            numbers[act[1]] = f"new:{act[1]}"
-            return
-        issue = post_json(f"repos/{repo}/issues", payload)
-        numbers[act[1]], ids[act[1]] = issue["number"], issue["id"]
-        made.append(f"#{issue['number']} ({act[1]})")
-        time.sleep(1)   # GitHub's secondary rate limit on content creation
-    elif act[0] == "attach":
-        parent = epic if act[1] is None else numbers[act[1]]
-        say(f"attach #{numbers[act[2]]} as a sub-issue of #{parent}")
-        if not dry_run:
-            post_json(f"repos/{repo}/issues/{parent}/sub_issues", {"sub_issue_id": ids[act[2]]})
-            made.append(f"#{numbers[act[2]]} under #{parent}")
-            time.sleep(0.5)
-    elif act[0] == "block":
-        say(f"mark #{numbers[act[1]]} ({act[1]}) blocked by #{numbers[act[2]]} ({act[2]})")
-        if not dry_run:
-            post_json(f"repos/{repo}/issues/{numbers[act[1]]}/dependencies/blocked_by", {"issue_id": ids[act[2]]})
-            made.append(f"#{numbers[act[1]]} blocked by #{numbers[act[2]]}")
-            time.sleep(0.5)
 
 
 def annotate_actions(records: list[dict[str, Any]], ratings: dict[str, tuple[str, str]]) -> list[dict[str, Any]]:

@@ -353,3 +353,23 @@ def test_only_a_person_who_may_settle_turns_spent_rounds_into_create(case):
         st = sdlc.derive_state(issue, h2.comments, TRUSTED, CONFIG)
         assert (st["turn"], st["action"], st["plan_settled"]["by"]) == ("agent", "create_plan_issues", author)
         assert sdlc.next_command(st) == f"/plan-issue {EPIC}"
+
+
+# --- a settled creation cut short after its record (#243 T14) -------------------------------------------------
+
+@pytest.mark.parametrize("case", range(4))
+def test_a_settled_record_left_behind_is_finished_by_plan_create_alone(case):
+    """Whatever label a settled plan-create left behind with its record posted, `next` and plan-create's own gate
+    (action create_plan_issues) agree: finish it with `plan-create N`, no new /approve; or, already in-progress,
+    build the slices."""
+    labels, h = _spent_plan_histories()[case]
+    issue = {"number": EPIC, "title": "epic", "state": "open", "author": POSTER, "labels": labels}
+    h.add(None, body="/approve", author=POSTER)
+    rev = sdlc.derive_state(issue, h.comments, TRUSTED, CONFIG)["latest_plan"]["rev"]
+    h.add("plan-created", rev, settled_by=POSTER, created="M1,M2" if rev == 2 else "M1")
+    st = sdlc.with_next(sdlc.derive_state(issue, h.comments, TRUSTED, CONFIG), CONFIG, offline=True)
+    if labels == ["sdlc:in-progress"]:   # the label needs no move: building carries on
+        assert st["action"] == "work_slices"
+        return
+    assert (st["turn"], st["action"], st["plan_settled"]["by"]) == ("agent", "create_plan_issues", POSTER)
+    assert st["next"].startswith(f"`uv run python tools/sdlc.py plan-create {EPIC}`")
