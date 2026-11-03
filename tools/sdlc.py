@@ -952,13 +952,14 @@ def load_bundle(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, A
     return fetch_bundle(args.number, config)
 
 
-def bundle_state(bundle: dict[str, Any], config: dict[str, Any], head_fp: str | None = None) -> dict[str, Any]:
+def bundle_state(bundle: dict[str, Any], config: dict[str, Any], context: tuple[str | None, str | None] = (None, None)
+                 ) -> dict[str, Any]:
     """`derive_state` of a fetched (or saved) bundle. Its owed review evals are those no recorded pass has
-    cleared, when the bundle carries the results (`eval`); `head_fp` (the epic head's review logic, when known)
-    lets a pass for it clear evals owed for logic the head has moved past."""
+    cleared, when the bundle carries the results (`eval`); `context` (the epic head's review logic and
+    `codex --version` now, `epic_eval_context`) lets a pass for that pair clear them too (`open_eval_owed`)."""
     st = derive_state(bundle["issue"], bundle["comments"], set(bundle["trusted"]), config)
     if "eval" in bundle:
-        st["eval_owed"] = open_eval_owed(st["eval_owed"], eval_records(bundle["eval"], set(bundle["trusted"])), head_fp)
+        st["eval_owed"] = open_eval_owed(st["eval_owed"], eval_records(bundle["eval"], set(bundle["trusted"])), *context)
     return st
 
 
@@ -1057,7 +1058,8 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
 
 def command_state(args: argparse.Namespace, config: dict[str, Any]) -> int:
     bundle = load_bundle(args, config)
-    st = bundle_state(bundle, config)
+    st = bundle_state(bundle, config, epic_eval_context(bundle["issue"].get("number"), bundle,
+                                                        bool(getattr(args, "from_file", None))))
     if st.get("plan_kind") == "slice" and not getattr(args, "from_file", None):
         return command_slice_status(argparse.Namespace(number=st["number"], json=args.json, from_file=None), config)
     st = with_next(st, config, offline=bool(getattr(args, "from_file", None)), trusted=set(bundle["trusted"]))
@@ -2693,24 +2695,29 @@ def real_version(version: str | None) -> str | None:
     return version if version and version not in (codex_eval.UNKNOWN, EVAL_UNAVAILABLE) else None
 
 
-def latest_completed(results: list[dict[str, Any]], fp: str) -> dict[str, Any] | None:
-    """The latest `pass` or `fail` for this fingerprint under any real version (results oldest first), or None."""
+def latest_completed(results: list[dict[str, Any]], fp: str, version: str | None = None) -> dict[str, Any] | None:
+    """The latest `pass` or `fail` for this fingerprint (results oldest first), under `version` or, with none,
+    under any real version; or None. A deferral never stands in for a completed eval."""
     done = [r for r in results if r.get("fingerprint") == fp and r.get("outcome") in ("pass", "fail")
-            and real_version(r.get("codex"))]
+            and real_version(r.get("codex")) and (version is None or r.get("codex") == version)]
     return done[-1] if done else None
+
+
+def passed(results: list[dict[str, Any]], fp: str | None, version: str | None = None) -> bool:
+    return bool(fp) and (r := latest_completed(results, fp, version)) is not None and r["outcome"] == "pass"
 
 
 def eval_status(fp: str, version: str | None, results: list[dict[str, Any]]) -> tuple[str, dict[str, Any] | None]:
     """(`pass`, `fail`, `deferred` or `none`, the result that decided it) for the review logic `fp` under `version`.
 
-    With a real version the pair decides. Without one, the fingerprint's latest completed result does, any
-    version; failing that, an `unavailable` deferral for the fingerprint."""
-    if v := real_version(version):
-        r = codex_eval.pair_result(results, fp, v)
-        return (r["outcome"], r) if r else ("none", None)
-    if r := latest_completed(results, fp):
+    A completed eval (pass or fail) always outranks a deferral, whatever their order: a deferral recorded after a
+    fail (a `--defer` that read the results before the fail was posted) never unblocks it. With a real version
+    the pair's latest completed result decides, else a deferral for the pair. Without one, the fingerprint's
+    latest completed result under any version decides, else an `unavailable` deferral for the fingerprint."""
+    v = real_version(version)
+    if r := latest_completed(results, fp, v):
         return r["outcome"], r
-    deferred = [r for r in results if r.get("fingerprint") == fp and r.get("codex") == EVAL_UNAVAILABLE
+    deferred = [r for r in results if r.get("fingerprint") == fp and r.get("codex") == (v or EVAL_UNAVAILABLE)
                 and r.get("outcome") == "deferred"]
     return ("deferred", deferred[-1]) if deferred else ("none", None)
 
@@ -2751,18 +2758,24 @@ def eval_defer_errors(fp: str, version: str | None, results: list[dict[str, Any]
 
 
 def open_eval_owed(owed: dict[str, list[dict[str, str]]], results: list[dict[str, Any]] | None,
-                   head_fp: str | None = None) -> dict[str, list[dict[str, str]]]:
-    """The owed evals (milestone -> entries) no pass has cleared yet. An entry is cleared when the latest completed
-    eval (any real version) of its fingerprint is a pass, or that of `head_fp` (the epic head's), once the head
-    has moved past it: that is the logic reviewing from now on. With no `results` (unread), every entry stands."""
+                   head_fp: str | None = None, version: str | None = None) -> dict[str, list[dict[str, str]]]:
+    """The owed evals (milestone -> entries) no pass has cleared yet. With no `results` (unread), every entry stands.
+
+    An entry owed for (F, V) is cleared by a pass for exactly (F, V); one owed for F alone (`unavailable`) by a
+    pass for F under any real version. Either is also cleared by a pass for the logic that reviews from now on:
+    `head_fp` (the epic head's; F when unknown) under `version` (`codex --version` now), when that can be read.
+    So a pass recorded for an older `codex` never clears a deferral recorded after an upgrade."""
+    results, now = results or [], real_version(version)
     out = {}
     for m, entries in (owed or {}).items():
         left = []
         for e in entries:
-            passed = [(r := latest_completed(results or [], f)) is not None and r["outcome"] == "pass"
-                      for f in {e.get("fp"), head_fp} if f]
-            if not any(passed):
-                left.append(e)
+            fp, v = e.get("fp"), real_version(e.get("codex"))
+            if passed(results, fp, v) if v else passed(results, fp):
+                continue
+            if now and passed(results, head_fp or fp, now):
+                continue
+            left.append(e)
         if left:
             out[m] = left
     return out
@@ -4076,31 +4089,32 @@ def demo_post_errors(body: str, folder: Path) -> list[str]:
 leaf_section = codex_review.section    # one `## <name>` section of a slice issue's body
 
 
-def epic_head_fp(n: int, bundle: dict[str, Any], offline: bool) -> str | None:
-    """The review logic at epic/N's head, read from the commit, when the epic owes an eval (else None, as when it
-    can't be read: then only a pass for an owed fingerprint itself clears it). Live, after fetching epic/N into
-    the primary checkout; offline, the bundle's `epic_head` in the repo this runs in."""
+def epic_eval_context(n: int, bundle: dict[str, Any], offline: bool) -> tuple[str | None, str | None]:
+    """(the review logic at epic/N's head, `codex --version` here), for clearing owed evals; (None, None) when the
+    epic owes none, so nothing is fetched or run for the rest. The head's fingerprint is read from the commit:
+    live, after fetching epic/N into the primary checkout; offline, the bundle's `epic_head` in the repo this runs
+    in. None when it can't be read: then only a pass for an owed fingerprint itself clears it."""
     if not any(mk.get("kind") == "eval-owed" for mk, _ in _marked(bundle["comments"], set(bundle["trusted"]))):
-        return None
+        return None, None
+    head_fp = None
     try:
         if offline:
-            if not bundle.get("epic_head"):
-                return None
-            root, sha = Path(git(["rev-parse", "--show-toplevel"])), bundle["epic_head"]
+            root, sha = Path(git(["rev-parse", "--show-toplevel"])), bundle.get("epic_head")
         else:
             root = primary_root()
             bounded_fetch([epic_branch(n)], root)
             sha = git(["rev-parse", "--verify", f"origin/{epic_branch(n)}^{{commit}}"], cwd=root)
-        return codex_eval.fingerprint(codex_eval.Commit(sha, root))
+        head_fp = codex_eval.fingerprint(codex_eval.Commit(sha, root)) if sha else None
     except (SdlcError, OSError):
-        return None
+        pass
+    return head_fp, real_version(codex_eval.current_version())
 
 
 def demo_brief(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str, Any]:
     """Everything milestone-demo needs: each milestone's demo steps, slices, PRs and demo state."""
     repo = repo_of(config)
     bundle = fetch_bundle(epic, config, trusted)
-    st = bundle_state(bundle, config, epic_head_fp(epic, bundle, offline=False))
+    st = bundle_state(bundle, config, epic_eval_context(epic, bundle, offline=False))
     records = fetch_plan_issues(epic, config, trusted)
     leaves = [r for r in records if r["kind"] == "slice"]
     progress = epic_progress(epic, config, trusted)    # the same progress `state` uses, so `next` agrees
@@ -4199,7 +4213,7 @@ def command_demo_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Publish a milestone's demo pictures and post the demo on the epic for the poster."""
     bundle = load_bundle(args, config)
     offline = bool(getattr(args, "from_file", None))
-    st = bundle_state(bundle, config, epic_head_fp(bundle["issue"]["number"], bundle, offline))
+    st = bundle_state(bundle, config, epic_eval_context(bundle["issue"].get("number"), bundle, offline))
     n, key = st["number"], args.milestone
     errs = []
     if st["conflicts"] or st["state"] not in BUILD_STATES | {"demo-review"} or st.get("feedback"):
