@@ -797,3 +797,198 @@ def test_a_real_amendment_round_runs_codex_in_a_checkout_of_epic_n(tmp_path, mon
     # and the round it made can be recorded
     assert sdlc.main(["plan-review", "12", "--plan", str(r.out / "plan.json"), "--report", str(r.out / "codex.md"),
                       "--from-file", _bundle(tmp_path, AMENDED, ("sdlc:in-progress",)), "--dry-run"]) == 0
+
+
+# --- a person's /approve settles a plan whose Codex rounds are spent (#243 T12, #146's plan half) ----------------
+
+STRANGER = "stranger"
+SPENT = APPROVED + [agent("plan", 1, 3)] + [review(1, 4 + i, "changes") for i in range(CONFIG["max_plan_rounds"])]
+
+
+def test_a_valid_approve_after_spent_rounds_settles_the_plan():
+    st = derive(["sdlc:approved"], SPENT + [comment(POSTER, "ship it\n/approve", 10)])
+    assert st["action"] == "create_plan_issues"
+    assert (st["plan_settled"]["by"], st["plan_settled"]["rev"]) == (POSTER, 1)
+    # a collaborator's counts too
+    assert derive(["sdlc:approved"], SPENT + [comment(OWNER, "/approve", 10)])["plan_settled"]["by"] == OWNER
+
+
+def test_a_strangers_or_an_agents_approve_never_settles():
+    st = derive(["sdlc:approved"], SPENT + [comment(STRANGER, "/approve", 10)])
+    assert st["action"] == "ask_poster" and st["plan_settled"] is None
+    assert st["ignored_keywords"] == [{"by": STRANGER, "action": "approve"}]
+    for c in (agent("note", None, 10, body="/approve"),                              # an agent's own comment
+              comment(POSTER, sdlc.marker("note", None) + "\n/approve", 10)):        # a marker, whoever wrote it
+        st = derive(["sdlc:approved"], SPENT + [c])
+        assert (st["action"], st["plan_settled"]) == ("ask_poster", None)
+
+
+def test_an_approve_before_the_latest_revision_or_with_rounds_left_changes_nothing():
+    st = derive(["sdlc:approved"], SPENT + [comment(POSTER, "/approve", 10), agent("plan", 2, 11)])
+    assert st["plan_settled"] is None and st["action"] == "ask_poster"
+    left = APPROVED + [agent("plan", 1, 3), review(1, 4, "changes"), comment(POSTER, "/approve", 5)]
+    st = derive(["sdlc:approved"], left)
+    assert (st["action"], st["plan_settled"]) == ("continue_plan", None)
+    # given with rounds left, it stays void once later rounds spend them
+    st = derive(["sdlc:approved"], left + [review(1, 6, "changes"), review(1, 7, "changes")])
+    assert (st["action"], st["plan_settled"]) == ("ask_poster", None)
+
+
+def test_a_later_changes_withdraws_the_settling_approve():
+    st = derive(["sdlc:approved"], SPENT + [comment(POSTER, "/approve", 10), comment(POSTER, "/changes fix it first", 11)])
+    assert (st["action"], st["plan_settled"]) == ("ask_poster", None)
+    st = derive(["sdlc:approved"], SPENT + [comment(POSTER, "/approve", 10), comment(OWNER, "/changes not yet", 11)])
+    assert st["plan_settled"] is None
+    # a stranger's /changes withdraws nothing, and a new /approve after the /changes settles again
+    st = derive(["sdlc:approved"], SPENT + [comment(POSTER, "/approve", 10), comment(STRANGER, "/changes no", 11)])
+    assert st["plan_settled"]["by"] == POSTER
+    st = derive(["sdlc:approved"], SPENT + [comment(POSTER, "/changes x", 10), comment(POSTER, "/approve", 11)])
+    assert st["action"] == "create_plan_issues"
+
+
+def test_settled_after_the_poster_was_asked():
+    asked = SPENT + [agent("question", None, 10, phase="plan")]
+    assert derive(["sdlc:needs-info"], asked)["plan_cycle_rounds"] == CONFIG["max_plan_rounds"]
+    st = derive(["sdlc:needs-info"], asked + [comment(POSTER, "the first plan is fine\n/approve", 11)])
+    assert (st["action"], st["plan_settled"]["by"]) == ("create_plan_issues", POSTER)
+    # the same /approve: `state` says it settles the plan, and it is never a PRD sign-off `transition` could record
+    assert st["decision"]["settles_plan"] and not st["decision"]["valid"]
+    assert "no valid /approve" in " ".join(sdlc.check_transition(st, "approved", "approval", CONFIG))
+    # an answer without /approve is still a replan
+    assert derive(["sdlc:needs-info"], asked + [comment(POSTER, "the quiet one", 11)])["action"] == "replan"
+
+
+def three_revisions():
+    return APPROVED + [agent("plan", 1, 3), review(1, 4, "changes"), agent("plan", 2, 5), review(2, 6, "changes"),
+                       agent("plan", 3, 7), review(3, 8, "changes")]
+
+
+def test_rounds_spent_across_revisions_settle_before_and_after_the_question():
+    before = derive(["sdlc:approved"], three_revisions() + [comment(POSTER, "/approve", 10)])
+    assert (before["action"], before["plan_settled"]["rev"]) == ("create_plan_issues", 3)
+    asked = three_revisions() + [agent("question", None, 10, phase="plan")]
+    after = derive(["sdlc:needs-info"], asked + [comment(POSTER, "/approve", 11)])
+    assert (after["action"], after["plan_settled"]["rev"]) == ("create_plan_issues", 3)
+    # a new Codex round after the reset ends that settling window: the /approve after it changes nothing
+    fresh = asked + [comment(POSTER, "go on", 11), agent("plan", 4, 12), review(4, 13, "changes"),
+                     comment(POSTER, "/approve", 14)]
+    st = derive(["sdlc:approved"], fresh)
+    assert (st["action"], st["plan_settled"], st["plan_cycle_rounds"]) == ("continue_plan", None, 1)
+    # and an /approve inside the window is void once a new round is recorded, even on the same revision
+    st = derive(["sdlc:approved"], asked + [comment(POSTER, "/approve", 11), review(3, 12, "changes")])
+    assert (st["plan_settled"], st["action"]) == (None, "continue_plan")
+    # and stays void when that new cycle spends its rounds too
+    spent_again = asked + [comment(POSTER, "/approve", 11), review(3, 12, "changes"), review(3, 13, "changes"),
+                           review(3, 14, "changes")]
+    st = derive(["sdlc:approved"], spent_again)
+    assert (st["plan_settled"], st["action"]) == (None, "ask_poster")
+    # an /approve posted just before the question still settles it
+    st = derive(["sdlc:needs-info"], three_revisions() + [comment(POSTER, "/approve", 9),
+                                                          agent("question", None, 10, phase="plan")])
+    assert (st["turn"], st["action"]) == ("agent", "create_plan_issues")
+
+
+def spent_amendment(labels=("sdlc:in-progress",)):
+    plan = two_milestones()
+    rounds = [review(2, 31 + i, "changes") for i in range(CONFIG["max_plan_rounds"])]
+    comments = (created_m1(plan) + DEMO_M1 + [plan_comment({**plan, "lessons": {"milestone": "M1", "text": "t"}}, 2, 30)]
+                + rounds)
+    return plan, comments
+
+
+def test_settled_amendment_at_escalate_plan_and_once_escalated():
+    _, comments = spent_amendment()
+    assert derive(["sdlc:in-progress"], comments)["action"] == "escalate_plan"
+    st = derive(["sdlc:in-progress"], comments + [comment(POSTER, "/approve", 40)])
+    assert (st["action"], st["plan_settled"]["by"]) == ("create_plan_issues", POSTER)
+    escalated = comments + [agent("escalation", None, 40, phase="plan")]
+    assert derive(["sdlc:escalated"], escalated)["action"] == "human"
+    assert derive(["sdlc:escalated"], escalated + [comment(STRANGER, "/approve", 41)])["action"] == "human"
+    st = derive(["sdlc:escalated"], escalated + [comment(POSTER, "/approve", 41)])
+    assert (st["turn"], st["action"], st["plan_settled"]["by"]) == ("agent", "create_plan_issues", POSTER)
+    assert sdlc.next_command(st) == "/plan-issue 12"
+    # an escalation before anything was created stays a human's (only an amendment's is settled here)
+    first = SPENT + [agent("escalation", None, 10, phase="plan"), comment(POSTER, "/approve", 11)]
+    assert derive(["sdlc:escalated"], first)["action"] == "human"
+    # an escalation that isn't escalate_plan's (a sync conflict after the settling /approve) stays a human's,
+    # and so does one with no phase (from before this) or one from before the round that spent the cycle
+    st = derive(["sdlc:in-progress"], comments + [comment(POSTER, "/approve", 40)])
+    assert st["action"] == "create_plan_issues"
+    for esc in (agent("escalation", None, 41), agent("escalation", None, 41, phase="sync")):
+        assert derive(["sdlc:escalated"], comments + [comment(POSTER, "/approve", 40), esc])["action"] == "human"
+    early = comments[:-1] + [agent("escalation", None, 32, phase="plan"), comments[-1], comment(POSTER, "/approve", 41)]
+    assert derive(["sdlc:escalated"], early)["action"] == "human"
+
+
+def test_the_escalation_at_escalate_plan_is_marked_phase_plan(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    _, comments = spent_amendment()
+    f = _bundle(tmp_path, comments, labels=("sdlc:in-progress",))
+    assert sdlc.main(["transition", "12", "escalated", "--kind", "escalation", "--reason", "no consensus",
+                      "--from-file", f, "--dry-run"]) == 0
+    assert "kind=escalation phase=plan" in capsys.readouterr().out
+
+
+def test_a_settled_creation_cut_short_after_its_record_can_finish(tmp_path, monkeypatch):
+    plan_c = comment(OWNER, sdlc.render_comment("plan", 1, sdlc.render_plan(make_plan()), CONFIG), 3)
+    settled = (APPROVED + [plan_c] + [review(1, 4 + i, "changes") for i in range(CONFIG["max_plan_rounds"])]
+               + [comment(POSTER, "/approve", 10)])
+    record = agent("plan-created", 1, 11, settled_by=POSTER)
+    for labels in (["sdlc:approved"], ["sdlc:needs-info"]):
+        st = derive(labels, settled + [record])
+        assert (st["action"], st["plan_settled"]["by"]) == ("create_plan_issues", POSTER)
+    f = _bundle(tmp_path, settled + [record])
+    posts = _Posts(monkeypatch)
+    assert sdlc.main(["plan-create", "12", "--from-file", f]) == 0
+    assert posts.labels == ["planned"] and posts.comments == []          # the record is not posted twice
+    # a record without settled_by (an old one, or Codex's approve) grants nothing more than before
+    assert derive(["sdlc:approved"], settled + [agent("plan-created", 1, 11)])["action"] == "continue_plan"
+
+
+class _Posts:
+    """plan-create offline, for real: every GitHub write recorded, none sent."""
+
+    def __init__(self, monkeypatch):
+        self.comments, self.labels, self.n = [], [], 500
+        monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("must not call gh directly"))
+        monkeypatch.setattr(sdlc, "check_plan", lambda plan, *a, **k: [])
+        monkeypatch.setattr(sdlc.time, "sleep", lambda s: None)
+        monkeypatch.setattr(sdlc, "post_json", self.post_json)
+        monkeypatch.setattr(sdlc, "post_comment", lambda n, body, config: self.comments.append(body) or {})
+        monkeypatch.setattr(sdlc, "set_state_label", lambda n, cur, to, config, **k: self.labels.append(to))
+
+    def post_json(self, path, payload):
+        self.n += 1
+        return {"number": self.n, "id": self.n}
+
+
+def test_plan_create_from_a_settled_escalation_resumes_building_and_names_who_settled(tmp_path, capsys, monkeypatch):
+    _, comments = spent_amendment()
+    settled = comments + [agent("escalation", None, 40, phase="plan"), comment(POSTER, "/approve", 41)]
+    f = _bundle(tmp_path, settled, labels=("sdlc:escalated",))
+    posts = _Posts(monkeypatch)
+    assert sdlc.main(["plan-create", "12", "--from-file", f, "--dry-run"]) == 0
+    assert f"(settled by @{POSTER})" in capsys.readouterr().out and posts.labels == []
+    assert sdlc.main(["plan-create", "12", "--from-file", f]) == 0
+    assert posts.labels == ["in-progress"]
+    record = posts.comments[-1]
+    mk = sdlc.parse_marker(record)
+    assert (mk["kind"], mk["rev"], mk["settled_by"]) == ("plan-created", "2", POSTER)
+    assert f"after @{POSTER} settled it with" in record
+    # read back: the epic is in-progress, building, and nothing is due from the plan any more
+    after = settled + [comment(OWNER, record, 42)]
+    assert derive(["sdlc:in-progress"], after)["action"] == "work_slices"
+
+
+def test_plan_create_from_a_settled_question_moves_it_to_planned(tmp_path, capsys, monkeypatch):
+    plan_c = comment(OWNER, sdlc.render_comment("plan", 1, sdlc.render_plan(make_plan()), CONFIG), 3)
+    comments = (APPROVED + [plan_c] + [review(1, 4 + i, "changes") for i in range(CONFIG["max_plan_rounds"])]
+                + [agent("question", None, 10, phase="plan"), comment(POSTER, "/approve", 11)])
+    f = _bundle(tmp_path, comments, labels=("sdlc:needs-info",))
+    posts = _Posts(monkeypatch)
+    assert sdlc.main(["plan-create", "12", "--from-file", f]) == 0
+    assert posts.labels == ["planned"] and sdlc.parse_marker(posts.comments[-1])["settled_by"] == POSTER
+    # without the /approve plan-create refuses, and says what would settle it
+    f = _bundle(tmp_path, comments[:-1], labels=("sdlc:needs-info",))
+    assert sdlc.main(["plan-create", "12", "--from-file", f, "--dry-run"]) == 1
+    assert "a `/approve` after it" in capsys.readouterr().err
