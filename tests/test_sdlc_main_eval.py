@@ -10,7 +10,8 @@ import subprocess
 
 import pytest
 
-from tests.test_sdlc_debt import due_group, gh, main_gate, repo, run, status, ticket_state  # noqa: F401
+from tests.test_sdlc_debt import (due_group, gh, git_stays_in_tmp_path, main_gate, repo, run, status,  # noqa: F401
+                                  ticket_state)
 from tests.test_sdlc_eval import only_git, result_comment
 from tests.test_sdlc_quick import CLAIM, GATE_BRIEF, STATION, MergeGitHub, changed, gate_bundle, marked, ready_quick
 from tools import codex_eval, sdlc
@@ -233,7 +234,3 @@ def test_the_slice_lane_still_takes_a_deferral():
     errs, _ = sdlc.eval_gate("f" * 64, "e" * 64, V, [])
     assert "codex-eval --defer" in errs[0]
 
-
-def test_existing_tests_never_reach_the_real_gate(capsys):
-    # without `real_eval_gate`, conftest answers for it: no test's fake GitHub serves a PR's head ref
-    assert sdlc.main_eval_errors({"number": 1}, {}, "quick", 1) == []

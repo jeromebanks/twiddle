@@ -168,12 +168,14 @@ like any other (`state` on it says so); if the change then escalates to the full
   conflict and needs a human. (`lane:quick` and `complexity:*` are not state labels.)
 - A quick change merges into `main` only through `merge`'s quick gate (the quick lane, above): a
   recorded passing suite and Codex's approval on the head, never a review deferred to a milestone,
-  and a diff that stays inside `.sdlc/config.json`'s `quick` rules.
+  a diff that stays inside `.sdlc/config.json`'s `quick` rules, and a passing review eval for the head's
+  review logic on the current `codex`, never a deferred one (the eval gate, below).
 - A debt PR merges into `main` only through `merge`'s debt gate (the debt lane, above): the base is
   `main`, it closes only open tickets of one claimed group of the open pass, and a passing suite and
-  Codex's approval are recorded on the head, never deferred. `merge`, in any lane, runs only main's gate code:
-  its `tools/sdlc.py` and `tools/sdlc_quick.py` must be identical to `origin/main`'s, which in practice means the
-  primary checkout.
+  Codex's approval are recorded on the head, never deferred, and so is a passing review eval for the head's
+  review logic on the current `codex` (the eval gate, below). `merge`, in any lane, runs only main's gate code:
+  its `tools/sdlc.py`, `tools/sdlc_quick.py`, `tools/codex_review.py` and `tools/codex_eval.py` must be identical
+  to `origin/main`'s, which in practice means the primary checkout.
 - Each PRD/diagnosis revision is a new comment; the previous one is collapsed and
   linked to its successor. After `max_rounds` (`.sdlc/config.json`) the agent escalates.
 - Reproducing a bug uses read-only commands and `--dry-run` only (see `CLAUDE.md`).
