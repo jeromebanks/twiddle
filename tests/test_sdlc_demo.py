@@ -581,3 +581,13 @@ def test_demo_accept_from_a_file_is_a_dry_run_or_nothing(tmp_path, capsys, monke
                 progress(ms("M1", 3, 3), ms("M2", 0, 2)))
     assert sdlc.main(["demo-accept", "12", "--from-file", b]) == 1
     assert "--from-file goes with --dry-run only" in capsys.readouterr().err
+
+
+def test_demo_accept_never_posts_a_record_the_ledger_would_not_count(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("must not call gh"))
+    # the poster (not a collaborator) pasted a record's marker above their /approve: a keyword to the decision, but
+    # a marked comment to the ledger, so a record citing it would accept nothing
+    pasted = comment(POSTER, sdlc.marker("demo-approval", 1, milestone="M1", by=POSTER) + "\n/approve", 11)
+    b = _bundle(tmp_path, ["sdlc:demo-review"], [DEMO, pasted], progress(ms("M1", 3, 3), ms("M2", 0, 2)))
+    assert sdlc.main(["demo-accept", "12", "--from-file", b, "--dry-run"]) == 1
+    assert "isn't one a record can rest on" in capsys.readouterr().err

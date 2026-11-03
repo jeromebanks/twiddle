@@ -7293,6 +7293,13 @@ def command_demo_accept(args: argparse.Namespace, config: dict[str, Any]) -> int
     # the record cites the /approve it was read from: without that comment, real and unmarked, it accepts nothing
     comment = render_comment("demo-approval", rev, body, config, milestone=key, by=d["by"],
                              **({"reply": str(d["comment_id"])} if d.get("comment_id") is not None else {}))
+    if not resume:   # what is posted must be what `state` and `ship` will accept: read back beside the comments
+        after = {**bundle, "comments": [*bundle["comments"], {"id": "pending", "author": sorted(bundle["trusted"])[0]
+                                                              if bundle["trusted"] else "", "body": comment,
+                                                              "created_at": "9999", "url": ""}]}
+        if not ((bundle_state(after, config).get("demos") or {}).get(key) or {}).get("accepted"):
+            raise SdlcError(f"#{n}: the /approve by @{d['by']} isn't one a record can rest on (a person's unmarked "
+                            "comment, after the demo it approves): nothing was posted")
     if args.dry_run:
         print(f"DRY RUN #{n}: demo-review -> {target}; then `ship {n}`" + (" (finishing a recorded acceptance)" if resume else ""))
         print("" if resume else comment)
