@@ -412,9 +412,11 @@ blocks until a later pass for that pair. Results live on the eval issue, so post
   is checked: its latest completed result (`pass` or `fail`, any version) decides; failing that, a deferral recorded
   as `unavailable` lets the merge through, owed. `--defer` there records `unavailable`, and is refused after a
   `fail` for that fingerprint under any version, until a pass. Once a version can be read again, the pair rule applies.
-- **Clearing what's owed**: an owed eval is cleared when the latest completed eval of its fingerprint, under any
-  real version, is a pass, or of `epic/N`'s head's fingerprint once the head has moved past it (the logic that
-  reviews from now on). Rounds already run keep their recorded provenance.
+- **Clearing what's owed**: an eval owed for a pair (F, V) is cleared when the latest completed eval of exactly
+  that pair is a pass; a pass for F under an older `codex` doesn't count, so an upgrade's deferral stays owed. One
+  owed for F alone (`unavailable`) is cleared by a pass for F under any real version. Either is also cleared by a
+  pass for the logic that reviews from now on: `epic/N`'s head's fingerprint (F, when the head can't be read) under
+  the `codex --version` in use now. Rounds already run keep their recorded provenance.
 - `merge --dry-run --from-file` judges a saved bundle (`pr`, `pr_comments`, `trusted`, `slice`, `epic`, `progress`,
   `behind_by`, `head`, `base`, `eval`) in the repo it runs in, with no GitHub; without `--dry-run` it refuses.
 

@@ -1494,3 +1494,24 @@ def test_the_live_gate_fetches_the_pull_ref_and_the_epic_branch(repo, tmp_path, 
     assert sdlc.merge_eval_errors(args, pr, "epic/12", CONFIG) == ([], None)
     errs, owed = sdlc.merge_eval_errors(args, {"number": 51, "headRefOid": head}, "epic/12", CONFIG)   # no such ref
     assert owed is None and "couldn't tell whether the review logic" in errs[0] and "refs/pull/51/head" in errs[0]
+
+
+@pytest.mark.parametrize("epic", [12, CONFIG["codex_eval_issue"]], ids=["another-epic", "the-ledgers-own-issue"])
+def test_fetch_bundle_reads_the_results_an_owed_eval_needs(monkeypatch, epic):
+    """Only for an epic that owes one; and when the epic is `codex_eval_issue` (#100), its own comments are them."""
+    owed, passed = owed_comment(), result_comment(30, "pass", fingerprint=FP, version=V)
+    raw = lambda c: {"id": c["id"], "user": {"login": c["author"]}, "body": c["body"],  # noqa: E731
+                     "created_at": c["created_at"], "html_url": c["url"]}
+    pages = {f"repos/{CONFIG['repository']}/issues/{epic}/comments":
+             [raw(c) for c in EPIC_HISTORY + [owed] + ([passed] if epic == CONFIG["codex_eval_issue"] else [])],
+             f"repos/{CONFIG['repository']}/issues/{CONFIG['codex_eval_issue']}/comments": [raw(passed)]}
+    asked = []
+    monkeypatch.setattr(sdlc, "gh_pages", lambda path: asked.append(path) or pages[path])
+    monkeypatch.setattr(sdlc, "gh_json", lambda args: {"number": epic, "title": "x", "state": "OPEN",
+                                                       "author": {"login": POSTER}, "labels": [], "createdAt": ""})
+    b = sdlc.fetch_bundle(epic, CONFIG, TRUSTED)
+    assert len(asked) == 1 + (epic != CONFIG["codex_eval_issue"])
+    assert sdlc.bundle_state(b, CONFIG)["eval_owed"] == {}                 # the pass cleared it
+    pages[asked[0]] = [raw(c) for c in EPIC_HISTORY]                        # no eval owed: nothing more fetched
+    asked.clear()
+    assert "eval" not in sdlc.fetch_bundle(epic, CONFIG, TRUSTED) and len(asked) == 1

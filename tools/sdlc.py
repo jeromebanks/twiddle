@@ -939,10 +939,12 @@ def fetch_bundle(n: int, config: dict[str, Any], trusted: set[str] | None = None
     comments = [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{n}/comments")]
     trusted = trusted if trusted is not None else fetch_trusted(config)
     bundle = {"issue": issue, "comments": comments, "trusted": sorted(trusted)}
-    # an epic that owes a review eval: the results that may have cleared it (only then: no fetch for the rest)
-    if isinstance(config.get("codex_eval_issue"), int) and n != config["codex_eval_issue"] and any(
-            mk.get("kind") == "eval-owed" for mk, _ in _marked(comments, trusted)):
-        bundle["eval"] = [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{config['codex_eval_issue']}/comments")]
+    # an epic that owes a review eval: the results that may have cleared it (only then: no fetch for the rest).
+    # When the epic is the results' own issue, its comments are already the ledger
+    ledger = config.get("codex_eval_issue")
+    if isinstance(ledger, int) and any(mk.get("kind") == "eval-owed" for mk, _ in _marked(comments, trusted)):
+        bundle["eval"] = comments if n == ledger else [
+            norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{ledger}/comments")]
     return bundle
 
 
