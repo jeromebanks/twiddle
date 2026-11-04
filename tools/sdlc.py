@@ -208,6 +208,9 @@ class Ledger:
     demos: dict[str, dict[str, Any]] = field(default_factory=dict)   # milestone -> its latest demo
     latest_demo: dict[str, Any] | None = None
     request: dict[str, Any] | None = None    # demo steps only a person can run, asked for on the issue
+    # a person's real `/approve` (an unmarked comment by a trusted person or the issue's author) -> the demo
+    # (milestone, rev) that was the latest when they wrote it: a `demo-approval` record counts only when it cites one
+    demo_approves: dict[str, tuple[str, int]] = field(default_factory=dict)
     shipped: dict[str, str] = field(default_factory=dict)              # milestone -> the commit on main
     untested: dict[str, str] = field(default_factory=dict)  # releases holding commits no run saw, until verified
     ship_reviews: list[dict[str, Any]] = field(default_factory=list)   # Codex on main...epic/N, per head
@@ -333,8 +336,17 @@ def _on_demo(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
 
 
 def _on_demo_approval(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    """Accepts the milestone only when a person's real `/approve` of that demo revision is among the comments before
+    it: the one it cites (`reply=<id>`, written by `demo-accept`), or, for a record from before `reply`, any."""
     d = L.demos.get(_ms(mk))
-    if d and d["rev"] == _rev(mk):
+    if not (d and d["rev"] == _rev(mk)):
+        return
+    demo = (_ms(mk), d["rev"])
+    if "reply" in mk:
+        real = L.demo_approves.get(mk["reply"]) == demo
+    else:
+        real = demo in L.demo_approves.values()
+    if real:
         d["accepted"] = True
         L.changes_from = i   # a `/changes` before the /approve was the demo's; one after it waits for the release
 
@@ -408,12 +420,21 @@ MARKERS = {
 }
 
 
-def read_ledger(ordered: list[dict[str, Any]], trusted: set[str]) -> tuple[Ledger, int, set[Any]]:
-    """(the ledger, the index of the last marked comment, the marked comments' ids)."""
+def read_ledger(ordered: list[dict[str, Any]], trusted: set[str],
+                allowed: set[str] | None = None) -> tuple[Ledger, int, set[Any]]:
+    """(the ledger, the index of the last marked comment, the marked comments' ids).
+
+    `allowed` is whose keywords count (derive_state's: the trusted and the issue's author; default the trusted)."""
     L, last, marked = Ledger(), -1, set()
+    allowed = trusted if allowed is None else allowed
     for i, c in enumerate(ordered):
         mk = parse_marker(c.get("body", "")) if c.get("author") in trusted else None
         if not mk:
+            # a person's `/approve` of the demo then in review: carrying no marker at all (an agent's comment
+            # quoting one, or anyone's comment pretending to be a record, never counts)
+            if (L.latest_demo and c.get("author") in allowed and not parse_marker(c.get("body", ""))
+                    and any(a == "approve" for a, _ in keyword_lines(c.get("body", "")))):
+                L.demo_approves[str(c.get("id"))] = (L.latest_demo["milestone"], L.latest_demo["rev"])
             continue
         marked.add(c.get("id"))
         last = i
@@ -457,7 +478,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         state = found[0][len(PREFIX):] if found else "untriaged"
 
     ordered = sorted(comments, key=lambda c: (c.get("created_at", ""), c.get("id", 0)))
-    L, last_marked, marked_ids = read_ledger(ordered, trusted)
+    L, last_marked, marked_ids = read_ledger(ordered, trusted, trusted | ({issue["author"]} if issue.get("author") else set()))
     latest_doc, approved_rev, approval_by, rounds = L.latest_doc, L.approved_rev, L.approval_by, L.rounds
     latest_plan, plan_verdict, plan_rounds, plan_body = L.latest_plan, L.plan_verdict, L.plan_rounds, L.plan_body
     demos, latest_demo, request = L.demos, L.latest_demo, L.request
@@ -1176,6 +1197,22 @@ def fetch_bundle(n: int, config: dict[str, Any], trusted: set[str] | None = None
             "trusted": sorted(trusted if trusted is not None else fetch_trusted(config))}
 
 
+WATCH_RUN_ENV = "TWIDDLE_SDLC_WATCH_RUN"   # set in a run the watcher started: no person is at the keyboard
+
+
+def watch_run() -> bool:
+    """Set to anything, even empty, counts (as for tools/demo_shot.py): a doubt is a watched run."""
+    return WATCH_RUN_ENV in os.environ
+
+
+def refuse_offline_decision(args: argparse.Namespace, command: str) -> None:
+    """A person's decision is recorded only as read from GitHub: a saved bundle (`--from-file`) could say anything,
+    so with it the command is a dry run or nothing. Checked before anything is read or posted."""
+    if getattr(args, "from_file", None) and not args.dry_run:
+        raise SdlcError(f"`{command}` records a person's decision, which is read from GitHub, never from a file: "
+                        "--from-file goes with --dry-run only (nothing was posted)")
+
+
 def load_bundle(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
     if getattr(args, "from_file", None):
         return json.loads(Path(args.from_file).read_text())
@@ -1484,6 +1521,8 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
 
 
 def command_transition(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    if args.kind == "approval":
+        refuse_offline_decision(args, "transition --kind approval")
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
     kind = args.kind
@@ -1833,6 +1872,10 @@ def command_commit_prd(args: argparse.Namespace, config: dict[str, Any]) -> int:
 
 def command_reconcile(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """A maintainer added `sdlc:approved` by hand: back it with an approval record."""
+    watch = watch_run()
+    if watch and not args.dry_run and (args.by or args.from_file):
+        raise SdlcError("a watched run records only what GitHub says: `reconcile` reads who added the label from the "
+                        "issue's events, so --by and --from-file go with --dry-run only (nothing was posted)")
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
     if st["reconcile"] not in ("label_approval", "stale_labels"):
@@ -1852,8 +1895,9 @@ def command_reconcile(args: argparse.Namespace, config: dict[str, Any]) -> int:
         labeled = [e for e in events if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == "sdlc:approved"]
         by = (labeled[-1].get("actor") or {}).get("login") if labeled else None
     if not by or by not in bundle["trusted"]:
-        raise SdlcError(f"cannot back this label: it was applied by {by or 'unknown'}, who is not a collaborator "
-                        "(pass --by <login> only if you checked)")
+        raise SdlcError(f"cannot back this label: it was applied by {by or 'unknown'}, who is not a collaborator"
+                        + (": a person re-adds it, or approves on the issue" if watch else
+                           " (pass --by <login> only if you checked)"))
     body = f"{st['latest_doc']['kind'].upper()} rev {rev} approved by @{by} (label)."
     comment = render_comment("approval", rev, body, config, by=by, via="label")
     if args.dry_run:
@@ -5973,9 +6017,10 @@ def read_bytes(path: Path) -> bytes | None:
         return None
 
 
-def gate_code_errors(config: dict[str, Any], pr: Any = "PR") -> list[str]:
-    """Why `merge` may not run from this checkout (empty list = it runs main's gate code). One bounded fetch of
-    origin/main, then the running GATE_CODE files against it; a failed fetch or an unreadable copy refuses."""
+def gate_code_errors(config: dict[str, Any], pr: Any = "PR", command: str = "merge") -> list[str]:
+    """Why `merge` (or `ship`, `command`) may not run from this checkout (empty list = it runs main's gate code). One
+    bounded fetch of origin/main, then the running GATE_CODE files against it; a failed fetch or an unreadable copy
+    refuses. `pr` is the command's argument: the PR, or `ship`'s epic."""
     if not GATE_FETCH_SECONDS > 0:
         raise SdlcError(f"GATE_FETCH_SECONDS must be positive (got {GATE_FETCH_SECONDS})")
     main = GATE_BRANCH
@@ -5985,12 +6030,12 @@ def gate_code_errors(config: dict[str, Any], pr: Any = "PR") -> list[str]:
         primary = None
     where = primary or "the primary checkout"
     update = f"`git -C {where} pull --ff-only` (on {main})"
-    rerun = f"`cd {where} && uv run python tools/sdlc.py merge {pr}`"
+    rerun = f"`cd {where} && uv run python tools/sdlc.py {command} {pr}`"
     try:
         git(["fetch", "-q", "origin", main], cwd=ROOT, timeout=GATE_FETCH_SECONDS)
         on_main: dict[str, bytes | None] = {p: git_blob(f"origin/{main}:{p}", ROOT, GATE_FETCH_SECONDS) for p in GATE_CODE}
     except SdlcError as exc:
-        return [f"could not read origin/{main}'s gate code ({exc}), so `merge` won't run: nothing was merged. "
+        return [f"could not read origin/{main}'s gate code ({exc}), so `{command}` won't run: nothing was merged. "
                 f"Check the network and origin, update the primary checkout ({where}) with {update}, then {rerun}"]
     drift = gate_code_drift({p: read_bytes(f) for p, f in GATE_CODE.items()}, on_main)
     if not drift:
@@ -5998,10 +6043,10 @@ def gate_code_errors(config: dict[str, Any], pr: Any = "PR") -> list[str]:
     here = ROOT.resolve()
     what = f"{' and '.join(drift)} in {here} differ{'s' if len(drift) == 1 else ''} from origin/{main}'s"
     if primary == here:   # this is the primary checkout, and it is behind (or ahead of) main
-        return [f"{what}: `merge` runs only main's gate code, and nothing was merged. Update this, the primary "
+        return [f"{what}: `{command}` runs only main's gate code, and nothing was merged. Update this, the primary "
                 f"checkout: {update}, then {rerun}"]
     stale = primary is not None and gate_code_drift({p: read_bytes(primary / p) for p in GATE_CODE}, on_main)
-    return [f"{what}: `merge` runs only main's gate code, never a branch's, and nothing was merged. Run it from the "
+    return [f"{what}: `{command}` runs only main's gate code, never a branch's, and nothing was merged. Run it from the "
             f"primary checkout ({where}), not this one: " + (f"update it first with {update}, then " if stale else "")
             + rerun]
 
@@ -6974,6 +7019,10 @@ def finish_epic(n: int, labels: list[str], config: dict[str, Any], root: Path) -
 def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Release an accepted milestone to main: epic/N merged through a pull request, with a merge commit."""
     n, repo, root = args.number, repo_of(config), primary_root()
+    # its gates (the demo's acceptance among them) are main's, as `merge`'s are: checked before anything is read
+    # or written, and under --dry-run too
+    if errs := gate_code_errors(config, n, command="ship"):
+        raise SdlcError("; ".join(errs))
     main = config.get("default_branch", "main")
     bundle = fetch_bundle(n, config)
     trusted = set(bundle["trusted"])
@@ -7492,6 +7541,7 @@ def close_finished_containers(epic: int, title: str | None, config: dict[str, An
 
 def command_demo_accept(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Record the poster's /approve of a milestone demo. The epic stays in progress: `ship` releases it."""
+    refuse_offline_decision(args, "demo-accept")
     bundle = load_bundle(args, config)
     st = bundle_state(bundle, config)
     n = st["number"]
@@ -7510,7 +7560,16 @@ def command_demo_accept(args: argparse.Namespace, config: dict[str, Any]) -> int
     body = (f"**{title}** accepted by @{d['by']} (demo rev {rev}). It ships to main next"
             + (", and then this issue is done. Thank you!" if progress["open"] == 0 and not st.get("uncreated_milestones")
                else "; work on the rest carries on."))
-    comment = render_comment("demo-approval", rev, body, config, milestone=key, by=d["by"])
+    # the record cites the /approve it was read from: without that comment, real and unmarked, it accepts nothing
+    comment = render_comment("demo-approval", rev, body, config, milestone=key, by=d["by"],
+                             **({"reply": str(d["comment_id"])} if d.get("comment_id") is not None else {}))
+    if not resume:   # what is posted must be what `state` and `ship` will accept: read back beside the comments
+        after = {**bundle, "comments": [*bundle["comments"], {"id": "pending", "author": sorted(bundle["trusted"])[0]
+                                                              if bundle["trusted"] else "", "body": comment,
+                                                              "created_at": "9999", "url": ""}]}
+        if not ((bundle_state(after, config).get("demos") or {}).get(key) or {}).get("accepted"):
+            raise SdlcError(f"#{n}: the /approve by @{d['by']} isn't one a record can rest on (a person's unmarked "
+                            "comment, after the demo it approves): nothing was posted")
     if args.dry_run:
         print(f"DRY RUN #{n}: demo-review -> {target}; then `ship {n}`" + (" (finishing a recorded acceptance)" if resume else ""))
         print("" if resume else comment)
