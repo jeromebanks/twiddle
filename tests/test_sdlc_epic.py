@@ -15,7 +15,7 @@ _ids = iter(range(1, 10_000))
 @pytest.fixture(autouse=True)
 def _runs_main_gate_code(monkeypatch):
     """`merge` first checks it runs origin/main's gate code (a git fetch): tests/test_sdlc_merge_gate.py tests that."""
-    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR": [])
+    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR", command="merge": [])
 
 
 def comment(author, body, ts):
@@ -30,7 +30,7 @@ def agent(kind, rev, ts, body="text", **extra):
 HISTORY = [agent("prd", 1, 1), agent("approval", 1, 2, by=POSTER), agent("plan", 1, 3),
            agent("plan-review", 1, 4, verdict="approve", round="1"), agent("plan-created", 1, 5)]
 DEMO1 = agent("demo", 1, 10, milestone="M1", sha="d" * 40)
-ACCEPT1 = agent("demo-approval", 1, 12, milestone="M1", by=POSTER)
+ACCEPT1 = (comment(POSTER, "/approve", 12), agent("demo-approval", 1, 12, milestone="M1", by=POSTER))   # the poster's /approve, then its record
 
 
 def derive(comments=(), labels=("sdlc:in-progress",)):
@@ -194,17 +194,17 @@ def test_ship_target_goes_in_order_and_needs_acceptance():
     p = progress(ms("M1", 3, 3), ms("M2", 2, 2))
     with pytest.raises(sdlc.SdlcError, match="isn't accepted"):
         sdlc.ship_target(derive([DEMO1]), p)
-    st = derive([DEMO1, ACCEPT1])
+    st = derive([DEMO1, *ACCEPT1])
     assert sdlc.ship_target(st, p)["key"] == "M1"
     with pytest.raises(sdlc.SdlcError, match="ships first"):
         sdlc.ship_target(st, p, "M2")
-    done = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)])
+    done = derive([DEMO1, *ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)])
     with pytest.raises(sdlc.SdlcError, match="M2: x isn't accepted"):
         sdlc.ship_target(done, p)
 
 
 def ready_to_ship(*extra):
-    return derive([DEMO1, ACCEPT1, agent("epic-tests", None, 14, sha=HEAD, result="pass", passed="9"),
+    return derive([DEMO1, *ACCEPT1, agent("epic-tests", None, 14, sha=HEAD, result="pass", passed="9"),
                    agent("ship-review", None, 15, milestone="M1", sha=HEAD, verdict="approve", round="1"), *extra])
 
 
@@ -224,7 +224,7 @@ def test_ship_gate_refusals(st, head, synced, carried, needle):
     state = {None: ready_to_ship(),
              "failed": ready_to_ship(agent("epic-tests", None, 16, sha=HEAD, result="fail", passed="8")),
              "changes": ready_to_ship(agent("ship-review", None, 16, milestone="M1", sha=HEAD, verdict="changes", round="2")),
-             "other": derive([DEMO1, ACCEPT1, agent("epic-tests", None, 14, sha=HEAD, result="pass", passed="9"),
+             "other": derive([DEMO1, *ACCEPT1, agent("epic-tests", None, 14, sha=HEAD, result="pass", passed="9"),
                               agent("ship-review", None, 15, milestone="M2", sha=HEAD, verdict="approve", round="1")]),
              }[st]
     errs = sdlc.ship_gate_errors(state, "M1", head, synced, carried)
@@ -236,7 +236,7 @@ def test_ship_review_binds_to_the_epic_head(tmp_path, capsys, monkeypatch):
     b = tmp_path / "b.json"
     b.write_text(json.dumps({"issue": {"number": 12, "title": "t", "state": "open", "author": POSTER,
                                        "labels": ["sdlc:in-progress"]},
-                             "comments": HISTORY + [DEMO1, ACCEPT1], "trusted": [OWNER],
+                             "comments": HISTORY + [DEMO1, *ACCEPT1], "trusted": [OWNER],
                              "progress": progress(ms("M1", 3, 3)), "epic_head": HEAD}))
     r = tmp_path / "r.md"
     r.write_text(f"HEAD: {HEAD}\n1. fine\n\nVERDICT: approve\n")
@@ -266,10 +266,10 @@ def test_only_the_earliest_unshipped_milestone_lands():
     # even before M1 is complete (`create: all`), nothing of M2 may land: shipping M1 would carry it
     assert "M2 waits: #12 M1: x is still being built" in sdlc.milestone_hold_errors(derive(), building, "#12 M2: y")[0]
     p = progress(ms("M1", 3, 3), ms("M2", 1, 4))
-    for st in (derive([DEMO1]), derive([DEMO1, ACCEPT1])):        # waiting for its demo, or for its release
+    for st in (derive([DEMO1]), derive([DEMO1, *ACCEPT1])):        # waiting for its demo, or for its release
         assert sdlc.milestone_hold_errors(st, p, "#12 M1: x") == []           # M1's own fix slices still land
         assert sdlc.milestone_hold_errors(st, p, "#12 M2: y")
-    shipped = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)])
+    shipped = derive([DEMO1, *ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)])
     assert sdlc.milestone_hold_errors(shipped, p, "#12 M2: y") == []
 
 
@@ -284,11 +284,11 @@ def test_next_offers_only_the_current_milestones_slices():
 
 
 def test_findings_after_acceptance_void_it_and_hold_the_release():
-    st = derive([DEMO1, ACCEPT1, agent("demo-changes", None, 13, milestone="M1", found="agent")])
+    st = derive([DEMO1, *ACCEPT1, agent("demo-changes", None, 13, milestone="M1", found="agent")])
     assert not st["demos"]["M1"]["accepted"] and st["action"] == "plan"
     with pytest.raises(sdlc.SdlcError, match="changes being planned"):
         sdlc.ship_target(st, progress(ms("M1", 3, 3)))
-    fixed = derive([DEMO1, ACCEPT1, agent("demo-changes", None, 13, milestone="M1", found="agent"),
+    fixed = derive([DEMO1, *ACCEPT1, agent("demo-changes", None, 13, milestone="M1", found="agent"),
                     agent("plan", 2, 14), agent("plan-review", 2, 15, verdict="approve"), agent("plan-created", 2, 16)])
     with pytest.raises(sdlc.SdlcError, match="isn't accepted yet"):               # a new demo comes first
         sdlc.ship_target(fixed, progress(ms("M1", 4, 4)))
@@ -299,12 +299,12 @@ def test_an_interrupted_ship_is_recorded_from_its_merged_pr():
               {"title": "Ship #13 M1: other epic", "mergeCommit": {"oid": OLD}},
               {"title": "Ship #12 M2: Set alarms", "mergeCommit": {"oid": OLD}}]
     assert sdlc.unrecorded_ships(merged, 12, {"M2": OLD}) == {"M1": HEAD}
-    done = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)])
+    done = derive([DEMO1, *ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)])
     assert sdlc.ship_target(done, progress(ms("M1", 3, 3), open_=0)) is None     # then `ship` finishes the epic
 
 
 def test_next_asks_for_a_sync_only_when_idle():
-    st = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)])
+    st = derive([DEMO1, *ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)])
     idle = progress(ms("M1", 3, 3), ms("M2", 1, 4), behind=4)
     assert sdlc.next_command(st, idle).startswith("`uv run python tools/sdlc.py sync 12`: epic/12 is 4 commit(s) behind")
     assert sdlc.next_command(st, {**idle, "ready": [35]}) == "/work-slice 35"
@@ -314,7 +314,7 @@ def test_next_asks_for_a_sync_only_when_idle():
 # --- reverting one slice --------------------------------------------------------------
 
 def test_a_reverted_slice_voids_its_milestones_demo():
-    st = derive([DEMO1, ACCEPT1, agent("demo-void", None, 14, milestone="M1")])
+    st = derive([DEMO1, *ACCEPT1, agent("demo-void", None, 14, milestone="M1")])
     assert not st["demos"]["M1"]["accepted"] and st["demos"]["M1"]["voided"] and st["demos"]["M1"]["rev"] == 1
 
 
@@ -456,7 +456,7 @@ def test_revert_slice_pushes_only_a_tested_revert(repo, monkeypatch, capsys):
     gh = GitHub(monkeypatch, repo)
     sdlc.ensure_epic_branch(12, CONFIG, repo)
     bad = commit_on_epic(repo, "bad.py", "bad = 1\n")
-    stub_revert(monkeypatch, repo, bad, [DEMO1, ACCEPT1])
+    stub_revert(monkeypatch, repo, bad, [DEMO1, *ACCEPT1])
     monkeypatch.setattr(sdlc, "run_suite", FAIL)
     assert sdlc.main(["revert-slice", "28"]) == 1
     assert "nothing pushed" in capsys.readouterr().err
@@ -475,20 +475,20 @@ def test_revert_slice_finishes_a_run_cut_short_after_its_push(repo, monkeypatch,
     gh = GitHub(monkeypatch, repo)
     sdlc.ensure_epic_branch(12, CONFIG, repo)
     bad = commit_on_epic(repo, "bad.py", "bad = 1\n")
-    stub_revert(monkeypatch, repo, bad, [DEMO1, ACCEPT1])
+    stub_revert(monkeypatch, repo, bad, [DEMO1, *ACCEPT1])
     monkeypatch.setattr(sdlc, "run_suite", PASS)
     gh.fail_reopen = True
     assert sdlc.main(["revert-slice", "28"]) == 1                 # voided and pushed, then GitHub failed
     pushed = origin_sha(repo, "epic/12")
     assert pushed != bad and gh.kinds() == [(12, "demo-void")]
     gh.posted.clear()
-    stub_revert(monkeypatch, repo, bad, [DEMO1, ACCEPT1, agent("demo-void", None, 14, milestone="M1")])
+    stub_revert(monkeypatch, repo, bad, [DEMO1, *ACCEPT1, agent("demo-void", None, 14, milestone="M1")])
     monkeypatch.setattr(sdlc, "run_suite", lambda wt: pytest.fail("the revert is already tested and pushed"))
     assert sdlc.main(["revert-slice", "28"]) == 0                 # a rerun only finishes the records
     assert origin_sha(repo, "epic/12") == pushed                  # no second revert, no second void
     assert gh.kinds() == [(28, "revert"), (28, "release")]
     # and once the slice is open again, a third run finds nothing missing but the void it already has
-    stub_revert(monkeypatch, repo, bad, [DEMO1, ACCEPT1, agent("demo-void", None, 14, milestone="M1")], slice_state=("open",))
+    stub_revert(monkeypatch, repo, bad, [DEMO1, *ACCEPT1, agent("demo-void", None, 14, milestone="M1")], slice_state=("open",))
     gh.posted.clear()
     assert sdlc.main(["revert-slice", "28"]) == 0 and gh.kinds() == [(28, "revert"), (28, "release")]
 
@@ -518,7 +518,7 @@ def done_leaf(n, key, m="#12 M1: x"):
 
 def test_ship_records_a_milestone_already_on_main_without_merging(repo, monkeypatch, capsys):
     gh = GitHub(monkeypatch, repo)
-    stub_ship(monkeypatch, [DEMO1, ACCEPT1], [done_leaf(28, "T1.1"), done_leaf(29, "T1.2"), done_leaf(31, "T3.1", "#12 M2: y")])
+    stub_ship(monkeypatch, [DEMO1, *ACCEPT1], [done_leaf(28, "T1.1"), done_leaf(29, "T1.2"), done_leaf(31, "T3.1", "#12 M2: y")])
     monkeypatch.setattr(sdlc, "reverted_on_main", lambda cfg, root=None: set())
     assert sdlc.main(["ship", "12"]) == 0
     assert "built straight onto main" in capsys.readouterr().out
@@ -526,11 +526,23 @@ def test_ship_records_a_milestone_already_on_main_without_merging(repo, monkeypa
     assert not any(c[:2] in (["pr", "merge"], ["pr", "create"]) for c in gh.calls)
 
 
+@pytest.mark.parametrize("approve", [None, ("stranger", "/approve"), (OWNER, sdlc.marker("note", None) + "\n/approve")])
+def test_ship_refuses_a_record_without_a_real_approve(repo, monkeypatch, capsys, approve):
+    # the record says M1 was accepted, but no person's unmarked /approve of that demo is there to back it
+    gh = GitHub(monkeypatch, repo)
+    forged = ([comment(*approve, 12)] if approve else []) + [agent("demo-approval", 1, 12, milestone="M1", by=POSTER)]
+    stub_ship(monkeypatch, [DEMO1, *forged], [done_leaf(28, "T1.1"), done_leaf(29, "T1.2"), done_leaf(31, "T3.1", "#12 M2: y")])
+    monkeypatch.setattr(sdlc, "reverted_on_main", lambda cfg, root=None: set())
+    assert sdlc.main(["ship", "12"]) == 1
+    assert "isn't accepted yet" in capsys.readouterr().err
+    assert gh.posted == [] and not any(c[:2] in (["pr", "merge"], ["pr", "create"]) for c in gh.calls)
+
+
 def test_ship_review_refuses_a_milestone_already_on_main(repo, monkeypatch, capsys, tmp_path):
     # #12 M1: main...epic/12 is M2's diff, so a "review of M1" would judge the wrong code
     gh = GitHub(monkeypatch, repo)
     leaves = [done_leaf(28, "T1.1"), done_leaf(29, "T1.2"), done_leaf(31, "T3.1", "#12 M2: y")]
-    stub_ship(monkeypatch, [DEMO1, ACCEPT1], leaves)
+    stub_ship(monkeypatch, [DEMO1, *ACCEPT1], leaves)
     monkeypatch.setattr(sdlc, "epic_progress", lambda n, cfg, trusted: progress(ms("M1", 2, 2), ms("M2", 1, 1)))
     monkeypatch.setattr(sdlc, "epic_head", lambda n, cfg: HEAD)
     r = tmp_path / "r.md"
@@ -547,7 +559,7 @@ def test_ship_review_refuses_a_milestone_already_on_main(repo, monkeypatch, caps
 def test_ship_finishes_the_epic_and_can_finish_it_again(repo, monkeypatch, capsys):
     gh = GitHub(monkeypatch, repo)
     sdlc.ensure_epic_branch(12, CONFIG, repo)
-    shipped = [DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)]
+    shipped = [DEMO1, *ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)]
     stub_ship(monkeypatch, shipped, [done_leaf(28, "T1.1")])
     gh.closes = False                               # GitHub won't close it: that's an error, not "done"
     assert sdlc.main(["ship", "12"]) == 1
@@ -563,7 +575,7 @@ def test_ship_records_a_release_pr_that_merged_without_its_record(repo, monkeypa
     gh = GitHub(monkeypatch, repo)
     sdlc.ensure_epic_branch(12, CONFIG, repo)
     merged = [{"title": "Ship #12 M1: x", "mergeCommit": {"oid": HEAD}}]
-    stub_ship(monkeypatch, [DEMO1, ACCEPT1], [done_leaf(28, "T1.1")], pr_base="epic/12", merged_ships=merged)
+    stub_ship(monkeypatch, [DEMO1, *ACCEPT1], [done_leaf(28, "T1.1")], pr_base="epic/12", merged_ships=merged)
     monkeypatch.setattr(sdlc, "release_untested", lambda repo_, sha: False)
     assert sdlc.main(["ship", "12"]) == 0
     assert gh.kinds() == [(12, "shipped")] and f"sha={HEAD}" in gh.posted[0][1]
@@ -574,7 +586,7 @@ def test_ship_stops_when_main_moves_before_the_merge(repo, monkeypatch, capsys):
     gh = GitHub(monkeypatch, repo)
     sdlc.ensure_epic_branch(12, CONFIG, repo)
     head = commit_on_epic(repo, "a.py", "a = 1\n")
-    records = [DEMO1, ACCEPT1, agent("epic-tests", None, 14, sha=head, result="pass", passed="9"),
+    records = [DEMO1, *ACCEPT1, agent("epic-tests", None, 14, sha=head, result="pass", passed="9"),
                agent("ship-review", None, 15, milestone="M1", sha=head, verdict="approve", round="1")]
     stub_ship(monkeypatch, records, [done_leaf(28, "T1.1"), done_leaf(31, "T3.1", "#12 M2: y")], pr_base="epic/12")
     monkeypatch.setattr(sdlc, "reverted_on_main", lambda cfg, root=None: set())
@@ -592,7 +604,7 @@ def test_ship_refuses_a_branch_carrying_a_later_milestone(repo, monkeypatch, cap
     gh = GitHub(monkeypatch, repo)
     sdlc.ensure_epic_branch(12, CONFIG, repo)
     later = commit_on_epic(repo, "m2.py", "m2 = 1\n")
-    records = [DEMO1, ACCEPT1, agent("epic-tests", None, 14, sha=later, result="pass", passed="9"),
+    records = [DEMO1, *ACCEPT1, agent("epic-tests", None, 14, sha=later, result="pass", passed="9"),
                agent("ship-review", None, 15, milestone="M1", sha=later, verdict="approve", round="1")]
     stub_ship(monkeypatch, records, [done_leaf(28, "T1.1"), {**done_leaf(31, "T3.1", "#12 M2: y"), "state": "open"}],
               pr_base="epic/12")
@@ -634,7 +646,7 @@ def test_one_sync_at_a_time_and_it_pushes_what_it_tested(repo):
 
 
 def test_a_reopened_slice_beats_an_old_acceptance():
-    st = derive([DEMO1, ACCEPT1])
+    st = derive([DEMO1, *ACCEPT1])
     phases = sdlc.milestone_phases(st, progress(ms("M1", 2, 3)))
     assert phases[0]["phase"] == "building"
     with pytest.raises(sdlc.SdlcError, match="not complete"):
@@ -686,7 +698,7 @@ def test_a_recovered_release_that_main_moved_under_is_escalated(repo, monkeypatc
     gh = GitHub(monkeypatch, repo)
     sdlc.ensure_epic_branch(12, CONFIG, repo)
     merged = [{"title": "Ship #12 M1: x", "mergeCommit": {"oid": HEAD}}]
-    stub_ship(monkeypatch, [DEMO1, ACCEPT1], [done_leaf(28, "T1.1")], pr_base="epic/12", merged_ships=merged)
+    stub_ship(monkeypatch, [DEMO1, *ACCEPT1], [done_leaf(28, "T1.1")], pr_base="epic/12", merged_ships=merged)
     monkeypatch.setattr(sdlc, "release_untested", lambda repo_, sha: True)
     assert sdlc.main(["ship", "12"]) == 1
     assert [k for _, k in gh.kinds()] == ["shipped", "escalation"] and "untested=1" in gh.posted[0][1]
@@ -706,7 +718,7 @@ def test_sync_dry_run_leaves_the_worktree_alone(repo, monkeypatch, capsys):
 def test_demo_status_and_state_agree_on_next(monkeypatch):
     """M1 shipped with open tech debt filed against #12: both offer M2's slice, never a cleanup pass. The real
     epic_progress runs, over a fake GitHub that holds that debt."""
-    shipped = [DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)]
+    shipped = [DEMO1, *ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)]
     leaves = [done_leaf(28, "T1.1"), {**done_leaf(31, "T3.1", "#12 M2: y"), "state": "open", "state_reason": None}]
     debt = {"number": 81, "body": sdlc.marker("debt", None, epic="12", source="review", generation="1"),
             "user": {"login": OWNER}, "labels": [{"name": "tech-debt"}], "state": "open"}
@@ -724,17 +736,17 @@ def test_demo_status_and_state_agree_on_next(monkeypatch):
 
 
 def test_an_untested_release_must_be_verified_before_the_epic_finishes():
-    untested = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1")])
+    untested = derive([DEMO1, *ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1")])
     assert untested["untested"] == {"M1": HEAD}
     p = progress(ms("M1", 3, 3), open_=0)
     view = sdlc.epic_view(untested, p)
     assert view["due"] == "verify" and view["next"].startswith("`uv run python tools/sdlc.py verify-main 12`")
     assert sdlc.pause_errors(view)
     assert not sdlc.finished(p, untested["demos"], untested["shipped"], [], untested["untested"])
-    failed = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1"),
+    failed = derive([DEMO1, *ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1"),
                      agent("main-tests", None, 14, sha="f" * 40, result="fail", covers=HEAD)])
     assert failed["untested"]                                     # a failing run verifies nothing
-    verified = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1"),
+    verified = derive([DEMO1, *ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1"),
                        agent("main-tests", None, 14, sha="f" * 40, result="pass", covers=HEAD)])
     assert verified["untested"] == {} and sdlc.finished(p, verified["demos"], verified["shipped"], [], {})
 
@@ -742,14 +754,14 @@ def test_an_untested_release_must_be_verified_before_the_epic_finishes():
 def test_an_interrupted_untested_ship_does_not_finish_on_rerun(repo, monkeypatch, capsys):
     gh = GitHub(monkeypatch, repo)
     sdlc.ensure_epic_branch(12, CONFIG, repo)
-    stub_ship(monkeypatch, [DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1")],
+    stub_ship(monkeypatch, [DEMO1, *ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1")],
               [done_leaf(28, "T1.1")])
     assert sdlc.main(["ship", "12"]) == 1
     assert "verify-main 12" in capsys.readouterr().err and sdlc.remote_has("epic/12", repo) and gh.labels == []
 
 
 def test_an_accepted_milestone_never_owes_a_cleanup_pass():
-    st = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)])
+    st = derive([DEMO1, *ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD)])
     p = {**progress(ms("M1", 3, 3), ms("M2", 0, 2), ready=(35,)), "debt": [81], "cleanup_budget": 1,
          "units": {35: {"key": "T4.1", "milestone": "M2"}}}   # stale keys an old caller might pass: ignored
     view = sdlc.epic_view(st, p)
@@ -760,10 +772,10 @@ def test_an_accepted_milestone_never_owes_a_cleanup_pass():
 
 
 def test_changes_after_an_approve_void_it():
-    st = derive([DEMO1, ACCEPT1, comment(POSTER, "/changes the bell is too loud", 13),
+    st = derive([DEMO1, *ACCEPT1, comment(POSTER, "/changes the bell is too loud", 13),
                  agent("demo-changes", 1, 14, milestone="M1")])
     assert not st["demos"]["M1"]["accepted"] and st["feedback"]
-    fixed = derive([DEMO1, ACCEPT1, comment(POSTER, "/changes louder", 13), agent("demo-changes", 1, 14, milestone="M1"),
+    fixed = derive([DEMO1, *ACCEPT1, comment(POSTER, "/changes louder", 13), agent("demo-changes", 1, 14, milestone="M1"),
                     agent("plan", 2, 15), agent("plan-review", 2, 16, verdict="approve"), agent("plan-created", 2, 17)])
     with pytest.raises(sdlc.SdlcError, match="isn't accepted yet"):
         sdlc.ship_target(fixed, progress(ms("M1", 4, 4)))
@@ -774,7 +786,7 @@ def test_claims_wait_on_an_escalated_epic_and_an_unverified_main():
     for labels, comments, needle in ((("sdlc:escalated",), [], "is escalated"),
                                      (("sdlc:in-progress",), [agent("shipped", None, 13, milestone="M1", sha=HEAD,
                                                                    untested="1")], "verify-main 12")):
-        st = sdlc.bundle_state(epic_bundle([DEMO1, ACCEPT1, *comments], labels), CONFIG)
+        st = sdlc.bundle_state(epic_bundle([DEMO1, *ACCEPT1, *comments], labels), CONFIG)
         b = {"issue": {"number": 35, "body": body, "milestone": "#12 M2: y"}, "epic_state": st,
              "epic_progress": None, "trusted": [OWNER]}
         errs = sdlc.epic_pause_errors(b, CONFIG, resume=False)
@@ -782,8 +794,8 @@ def test_claims_wait_on_an_escalated_epic_and_an_unverified_main():
 
 
 def test_nothing_ships_while_an_earlier_release_is_unverified():
-    st = derive([DEMO1, ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1"),
-                 agent("demo", 1, 14, milestone="M2", sha="d" * 40), agent("demo-approval", 1, 15, milestone="M2", by=POSTER)])
+    st = derive([DEMO1, *ACCEPT1, agent("shipped", None, 13, milestone="M1", sha=HEAD, untested="1"),
+                 agent("demo", 1, 14, milestone="M2", sha="d" * 40), comment(POSTER, "/approve", 15), agent("demo-approval", 1, 15, milestone="M2", by=POSTER)])
     with pytest.raises(sdlc.SdlcError, match="verify-main 12"):
         sdlc.ship_target(st, progress(ms("M1", 3, 3), ms("M2", 2, 2), open_=0))
 
@@ -879,7 +891,7 @@ def test_a_milestone_round_names_every_slice_and_both_deferred_ones(tmp_path, mo
     r.owed = []
     assert sdlc.main(["--config", str(r.config), "codex-review", "--milestone", "12", "--out", str(r.out),
                       "--from-file", r.bundle([agent("demo", 1, 30, milestone="M1", sha=r.head),
-                                               agent("demo-approval", 1, 31, milestone="M1", by=POSTER)]),
+                                               comment(POSTER, "/approve", 31), agent("demo-approval", 1, 31, milestone="M1", by=POSTER)]),
                       "--dry-run"]) == 0
     assert "without a review of their own" not in (r.out / "prompt.md").read_text()
 

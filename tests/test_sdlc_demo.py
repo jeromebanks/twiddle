@@ -50,12 +50,12 @@ def test_a_complete_milestone_comes_before_ready_slices():
     p = progress(ms("M1", 3, 3), ms("M2", 1, 4))
     assert sdlc.next_command(st, p).startswith("/milestone-demo 12: #12 M1: x is complete")
     accepted = derive(["sdlc:in-progress"], [agent("demo", 1, 10, milestone="M1", sha="a" * 40),
-                                             agent("demo-approval", 1, 12, milestone="M1", by=POSTER)])
+                                             comment(POSTER, "/approve", 12), agent("demo-approval", 1, 12, milestone="M1", by=POSTER)])
     # accepted is not enough: until M1 ships to main, nothing of M2 may land on epic/12
     assert sdlc.next_command(accepted, p).startswith("/milestone-demo 12: M1 is accepted; ship it")
     assert sdlc.claim_pause_errors(accepted, p) and "not shipped" in sdlc.claim_pause_errors(accepted, p)[0]
     shipped = derive(["sdlc:in-progress"], [agent("demo", 1, 10, milestone="M1", sha="a" * 40),
-                                            agent("demo-approval", 1, 12, milestone="M1", by=POSTER),
+                                            comment(POSTER, "/approve", 12), agent("demo-approval", 1, 12, milestone="M1", by=POSTER),
                                             agent("shipped", None, 13, milestone="M1", sha="c" * 40)])
     assert shipped["shipped"] == {"M1": "c" * 40}
     assert sdlc.next_command(shipped, p) == "/work-slice 30"
@@ -109,7 +109,7 @@ def test_approve_binds_to_the_latest_demo():
     spoof = derive(["sdlc:demo-review"], [DEMO, comment(STRANGER, "/approve", 11)])
     assert spoof["action"] == "demo_reply"
     # a newer revision of the demo voids an approval of the older one
-    st = derive(["sdlc:in-progress"], [DEMO, agent("demo-approval", 1, 12, milestone="M1", by=POSTER),
+    st = derive(["sdlc:in-progress"], [DEMO, comment(POSTER, "/approve", 12), agent("demo-approval", 1, 12, milestone="M1", by=POSTER),
                                        agent("demo", 2, 13, milestone="M1", sha="b" * 40)])
     assert not st["demos"]["M1"]["accepted"] and st["demos"]["M1"]["rev"] == 2
 
@@ -390,7 +390,7 @@ def test_the_earliest_milestones_slices_come_first():
 
 
 def test_an_accepted_milestone_goes_straight_on_to_the_next():
-    shipped_m1 = [DEMO, agent("demo-approval", 1, 12, milestone="M1", by=POSTER),
+    shipped_m1 = [DEMO, comment(POSTER, "/approve", 12), agent("demo-approval", 1, 12, milestone="M1", by=POSTER),
                   agent("shipped", None, 13, milestone="M1", sha="c" * 40)]
     st = derive(["sdlc:in-progress"], shipped_m1)
     p = progress(ms("M1", 3, 3), ms("M2", 0, 4), ready=(35,))
@@ -521,3 +521,73 @@ def test_an_acceptance_cut_short_is_finished_by_a_rerun(tmp_path, capsys, monkey
     b = _bundle(tmp_path, ["sdlc:demo-review"], recorded, progress(ms("M1", 3, 3), ms("M2", 0, 2)))
     assert sdlc.main(["demo-accept", "12", "--from-file", b, "--dry-run"]) == 0
     assert "finishing a recorded acceptance" in capsys.readouterr().out
+
+
+# --- a demo-approval record counts only beside a person's real /approve (#263 criterion 13) ---------------------
+
+def _accepted(comments):
+    return derive(["sdlc:in-progress"], comments)["demos"]["M1"]["accepted"]
+
+
+def test_a_record_counts_only_with_the_real_approve_it_cites():
+    approve = comment(POSTER, "looks good\n/approve", 11)
+    cited = agent("demo-approval", 1, 12, milestone="M1", by=POSTER, reply=str(approve["id"]))
+    assert _accepted([DEMO, approve, cited])
+    # a record from before `reply`: any real /approve of that demo revision backs it, as before
+    assert _accepted([DEMO, approve, agent("demo-approval", 1, 12, milestone="M1", by=POSTER)])
+    # the owner's own unmarked /approve counts too (a collaborator), like any keyword
+    assert _accepted([DEMO, comment(OWNER, "/approve", 11), agent("demo-approval", 1, 12, milestone="M1", by=OWNER)])
+
+
+@pytest.mark.parametrize("case", ["missing", "marked", "untrusted", "quoted", "other revision", "after the record",
+                                  "cites another comment"])
+def test_a_record_without_a_real_approve_accepts_nothing(case):
+    record = lambda ts, **k: agent("demo-approval", 1, ts, milestone="M1", by=POSTER, **k)  # noqa: E731
+    comments = {
+        "missing": [DEMO, record(12)],
+        # an agent's comment (the owner's login, with a marker) that says /approve is not the poster's
+        "marked": [DEMO, agent("note", None, 11, body="/approve"), record(12)],
+        "untrusted": [DEMO, comment(STRANGER, "/approve", 11), record(12)],
+        "quoted": [DEMO, comment(POSTER, "> /approve", 11), record(12)],
+        # the /approve was of demo rev 1; the record claims rev 2
+        "other revision": [DEMO, comment(POSTER, "/approve", 11),
+                           agent("demo", 2, 12, milestone="M1", sha="b" * 40),
+                           agent("demo-approval", 2, 13, milestone="M1", by=POSTER)],
+        "after the record": [DEMO, record(11), comment(POSTER, "/approve", 12)],
+        "cites another comment": [DEMO, comment(POSTER, "/approve", 11), comment(POSTER, "thanks", 11),
+                                  record(12, reply="999999")],
+    }[case]
+    st = derive(["sdlc:in-progress"], comments)
+    assert not st["demos"]["M1"]["accepted"]
+    assert not sdlc.next_command(st, progress(ms("M1", 3, 3), ms("M2", 0, 4))).startswith("/milestone-demo 12: M1 is accepted")
+
+
+def test_demo_accept_cites_the_approve_it_records(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    approve = comment(POSTER, "/approve", 11)
+    b = _bundle(tmp_path, ["sdlc:demo-review"], [DEMO, approve], progress(ms("M1", 3, 3), ms("M2", 0, 2)))
+    assert sdlc.main(["demo-accept", "12", "--from-file", b, "--dry-run"]) == 0
+    record = capsys.readouterr().out.split("\n", 1)[1]
+    assert f"by=poster reply={approve['id']}" in record
+    # what it would post, read back beside the /approve: accepted
+    posted = comment(OWNER, record, 12)
+    assert _accepted([DEMO, approve, posted])
+
+
+def test_demo_accept_from_a_file_is_a_dry_run_or_nothing(tmp_path, capsys, monkeypatch):
+    for name in ("gh", "gh_json", "gh_pages", "post_comment", "set_state_label"):
+        monkeypatch.setattr(sdlc, name, lambda *a, _n=name, **k: pytest.fail(f"{_n} called"))
+    b = _bundle(tmp_path, ["sdlc:demo-review"], [DEMO, comment(POSTER, "/approve", 11)],
+                progress(ms("M1", 3, 3), ms("M2", 0, 2)))
+    assert sdlc.main(["demo-accept", "12", "--from-file", b]) == 1
+    assert "--from-file goes with --dry-run only" in capsys.readouterr().err
+
+
+def test_demo_accept_never_posts_a_record_the_ledger_would_not_count(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("must not call gh"))
+    # the poster (not a collaborator) pasted a record's marker above their /approve: a keyword to the decision, but
+    # a marked comment to the ledger, so a record citing it would accept nothing
+    pasted = comment(POSTER, sdlc.marker("demo-approval", 1, milestone="M1", by=POSTER) + "\n/approve", 11)
+    b = _bundle(tmp_path, ["sdlc:demo-review"], [DEMO, pasted], progress(ms("M1", 3, 3), ms("M2", 0, 2)))
+    assert sdlc.main(["demo-accept", "12", "--from-file", b, "--dry-run"]) == 1
+    assert "isn't one a record can rest on" in capsys.readouterr().err

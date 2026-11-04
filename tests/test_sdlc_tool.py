@@ -210,3 +210,95 @@ def test_prd_pr_guard():
     assert sdlc.prd_pr_errors({**ok, "baseRefName": "dev"}, "main")
     assert sdlc.prd_pr_errors({**ok, "mergeable": "UNKNOWN"}, "main")
     assert sdlc.prd_pr_errors({**ok, "state": "MERGED"}, "main")
+
+
+# --- a person's decision is read from GitHub, never from a file (#263 criterion 13) --------------------------
+
+def _no_github(monkeypatch):
+    for name in ("gh", "gh_json", "gh_pages", "post_comment", "patch_comment", "set_state_label"):
+        monkeypatch.setattr(sdlc, name, lambda *a, _n=name, **k: pytest.fail(f"{_n} called"))
+
+
+def _saved(tmp_path, labels, comments):
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps({"issue": issue(labels), "comments": comments, "trusted": [OWNER]}))
+    return str(f)
+
+
+def test_an_approval_from_a_file_is_a_dry_run_or_nothing(tmp_path, capsys, monkeypatch):
+    _no_github(monkeypatch)
+    b = _saved(tmp_path, ["sdlc:prd-review"], [agent("prd", 1, 1), comment(POSTER, "/approve", 2)])
+    assert sdlc.main(["transition", "12", "approved", "--kind", "approval", "--from-file", b]) == 1
+    assert "--from-file goes with --dry-run only" in capsys.readouterr().err
+    assert sdlc.main(["transition", "12", "approved", "--kind", "approval", "--from-file", b, "--dry-run"]) == 0
+    assert "kind=approval rev=1 by=poster via=comment" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("flags", [["--by", OWNER], ["--from-file", "B"], ["--by", OWNER, "--from-file", "B"]])
+def test_a_watched_run_cannot_name_the_approver(tmp_path, capsys, monkeypatch, flags):
+    _no_github(monkeypatch)
+    b = _saved(tmp_path, ["sdlc:approved"], [agent("prd", 1, 1)])
+    flags = [b if f == "B" else f for f in flags]
+    monkeypatch.setenv(sdlc.WATCH_RUN_ENV, "")   # set, even empty, is a watched run
+    assert sdlc.main(["reconcile", "12", *flags]) == 1
+    assert "go with --dry-run only" in capsys.readouterr().err
+    if len(flags) == 4:   # offline, with an approver named: a dry run still shows what it would record
+        assert sdlc.main(["reconcile", "12", *flags, "--dry-run"]) == 0
+        assert "kind=approval rev=1 by=owner via=label" in capsys.readouterr().out
+        monkeypatch.delenv(sdlc.WATCH_RUN_ENV)
+        monkeypatch.setattr(sdlc, "post_comment", lambda n, body, cfg: {"html_url": "u"})
+        assert sdlc.main(["reconcile", "12", *flags]) == 0   # a person, outside a watched run, keeps --by
+
+
+class LabelledIssue:
+    """A fake `gh` for one issue a collaborator moved to sdlc:approved in GitHub's UI: it answers the issue, its
+    comments, the collaborators and the issue's events, and keeps what is posted."""
+
+    def __init__(self, monkeypatch, actor):
+        self.comments = [{"id": 1, "user": {"login": OWNER}, "body": sdlc.marker("prd", 1) + "\nPRD",
+                          "created_at": "2026-10-02T00:01:00Z", "html_url": "u1"}]
+        self.actor, self.writes = actor, []
+        monkeypatch.setattr(sdlc, "gh", self.gh)
+
+    def gh(self, args, check=True):
+        if args[:2] == ["issue", "view"]:
+            return json.dumps({"number": 12, "title": "Alarm manager", "state": "open", "author": {"login": POSTER},
+                               "labels": [{"name": "sdlc:approved"}], "body": ""})
+        if args[:2] == ["api", "-X"]:
+            assert args[2:4] == ["POST", "repos/jeromebanks/twiddle/issues/12/comments"], args
+            body = Path(args[-1].split("@", 1)[1]).read_text()
+            self.writes.append(body)
+            self.comments.append({"id": len(self.comments) + 1, "user": {"login": OWNER}, "body": body,
+                                  "created_at": "2026-10-02T00:09:00Z", "html_url": "u2"})
+            return json.dumps({"html_url": "u2"})
+        path = args[1]
+        if path.endswith("/comments"):
+            return json.dumps([self.comments])
+        if path.endswith("/collaborators"):
+            return json.dumps([[{"login": OWNER, "permissions": {"push": True}}]])
+        if path.endswith("/events"):
+            return json.dumps([[{"event": "labeled", "label": {"name": "sdlc:approved"}, "actor": {"login": self.actor}}]])
+        raise AssertionError(f"unexpected gh {args}")
+
+
+@pytest.mark.parametrize("watched", [False, True])
+def test_a_label_approval_is_backed_from_the_issue_s_events(monkeypatch, capsys, watched):
+    if watched:   # a watched run backs a label with no --by: who added it comes from GitHub
+        monkeypatch.setenv(sdlc.WATCH_RUN_ENV, "1")
+    gh = LabelledIssue(monkeypatch, OWNER)
+    assert sdlc.main(["state", "12", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["action"] == "reconcile_label"
+    assert sdlc.main(["reconcile", "12"]) == 0
+    assert len(gh.writes) == 1 and "kind=approval rev=1 by=owner via=label" in gh.writes[0]
+    capsys.readouterr()
+    assert sdlc.main(["state", "12", "--json"]) == 0
+    st = json.loads(capsys.readouterr().out)
+    assert st["reconcile"] is None and st["action"] != "reconcile_label" and st["approved_rev"] == 1
+
+
+def test_a_label_added_by_someone_else_is_not_backed(monkeypatch, capsys):
+    monkeypatch.setenv(sdlc.WATCH_RUN_ENV, "1")
+    gh = LabelledIssue(monkeypatch, STRANGER)
+    assert sdlc.main(["reconcile", "12"]) == 1
+    err = capsys.readouterr().err
+    assert "applied by stranger, who is not a collaborator" in err and "--by" not in err and gh.writes == []

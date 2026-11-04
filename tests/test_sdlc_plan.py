@@ -400,7 +400,7 @@ def plan_comment(plan, rev, ts):
     return comment(OWNER, sdlc.render_comment("plan", rev, sdlc.render_plan(plan), CONFIG), ts)
 
 
-DEMO_M1 = [agent("demo", 1, 20, milestone="M1", sha="d" * 40), agent("demo-approval", 1, 21, milestone="M1", by=POSTER)]
+DEMO_M1 = [agent("demo", 1, 20, milestone="M1", sha="d" * 40), comment(POSTER, "/approve", 21), agent("demo-approval", 1, 21, milestone="M1", by=POSTER)]
 
 
 def created_m1(plan):

@@ -31,6 +31,8 @@ def _isolated_state_files(tmp_path, monkeypatch):
     monkeypatch.setattr(streaminfo, "CACHE_FILE", tmp_path / "streams.json")
     monkeypatch.setattr(lookup, "DISCOGS_TOKEN_FILE", tmp_path / "discogs.json")
     monkeypatch.delenv("DISCOGS_TOKEN", raising=False)
+    # a run the SDLC watcher started refuses some of tools/sdlc.py's offline paths: only the tests of that guard set it
+    monkeypatch.delenv("TWIDDLE_SDLC_WATCH_RUN", raising=False)
     monkeypatch.setattr(play, "INTERVENTION_LOG", tmp_path / "interventions.jsonl")
     monkeypatch.setattr(daemon, "AGENT_DIR", tmp_path / "LaunchAgents")
     monkeypatch.setattr(scene_cache, "CACHE_DIR", tmp_path / "scene")
