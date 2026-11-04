@@ -38,6 +38,8 @@ class History:
         self.comments, self.ts = [], 0
 
     def add(self, kind, rev=None, body="text", author=OWNER, **extra):
+        if kind == "demo-approval":   # a record counts only beside the poster's real /approve it was read from
+            self.add(None, body="/approve", author=POSTER)
         self.ts += 1
         text = sdlc.marker(kind, rev, **extra) + "\n" + body if kind else body
         self.comments.append({"id": self.ts, "author": author, "body": text, "url": f"u{self.ts}",

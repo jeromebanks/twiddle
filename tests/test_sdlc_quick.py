@@ -19,7 +19,7 @@ _ids = iter(range(1, 10_000))
 @pytest.fixture(autouse=True)
 def _runs_main_gate_code(monkeypatch):
     """`merge` first checks it runs origin/main's gate code (a git fetch): tests/test_sdlc_merge_gate.py tests that."""
-    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR": [])
+    monkeypatch.setattr(sdlc, "gate_code_errors", lambda config, pr="PR", command="merge": [])
 
 
 def issue(labels=(), state="open", number=12):
