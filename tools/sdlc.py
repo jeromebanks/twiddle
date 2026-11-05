@@ -551,6 +551,13 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
             # the same /approve settles the plan. It stays no PRD sign-off (`valid` is only that), so it can never be
             # recorded as an approval by `transition`
             decision["settles_plan"] = True
+        if settled and poster_changes:
+            # the later of the poster's `/changes` and the settling `/approve` wins (a `/changes` after it already
+            # withdrew it, above). The /approve answers only a `/changes` inside the same window, after the round that
+            # spent the cycle: it is superseded, and the plan-created record that follows moves `changes_from` past it
+            at = {c.get("id"): i for i, c in enumerate(ordered)}
+            if max(L.plan_index, L.plan_review_index) < at[poster_changes["comment_id"]] <= at[settled["comment_id"]]:
+                poster_changes = None
     if (settled is None and L.settled_record and latest_plan and L.settled_record["rev"] == latest_plan["rev"]
             and plan_verdict != "approve" and not plan_after_created):
         # plan-create recorded this revision as settled, then was cut short (the branch, the label): it may finish

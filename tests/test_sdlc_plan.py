@@ -994,6 +994,72 @@ def test_plan_create_from_a_settled_question_moves_it_to_planned(tmp_path, capsy
     assert "a `/approve` after it" in capsys.readouterr().err
 
 
+# --- the later of the poster's /changes and a settling /approve wins (#243 F5) ----------------
+
+SHIPPED_M1 = agent("shipped", None, 22, milestone="M1", sha="c" * 40)
+
+
+def shipped_amendment(rounds=None):
+    """M1 shipped, then an M2 amendment whose Codex rounds are spent (or `rounds` of them)."""
+    plan, comments = spent_amendment()
+    comments = comments[:len(comments) - CONFIG["max_plan_rounds"]]
+    comments.insert(comments.index(DEMO_M1[-1]) + 1, SHIPPED_M1)
+    n = CONFIG["max_plan_rounds"] if rounds is None else rounds
+    return plan, comments + [review(2, 31 + i, "changes") for i in range(n)]
+
+
+def test_a_later_approve_settles_a_spent_amendment_over_the_posters_changes():
+    _, comments = shipped_amendment()
+    st = derive(["sdlc:in-progress"], comments + [comment(POSTER, "/changes louder", 40), comment(POSTER, "/approve", 41)])
+    assert (st["action"], st["plan_settled"]["by"], st["poster_changes"]) == ("create_plan_issues", POSTER, None)
+    # the reverse order: the /changes withdraws the /approve, and is recorded as before
+    ask = comment(POSTER, "/changes louder", 41)
+    st = derive(["sdlc:in-progress"], comments + [comment(POSTER, "/approve", 40), ask])
+    assert (st["action"], st["plan_settled"], st["poster_changes"]["comment_id"]) == ("record_changes", None, ask["id"])
+
+
+def test_a_settling_approve_answers_only_a_changes_inside_its_window():
+    # a /changes from before the round that spent the cycle was never answered by the /approve: still recorded
+    _, comments = shipped_amendment()
+    early = comments + [comment(POSTER, "/changes louder", 31 + CONFIG["max_plan_rounds"] - 2),   # before the last round
+                        comment(POSTER, "/approve", 41)]
+    assert derive(["sdlc:in-progress"], early)["action"] == "record_changes"
+
+
+def test_a_changes_with_no_settlement_in_play_is_recorded():
+    # rounds left on the amendment: the /approve settles nothing, so the /changes stands
+    _, comments = shipped_amendment(rounds=1)
+    st = derive(["sdlc:in-progress"], comments + [comment(POSTER, "/changes louder", 40), comment(POSTER, "/approve", 41)])
+    assert (st["action"], st["plan_settled"]) == ("record_changes", None)
+    # no amendment at all
+    plan = two_milestones()
+    built = created_m1(plan) + DEMO_M1 + [SHIPPED_M1]
+    st = derive(["sdlc:in-progress"], built + [comment(POSTER, "/changes louder", 40), comment(POSTER, "/approve", 41)])
+    assert (st["action"], st["plan_settled"]) == ("record_changes", None)
+    # a stranger's /approve never clears the poster's /changes
+    _, comments = shipped_amendment()
+    st = derive(["sdlc:in-progress"], comments + [comment(POSTER, "/changes louder", 40),
+                                                  comment(STRANGER, "/approve", 41)])
+    assert (st["action"], st["plan_settled"]) == ("record_changes", None)
+
+
+def test_the_superseded_changes_is_consumed_once_the_settled_revision_is_created(tmp_path, monkeypatch):
+    _, comments = shipped_amendment()
+    settled = comments + [comment(POSTER, "/changes louder", 40), comment(POSTER, "/approve", 41)]
+    f = _bundle(tmp_path, settled, labels=("sdlc:in-progress",))
+    posts = _Posts(monkeypatch)
+    assert sdlc.main(["plan-create", "12", "--from-file", f]) == 0
+    record = posts.comments[-1]
+    assert sdlc.parse_marker(record)["settled_by"] == POSTER
+    after = settled + [comment(OWNER, record, 42)]
+    st = derive(["sdlc:in-progress"], after)
+    assert (st["action"], st["poster_changes"]) == ("work_slices", None)
+    # a fresh /changes after that record is the poster's new request, recorded as T13 made it
+    ask = comment(POSTER, "/changes quieter", 43)
+    st = derive(["sdlc:in-progress"], after + [ask])
+    assert (st["action"], st["poster_changes"]["comment_id"]) == ("record_changes", ask["id"])
+
+
 # --- plan-create never stops silently (#243 T14) -------------------------------------------
 
 def on_github(plan, keys=None):

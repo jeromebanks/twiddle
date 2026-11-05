@@ -436,7 +436,7 @@ question, or an amendment at `escalate_plan` or already `sdlc:escalated`. The ro
 cycle's, counted across revisions; the question resets them for the planner, but the cycle still reads
 as spent until a new Codex round is recorded. Only the escalation `escalate_plan` asked for can be settled so
 (`transition` marks it `phase=plan`); any other escalation, such as a sync conflict, stays a human's.
-`plan-create` records `settled_by=` and moves a settled escalation back to `sdlc:in-progress`. Their later `/changes` withdraws it. Anyone else's `/approve` is listed as ignored,
+`plan-create` records `settled_by=` and moves a settled escalation back to `sdlc:in-progress`. Their later `/changes` withdraws it; the later of the two wins, so their `/approve` after a `/changes` they posted since that round settles the amendment, and the `/changes` is not recorded. Anyone else's `/approve` is listed as ignored,
 and an agent's (marked) comment never counts.
 
 `uv run python tools/sdlc.py ready --epic N` lists the units of work whose
