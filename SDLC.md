@@ -122,7 +122,8 @@ ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every sk
 - **`/changes <what>`** asks for changes. Any other reply is treated as feedback. On an epic being built with no
   demo in review, it is recorded (`demo-changes`) and planned as new slices of the current milestone; it adds
   nothing while changes already wait to be planned, and waits while an accepted milestone waits to ship (it is
-  recorded once that milestone has shipped).
+  recorded once that milestone has shipped). Their later `/approve` that settles a plan amendment whose Codex
+  rounds are spent answers a `/changes` posted since its latest revision, which is then not recorded.
 - A maintainer may instead add the **`sdlc:approved`** label; the next run records it as an approval comment.
 
 `/approve` counts only from the issue's author or someone who can write to the
@@ -437,7 +438,7 @@ question, or an amendment at `escalate_plan` or already `sdlc:escalated`. The ro
 cycle's, counted across revisions; the question resets them for the planner, but the cycle still reads
 as spent until a new Codex round is recorded. Only the escalation `escalate_plan` asked for can be settled so
 (`transition` marks it `phase=plan`); any other escalation, such as a sync conflict, stays a human's.
-`plan-create` records `settled_by=` and moves a settled escalation back to `sdlc:in-progress`. Their later `/changes` withdraws it. Anyone else's `/approve` is listed as ignored,
+`plan-create` records `settled_by=` and moves a settled escalation back to `sdlc:in-progress`. Their later `/changes` withdraws it; the later of the two wins, so their `/approve` after a `/changes` they posted since the latest revision settles the amendment, and the `/changes` is not recorded. Anyone else's `/approve` is listed as ignored,
 and an agent's (marked) comment never counts.
 
 `uv run python tools/sdlc.py ready --epic N` lists the units of work whose
