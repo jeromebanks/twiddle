@@ -2567,6 +2567,8 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
                         "(it needs Codex's `approve` on the latest plan revision, or, once its Codex rounds are "
                         "spent, a `/approve` after it from the issue author or a collaborator)")
     settled = st.get("plan_settled")   # None when Codex approved it
+    if settled:   # a person settled it: only the state shows that, so checked here, before anything is posted
+        refuse_offline_decision(args, "plan-create")
     plan_comment, plan = latest_plan_of(bundle, st)
     epic = st["number"]
     ref = planning_ref(plan.get("issue"), config, offline=bool(getattr(args, "from_file", None)))
