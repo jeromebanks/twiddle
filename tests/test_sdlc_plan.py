@@ -1113,7 +1113,8 @@ def test_the_superseded_changes_is_consumed_once_the_settled_revision_is_created
     settled = comments + [comment(POSTER, "/changes louder", 40), comment(POSTER, "/approve", 41)]
     f = _bundle(tmp_path, settled, labels=("sdlc:in-progress",))
     posts = _Posts(monkeypatch)
-    assert sdlc.main(["plan-create", "12", "--from-file", f]) == 0
+    _FromGitHub(monkeypatch, f)   # a person's settlement is read from GitHub, never from a file (F4)
+    assert sdlc.main(["plan-create", "12"]) == 0
     record = posts.comments[-1]
     assert sdlc.parse_marker(record)["settled_by"] == POSTER
     after = settled + [comment(OWNER, record, 42)]
