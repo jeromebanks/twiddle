@@ -1,6 +1,7 @@
 """tools/sdlc.py planning: plan state, validation, Codex verdicts, idempotent creation. No network."""
 import copy
 import json
+from pathlib import Path
 
 import pytest
 
@@ -939,8 +940,10 @@ def test_a_settled_creation_cut_short_after_its_record_can_finish(tmp_path, monk
         assert (st["action"], st["plan_settled"]["by"]) == ("create_plan_issues", POSTER)
     f = _bundle(tmp_path, settled + [record])
     posts = _Posts(monkeypatch)
-    assert sdlc.main(["plan-create", "12", "--from-file", f]) == 0
+    github = _FromGitHub(monkeypatch, f)
+    assert sdlc.main(["plan-create", "12"]) == 0
     assert posts.labels == ["planned"] and posts.comments == []          # the record is not posted twice
+    assert github.branches == [12]
     # a record without settled_by (an old one, or Codex's approve) grants nothing more than before
     assert derive(["sdlc:approved"], settled + [agent("plan-created", 1, 11)])["action"] == "continue_plan"
 
@@ -962,15 +965,68 @@ class _Posts:
         return {"number": self.n, "id": self.n}
 
 
+class _FromGitHub:
+    """plan-create reading a fixture bundle as GitHub (`fetch_bundle`), as a person's settlement must be read: every
+    online read it makes answers from the fixture's `plan_issues`/`plan_links`/`plan_milestones` (`on_github`) plus
+    what this run wrote through the `_Posts` recorder installed before it, so the read-back finds it; `gh` stays
+    forbidden."""
+
+    def __init__(self, monkeypatch, path):
+        bundle = json.loads(Path(path).read_text())
+        links = bundle.get("plan_links") or {}
+        self.records = list(bundle.get("plan_issues") or [])
+        self.attached, self.blocked = ({int(k): set(v) for k, v in (links.get(w) or {}).items()}
+                                       for w in ("attached", "blocked"))
+        self.milestones = dict(bundle.get("plan_milestones") or {})
+        self.branches = []
+        recorded = sdlc.post_json
+        bundle = {k: v for k, v in bundle.items() if k not in ("plan_issues", "plan_links", "plan_milestones")}
+
+        def post_json(path, payload):
+            out = recorded(path, payload)
+            parts = path.split("/")
+            if parts[-1] == "issues":
+                mk = sdlc.parse_marker(payload["body"]) or {}
+                self.records.append({"key": mk["key"], "number": out["number"], "id": out["id"], "kind": mk["kind"]})
+            elif parts[-1] == "sub_issues":
+                self.attached.setdefault(int(parts[-2]), set()).add(payload["sub_issue_id"])   # id == number here
+            elif parts[-1] == "blocked_by":
+                self.blocked.setdefault(int(parts[-3]), set()).add(payload["issue_id"])
+            elif parts[-1] == "milestones":
+                self.milestones[payload["title"]] = out["number"]
+            return out
+
+        def gh_pages(path):
+            assert path.split("?")[0].endswith("/milestones"), path
+            return [{"title": t, "number": n} for t, n in self.milestones.items()]
+
+        def gh_json(args):
+            assert args[:2] == ["label", "list"], args
+            return [{"name": l} for l in [sdlc.LEAF_LABEL, sdlc.CONTAINER_LABEL]
+                    + [sdlc.COMPLEXITY_PREFIX + c for c in sdlc.COMPLEXITY]]
+
+        monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted=None: copy.deepcopy(bundle))
+        monkeypatch.setattr(sdlc, "planning_ref", lambda n, config, offline: None)
+        monkeypatch.setattr(sdlc, "post_json", post_json)
+        monkeypatch.setattr(sdlc, "gh_pages", gh_pages)
+        monkeypatch.setattr(sdlc, "gh_json", gh_json)
+        monkeypatch.setattr(sdlc, "fetch_plan_issues", lambda epic, config, trusted: list(self.records))
+        monkeypatch.setattr(sdlc, "fetch_links", lambda epic, records, config: (
+            {k: set(v) for k, v in self.attached.items()}, {k: set(v) for k, v in self.blocked.items()}))
+        monkeypatch.setattr(sdlc, "ensure_epic_branch",
+                            lambda n, config, **k: self.branches.append(n) or ("0" * 40, True))
+
+
 def test_plan_create_from_a_settled_escalation_resumes_building_and_names_who_settled(tmp_path, capsys, monkeypatch):
     _, comments = spent_amendment()
     settled = comments + [agent("escalation", None, 40, phase="plan"), comment(POSTER, "/approve", 41)]
     f = _bundle(tmp_path, settled, labels=("sdlc:escalated",))
     posts = _Posts(monkeypatch)
     assert sdlc.main(["plan-create", "12", "--from-file", f, "--dry-run"]) == 0
-    assert f"(settled by @{POSTER})" in capsys.readouterr().out and posts.labels == []
-    assert sdlc.main(["plan-create", "12", "--from-file", f]) == 0
-    assert posts.labels == ["in-progress"]
+    assert f"(settled by @{POSTER})" in capsys.readouterr().out and posts.labels == [] and posts.comments == []
+    github = _FromGitHub(monkeypatch, f)
+    assert sdlc.main(["plan-create", "12"]) == 0
+    assert posts.labels == ["in-progress"] and github.branches == [12]
     record = posts.comments[-1]
     mk = sdlc.parse_marker(record)
     assert (mk["kind"], mk["rev"], mk["settled_by"]) == ("plan-created", "2", POSTER)
@@ -986,8 +1042,10 @@ def test_plan_create_from_a_settled_question_moves_it_to_planned(tmp_path, capsy
                 + [agent("question", None, 10, phase="plan"), comment(POSTER, "/approve", 11)])
     f = _bundle(tmp_path, comments, labels=("sdlc:needs-info",))
     posts = _Posts(monkeypatch)
-    assert sdlc.main(["plan-create", "12", "--from-file", f]) == 0
+    github = _FromGitHub(monkeypatch, f)
+    assert sdlc.main(["plan-create", "12"]) == 0
     assert posts.labels == ["planned"] and sdlc.parse_marker(posts.comments[-1])["settled_by"] == POSTER
+    assert github.branches == [12]
     # without the /approve plan-create refuses, and says what would settle it
     f = _bundle(tmp_path, comments[:-1], labels=("sdlc:needs-info",))
     assert sdlc.main(["plan-create", "12", "--from-file", f, "--dry-run"]) == 1
@@ -1112,7 +1170,8 @@ def test_a_settled_creation_cut_short_before_its_label_moves_is_finished_once(wh
     made = on_github(plan)
     # creation fails after plan-created is posted, before the label moves
     posts = _Failing(monkeypatch, label_fails=True)
-    assert sdlc.main(["plan-create", "12", "--from-file", _bundle(tmp_path, comments, labels=labels, **made)]) == 1
+    _FromGitHub(monkeypatch, _bundle(tmp_path, comments, labels=labels, **made))
+    assert sdlc.main(["plan-create", "12"]) == 1
     err = capsys.readouterr().err
     assert "plan-created for plan rev" in err and "is posted" in err and "plan-create 12" in err
     assert len(posts.comments) == 1 and posts.n == 500
@@ -1126,8 +1185,56 @@ def test_a_settled_creation_cut_short_before_its_label_moves_is_finished_once(wh
     assert st["next"].startswith("`uv run python tools/sdlc.py plan-create 12`") and "is posted" in st["next"]
     # the rerun: no issue, link or milestone, no second record, no new /approve; only the label
     posts = _Posts(monkeypatch)
-    assert sdlc.main(["plan-create", "12", "--from-file", _bundle(tmp_path, after, labels=labels, **made)]) == 0
+    _FromGitHub(monkeypatch, _bundle(tmp_path, after, labels=labels, **made))
+    assert sdlc.main(["plan-create", "12"]) == 0
     assert posts.n == 500 and posts.comments == [] and posts.labels == [to]
+
+
+# --- a person's settlement is read from GitHub, never from a file (#243 F4) -----------------------------------
+
+@pytest.mark.parametrize("where", ["needs-info", "escalated", "spent"])
+def test_plan_create_from_a_file_refuses_a_creation_a_person_settled(where, tmp_path, capsys, monkeypatch):
+    """A `--from-file` bundle could carry an invented `/approve`: a settled creation runs only as read from GitHub.
+    The dry run still shows it; Codex's approval from a file is unchanged (the tests above)."""
+    if where == "spent":   # the first plan, its rounds spent, then an /approve: no question, no escalation
+        comments = (APPROVED + [plan_comment(make_plan(), 1, 3)]
+                    + [review(1, 4 + i, "changes") for i in range(CONFIG["max_plan_rounds"])]
+                    + [comment(POSTER, "/approve", 10)])
+        labels = ("sdlc:approved",)
+    else:
+        comments, _, _ = _settled_from(where)
+        labels = (f"sdlc:{where}",)
+    f = _bundle(tmp_path, comments, labels=labels)
+    st = sdlc.bundle_state(json.loads(Path(f).read_text()), CONFIG)
+    assert (st["action"], st["plan_settled"]["by"]) == ("create_plan_issues", POSTER)
+    posts = _Posts(monkeypatch)
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda *a, **k: pytest.fail("--from-file must not read GitHub"))
+    assert sdlc.main(["plan-create", "12", "--from-file", f]) == 1
+    err = capsys.readouterr().err
+    assert "`plan-create` records a person's decision, which is read from GitHub, never from a file" in err
+    assert (posts.n, posts.comments, posts.labels) == (500, [], [])
+    assert sdlc.main(["plan-create", "12", "--from-file", f, "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert f"(settled by @{POSTER})" in out and "would create" in out
+    assert (posts.n, posts.comments, posts.labels) == (500, [], [])
+
+
+def test_plan_create_from_a_file_refuses_to_finish_a_settled_record(tmp_path, capsys, monkeypatch):
+    """The plan-created record a settled run left behind (`settled_by=`, no /approve to cite) settles it too: a file
+    can't finish it either, while the same bundle read from GitHub can (the T14 tests above)."""
+    plan_c = comment(OWNER, sdlc.render_comment("plan", 1, sdlc.render_plan(make_plan()), CONFIG), 3)
+    comments = (APPROVED + [plan_c] + [review(1, 4 + i, "changes") for i in range(CONFIG["max_plan_rounds"])]
+                + [agent("plan-created", 1, 11, settled_by=POSTER)])
+    f = _bundle(tmp_path, comments)
+    st = sdlc.bundle_state(json.loads(Path(f).read_text()), CONFIG)
+    assert st["action"] == "create_plan_issues"
+    assert (st["plan_settled"]["by"], st["plan_settled"]["comment_id"]) == (POSTER, None)   # the record, not a reply
+    posts = _Posts(monkeypatch)
+    assert sdlc.main(["plan-create", "12", "--from-file", f]) == 1
+    assert "read from GitHub, never from a file" in capsys.readouterr().err
+    assert (posts.n, posts.comments, posts.labels) == (500, [], [])
+    assert sdlc.main(["plan-create", "12", "--from-file", f, "--dry-run"]) == 0
+    assert f"(settled by @{POSTER})" in capsys.readouterr().out and posts.labels == []
 
 
 def test_a_later_escalation_after_a_settled_record_stays_a_humans():

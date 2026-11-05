@@ -755,7 +755,7 @@ passing suite and Codex's approval on the exact head (never deferred), the poste
 <li><strong>A person's decision is read from GitHub, never from a file.</strong> A milestone counts as accepted only when a person's real,
 unmarked <code>/approve</code> of that demo revision is on the issue; <code>demo-accept</code>'s record cites it (<code>reply=</code>), and a record
 without one accepts nothing, so <code>ship</code> refuses. <code>ship</code>, like <code>merge</code>, runs only <code>origin/main</code>'s gate code.
-<code>demo-accept</code> and <code>transition --kind approval</code> take <code>--from-file</code> only with <code>--dry-run</code>; in a watched run
+<code>demo-accept</code>, <code>transition --kind approval</code> and <code>plan-create</code> of a plan a person settled take <code>--from-file</code> only with <code>--dry-run</code>; in a watched run
 (<code>TWIDDLE_SDLC_WATCH_RUN</code>), <code>reconcile</code> reads who added the label from the issue's events, never <code>--by</code>.</li>
 <li><strong>People are reached through the issue.</strong> No skill asks a question in the chat. Publishing a demo is gated by automated checks
 (no device IDs, addresses or secrets, no blank pictures), and the poster's reply is the human check.</li>
