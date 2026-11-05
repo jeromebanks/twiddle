@@ -182,7 +182,8 @@ like any other (`state` on it says so); if the change then escalates to the full
   `/approve` of that demo revision is among the issue's comments: unmarked, by a collaborator or the issue's
   author, after that demo. `demo-accept` cites it in its record (`reply=<comment id>`), and a `demo-approval`
   record without one accepts nothing, so `ship` refuses. `ship`, like `merge`, runs only `origin/main`'s gate code.
-  `demo-accept` and `transition --kind approval` take `--from-file` only with `--dry-run`. In a run the watcher
+  `demo-accept`, `transition --kind approval` and `plan-create` of a plan a person settled take `--from-file`
+  only with `--dry-run`. In a run the watcher
   started (`TWIDDLE_SDLC_WATCH_RUN` set), `reconcile` takes neither `--by` nor `--from-file` without `--dry-run`:
   it reads who added `sdlc:approved` from the issue's events. A person at a terminal keeps `--by`.
 - Each PRD/diagnosis revision is a new comment; the previous one is collapsed and
