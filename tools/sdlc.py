@@ -553,10 +553,11 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
             decision["settles_plan"] = True
         if settled and poster_changes:
             # the later of the poster's `/changes` and the settling `/approve` wins (a `/changes` after it already
-            # withdrew it, above). The /approve answers only a `/changes` inside the same window, after the round that
-            # spent the cycle: it is superseded, and the plan-created record that follows moves `changes_from` past it
+            # withdrew it, above). The /approve answers only a `/changes` on the plan it settles, after its latest
+            # revision: it is superseded, and the plan-created record that follows moves `changes_from` past it. One
+            # from before that revision (one waiting for a release, say) was never planned, and is still recorded
             at = {c.get("id"): i for i, c in enumerate(ordered)}
-            if max(L.plan_index, L.plan_review_index) < at[poster_changes["comment_id"]] <= at[settled["comment_id"]]:
+            if L.plan_index < at[poster_changes["comment_id"]] <= at[settled["comment_id"]]:
                 poster_changes = None
     if (settled is None and L.settled_record and latest_plan and L.settled_record["rev"] == latest_plan["rev"]
             and plan_verdict != "approve" and not plan_after_created):

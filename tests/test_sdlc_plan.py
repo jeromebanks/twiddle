@@ -1018,13 +1018,15 @@ def test_a_later_approve_settles_a_spent_amendment_over_the_posters_changes():
     assert (st["action"], st["plan_settled"], st["poster_changes"]["comment_id"]) == ("record_changes", None, ask["id"])
 
 
-def test_a_settling_approve_answers_only_a_changes_inside_its_window():
-    # a /changes from before the round that spent the cycle was never answered by the /approve: still recorded
+def test_a_settling_approve_answers_only_a_changes_on_the_plan_it_settles():
+    # a /changes on the latest revision, even before the round that spent the cycle: the later /approve wins
     _, comments = shipped_amendment()
     early = comments + [comment(POSTER, "/changes louder", 31 + CONFIG["max_plan_rounds"] - 2),   # before the last round
                         comment(POSTER, "/approve", 41)]
-    assert derive(["sdlc:in-progress"], early)["action"] == "record_changes"
-    # nor one posted between M1's acceptance and its release, which waits for the release and is not lost there (T13)
+    st = derive(["sdlc:in-progress"], early)
+    assert (st["action"], st["poster_changes"]) == ("create_plan_issues", None)
+    # not one from before that revision: posted between M1's acceptance and its release, it waits for the release
+    # and is not lost there (T13); the amendment was never planned from it
     plan, comments = shipped_amendment()
     waited = comments[:comments.index(SHIPPED_M1)] + [comment(POSTER, "/changes louder", 21)] \
         + comments[comments.index(SHIPPED_M1):]
