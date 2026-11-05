@@ -1024,6 +1024,11 @@ def test_a_settling_approve_answers_only_a_changes_inside_its_window():
     early = comments + [comment(POSTER, "/changes louder", 31 + CONFIG["max_plan_rounds"] - 2),   # before the last round
                         comment(POSTER, "/approve", 41)]
     assert derive(["sdlc:in-progress"], early)["action"] == "record_changes"
+    # nor one posted between M1's acceptance and its release, which waits for the release and is not lost there (T13)
+    plan, comments = shipped_amendment()
+    waited = comments[:comments.index(SHIPPED_M1)] + [comment(POSTER, "/changes louder", 21)] \
+        + comments[comments.index(SHIPPED_M1):]
+    assert derive(["sdlc:in-progress"], waited + [comment(POSTER, "/approve", 41)])["action"] == "record_changes"
 
 
 def test_a_changes_with_no_settlement_in_play_is_recorded():
