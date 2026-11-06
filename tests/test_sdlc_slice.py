@@ -194,7 +194,7 @@ def test_progress_and_epic_next():
     assert {m["title"]: (m["done"], m["total"]) for m in p["milestones"]} == {"#12 M1: read": (1, 3), "#12 M2: write": (0, 1)}
     epic = {"number": 12, "action": "work_slices", "state": "in-progress", "conflicts": []}
     # #31 is ready, but it's M2's: until M1 ships, only M1's slices are offered
-    assert sdlc.next_command(epic, p).startswith("nothing new to start: in progress #29")
+    assert sdlc.next_command(epic, p).startswith("/work-slice 29: resumes it; nothing new to start: in progress #29")
     assert sdlc.next_command({**epic, "shipped": {"M1": "x"}}, p) == "/work-slice 31"
     done = {"ready": [], "in_flight": [], "escalated": [], "open": 0, "waiting": [], "milestones": []}
     assert sdlc.next_command(epic, done).startswith("/milestone-demo 12")

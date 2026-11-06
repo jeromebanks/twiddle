@@ -277,7 +277,7 @@ def test_next_offers_only_the_current_milestones_slices():
     st = derive()
     units = {30: {"key": "T1.3", "milestone": "M1"}, 35: {"key": "T4.1", "milestone": "M2"}}
     p = {**progress(ms("M1", 2, 3), ms("M2", 0, 4), ready=(35,), in_flight=(30,)), "units": units}
-    assert sdlc.next_command(st, p).startswith("nothing new to start: in progress #30")
+    assert sdlc.next_command(st, p).startswith("/work-slice 30: resumes it; nothing new to start: in progress #30")
     stuck = {**p, "in_flight": []}
     assert sdlc.next_command(st, stuck).startswith("nothing ready in #12 M1: x: later milestones' slices wait")
     assert sdlc.next_command(st, {**p, "ready": [30, 35], "in_flight": []}) == "/work-slice 30"
@@ -405,6 +405,8 @@ def stub_merge(monkeypatch, gh, reads, base="epic/12"):
     monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, cfg, trusted=None: epic_bundle())
     monkeypatch.setattr(sdlc, "epic_progress", lambda n, cfg, trusted: progress(ms("M1", 1, 3)))
     monkeypatch.setattr(sdlc, "with_next", lambda st, cfg, offline=False, trusted=None: {**st, "next": "x", "progress": None})
+    # the review logic at the head has a passing eval (the eval gate's own tests are in test_sdlc_eval.py)
+    monkeypatch.setattr(sdlc, "merge_eval_errors", lambda *a, **k: ([], None))
 
 
 def test_merge_squashes_into_the_epic_then_closes_and_reads_back(monkeypatch, capsys):
@@ -944,3 +946,26 @@ def test_an_epic_without_milestones_takes_its_steps_from_the_slices_demo_section
     steps = (r.out / "milestone.md").read_text().split("## Demo steps", 1)[1]
     assert "- T1.1: `np` shows T1.1" in steps and "- T1.3: `np` shows T1.3" in steps
     assert "T1.2 (PR #56" in (r.out / "prompt.md").read_text().split("merged without a review of their own")[1]
+
+
+def test_a_milestone_round_that_could_not_be_recorded_or_would_change_nothing_never_starts_codex(tmp_path, monkeypatch, capsys):
+    r = MilestoneReview(tmp_path, monkeypatch)
+
+    def ship(verdict, sha, ts):
+        return agent("ship-review", None, ts, "**M1 review**", milestone="M1", sha=sha, verdict=verdict, round=str(ts))
+
+    spent = [ship("changes", OLD, 30 + i) for i in range(CONFIG["max_pr_rounds"])]
+    for extra in ((), ("--dry-run",)):
+        assert r.run(*extra, comments=spent) == 1
+        err = capsys.readouterr().err
+        assert "transition 12 escalated" in err and f"{CONFIG['max_pr_rounds']}/{CONFIG['max_pr_rounds']}" in err
+        assert r.run(*extra, comments=[ship("approve", r.head, 40)]) == 1
+        err = capsys.readouterr().err
+        assert "already approved" in err and "stands" in err and "ship 12" in err
+    assert calls(r.log) == [] and not (r.out / "codex.md").exists()
+    # an approval of an older epic head doesn't serve this one; a later round that asked for changes reopens it
+    accepted = [agent("demo", 1, 35, milestone="M1", sha=r.head), comment(POSTER, "/approve", 36),
+                agent("demo-approval", 1, 36, milestone="M1", by=POSTER)]
+    assert r.run(comments=accepted + [ship("approve", OLD, 40)]) == 0 and len(calls(r.log)) == 1
+    assert r.run(comments=accepted + [ship("approve", r.head, 40), ship("changes", r.head, 41)]) == 1
+    assert "already approved" not in capsys.readouterr().err      # the usual checks apply: it wants a response

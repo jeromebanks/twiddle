@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tools import sdlc, sdlc_quick
+from tools import codex_review, sdlc, sdlc_quick
 
 CONFIG = sdlc.load_config()
 OWNER, POSTER = "owner", "poster"
@@ -1782,7 +1782,7 @@ def test_commit_prd_merges_the_brief_and_planning_starts(repo, monkeypatch, caps
     out = capsys.readouterr().out
     assert "action: plan" in out and "next: /plan-issue 12" in out
     # planning finds it: the plan prompt's requirements, and plan-validate's criteria
-    assert sdlc.approved_requirements(12, anchor(brief), "", "origin/main", repo)[1] == Path("docs/prd/12-add-a-station.md")
+    assert codex_review.approved_requirements(12, anchor(brief), "", "origin/main", repo)[1] == Path("docs/prd/12-add-a-station.md")
     _git("merge", "-q", "--ff-only", "origin/main", cwd=repo)
     monkeypatch.setattr(sdlc, "ROOT", repo)
     plan = tmp_path / "plan.json"
