@@ -274,7 +274,8 @@ and **Next:** is `/plan-issue N`. Don't post a demo meanwhile: `demo-post` waits
 `main` gets the milestone now, as one merge commit of `epic/N`. Every step is a
 tool step; never merge or push by hand.
 
-0. **Is it already on `main`?** Run `uv run python tools/sdlc.py ship N --dry-run` first. If it says
+0. **Is it already on `main`?** Run `ship N --dry-run` first (from the primary checkout after
+   `git -C <PRIMARY> pull --ff-only`, as step 3 says). If it says
    the milestone was **built straight onto main** (before epic branches existed), there is
    nothing to sync or review: `main...epic/N` holds a *later* milestone's work, not this one,
    and Codex would judge the wrong code (`ship-review` refuses it). Run `ship N` (it records a
@@ -331,14 +332,18 @@ tool step; never merge or push by hand.
    Every slice was already reviewed, so this looks for what only shows up
    together. A blocking finding is a demo finding: it needs fix slices
    (`plan-issue`), never a hand edit on `epic/N`.
-3. **Ship:**
+3. **Ship**, from the primary checkout, on `main`, up to date:
 
    ```bash
-   uv run python tools/sdlc.py ship N --dry-run
-   uv run python tools/sdlc.py ship N
+   git -C <PRIMARY> pull --ff-only
+   cd <PRIMARY> && uv run python tools/sdlc.py ship N --dry-run
+   cd <PRIMARY> && uv run python tools/sdlc.py ship N
    ```
 
-   It refuses unless the milestone is accepted, `epic/N` contains `main`, a passing
+   `ship` runs only `origin/main`'s gate code, as `merge` does: before it reads or writes
+   anything it refuses unless the running gate files (`tools/sdlc.py`, `tools/sdlc_quick.py`,
+   `tools/codex_review.py`, `tools/codex_eval.py`) match `origin/main`'s byte for byte, which in practice means the primary checkout after the pull
+   (never a worktree). The refusal says how to fix it. It refuses unless the milestone is accepted, `epic/N` contains `main`, a passing
    run and Codex's approval are recorded on its current head, and no slice of a
    milestone that isn't accepted is on it. Then it opens a pull request
    `epic/N -> main` and merges it with a **merge commit**, so each slice stays one
