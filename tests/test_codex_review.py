@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from tools import codex_review
-from tests.fake_codex import APPROVES, NO_VERDICT, SETTINGS, install, no_real_codex_home  # noqa: F401
+from tests.fake_codex import APPROVES, NO_VERDICT, QUICK, SETTINGS, install, no_real_codex_home  # noqa: F401
 from tests.test_sdlc_review import Codex
 
 FIX = Path(__file__).resolve().parent / "fixtures" / "codex_limit"
@@ -37,12 +37,12 @@ def repo(tmp_path, monkeypatch):
     return primary
 
 
-def review(tmp_path, monkeypatch, wt, *steps, target="pr 50"):
+def review(tmp_path, monkeypatch, wt, *steps, target="pr 50", settings=SETTINGS):
     log, _, _ = install(tmp_path, monkeypatch, steps)
     (tmp_path / "scratch").mkdir(exist_ok=True)
     lines = []
     status, report = codex_review.run_review(["codex", "exec", "the prompt"], wt, git(wt, "rev-parse", "HEAD"),
-                                             tmp_path / "scratch", SETTINGS, log=lines.append, target=target)
+                                             tmp_path / "scratch", settings, log=lines.append, target=target)
     return status, report, "\n".join(lines), log
 
 
@@ -89,6 +89,23 @@ def test_another_cant_run_cause_gives_no_record(tmp_path, monkeypatch, repo, ste
     status, _, out, log = review(tmp_path, monkeypatch, repo, step)
     assert status == codex_review.UNAVAILABLE and len(log.read_text().splitlines()) == 2   # retried as before
     assert limits(repo) == [] and "codex-limit:" not in out
+
+
+def test_a_timeout_whose_stderr_quotes_the_limit_gives_no_record(tmp_path, monkeypatch, repo):
+    """Codex echoing a fixture (a tool's output) at column 0, then timing out before any `task_complete`."""
+    step = {"stderr": str(FIX / "stderr_limit_at.txt"), "sleep": 5, "out": "VERDICT: approve\n"}
+    status, _, out, log = review(tmp_path, monkeypatch, repo, step, settings=QUICK)
+    assert status == codex_review.UNAVAILABLE and len(log.read_text().splitlines()) == 2   # retried as before
+    assert limits(repo) == [] and "codex-limit:" not in out and "timed out" in out
+
+
+def test_only_this_attempts_evidence_counts(tmp_path, monkeypatch, repo):
+    """Attempt 1 quotes the limit on stderr and ends normally; attempt 2 really hits it, on stderr only."""
+    quoted = {**NO_VERDICT, "stderr": str(FIX / "stderr_quoted.txt"), "rollout": str(FIX / "rollout_quoted.jsonl")}
+    status, _, out, log = review(tmp_path, monkeypatch, repo, quoted, {"stderr": str(FIX / "stderr_limit_none.txt")})
+    assert status == codex_review.UNAVAILABLE and len(log.read_text().splitlines()) == 2
+    (rec,) = limits(repo)
+    assert rec["reset"] is None and "codex-limit: reset=none" in out.splitlines()
 
 
 def test_an_approving_run_that_quotes_the_limit_gives_no_record(tmp_path, monkeypatch, repo):

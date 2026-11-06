@@ -497,10 +497,15 @@ LIMITS_LOG = Path("logs") / "sdlc_watch" / "codex_limits.jsonl"
 RUN_ID_ENV = "TWIDDLE_SDLC_WATCH_RUN_ID"
 
 
-def rollout_events(home: Path) -> list[dict[str, Any]]:
-    """Every `task_complete` event's payload in a run's rollout under its `CODEX_HOME` (`sessions/**/rollout-*.jsonl`)."""
+def rollouts(home: Path) -> set[Path]:
+    """The rollout files under a run's `CODEX_HOME` (`sessions/**/rollout-*.jsonl`)."""
+    return set((home / "sessions").glob("**/rollout-*.jsonl"))
+
+
+def rollout_events(files: set[Path]) -> list[dict[str, Any]]:
+    """Every `task_complete` event's payload in these rollout files."""
     out = []
-    for f in sorted((home / "sessions").glob("**/rollout-*.jsonl")):
+    for f in sorted(files):
         try:
             lines = f.read_text(errors="replace").splitlines()
         except OSError:
@@ -516,11 +521,13 @@ def rollout_events(home: Path) -> list[dict[str, Any]]:
     return out
 
 
-def usage_limit(home: Path, err: Path) -> str | None:
-    """The message of Codex's usage limit ("" for none given), if that is what stopped this run: a rollout
+def usage_limit(home: Path, err: Path, before: tuple[set[Path], int] = (set(), 0)) -> str | None:
+    """The message of Codex's usage limit ("" for none given), if that is what stopped this attempt: a rollout
     `task_complete` event with `error.codex_error_info` `usage_limit_exceeded`; only when the rollout holds no
-    `task_complete` at all, a stderr line starting `ERROR: `. None otherwise."""
-    done = rollout_events(home)
+    `task_complete` at all, a stderr line starting `ERROR: `. None otherwise. `before`: the rollout files and the
+    size of `err` before the attempt (`attempt_mark`), so only this attempt's own evidence is read."""
+    seen, offset = before
+    done = rollout_events(rollouts(home) - seen)
     for p in reversed(done):
         e = p.get("error")
         if isinstance(e, dict) and e.get("codex_error_info") == LIMIT_INFO:
@@ -528,11 +535,22 @@ def usage_limit(home: Path, err: Path) -> str | None:
     if done:      # the run ended some other way: a limit message on stderr is only quoted
         return None
     try:
-        text = err.read_text(errors="replace")
+        with err.open("rb") as f:
+            f.seek(offset)
+            text = f.read().decode(errors="replace")
     except OSError:
         return None
     m = LIMIT_LINE_RE.search(text)
     return m.group(1).strip() if m else None
+
+
+def attempt_mark(home: Path, err: Path) -> tuple[set[Path], int]:
+    """What `usage_limit` should skip: the rollout files and stderr already there before an attempt."""
+    try:
+        size = err.stat().st_size
+    except OSError:
+        size = 0
+    return rollouts(home), size
 
 
 def local_now(now: dt.datetime | None = None) -> dt.datetime:
@@ -696,6 +714,7 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
             return UNAVAILABLE, None
         for attempt in range(1, ATTEMPTS + 1):
             raw = scratch / f"codex-{attempt}.out"
+            mark = attempt_mark(Path(env["CODEX_HOME"]), err)
             try:
                 output = run_once(cmd, wt, raw, err, timeout, env)
             except CannotStart as exc:
@@ -707,13 +726,14 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
             if dirty := dirty_files(wt):
                 raise ReviewError("the worktree changed while Codex ran (" + ", ".join(dirty[:8])
                                   + "): it didn't review the pushed head, so no report was saved. Restore it and run again")
+            if output is None:   # a limit stops Codex at once: a timeout is never one (its stderr may quote one)
+                log(f"attempt {attempt}: Codex timed out after {timeout:g}s")
+                continue
             try:
-                if output is None:
-                    raise ReviewError(f"Codex timed out after {timeout:g}s")
                 parse_verdict(output)
             except ReviewError as exc:
                 log(f"attempt {attempt}: {exc}")
-                if (limit := usage_limit(Path(env["CODEX_HOME"]), err)) is not None:
+                if (limit := usage_limit(Path(env["CODEX_HOME"]), err, mark)) is not None:
                     record_limit(wt, target, limit, log)
                     log(f"Codex can't run: its usage limit (exit {UNAVAILABLE}). The end of {err}:\n{tail(err)}")
                     return UNAVAILABLE, None
