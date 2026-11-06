@@ -940,20 +940,43 @@ def test_no_other_file_lends_the_planted_line_however_its_name_is_written(fx):
         report = f"1. **blocking** {ref} {kw}; `{name}` is otherwise fine.\n\nVERDICT: changes\n"
         assert not codex_eval.score(fx, report).hit, report
     # a slot where a name sits, empty or holding no file's name, keeps the line from the file before it
-    for words in (f"{name}, line {n} of [](x)", f"{name} line {n} in ``", f"{name} line {n} (see [here](x))"):
+    for words in (f"{name}, line {n} of [](x)", f"{name} line {n} in ``", f"{name} line {n} (see [here](x))",
+                  f"{name} line {n} in ` `"):
         report = f"1. **blocking** {words}: {kw}\n\nVERDICT: changes\n"
         assert not codex_eval.score(fx, report).hit, report
     # but words alone never do (#179): with no file and no slot after it in its clause, the line is the file's before
     assert codex_eval.score(fx, f"1. **blocking** {name}, line {n} of: {kw}\n\nVERDICT: changes\n").hit
-    # a file named later in the clause makes the citation ambiguous, and a words-first line goes no further than one
-    # word (Codex round 1 on #374): the line is no file's
+    # a file named further on in the clause makes the citation ambiguous (Codex round 1 on #374): the line is no file's
     for report in (f"1. **blocking** tests/test_{name} line {n} is fine, but {name} has an {kw} error\n\nVERDICT: changes\n",
                    f"1. **blocking** line {n} is fine, but {name} has an {kw} error\n\nVERDICT: changes\n",
-                   f"1. **blocking** `other.py` line {n} of `{name}`: {kw}\n\nVERDICT: changes\n"):
+                   f"1. **blocking** {name} line {n} calls `newest_v2`, {kw}\n\nVERDICT: changes\n",
+                   f"1. **blocking** {name} line {n} calls (helper), {kw}\n\nVERDICT: changes\n"):
         assert not codex_eval.score(fx, report).hit, report
+    # two files around one line is ambiguous whatever the words between (#179): the line is neither's
+    for words in (f"`other.py` line {n} of `{name}`", f"other.py line {n} see {name}", f"other.py line {n} {name}"):
+        report = f"1. **blocking** {words}: {kw}\n\nVERDICT: changes\n"
+        assert not codex_eval.score(fx, report).hit, report
+    # written words first, a file one word on (or none) takes the line; and the same name again is no rival
+    for words in (f"line {n} of `{name}`", f"line {n} see {name}", f"line {n} — {name}",
+                  f"{name} line {n} is wrong, as `{name}` shows", f"{name} line {n} of ``{name}``",
+                  f"{name} line {n} of [{name}][1]"):
+        report = f"1. **blocking** {words}: {kw}\n\nVERDICT: changes\n"
+        assert codex_eval.score(fx, report).hit, report
+    # a plain word or `_emphasis_` names no file by its position alone (#179 drops the words that once told): a line
+    # handed to one, unmarked, stays with the file before it; quoted, emphasized or bracketed, it is set apart as a
+    # name is, and takes the line away
+    for target in ("Makefile", "_Makefile_"):
+        assert codex_eval.score(fx, f"1. **blocking** {name} line {n} of {target}: {kw}\n\nVERDICT: changes\n").hit, target
+    for target in ('"Makefile"', "'Makefile'", "\u201cMakefile\u201d", "**Makefile**", "*Makefile*", "<Makefile>", "(Makefile)",
+                   "[Makefile][1]"):
+        report = f"1. **blocking** {name} line {n} of {target}: {kw}\n\nVERDICT: changes\n"
+        assert not codex_eval.score(fx, report).hit, report
+    # code of several tokens in one span is code, not a name; one identifier alone in a span could be a file's
+    assert codex_eval.score(fx, f"1. **blocking** {name} line {n} calls `rooms_api.set_mute(args.room, muted)`, {kw}\n\nVERDICT: changes\n").hit
+    assert not codex_eval.score(fx, f"1. **blocking** {name} line {n} calls `rooms_api.set_mute`, {kw}\n\nVERDICT: changes\n").hit
     # a name written as a path, or alone in a code span, could be a file's whatever its shape
     for target in ("`./Makefile`", "./Makefile", "`Makefile`", "docs/Makefile", "[Makefile](Makefile)",
-                   "[Makefile](<Makefile>)", "[Makefile]( Makefile )"):
+                   "[Makefile](<Makefile>)", "[Makefile]( Makefile )", "` Makefile `", "`` Makefile ``", "` ./Makefile `"):
         report = f"1. **blocking** {name} line {n} of {target}: {kw}\n\nVERDICT: changes\n"
         assert not codex_eval.score(fx, report).hit, report
     # a file in the sentence before is in no clause of the line's (Codex round 2 on #374): it neither competes for the
