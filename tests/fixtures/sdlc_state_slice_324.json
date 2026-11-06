@@ -1,0 +1,36 @@
+{
+  "number": 324,
+  "title": "#263 T0.1: A person's approval counts only if their `/approve` is really there",
+  "epic": 263,
+  "key": "T0.1",
+  "state": "merged",
+  "complexity": "judgment",
+  "claim": {
+    "branch": "slice/324",
+    "url": "https://github.com/jeromebanks/twiddle/issues/324#issuecomment-6612975083",
+    "at": "2026-11-03T19:06:30Z",
+    "model": "opus"
+  },
+  "unmet": [],
+  "pr": 333,
+  "pr_state": "MERGED",
+  "head": "23d54ba9c9107345a946f2f7c6881114d115c17a",
+  "tests_on_head": {
+    "sha": "23d54ba9c9107345a946f2f7c6881114d115c17a",
+    "result": "pass",
+    "passed": "5976",
+    "url": "https://github.com/jeromebanks/twiddle/pull/333#issuecomment-6613648704"
+  },
+  "review_on_head": {
+    "sha": "23d54ba9c9107345a946f2f7c6881114d115c17a",
+    "verdict": "approve",
+    "round": "1",
+    "url": "https://github.com/jeromebanks/twiddle/pull/333#issuecomment-6613523387"
+  },
+  "deferred_on_head": false,
+  "pr_rounds": 0,
+  "merge_due": false,
+  "next": "`uv run python tools/sdlc.py state 263` (the epic's next)",
+  "model": "opus",
+  "review": "slice"
+}

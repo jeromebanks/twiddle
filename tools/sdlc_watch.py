@@ -8,6 +8,7 @@ where, and the commands a person uses to hold it back.
     uv run python tools/sdlc_watch.py status            # read-only: the record as it stands
     uv run python tools/sdlc_watch.py pause [N]         # all issues, or one
     uv run python tools/sdlc_watch.py resume [N]
+    uv run python tools/sdlc_watch.py poll --dry-run    # one GitHub check: what came into care, what would run
 
 **One state root for every checkout.** The record and the log live in the *primary*
 checkout's `logs/sdlc_watch/`, found from `git rev-parse --git-common-dir` run where this
@@ -402,6 +403,44 @@ def render_status(record: dict[str, Any] | None, root: Path) -> str:
     return "\n".join(lines)
 
 
+# --- one poll (T1.2: change detection and intake; the loop that runs steps is T1.6's) ------
+
+def _github_module():
+    """tools/sdlc_watch_github.py, imported only by a poll: it imports tools/sdlc.py."""
+    try:
+        from tools import sdlc_watch_github     # imported as tools.sdlc_watch (the tests)
+    except ImportError:
+        import sdlc_watch_github                # run as tools/sdlc_watch.py
+    return sdlc_watch_github
+
+
+def poll_dry_run(where: Path | None = None, state: Any = None) -> str:
+    """One poll that starts nothing: probe GitHub, take in what a person did, and say what would run.
+
+    It writes nothing to GitHub. It does write the watcher's own record, like any poll: the first poll
+    is the start (`start`: the start time and the pin), and the ETags, watermarks and care set it read
+    are kept, so the next poll is answered "not modified" when nothing changed. A failed read writes none of it."""
+    gw = _github_module()
+    root = state_root(where)
+    checkout = checkout_root(where)
+    record = start(where)
+    config = gw.sdlc.load_config(checkout / CONFIG_PATH)
+    repo = config.get("repository") or gw.sdlc.repo_of(config)
+    try:
+        out = gw.poll(record, repo, config, checkout, lambda n: is_paused(record, n), state=state)
+    except (gw.GitHubError, gw.sdlc.SdlcError) as exc:
+        log(root, "poll", dry_run=True, outcome="error", detail=str(exc))
+        raise WatchError(str(exc)) from None
+    with locked(root):   # only this poll's fields: a pause written meanwhile is kept
+        fresh = read_record(root) or record
+        fresh["github"], fresh["care"] = out["github"], out["care"]
+        write_record(root, fresh)
+    log(root, "poll", dry_run=True, outcome="ok", requests=out["requests"], changed=out["changed"],
+        joined=sorted(out["joined"]), left=sorted(out["left"]), truncated=out["truncated"],
+        would_run=[{"issue": d["issue"], "next": d["run"]} for d in out["decisions"] if d.get("run") is not None])
+    return gw.render(out, dry_run=True)
+
+
 # --- command line -----------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
@@ -411,6 +450,9 @@ def main(argv: list[str] | None = None) -> int:
     for name, words in (("pause", "start no new run"), ("resume", "lift a pause")):
         p = sub.add_parser(name, help=f"{words}: all issues, or one")
         p.add_argument("issue", nargs="?", type=int, help="one issue (default: all)")
+    p = sub.add_parser("poll", help="check GitHub once and say what would run (T1.6 runs it)")
+    p.add_argument("--dry-run", action="store_true", required=True,
+                   help="start nothing; writes only the watcher's record (start time, ETags, care)")
     args = parser.parse_args(argv)
     issue = getattr(args, "issue", None)
     if issue is not None and issue <= 0:
@@ -426,6 +468,9 @@ def main(argv: list[str] | None = None) -> int:
             record = read_record(root)
             log(root, "command", command="status", outcome="ok")
             print(render_status(record, root))
+            return 0
+        if args.cmd == "poll":
+            print(poll_dry_run())
             return 0
         try:
             refuse_in_watch_run()

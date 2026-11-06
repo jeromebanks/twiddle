@@ -471,12 +471,15 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
     review_owed = L.review_owed
     untested = L.untested
 
-    replies = [c for c in ordered[last_marked + 1:] if c.get("id") not in marked_ids]
+    # a plain agent note (unmarked, under the owner's login, titled like the agent's comments) is nobody's reply
+    replies = [c for c in ordered[last_marked + 1:]
+               if c.get("id") not in marked_ids and not is_agent_note(c.get("body", ""))]
     allowed = trusted | {issue.get("author", "")}
     if request:   # what the person who ran the steps said, since the request (a later agent comment doesn't hide it)
         request["replies"] = [{"id": c.get("id"), "by": c.get("author"), "url": c.get("url")}
                               for c in ordered[request["index"] + 1:]
-                              if c.get("id") not in marked_ids and c.get("author") in allowed]
+                              if c.get("id") not in marked_ids and c.get("author") in allowed
+                              and not is_agent_note(c.get("body", ""))]
     decision: dict[str, Any] | None = None
     ignored: list[dict[str, str]] = []
     for c in replies:
@@ -1638,6 +1641,14 @@ def approval_links(bundle: dict[str, Any], st: dict[str, Any]) -> tuple[dict[str
 
 
 BOT_TITLE_RE = re.compile(r"\A> 🤖 \*\*[^*\n]*\*\* — [^\n]*\n")
+
+
+def is_agent_note(body: str | None) -> bool:
+    """Whether an unmarked comment is the agent's own plain note: its first line is the agent's title,
+    `> 🤖 **<name>** — ...` (BOT_TITLE_RE). It is posted under the maintainer's login, so it would otherwise
+    pass for a person: `derive_state`'s replies and the watcher's intake (#263 T1.2) both leave it out."""
+    text = (body or "").replace("\r\n", "\n")
+    return BOT_TITLE_RE.match(text if text.endswith("\n") else text + "\n") is not None
 
 
 def render_prd_file(n: int, title: str, bundle: dict[str, Any], st: dict[str, Any], repo: str) -> str:
