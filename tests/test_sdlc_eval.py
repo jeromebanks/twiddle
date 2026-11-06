@@ -322,27 +322,33 @@ def test_every_file_a_review_reads_is_an_input_or_excluded_on_purpose():
     assert "review-rules.md" in {n.rsplit("/", 1)[-1] for n in named} and "CLAUDE.md" in named
 
 
+# path-shaped tokens a prompt may name that are git's, not files: each one listed here, by hand, so no shape rule can
+# wave a real file through
+GIT_NOT_FILES = {"origin/main..HEAD": "the milestone prompt's revision range"}
+
+
 def paths_named(text):
     """Every backticked token that looks like a path, whatever its extension (#174): it holds a `/` or ends in an
-    extension, and isn't a `<placeholder>`. A revision range (`origin/main..HEAD`, `a...b`: dots between two names)
-    is git's, not a file; `../x.txt` is a file."""
+    extension (`.txt`, `.1`, `.c++`), and isn't a `<placeholder>`."""
     return {tok for tok in re.findall(r"`([^`\s]+)`", text)
-            if "<" not in tok and not re.search(r"[^./]\.{2,3}[^./]", tok) and ("/" in tok or re.search(r"\.[A-Za-z]\w*$", tok))}
+            if "<" not in tok and ("/" in tok or re.search(r"\.[^./]+$", tok))}
 
 
 def uncovered(text, files):
-    """What `text` names that is neither an input (by its path or its file name) nor excluded on purpose."""
+    """What `text` names that is neither an input (by its path or its file name), excluded on purpose nor git's."""
     basenames = {f.rsplit("/", 1)[-1] for f in files}
-    return sorted(t for t in paths_named(text) if t not in files and t not in basenames and t not in codex_eval.EXCLUDED)
+    return sorted(t for t in paths_named(text)
+                  if t not in files and t not in basenames and t not in codex_eval.EXCLUDED and t not in GIT_NOT_FILES)
 
 
 def test_a_prompt_naming_a_file_of_any_kind_that_is_not_an_input_fails_the_coverage_check():
     files = set(codex_eval.FILES)
     text = ("Read `.agents/skills/review-rules.md` and `.agents/skills/extra-rules.txt`, then `.agents/skills/extra/rules`,"
-            " `notes.cfg`, `../extra-rules.txt` and `CLAUDE.md`; diff `origin/main..HEAD` and `main...HEAD` against"
-            " `<base>/x.py`, and say `VERDICT: approve`.")
+            " `notes.cfg`, `../extra-rules.txt`, `review.1`, `rules.c++`, `.agents/skills/rules..txt` and `CLAUDE.md`;"
+            " diff `origin/main..HEAD` against `<base>/x.py`, and say `VERDICT: approve`.")
     assert uncovered(text, files) == ["../extra-rules.txt", ".agents/skills/extra-rules.txt", ".agents/skills/extra/rules",
-                                      "notes.cfg"]
+                                      ".agents/skills/rules..txt", "notes.cfg", "review.1", "rules.c++"]
+    assert uncovered("diff `main...HEAD`", files) == ["main...HEAD"]     # only a range listed in GIT_NOT_FILES is git's
     assert {".agents/skills/review-rules.md", "CLAUDE.md"} <= paths_named(text)
 
 
@@ -939,6 +945,16 @@ def test_no_other_file_lends_the_planted_line_however_its_name_is_written(fx):
         assert not codex_eval.score(fx, report).hit, report
     # but words alone never do (#179): with no file and no slot after it in its clause, the line is the file's before
     assert codex_eval.score(fx, f"1. **blocking** {name}, line {n} of: {kw}\n\nVERDICT: changes\n").hit
+    # a file named later in the clause makes the citation ambiguous, and a words-first line goes no further than one
+    # word (Codex round 1 on #374): the line is no file's
+    for report in (f"1. **blocking** tests/test_{name} line {n} is fine, but {name} has an {kw} error\n\nVERDICT: changes\n",
+                   f"1. **blocking** line {n} is fine, but {name} has an {kw} error\n\nVERDICT: changes\n",
+                   f"1. **blocking** `other.py` line {n} of `{name}`: {kw}\n\nVERDICT: changes\n"):
+        assert not codex_eval.score(fx, report).hit, report
+    # a name written as a path, or alone in a code span, could be a file's whatever its shape
+    for target in ("`./Makefile`", "./Makefile", "`Makefile`", "docs/Makefile", "[Makefile](Makefile)"):
+        report = f"1. **blocking** {name} line {n} of {target}: {kw}\n\nVERDICT: changes\n"
+        assert not codex_eval.score(fx, report).hit, report
     # code made of plain words, numbers and punctuation names no file, so it takes nothing
     assert codex_eval.score(fx, f"1. **blocking** `{name}` line {n} returns `entries[-(limit + 1):]`, {kw}\n\nVERDICT: changes\n").hit
     # and a file named after the clause has ended takes nothing from it

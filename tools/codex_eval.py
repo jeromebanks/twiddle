@@ -391,19 +391,22 @@ TOKEN_RE = re.compile(rf"[^{re.escape(SEPARATORS)}]+")
 # a line written onto its file: `f.py:12`, `f.py#L12-L14`, `f.py(12)`
 TIGHT = re.compile(rf"[`*_]*[:#(]\s*{RANGE}", re.IGNORECASE)
 # a line written after it in words: `` `f.py` line 12 ``, `f.py (lines 12-14)`, `f.py, L12`, `f.py at line 12`.
-# Whatever the words, the clause decides (#179): the first thing after the line, in the same clause, that could name
-# a file takes it (`f.py, line 12 of g.py`, `f.py line 12, over in g.py`, `line 12 of f.py`); only when nothing
-# could does the token before it. A clause runs to `;`, `:`, `!`, `?`, a line's end or a full stop before a space;
-# commas, dashes and brackets stay inside it.
+# Whatever the words, the clause decides (#179): the token before the line takes it only when nothing after it, in the
+# same clause, could name a file. When something could (`f.py, line 12 of g.py`, `f.py line 12, over in g.py`,
+# `f.py line 12 is fine, but g.py ...`), the citation is ambiguous and the line is no file's. Written words first,
+# after a token that names no file, the line goes to a file one word or none after it (`line 12 of f.py`), and to
+# nothing further off. A clause runs to `;`, `:`, `!`, `?`, a line's end or a full stop before a space; commas,
+# dashes and brackets stay inside it.
 LOOSE = re.compile(rf"[\s,(`*_:]+(?:(?:at|on)\s+)?(?:lines?\s+|(?=[`*_]*L\d))\s*{RANGE}", re.IGNORECASE)
 CLAUSE_END = re.compile(r"[;:!?\n]|\.(?=\s|\Z)")
-# what can't name a file: a plain word (`off-by-one`; an apostrophe is a separator), a number, punctuation alone (the `-` and `+` of
-# `entries[-(limit + 1):]`). Anything else could: a dot, a slash, an underscore, letters and digits run together.
-# So a file named by a plain word alone (`Makefile`) takes no line from the file before it; every fixture's file
-# name holds a `_` or a `.`, so none is named that way.
-PLAIN = re.compile(r"[^\W\d_]+(?:-[^\W\d_]+)*|\d+|[^\w]+")
-# the slots a name sits in, whatever is in them, so either one takes the line: a link's target (`[x](y)`, in
-# `_could_name_a_file`) and an empty code span, which gives it to no file
+# what can't name a file: a plain word (`off-by-one`; an apostrophe is a separator), a number, punctuation alone (the
+# `-` and `+` of `entries[-(limit + 1):]`). Anything else could: a dot, a slash, an underscore, letters and digits run
+# together. So could a token written as a path (`./Makefile`) or in a slot a name sits in, whatever it is: a link's
+# target (`[x](y)`) or a whole code span (`` `Makefile` ``). Only a plain word in running prose (Makefile) never
+# could; every fixture's file name holds a `_` or a `.`, so none is named that way.
+WORD = re.compile(r"[^\W\d_]+(?:-[^\W\d_]+)*")
+PLAIN = re.compile(rf"{WORD.pattern}|\d+|[^\w]+")
+# an empty code span is a slot with no name in it: a line given to it is no file's
 EMPTY_CODE = re.compile(r"``")
 WIDEST = 10                            # a wider range (`f.py:1-200`) points at no line in particular
 
@@ -431,35 +434,44 @@ def _is(token: str, path: str) -> bool:
                             or (token.startswith("/") and token.endswith("/" + path)))
 
 
-def _could_name_a_file(text: str, token: str, start: int) -> bool:
-    return not PLAIN.fullmatch(token) or text.endswith("](", 0, start)
+def _could_name_a_file(text: str, tok: tuple[str, int, int]) -> bool:
+    token, start, end = tok
+    return (not PLAIN.fullmatch(token) or text.startswith("./", start) or text.endswith("](", 0, start)
+            or (text.endswith("`", 0, start) and text.startswith("`", end)))
 
 
-def _taker(text: str, toks: list[tuple[str, int, int]], after: int, before: str) -> str:
-    """Whose a loose line is: the first thing from `after` to the clause's end that could name a file (an empty
-    slot names none), else `before`, the token the line was written after. A token the line's number runs into
-    (`line 14 — 4probe.py`, read as lines 4-14) is the first thing after it."""
+def _taker(text: str, toks: list[tuple[str, int, int]], after: int, before: tuple[str, int, int]) -> str:
+    """Whose a loose line is, the line ending at `after` and written after the token `before`: that token's when
+    nothing to the clause's end could name a file; no file's when something could and `before` could too (or an
+    empty slot comes first); else the first thing that could, if one word or none comes between. A token the line's
+    number runs into (`line 14 — 4probe.py`, read as lines 4-14) is the first thing after it."""
     stop = c.start() if (c := CLAUSE_END.search(text, after)) else len(text)
     empty = e.start() if (e := EMPTY_CODE.search(text, after, stop)) else stop
-    for token, start, end in toks:
-        if end > after and start < stop and _could_name_a_file(text, token, start):
-            return token if start < empty else ""
-    return "" if empty < stop else before
+    later = [t for t in toks if t[2] > after and t[1] < stop]
+    first = next((i for i, t in enumerate(later) if _could_name_a_file(text, t)), None)
+    if empty < (later[first][1] if first is not None else stop):
+        return ""
+    if first is None:
+        return before[0]
+    if _could_name_a_file(text, before) or first > 1 or (first == 1 and not WORD.fullmatch(later[0][0])):
+        return ""
+    return later[first][0]
 
 
 def lines_named(text: str, path: str) -> list[tuple[int, int]]:
     """(first, last) for every line or line range written right after `path`: `base.py:12`, `base.py#L12-L14`,
     `` `base.py` line 12 ``, or given to it in words (`line 12 of base.py`). A line written in words belongs to the
-    first thing after it in its clause that could name a file, and to the file before it only when there is none
-    (`_taker`). A line written anywhere else is never credited to it, nor a range wider than `WIDEST`."""
+    file before it only when nothing after it in its clause could name a file (`_taker`). A line written anywhere
+    else is never credited to it, nor a range wider than `WIDEST`."""
     text = _unemphasized(text)
     toks = _tokens(text)
     found = []
-    for token, _, end in toks:
+    for tok in toks:
+        token, _, end = tok
         if m := TIGHT.match(text, end):
             owner = token
         elif m := LOOSE.match(text, end):
-            owner = _taker(text, toks, m.end(), token)
+            owner = _taker(text, toks, m.end(), tok)
         else:
             continue
         a = int(m.group(1))
