@@ -823,7 +823,11 @@ def local_now(now: dt.datetime | None = None) -> dt.datetime:
 
 def parse_reset(message: str, now: dt.datetime | None = None) -> dt.datetime | None:
     """When the limit resets, from "try again at 8:36 PM" (local time: its next occurrence after `now`), as an
-    aware datetime; None for any other shape, or none at all."""
+    aware datetime; None for any other shape, or none at all.
+
+    The arithmetic is on the wall clock, and the offset is the reset's own: a naive `now` (the default, this
+    machine's local time) is resolved by `.astimezone()` at the reset, an aware one keeps its `tzinfo` (a
+    `ZoneInfo` gives each date its own offset). Never today's fixed offset, which is an hour off across a DST change."""
     m = RESET_RE.search(message or "")
     if not m:
         return None
@@ -831,9 +835,11 @@ def parse_reset(message: str, now: dt.datetime | None = None) -> dt.datetime | N
     if not (1 <= hour <= 12 and minute < 60):
         return None
     hour = hour % 12 + (12 if m.group(3).upper() == "PM" else 0)
-    now = local_now(now)
+    now = now or dt.datetime.now()
     at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    return at if at > now else at + dt.timedelta(days=1)
+    if at <= now:
+        at += dt.timedelta(days=1)
+    return at if at.tzinfo else at.astimezone()
 
 
 def primary_checkout(cwd: Path) -> Path:
@@ -849,9 +855,9 @@ def record_limit(cwd: Path, target: str | None, message: str, log=print,
     {ts, target, reset, run_id} to the primary checkout's `logs/sdlc_watch/codex_limits.jsonl`. `target` names the
     step that needed Codex (`pr <N>`, `plan <N>`, `milestone <N> <key>`); `run_id` is the watcher run's, or null.
     A record that can't be written is warned about; the line is printed either way."""
-    now = local_now(now)
+    now = now or dt.datetime.now()
     reset = parse_reset(message, now)
-    rec = {"ts": now.isoformat(timespec="seconds"), "target": target,
+    rec = {"ts": local_now(now).isoformat(timespec="seconds"), "target": target,
            "reset": reset.isoformat(timespec="seconds") if reset else None,
            "run_id": os.environ.get(RUN_ID_ENV) or None}
     try:

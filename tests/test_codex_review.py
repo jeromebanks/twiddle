@@ -163,6 +163,29 @@ def test_the_reset_time_is_the_next_time_of_day_it_names(message, now, want):
     assert codex_review.parse_reset(message, now) == want
 
 
+@pytest.fixture
+def los_angeles(monkeypatch):
+    """This machine's local time is Los Angeles'."""
+    import time
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_a_reset_across_a_dst_change_takes_that_dates_offset(los_angeles, tmp_path, repo):
+    from zoneinfo import ZoneInfo
+    before_fallback = dt.datetime(2026, 10, 31, 23, 0)                  # local, PDT (-07:00)
+    want = "2026-11-01T20:36:00-08:00"                                  # PST: the clocks went back that morning
+    assert codex_review.parse_reset("try again at 8:36 PM", before_fallback).isoformat() == want
+    la = ZoneInfo("America/Los_Angeles")
+    assert codex_review.parse_reset("try again at 8:36 PM", before_fallback.replace(tzinfo=la)).isoformat() == want
+    rec = codex_review.record_limit(repo, "pr 1", "try again at 8:36 PM", lambda line: None, now=before_fallback)
+    assert rec["reset"] == want and rec["ts"] == "2026-10-31T23:00:00-07:00"
+    assert limits(repo)[-1]["reset"] == want
+
+
 def test_a_record_that_cannot_be_written_still_prints_the_line(tmp_path, monkeypatch, repo):
     (repo / "logs").write_text("a file where the directory would go")
     lines = []
