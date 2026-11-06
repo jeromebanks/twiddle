@@ -194,12 +194,24 @@ def check_paths(primary: Path, scratch: Path) -> None:
         raise WatchCmdError(f"the scratch dir {scratch} must be outside the primary checkout {primary}")
 
 
+def slice_place(primary: Path, issue: int, worktree: Path | None, branch: str | None) -> tuple[Path, str]:
+    """The run's slice worktree and branch: `.worktrees/slice-N` and `slice/N`, or what a debt group's validated
+    claim recorded (a resume through another member keeps the group's), checked to be a slice's."""
+    wt = worktree or primary / ".worktrees" / f"slice-{issue}"
+    br = branch or f"slice/{issue}"
+    m = re.fullmatch(r"slice/(\d+)", br)
+    if not m or wt != primary / ".worktrees" / f"slice-{m[1]}":
+        raise WatchCmdError(f"not a slice's worktree and branch: {wt} on {br!r}")
+    return wt, br
+
+
 def build_rules(tools: dict[str, Any], issue: int, *, primary: Path, scratch: Path, demo_shot: bool,
-                epic: int | None = None) -> Rules:
-    """The run's rules: `issue` is the one its command names, `epic` the epic in care (None: its rules dropped)."""
+                epic: int | None = None, worktree: Path | None = None, branch: str | None = None) -> Rules:
+    """The run's rules: `issue` is the one its command names, `epic` the epic in care (None: its rules dropped),
+    `worktree`/`branch` a debt group's recorded ones (None: the issue's own)."""
     check_paths(primary, scratch)
-    values = {"PRIMARY": str(primary), "SCRATCH": str(scratch), "N": str(issue),
-              "WORKTREE": str(primary / ".worktrees" / f"slice-{issue}")}
+    wt, br = slice_place(primary, issue, worktree, branch)
+    values = {"PRIMARY": str(primary), "SCRATCH": str(scratch), "N": str(issue), "WORKTREE": str(wt), "BRANCH": br}
     bash = [fill(r, values) for r in tools["bash"] + tools["bash_per_issue"]]
     if epic is not None:
         bash += [fill(r, {**values, "E": str(epic)}) for r in tools["bash_per_epic"]]
@@ -216,13 +228,15 @@ def build_rules(tools: dict[str, Any], issue: int, *, primary: Path, scratch: Pa
 
 
 def build_argv(step: Step, tools: dict[str, Any], *, primary: Path, scratch: Path, default_model: str,
-               demo_shot: bool, epic: int | None = None) -> list[str]:
+               demo_shot: bool, epic: int | None = None, worktree: Path | None = None,
+               branch: str | None = None) -> list[str]:
     """The `claude -p` command line of a skill step, from an already-loaded tool list (`read_pinned_tools`;
     `demo_shot`: `demo_shot_matches_main`, else that one entry is dropped; `epic`: the epic in care). Runs
     nothing."""
     if step.kind != "skill" or step.issue is None:
         raise WatchCmdError(f"only a skill step runs as `claude -p` (this is {step.kind}: {step.text})")
-    rules = build_rules(tools, step.issue, primary=primary, scratch=scratch, demo_shot=demo_shot, epic=epic)
+    rules = build_rules(tools, step.issue, primary=primary, scratch=scratch, demo_shot=demo_shot, epic=epic,
+                        worktree=worktree, branch=branch)
     argv = ["claude", "-p", step.command,
             "--model", resolve_model(step, default_model),
             "--permission-mode", PERMISSION_MODE,
@@ -240,10 +254,11 @@ def build_argv(step: Step, tools: dict[str, Any], *, primary: Path, scratch: Pat
 
 
 def build_pinned_argv(step: Step, *, primary: Path, pin: str, scratch: Path, default_model: str,
-                      epic: int | None = None) -> list[str]:
+                      epic: int | None = None, worktree: Path | None = None, branch: str | None = None) -> list[str]:
     """`build_argv` over the tool list at the pin: what a watcher run uses."""
     return build_argv(step, read_pinned_tools(primary, pin), primary=primary, scratch=scratch,
-                      default_model=default_model, demo_shot=demo_shot_matches_main(primary), epic=epic)
+                      default_model=default_model, demo_shot=demo_shot_matches_main(primary), epic=epic,
+                      worktree=worktree, branch=branch)
 
 
 # --- how Claude Code matches the rules (documented semantics, for tests and status) ---------------------------
@@ -327,8 +342,8 @@ def frontmatter(text: str) -> dict[str, str]:
     m = re.match(r"---\n(.*?)\n---", text, re.S)
     out: dict[str, str] = {}
     for line in (m[1].splitlines() if m else []):
-        if km := re.match(r"([A-Za-z][\w-]*):\s*(.*)", line):
-            out[km[1]] = km[2]
+        if km := re.match(r"""["']?([A-Za-z][\w-]*)["']?:\s*(.*)""", line):
+            out[km[1]] = km[2].strip().strip("\"'")
     return out
 
 
@@ -344,8 +359,11 @@ def scan_skills(primary: Path, home: Path) -> list[str]:
             if not f.is_file():
                 errs.append(f"{f} is missing")
                 continue
-            meta = frontmatter(f.read_text(errors="replace"))
-            if "allowed-tools" in meta:
+            text = f.read_text(errors="replace")
+            meta = frontmatter(text)
+            head = re.match(r"---\n(.*?)\n---", text, re.S)
+            # any spelling (quoted key, flow style, `allowed_tools`): the block isn't parsed as YAML here
+            if re.search(r"allowed[-_]tools", head[1] if head else text[:4000], re.I):
                 errs.append(f"{f} declares allowed-tools")
             if meta.get("name") != s:
                 errs.append(f"{f} is named {meta.get('name')!r}, not {s!r}")

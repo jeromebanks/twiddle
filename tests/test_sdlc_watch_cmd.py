@@ -327,6 +327,29 @@ def test_worktree_commands():
         assert not allowed(cmd), cmd
 
 
+def test_triage_commits_and_pushes_the_prd_from_its_own_worktree():
+    prd = SCRATCH / "prd"
+    for cmd in (f"git worktree add -b prd/{ISSUE} {prd} origin/main", f"git -C {prd} add docs/prd/{ISSUE}-x.md",
+                f"git -C {prd} commit -m 'PRD for #{ISSUE}'", f"git -C {prd} push -u origin prd/{ISSUE}",
+                f"uv run python tools/sdlc.py merge-prd {ISSUE} 501", f"git worktree remove {prd}"):
+        assert allowed(cmd), cmd
+    for cmd in (f"git -C {prd} push origin main", f"git -C {prd} push -u origin prd/{ISSUE + 1}",
+                f"cd {prd} && git commit -m x"):
+        assert not allowed(cmd), cmd
+
+
+def test_a_debt_resume_through_another_member_uses_the_groups_branch():
+    wt = PRIMARY / ".worktrees" / "slice-345"
+    r = w.build_rules(TOOLS, 346, primary=PRIMARY, scratch=SCRATCH, demo_shot=True, worktree=wt, branch="slice/345")
+    for cmd in (f"git -C {wt} commit -m x", f"git -C {wt} push -u origin slice/345", "git push -u origin slice/345"):
+        assert allowed(cmd, r), cmd
+    assert not allowed("git push -u origin slice/346", r)
+    for wt_, br in ((wt, "main"), (wt, "epic/263"), (PRIMARY / ".worktrees" / "slice-9", "slice/345"),
+                    (PRIMARY, "slice/345"), (SCRATCH, "slice/345")):
+        with pytest.raises(w.WatchCmdError):
+            w.build_rules(TOOLS, 346, primary=PRIMARY, scratch=SCRATCH, demo_shot=True, worktree=wt_, branch=br)
+
+
 def test_the_epic_rules_need_an_epic():
     assert f"git rebase origin/epic/{EPIC}" in rules().bash
     assert not any("epic/" in b for b in rules(epic=None).bash if b.startswith(("git rebase", "git merge")))
@@ -591,6 +614,14 @@ def test_a_skill_declaring_allowed_tools_fails_the_scan(skills):
     primary, home = skills
     skill(primary / ".claude" / "skills" / "work-slice", "work-slice", "allowed-tools: Bash(uv run twiddle play *)\n")
     assert any("declares allowed-tools" in e for e in w.scan_skills(primary, home))
+
+
+@pytest.mark.parametrize("line", ['"allowed-tools": Bash(uv run twiddle play *)', "'allowed-tools': [Bash]",
+                                  "allowed_tools: Bash", "meta: {allowed-tools: Bash}"])
+def test_any_spelling_of_allowed_tools_fails_the_scan(skills, line):
+    primary, home = skills
+    skill(primary / ".agents" / "skills" / "work-slice", "work-slice", line + "\n")
+    assert any("declares allowed-tools" in e for e in w.scan_skills(primary, home)), line
 
 
 def test_a_skill_granting_tools_outside_the_four_doesnt_fail_but_cant_run(skills):
