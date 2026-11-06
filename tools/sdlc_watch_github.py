@@ -28,9 +28,10 @@ GitHub's 5000 an hour for an authenticated client, even if the 304s did count.
 
 - the issues and the comments updated since the last poll's watermark
   (`...?since=<watermark less 1s>&sort=updated&direction=asc&per_page=100`, at most MAX_PAGES pages each:
-  a capped read keeps the old ETag and moves the watermark to the last item read, so the next poll
-  carries on where it stopped);
-- who counts as a person: the repo's owner and its push collaborators (`sdlc.fetch_trusted`);
+  a capped read keeps the old ETag and moves the watermark to the last item read, or, when every item
+  read is in the watermark's own second, to the next page, so the next poll carries on where it stopped);
+- who counts as a person: the repo's owner and its push collaborators (`sdlc.fetch_trusted`'s rule,
+  but a failed lookup fails the poll rather than falling back to the owner alone);
 - `sdlc.py state N --json` for each issue in care. On an epic that fans out to its slices' reads,
   so a change poll costs more than a quiet one: it is bounded by the care set, which only a person
   grows.
@@ -142,23 +143,44 @@ def get_json(path: str) -> Any:
         raise GitHubError(f"gh api {path} returned no JSON ({exc})") from None
 
 
-def read_since(repo: str, name: str, since: str) -> tuple[list[dict[str, Any]], bool]:
-    """Everything of `name` updated at or after `since`, oldest first: (items, truncated at MAX_PAGES)."""
+def read_since(repo: str, name: str, since: str, first_page: int = 1) -> tuple[list[dict[str, Any]], int | None]:
+    """`name` updated at or after `since`, oldest first, from `first_page` for at most MAX_PAGES pages:
+    (items, None when the read reached the end, else the next page to read)."""
     items: list[dict[str, Any]] = []
-    for page in range(1, MAX_PAGES + 1):
+    for page in range(first_page, first_page + MAX_PAGES):
         path = f"repos/{repo}/" + SINCE[name].format(per_page=PER_PAGE, since=since, page=page)
         got = get_json(path)
         if not isinstance(got, list):
             raise GitHubError(f"gh api {path}: expected a list")
         items += got
         if len(got) < PER_PAGE:
-            return items, False
-    return items, True
+            return items, None
+    return items, first_page + MAX_PAGES
+
+
+def next_mark(since: str, items: list[dict[str, Any]], more: int | None, page: int) -> dict[str, Any]:
+    """Where the next since-read starts. A complete read: from the newest item. A capped one: from the
+    newest item read if that is a later second than `since` (progress), else the same `since` from the
+    next page, so even a run of more than a page's worth of items in one second is read to its end.
+    (Paging is by position: an item before the cut updated meanwhile moves to the end, and is read there.)"""
+    newest = latest(items, since)
+    if more is None:
+        return {"at": newest}
+    if parse_time(newest) and parse_time(since) and parse_time(newest) > parse_time(since):
+        return {"at": newest}
+    return {"at": since, "page": more}
 
 
 def fetch_trusted(config: dict[str, Any], repo: str) -> set[str]:
-    """Who is a person here: the repo's owner and its push collaborators (`sdlc.py`'s own rule)."""
-    return set(sdlc.fetch_trusted(config)) | {repo.split("/")[0]}
+    """Who is a person here: the repo's owner and its push collaborators (`sdlc.fetch_trusted`'s rule).
+    Unlike that, a failed lookup raises: falling back to the owner alone would read past a collaborator's
+    action and move the watermark beyond it, so the poll writes nothing and the next one reads it again."""
+    try:
+        rows = sdlc.gh_pages(f"repos/{repo}/collaborators")
+    except sdlc.SdlcError as exc:
+        raise GitHubError(f"cannot list collaborators: {exc}") from None
+    return {c["login"] for c in rows if isinstance(c, dict) and (c.get("permissions") or {}).get("push")} \
+        | {repo.split("/")[0]}
 
 
 # --- pure rules -------------------------------------------------------------------------
@@ -322,11 +344,12 @@ def poll(record: dict[str, Any], repo: str, config: dict[str, Any], checkout: Pa
     marks = dict(github.get("since") or {})
     reads: dict[str, list[dict[str, Any]]] = {}
     for name in SINCE:   # both, whichever probe moved: a comment's issue is in the issues read
-        since = marks.get(name) or record.get("started_at") or ""
-        reads[name], cut = read_since(repo, name, shifted(since))
-        if cut:
+        mark = marks.get(name) if isinstance(marks.get(name), dict) else {}
+        since, page = mark.get("at") or record.get("started_at") or "", int(mark.get("page") or 1)
+        reads[name], more = read_since(repo, name, shifted(since), page)
+        if more is not None:
             out["truncated"].append(name)
-        marks[name] = latest(reads[name], since)
+        marks[name] = next_mark(since, reads[name], more, page)
     trusted = fetch_trusted(config, repo)
     by_number = {i["number"]: i for i in reads["issues"] if isinstance(i.get("number"), int)}
 

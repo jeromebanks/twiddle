@@ -52,12 +52,16 @@ if rest[:1] == ["-i"]:
     sys.exit(0)
 path = rest[0]
 if "/collaborators" in path:
+    if scene.get("collaborators_fail"):
+        print("gh: HTTP 503", file=sys.stderr); sys.exit(1)
     print(json.dumps([[{"login": l, "permissions": {"push": True}} for l in scene["collaborators"]]])); sys.exit(0)
 base, _, query = path.partition("?")
 if base in scene["get"]:
     got = scene["get"][base]
-    if isinstance(got, list):   # one page of per_page, as GitHub pages it
+    if isinstance(got, list):   # updated at or after since, oldest first, one page of per_page
         q = dict(kv.split("=", 1) for kv in query.split("&") if "=" in kv)
+        if "since" in q:
+            got = sorted((g for g in got if g["updated_at"] >= q["since"]), key=lambda g: g["updated_at"])
         size, page = int(q.get("per_page", 30)), int(q.get("page", 1))
         got = got[(page - 1) * size:page * size]
     print(json.dumps(got)); sys.exit(0)
@@ -109,12 +113,13 @@ class Fakes:
         self.asked: list[int] = []
         self.scene(etags=("e-issues-1", "e-comments-1"))
 
-    def scene(self, etags, issues=(), comments=(), get=None, collaborators=(OWNER, COLLAB)):
+    def scene(self, etags, issues=(), comments=(), get=None, collaborators=(OWNER, COLLAB), fail_trust=False):
         probes = {f"repos/{REPO}/{gw.PROBES['issues']}": {"etag": f'"{etags[0]}"', "body": list(issues)[-1:]},
                   f"repos/{REPO}/{gw.PROBES['comments']}": {"etag": f'"{etags[1]}"', "body": list(comments)[-1:]}}
         gets = {f"repos/{REPO}/issues": list(issues), f"repos/{REPO}/issues/comments": list(comments), **(get or {})}
         (self.dir / "scene.json").write_text(json.dumps({"probes": probes, "get": gets,
-                                                         "collaborators": list(collaborators)}))
+                                                         "collaborators": list(collaborators),
+                                                         "collaborators_fail": fail_trust}))
         (self.dir / "calls.jsonl").write_text("")
 
     def calls(self):
@@ -258,7 +263,7 @@ def test_a_capped_read_keeps_the_old_etag_and_carries_on(repo, fakes, monkeypatc
     out = poll(repo, fakes)
     rec = record(repo)["github"]
     assert "read capped" in out and "comments" not in rec["etags"]       # no old ETag: read again next poll
-    assert rec["since"]["comments"] == "2026-11-05T12:01:00Z"             # the last item read
+    assert rec["since"]["comments"] == {"at": "2026-11-05T12:01:00Z"}     # the last item read
 
 
 # --- criterion 3: who brings an issue into care ----------------------------------------------
@@ -505,3 +510,34 @@ def test_a_debt_ticket_s_shape_never_stays_in_care():
 def test_the_since_read_reaches_back_a_second():
     assert gw.shifted("2026-11-05T12:00:00Z") == "2026-11-05T11:59:59Z"
     assert gw.shifted("2026-11-05T12:00:00+00:00") == "2026-11-05T11:59:59Z"
+
+
+def test_a_failed_collaborator_lookup_writes_nothing_and_the_comment_is_read_after(repo, fakes):
+    """Never fall back to the owner alone: that would read past a collaborator's comment for good."""
+    started(repo)
+    fakes.states[44] = epic_state(44, nxt="/triage-issue 44")
+    gets = {f"repos/{REPO}/issues/44": issue(44)}
+    fakes.scene(etags=("x", "y"), comments=[comment(44, by=COLLAB)], get=gets, fail_trust=True)
+    with pytest.raises(w.WatchError, match="collaborators"):
+        poll(repo, fakes)
+    assert record(repo).get("github") is None and record(repo)["care"] == {}
+    fakes.scene(etags=("x", "y"), comments=[comment(44, by=COLLAB)], get=gets)
+    assert "into care: #44" in poll(repo, fakes)
+
+
+@pytest.mark.parametrize("same_second", [False, True])
+def test_capped_reads_reach_the_last_comment_over_several_polls(repo, fakes, monkeypatch, same_second):
+    """A backlog bigger than a capped read: each poll carries on, by time or, within one second, by page."""
+    started(repo)
+    monkeypatch.setattr(gw, "PER_PAGE", 2)
+    monkeypatch.setattr(gw, "MAX_PAGES", 1)
+    at = (lambda i: AFTER) if same_second else (lambda i: f"2026-11-05T12:{10 + i:02d}:00Z")
+    backlog = [comment(7, by=STRANGER, at=at(i)) for i in range(7)] + [comment(45, at=at(7))]
+    fakes.states[45] = epic_state(45, nxt="/triage-issue 45")
+    gets = {f"repos/{REPO}/issues/45": issue(45)}
+    for polls in range(1, 9):
+        fakes.scene(etags=("x", "y"), comments=backlog, get=gets)
+        poll(repo, fakes)
+        if "45" in record(repo)["care"]:
+            break
+    assert "45" in record(repo)["care"] and polls <= len(backlog)   # every poll moves on
