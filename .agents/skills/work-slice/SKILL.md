@@ -210,7 +210,9 @@ It does what used to be done by hand, so don't run Codex any other way:
   latest recorded round. It refuses if that round asked for changes and has no response;
 - it refuses unless the worktree is clean and its HEAD is the PR's head;
 - it refuses, before starting Codex, a round that couldn't be recorded (the change rounds are spent: `escalate-slice`)
-  or would change nothing (Codex already approved this head: go on to `merge`); `--dry-run` refuses the same way;
+  or would change nothing (Codex already approved this head: go on to `merge`; for a quick change, that approval
+  stands only if it is recorded against the brief approved now, and one bound to an earlier brief is re-reviewed);
+  `--dry-run` refuses the same way;
 - it runs Codex with the model, reasoning effort, sandbox, flags and timeout from
   `.sdlc/config.json`'s `codex` section, never your own Codex config;
 - it fails, and saves nothing, if HEAD moved while Codex ran;
