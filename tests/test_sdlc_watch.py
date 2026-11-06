@@ -356,3 +356,19 @@ def test_a_held_lock_is_reported_after_a_bounded_wait_and_nothing_is_written(rep
     last = log_lines(repo)[-1]
     assert (last["command"], last["outcome"]) == ("pause", "error") and "held for over" in last["detail"]
     assert not (root / w.RECORD_NAME).exists()
+
+
+@pytest.mark.parametrize("where", ["write_record", "locked"])
+@pytest.mark.parametrize("argv", [["pause"], ["resume", "4"]])
+def test_a_filesystem_failure_is_reported_and_logged(repo, monkeypatch, capsys, where, argv):
+    def fail(*a, **k):
+        raise PermissionError(13, "Permission denied", "state.json")
+
+    here(monkeypatch, repo)
+    monkeypatch.setattr(w, where, fail)
+    assert w.main(argv) == 1
+    assert "Permission denied" in capsys.readouterr().err
+    last = log_lines(repo)[-1]
+    assert (last["command"], last.get("issue"), last["outcome"]) == (argv[0], int(argv[1]) if argv[1:] else None,
+                                                                       "error")
+    assert not (root_of(repo) / w.RECORD_NAME).exists()

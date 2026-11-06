@@ -435,9 +435,9 @@ def main(argv: list[str] | None = None) -> int:
         print()
         print(render_status(read_record(root), root))
         return 0
-    except WatchError as exc:
+    except (WatchError, OSError) as exc:              # OSError: the lock, the record's read or write, a mkdir
         print(f"sdlc_watch: {exc}", file=sys.stderr)
-        refused = str(exc).startswith("refused")      # already logged, as `refused`, where it was raised
+        refused = isinstance(exc, WatchError) and str(exc).startswith("refused")   # logged where it was raised
         if not refused:
             with contextlib.suppress(OSError):
                 log(root, "command", command=args.cmd, issue=issue, outcome="error", detail=str(exc))
