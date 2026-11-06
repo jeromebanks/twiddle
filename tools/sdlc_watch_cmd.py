@@ -39,6 +39,9 @@ PERMISSION_MODE = "dontAsk"                       # anything no rule allows is d
 SETTINGS = json.dumps({"disableAllHooks": True})
 SETTING_SOURCES = "project"                       # the repo's skills; never the user's allow rules or hooks
 GIT_TIMEOUT_S = 30
+# the advisor must rank at or above the session's model; a Fable advisor can bill usage credits, so never one
+ADVISOR_RANK = {"haiku": 0, "sonnet": 1, "opus": 2}
+FRONTMATTER_LINE = re.compile(r"(name|description): \S.*")   # all the four skills' frontmatter may hold
 
 SLASH = re.compile(r"/(?P<skill>[a-z-]+) (?P<n>\d+)(?P<flags>(?: --(?:quick|debt))?)"
                    r"(?: \((?P<model>[a-z][a-z0-9.-]*): (?P<complexity>[a-z]+)\))?(?P<rest>:\s.*)?")
@@ -113,6 +116,8 @@ def load_tools(text: str) -> dict[str, Any]:
     for k in LIST_KEYS:
         if not isinstance(data.get(k), list) or not all(isinstance(x, str) and x for x in data[k]):
             raise WatchCmdError(f"{TOOLS_FILE}: `{k}` must be a list of strings")
+    if data.get("advisor") not in ADVISOR_RANK:
+        raise WatchCmdError(f"{TOOLS_FILE}: `advisor` must be one of {', '.join(ADVISOR_RANK)}")
     if not isinstance(data.get("demo_shot"), str):
         raise WatchCmdError(f"{TOOLS_FILE}: `demo_shot` must be a string")
     if tuple(data["skills"]) != SKILLS:
@@ -237,8 +242,13 @@ def build_argv(step: Step, tools: dict[str, Any], *, primary: Path, scratch: Pat
         raise WatchCmdError(f"only a skill step runs as `claude -p` (this is {step.kind}: {step.text})")
     rules = build_rules(tools, step.issue, primary=primary, scratch=scratch, demo_shot=demo_shot, epic=epic,
                         worktree=worktree, branch=branch)
+    model = resolve_model(step, default_model)
+    family = next((f for f in ADVISOR_RANK if f in model), None)
+    if family is None or ADVISOR_RANK[family] > ADVISOR_RANK[tools["advisor"]]:
+        raise WatchCmdError(f"the advisor ({tools['advisor']}) can't advise model {model}: it must rank at or above it")
     argv = ["claude", "-p", step.command,
-            "--model", resolve_model(step, default_model),
+            "--model", model,
+            "--advisor", tools["advisor"],          # every SDLC skill calls it; it has no name to allow
             "--permission-mode", PERMISSION_MODE,
             "--permission-prompts", "none",
             "--setting-sources", SETTING_SOURCES,
@@ -362,9 +372,14 @@ def scan_skills(primary: Path, home: Path) -> list[str]:
             text = f.read_text(errors="replace")
             meta = frontmatter(text)
             head = re.match(r"---\n(.*?)\n---", text, re.S)
-            # any spelling (quoted key, flow style, `allowed_tools`): the block isn't parsed as YAML here
-            if re.search(r"allowed[-_]tools", head[1] if head else text[:4000], re.I):
-                errs.append(f"{f} declares allowed-tools")
+            # no YAML parser here, so nothing but plain `name:` and `description:` lines: a quoted, escaped or
+            # flow-style key could spell `allowed-tools` (which grants tools while the skill runs, even in -p)
+            lines = head[1].splitlines() if head else []
+            if not head or re.search(r"allowed[-_]tools", head[1], re.I):
+                errs.append(f"{f} declares allowed-tools" if head else f"{f} has no frontmatter")
+            elif bad := [x for x in lines if not FRONTMATTER_LINE.fullmatch(x)]:
+                errs.append(f"{f} declares allowed-tools or another key: frontmatter line {bad[0]!r} "
+                            "isn't a plain `name:` or `description:`")
             if meta.get("name") != s:
                 errs.append(f"{f} is named {meta.get('name')!r}, not {s!r}")
     found = [*sorted((primary / ".claude" / "skills").glob("*/SKILL.md")),

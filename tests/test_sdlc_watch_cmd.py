@@ -426,10 +426,26 @@ def test_no_command_line_carries_a_budget_or_a_skip(step):
 
 def test_the_model_comes_from_the_line_else_the_default():
     assert argv(STEPS[2])[4] == "opus" and argv(STEPS[4])[4] == "sonnet"
-    a = w.build_argv(STEPS[0], TOOLS, primary=PRIMARY, scratch=SCRATCH, default_model="fable", demo_shot=True)
-    assert a[a.index("--model") + 1] == "fable"
+    a = w.build_argv(STEPS[0], TOOLS, primary=PRIMARY, scratch=SCRATCH, default_model="sonnet", demo_shot=True)
+    assert a[a.index("--model") + 1] == "sonnet"
     with pytest.raises(w.WatchCmdError):
         w.build_argv(STEPS[0], TOOLS, primary=PRIMARY, scratch=SCRATCH, default_model="", demo_shot=True)
+
+
+def test_the_advisor_is_enabled_by_model_never_by_a_rule():
+    """The advisor is a server tool with no name a permission rule can reference: the run turns it on with
+    `--advisor`, at or above the run's model, and never Fable (which can bill usage credits)."""
+    for step in STEPS:
+        a = argv(step)
+        assert a[a.index("--advisor") + 1] == TOOLS["advisor"] == "opus"
+        assert not any("advisor" in x.lower() for x in a[a.index("--allowedTools"):])
+    with pytest.raises(w.WatchCmdError, match="rank"):
+        argv(w.parse_next("/work-slice 160 (fable: novel)"))
+    data = json.loads((ROOT / w.TOOLS_FILE).read_text())
+    for bad in ("fable", "", None):
+        data["advisor"] = bad
+        with pytest.raises(w.WatchCmdError):
+            w.load_tools(json.dumps(data))
 
 
 def test_skills_are_scoped_to_the_four_by_name():
@@ -617,7 +633,9 @@ def test_a_skill_declaring_allowed_tools_fails_the_scan(skills):
 
 
 @pytest.mark.parametrize("line", ['"allowed-tools": Bash(uv run twiddle play *)', "'allowed-tools': [Bash]",
-                                  "allowed_tools: Bash", "meta: {allowed-tools: Bash}"])
+                                  "allowed_tools: Bash", "meta: {allowed-tools: Bash}",
+                                  '"allowed\\u002Dtools": Bash(uv run twiddle play *)', "? allowed-tools\n: Bash",
+                                  "model: opus", "description2: x"])
 def test_any_spelling_of_allowed_tools_fails_the_scan(skills, line):
     primary, home = skills
     skill(primary / ".agents" / "skills" / "work-slice", "work-slice", line + "\n")
