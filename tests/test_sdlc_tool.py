@@ -302,3 +302,18 @@ def test_a_label_added_by_someone_else_is_not_backed(monkeypatch, capsys):
     assert sdlc.main(["reconcile", "12"]) == 1
     err = capsys.readouterr().err
     assert "applied by stranger, who is not a collaborator" in err and "--by" not in err and gh.writes == []
+
+
+def test_a_resume_only_epic_names_the_resume_as_a_runnable_command():
+    """When the only agent move is resuming claimed work, `next:` leads with the command itself (#263 T2.1)."""
+    epic = {"number": 12, "action": "work_slices", "state": "in-progress", "conflicts": []}
+    m1 = {"title": "#12 M1: x", "key": "M1", "done": 0, "total": 2}
+    units = {29: {"key": "T1.1", "milestone": "M1", "model": "opus", "complexity": "judgment"},
+             30: {"key": "T1.2", "milestone": "M1"}}
+    p = {"ready": [], "in_flight": [29, 30], "escalated": [], "open": 2, "waiting": [], "milestones": [m1],
+         "units": units}
+    nxt = sdlc.next_command(epic, p)
+    assert nxt == "/work-slice 29 (opus: judgment): resumes it; nothing new to start: in progress #29, #30"
+    assert nxt.split(":")[0].split(" (")[0] == "/work-slice 29"      # the runnable part, as an offered slice's
+    unrated = sdlc.next_command(epic, {**p, "in_flight": [30]})
+    assert unrated == "/work-slice 30: resumes it; nothing new to start: in progress #30"

@@ -41,9 +41,15 @@ if step.get("edit"):
     pathlib.Path(step["edit"]).write_text("edited during the review\\n")
 if step.get("commit"):
     subprocess.run(["git", "commit", "--allow-empty", "-qm", "moved"], check=True)
+if step.get("rollout"):                   # the run's rollout, as Codex writes it under its CODEX_HOME
+    day = home / "sessions" / "2026" / "11" / "03"
+    day.mkdir(parents=True, exist_ok=True)
+    (day / f"rollout-2026-11-03T01-42-21-test-{{n}}.jsonl").write_text(pathlib.Path(step["rollout"]).read_text())
 time.sleep(step.get("sleep", 0))
 sys.stdout.write(step.get("out", ""))
 sys.stderr.write("codex progress noise\\n")
+if step.get("stderr"):
+    sys.stderr.write(pathlib.Path(step["stderr"]).read_text())
 sys.exit(step.get("exit", 0))
 """
 APPROVES = {"out": "1. fine (non-blocking)\n\nVERDICT: approve\n"}
