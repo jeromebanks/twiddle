@@ -106,6 +106,7 @@ ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every sk
 | `sdlc:planned`, `sdlc:in-progress` | the agent: `/work-slice <ready slice>`, `/milestone-demo N` once a milestone's units are all merged or an accepted one is due to ship, or `sync N` when `epic/N` is behind `main` and nothing else is going on (state's `next:`) |
 | `sdlc:demo-review` | the poster, until they reply to the demo; then the agent (`/milestone-demo N`) |
 | `sdlc:in-progress` after a demo's `/changes` | the agent: `/plan-issue N` plans them as new slices |
+| `sdlc:in-progress`, the poster's `/changes` with no demo in review | the agent: `demo-changes N --body-file ...` records it against the current milestone (state's action `record_changes`), then `/plan-issue N` plans it as new slices |
 | `sdlc:in-progress` with `lane:debt` (the debt epic) | the agent, from its tickets: `debt-epic` (open it, attach debt, end a pass), `debt-intake`, `/plan-issue D` (a pass), `/work-slice T --debt`, or `merge PR` (state's actions `pass_end`, `debt_intake`, `plan_pass`, `work_debt`, `merge_debt`); never the poster |
 | `tech-debt` issues | never triaged on their own; they move with the debt epic, and `state T` names it |
 | `plan:slice` / `plan:subtask` issues | never triaged; a slice's state is `slice-status N` |
@@ -118,7 +119,11 @@ ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every sk
 
 - **Reply in a comment** to answer a question or react to a PRD.
 - **`/approve`** on its own line signs off on the *latest* PRD/diagnosis revision, or accepts the latest milestone demo.
-- **`/changes <what>`** asks for changes. Any other reply is treated as feedback.
+- **`/changes <what>`** asks for changes. Any other reply is treated as feedback. On an epic being built with no
+  demo in review, it is recorded (`demo-changes`) and planned as new slices of the current milestone; it adds
+  nothing while changes already wait to be planned, and waits while an accepted milestone waits to ship (it is
+  recorded once that milestone has shipped). Their later `/approve` that settles a plan amendment whose Codex
+  rounds are spent answers a `/changes` posted since its latest revision, which is then not recorded.
 - A maintainer may instead add the **`sdlc:approved`** label; the next run records it as an approval comment.
 
 `/approve` counts only from the issue's author or someone who can write to the
@@ -180,7 +185,8 @@ like any other (`state` on it says so); if the change then escalates to the full
   `/approve` of that demo revision is among the issue's comments: unmarked, by a collaborator or the issue's
   author, after that demo. `demo-accept` cites it in its record (`reply=<comment id>`), and a `demo-approval`
   record without one accepts nothing, so `ship` refuses. `ship`, like `merge`, runs only `origin/main`'s gate code.
-  `demo-accept` and `transition --kind approval` take `--from-file` only with `--dry-run`. In a run the watcher
+  `demo-accept`, `transition --kind approval` and `plan-create` of a plan a person settled take `--from-file`
+  only with `--dry-run`. In a run the watcher
   started (`TWIDDLE_SDLC_WATCH_RUN` set), `reconcile` takes neither `--by` nor `--from-file` without `--dry-run`:
   it reads who added `sdlc:approved` from the issue's events. A person at a terminal keeps `--by`.
 - Each PRD/diagnosis revision is a new comment; the previous one is collapsed and
@@ -385,7 +391,11 @@ Instead the agents review it:
 1. The planner checks it with its `advisor`.
 2. **Codex** reviews it read-only, ending in `VERDICT: approve` or `VERDICT: changes`.
    `codex-review --plan N` runs each round on the revision as posted, held to the currently
-   approved PRD or diagnosis, in a scratch checkout of `origin/main` it makes and removes.
+   approved PRD or diagnosis, in a scratch checkout of `origin/main` it makes and removes. While
+   the epic is being built (`planned` or `in-progress`, so an amendment: demo feedback, a fix
+   after a milestone review, the next milestone), it reads `origin/epic/N` instead, and the
+   prompt says that branch is ahead of `main`. A missing or unfetchable `epic/N` is a refusal,
+   never a fallback to `main`.
 3. The planner accepts or rebuts each finding, and each round is posted as a
    `plan-review` comment.
 4. When Codex approves the latest revision, that's consensus, and `plan-create`
@@ -396,6 +406,18 @@ then slices as sub-issues of their subtask (labels `plan:subtask` / `plan:slice`
 Ordering is **native `blocked_by`** links. All of it is created from the
 reviewed comment, so what was reviewed is what was built. A rerun finishes a
 partial creation instead of duplicating it.
+
+**`plan-create` never stops silently.** It reads what it made back from GitHub, and looks again
+after a few seconds while steps still seem missing (a new issue can take that long to be listed).
+Whenever it stops partway (a failed write, a read-back that still finds gaps, a failed branch or
+label move) it prints what this run made, what is still missing, and the `plan-create N` to rerun.
+It posts the `plan-created` record before it makes `epic/N` and moves the label, an escalated
+amendment's included. So `state` can always tell how far it got: an epic whose plan is agreed and
+whose issues exist (found by marker) with no record, or whose record is posted while its label never
+moved (still `sdlc:approved`, `sdlc:needs-info` or `sdlc:escalated`), says `create_plan_issues`
+with `next:` naming `plan-create N` and why, never a fresh `/plan-issue N`. The rerun creates no
+duplicate issue, posts no second record and needs no new `/approve`: a settled record
+(`settled_by=`) stands in for the person's.
 
 **One milestone at a time.** The plan covers the whole epic, but by default
 (`"create": "milestone"` in `.sdlc/config.json`, or per plan) only the first milestone's
@@ -410,6 +432,16 @@ one plain-language question (`sdlc:needs-info`, marked `phase=plan`). Their answ
 fresh set of rounds. An amendment while the epic is being built (demo changes, the next
 milestone) that runs out of rounds is escalated to a human instead
 (`escalate_plan`). A plan revision never voids the PRD's sign-off.
+
+Spent rounds can also be settled by a person: a `/approve` from the issue author or a collaborator,
+posted after the latest plan revision and the Codex round that spent them, counts as consensus (`create_plan_issues`, with `plan_settled`
+in `state`), whether the issue is still `sdlc:approved`, waiting in `sdlc:needs-info` on the planning
+question, or an amendment at `escalate_plan` or already `sdlc:escalated`. The rounds are the planning
+cycle's, counted across revisions; the question resets them for the planner, but the cycle still reads
+as spent until a new Codex round is recorded. Only the escalation `escalate_plan` asked for can be settled so
+(`transition` marks it `phase=plan`); any other escalation, such as a sync conflict, stays a human's.
+`plan-create` records `settled_by=` and moves a settled escalation back to `sdlc:in-progress`. Their later `/changes` withdraws it; the later of the two wins, so their `/approve` after a `/changes` they posted since the latest revision settles the amendment, and the `/changes` is not recorded. Anyone else's `/approve` is listed as ignored,
+and an agent's (marked) comment never counts.
 
 `uv run python tools/sdlc.py ready --epic N` lists the units of work whose
 blockers have all closed as completed.
@@ -689,7 +721,7 @@ makes it work in the worktree by writing every path out in full (`work-slice` §
 | `.worktrees/epic-N`, detached at `origin/epic/N` | `sync N`, `revert-slice S` | merging `main` in, reverting a slice, Codex's milestone review (`codex-review --milestone N` reads it as `sync` left it: it never resets it, and refuses it dirty or behind `epic/N`) | nobody: `sync` and `revert-slice` reset it to `origin/epic/N` before each use |
 | `.worktrees/sdlc-demos`, on `sdlc-demos` | `demo-post` | committing a demo's pictures | nobody: kept |
 | `.worktrees/verify-main-N`, detached at `origin/main` | `verify-main N` | the suite on `main` after an untested release | `verify-main N`, when it's done |
-| `<out>/main`, detached at `origin/main` | `codex-review --plan N` | Codex's plan review reads the repo there | `codex-review --plan N`, when the round ends (a left-over one is replaced on the next run) |
+| `<out>/main`, detached at `origin/main` (`<out>/epic-N` at `origin/epic/N` while the epic is being built) | `codex-review --plan N` | Codex's plan review reads the repo there | `codex-review --plan N`, when the round ends (a left-over one is replaced on the next run) |
 | `<scratchpad>/before` and `after`, detached | `milestone-demo` | the pictures of `main` and `epic/N` | the skill (`git worktree remove`) |
 | a throwaway worktree on `prd/N`, from `origin/main` | `triage-issue` | the approved PRD's one-file PR | the skill |
 

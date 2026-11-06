@@ -301,12 +301,14 @@ def prepare_pr_round(pr: dict[str, Any], brief: str, base: str, rounds: list[dic
 
 
 def prepare_plan_round(issue: int, plan: dict[str, Any], requirements: str | Path, rounds: list[dict[str, Any]],
-                       scratch: Path, template: str | None = None) -> tuple[str, dict[str, Path]]:
+                       scratch: Path, template: str | None = None, base: str = "main",
+                       epic: bool = False) -> tuple[str, dict[str, Path]]:
     """(the filled prompt, the files written for it) for one round on a posted plan revision.
 
     `plan` is the JSON as posted (written to `plan.json`, which `plan-review --plan` takes); `requirements` is
-    the approved revision: a path Codex can read from its checkout of main (a `docs/prd/` file), or the
-    approved comment's text, written to `requirements.md`."""
+    the approved revision: a path Codex can read from its checkout of `base` (a `docs/prd/` file), or the
+    approved comment's text, written to `requirements.md`. `base` is the branch Codex's checkout is of; `epic`:
+    it is the epic's own branch (an epic being built), and the prompt says it is ahead of main."""
     files = {"plan": scratch / "plan.json", "prompt": scratch / "prompt.md"}
     files["plan"].write_text(json.dumps(plan, indent=1, ensure_ascii=False) + "\n")
     if isinstance(requirements, Path):
@@ -318,7 +320,8 @@ def prepare_plan_round(issue: int, plan: dict[str, Any], requirements: str | Pat
     k = _write_response(rounds, "plan-review", scratch, files)
     prompt = fill_prompt(PLAN_PROMPT.read_text() if template is None else template,
                          {"N": str(issue), "PLAN_FILE": str(files["plan"]), "PRD_FILE": req, "K": str(k),
-                          "RESPONSE_FILE": str(files.get("response", ""))}, {"ROUND2": "response" in files})
+                          "RESPONSE_FILE": str(files.get("response", "")), "BASE": base},
+                         {"ROUND2": "response" in files, "EPIC": epic})
     files["prompt"].write_text(prompt)
     return prompt, files
 

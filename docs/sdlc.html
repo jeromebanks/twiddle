@@ -221,8 +221,8 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <td>A revision is posted. The poster replies <code>/approve</code>, <code>/changes …</code>, or just comments. Each revision spends a round, up to <code>max_rounds</code>.</td>
 <td><code>record_approval</code> or <code>respond_to_reply</code> → <code>/triage-issue N</code></td></tr>
 <tr><td><span class="chip">sdlc:approved</span></td><td class="turn agent">agent</td>
-<td>The approved PRD is merged into <code>docs/prd/</code>. The agent plans the work as subtasks and one-session slices, grouped into milestones, each rated for complexity. Codex reviews the plan round by round until it approves (<code>codex-review --plan N</code>, against the approved revision). The poster isn't asked to review it.</td>
-<td><code>plan</code>, <code>continue_plan</code>, <code>create_plan_issues</code>, <code>ask_poster</code> → <code>/plan-issue N</code> (<code>reconcile_label</code> when a maintainer ticked the label by hand)</td></tr>
+<td>The approved PRD is merged into <code>docs/prd/</code>. The agent plans the work as subtasks and one-session slices, grouped into milestones, each rated for complexity. Codex reviews the plan round by round until it approves (<code>codex-review --plan N</code>, against the approved revision, in a scratch checkout of <code>main</code>; an amendment to an epic being built is read on <code>epic/N</code>, which is ahead of <code>main</code>). The poster isn't asked to review it. If Codex's rounds run out, a <code>/approve</code> from the poster or a collaborator after the latest plan revision settles it (here, in <span class="chip">sdlc:needs-info</span> after the planning question, or on an escalated amendment).</td>
+<td><code>plan</code>, <code>continue_plan</code>, <code>create_plan_issues</code>, <code>ask_poster</code> → <code>/plan-issue N</code> (<code>reconcile_label</code> when a maintainer ticked the label by hand); <code>create_plan_issues</code> → <code>plan-create N</code> when a run was cut short, its issues or its record already made: <code>plan-create</code> always prints what it made and the rerun, and posts its record before the label</td></tr>
 <tr><td><span class="chip">sdlc:planned</span></td><td class="turn agent">agent</td>
 <td><code>plan-create</code> has made the first milestone's issues and the branch <code>epic/N</code>.</td>
 <td><code>work_slices</code> → <code>/work-slice S</code></td></tr>
@@ -232,6 +232,9 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <tr><td><span class="chip">sdlc:in-progress</span> with a demo request</td><td class="turn poster">a person</td>
 <td>A demo step would make a real speaker play, so the agent asks on the issue for someone to run it and say what they heard.</td>
 <td><code>wait_for_poster</code>, then <code>demo_heard</code> → <code>/milestone-demo N</code></td></tr>
+<tr><td><span class="chip">sdlc:in-progress</span> with the poster's <code>/changes</code></td><td class="turn agent">agent</td>
+<td>The poster asks for something different while the epic is being built and no demo is in review. The agent restates it in plain words and records it against the current milestone; it is then planned as new slices. A <code>/changes</code> while changes already wait to be planned adds nothing; one while an accepted milestone waits to ship is recorded once it has shipped.</td>
+<td><code>record_changes</code> → <code>demo-changes N --body-file …</code>, then <code>/plan-issue N</code></td></tr>
 <tr><td><span class="chip">sdlc:demo-review</span></td><td class="turn poster">poster</td>
 <td>A milestone demo is posted, with real screenshots. The poster tries it.</td>
 <td><code>record_demo_acceptance</code> or <code>demo_reply</code> → <code>/milestone-demo N</code></td></tr>
@@ -239,8 +242,8 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <td>Every milestone was accepted and shipped. <code>epic/N</code> is deleted and the issue closed.</td>
 <td><code>none</code></td></tr>
 <tr><td><span class="chip">sdlc:escalated</span></td><td class="turn human">a human</td>
-<td>The agents couldn't agree, a merge of <code>main</code> conflicted, a suite failed on the epic branch, or a plan amendment ran out of rounds (<code>escalate_plan</code>). A human resolves it and moves it back to triage.</td>
-<td><code>human</code> (and <code>fix_conflict</code> when two labels clash)</td></tr>
+<td>The agents couldn't agree, a merge of <code>main</code> conflicted, a suite failed on the epic branch, or a plan amendment ran out of rounds (<code>escalate_plan</code>). A human resolves it and moves it back to triage; a plan amendment is settled by a <code>/approve</code> after its latest revision instead, and <code>plan-create</code> moves it back to <span class="chip">sdlc:in-progress</span>.</td>
+<td><code>human</code> (and <code>fix_conflict</code> when two labels clash); <code>create_plan_issues</code> → <code>/plan-issue N</code> once a person settles a plan amendment</td></tr>
 <tr><td><span class="chip">sdlc:approved</span> / <span class="chip">sdlc:in-progress</span> with <span class="chip">lane:quick</span></td><td class="turn agent">agent</td>
 <td>A small, safe change whose brief was posted with <code>transition N prd-review --kind prd --lane quick</code> (only on a <span class="chip">complexity:routine</span> issue). It is built from that one approved brief, with no plan or epic. Once building starts the brief is frozen: <code>escalate-to-full N</code> is the only way to change course.</td>
 <td><code>work_quick</code> → <code>/work-slice N --quick</code> (see <a href="#quick">section 6</a>)</td></tr>
@@ -755,7 +758,7 @@ passing suite and Codex's approval on the exact head (never deferred), the poste
 <li><strong>A person's decision is read from GitHub, never from a file.</strong> A milestone counts as accepted only when a person's real,
 unmarked <code>/approve</code> of that demo revision is on the issue; <code>demo-accept</code>'s record cites it (<code>reply=</code>), and a record
 without one accepts nothing, so <code>ship</code> refuses. <code>ship</code>, like <code>merge</code>, runs only <code>origin/main</code>'s gate code.
-<code>demo-accept</code> and <code>transition --kind approval</code> take <code>--from-file</code> only with <code>--dry-run</code>; in a watched run
+<code>demo-accept</code>, <code>transition --kind approval</code> and <code>plan-create</code> of a plan a person settled take <code>--from-file</code> only with <code>--dry-run</code>; in a watched run
 (<code>TWIDDLE_SDLC_WATCH_RUN</code>), <code>reconcile</code> reads who added the label from the issue's events, never <code>--by</code>.</li>
 <li><strong>People are reached through the issue.</strong> No skill asks a question in the chat. Publishing a demo is gated by automated checks
 (no device IDs, addresses or secrets, no blank pictures), and the poster's reply is the human check.</li>
