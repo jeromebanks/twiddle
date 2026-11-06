@@ -143,6 +143,40 @@ The PR body must contain **exactly one** `Closes #N`. Include:
 
 ```bash
 gh pr create --base epic/E --head slice/N --title "<key>: <slice title>" --body-file <SCRATCH>/pr.md
+```
+
+**`merge` needs a passing eval for the review logic at the PR's head**, under the `codex --version` it runs
+with, or a deferral. That bites when this slice changed the review logic (a prompt, `review-rules.md`, the `codex`
+settings, `tools/codex_review.py`, `tools/codex_eval.py` or anything under `tests/codex_eval/`; `SDLC.md` lists the
+fingerprint's inputs), and when `codex` itself was upgraded: once per change, never per commit.
+`uv run python tools/sdlc.py codex-eval --status` says whether this pair has a result. The order for such a PR:
+change, push, then the eval, then `test-record` and `codex-review`. A later commit to those inputs voids its result,
+so run it again whenever self-review or a Codex round makes you change one.
+Run the Bash call in the background (`run_in_background`); a full eval takes 10-15 minutes.
+
+```bash
+uv run python tools/sdlc.py codex-eval
+```
+
+It posts its result, and runs nothing when this fingerprint and `codex` version already passed. A `fail`
+means Codex missed a planted bug or flagged the clean change: fix the review logic, not the fixture, unless the
+fixture is what is wrong, and run it again; if you can't, escalate (§8). A `fail` blocks the merge and can't be
+deferred.
+
+**Defer the eval only when it couldn't run**: exit 3 (Codex can't start, sign-in, quota, rate limit or network,
+or no verdict after the retry; the end of each fixture's `codex.err` says which), or no `codex` on the PATH:
+
+```bash
+uv run python tools/sdlc.py codex-eval --defer --reason "<the error, verbatim>"
+```
+
+It records a `deferred` result for the pair (for the fingerprint alone, as `unavailable`, when `codex --version`
+can't be read), so the slice can merge, and `merge` records the eval as owed by the milestone, before its demo.
+It is refused once the eval failed for this review logic. A Codex review that can't run is `review-defer`'s, in §8.
+
+Then record the tests:
+
+```bash
 cd <WORKTREE> && uv run python tools/sdlc.py test-record PR    # runs the full suite itself
 ```
 
@@ -175,6 +209,8 @@ It does what used to be done by hand, so don't run Codex any other way:
 - it fills `references/codex-pr-prompt.md`; from round 2 on, it adds your response from the
   latest recorded round. It refuses if that round asked for changes and has no response;
 - it refuses unless the worktree is clean and its HEAD is the PR's head;
+- it refuses, before starting Codex, a round that couldn't be recorded (the change rounds are spent: `escalate-slice`)
+  or would change nothing (Codex already approved this head: go on to `merge`); `--dry-run` refuses the same way;
 - it runs Codex with the model, reasoning effort, sandbox, flags and timeout from
   `.sdlc/config.json`'s `codex` section, never your own Codex config;
 - it fails, and saves nothing, if HEAD moved while Codex ran;
@@ -187,7 +223,10 @@ and runs nothing. Exit 1 is a refusal: fix what it says and run it again.
 **If Codex can't run, defer its review to the milestone.** "Can't run" means `codex-review`
 exits with status 3: `codex` isn't on the PATH, or there was no `VERDICT:` line after the one
 automatic retry (two timeouts count). It also means Codex fails to sign in or says to log in,
-reports a quota, usage or rate limit, or a network error. In those cases the tool prints the
+reports a quota, usage or rate limit, or a network error. And it means the run's session log
+didn't show what the repo's settings say Codex was given: skills offered, an `AGENTS.md` from
+outside the checkout, or a log of a shape the tool doesn't know (a new `codex`); no report is
+saved (SDLC.md, "The review logic's fingerprint"). In those cases the tool prints the
 end of `<SCRATCH>/codex.err`. Copy the failure from there:
 
 ```bash
@@ -240,9 +279,9 @@ cd <PRIMARY> && uv run python tools/sdlc.py cleanup N
 
 **Run `merge` from the primary checkout, never from `WORKTREE`.** The worktree holds the slice's
 own `tools/sdlc.py`, and a PR must never be judged by a gate it changed. So `merge` first
-compares its running `tools/sdlc.py` and `tools/sdlc_quick.py` with `origin/main`'s, byte for
-byte (after one bounded `git fetch`), and refuses, merging nothing, on any difference, a failed
-fetch or an unreadable copy. The refusal names the primary checkout, and says to update it
+compares its running `tools/sdlc.py`, `tools/sdlc_quick.py`, `tools/codex_review.py` and
+`tools/codex_eval.py` with `origin/main`'s, byte for byte (after one bounded `git fetch`), and
+refuses, merging nothing, on any difference, a failed fetch or an unreadable copy. The refusal names the primary checkout, and says to update it
 (`git -C <PRIMARY> pull --ff-only`) when it is behind too. `--dry-run` is checked the same way.
 
 **If `merge` itself is refused by a permission check** (not by the gate), don't work around it,
@@ -278,9 +317,15 @@ Then `merge` refuses unless all of these hold:
 - a passing test run is recorded on that head;
 - the PR targets `epic/E`, and its head is **not behind `epic/E`**;
 - the slice belongs to the epic's current milestone, the earliest one not yet shipped;
+- the review logic at the head (its fingerprint, read from the commit) has a passing `codex-eval` for the
+  `codex --version` here, or a deferral (§7); a `fail` always blocks;
 - GitHub says the PR is mergeable.
 
 How to clear each refusal:
+
+- **No review eval** for the head's pair (it changed the review logic, or `codex` was upgraded): run
+  `codex-eval` from `WORKTREE` as §7 says, or `codex-eval --defer` only if it can't run. Its result lives on
+  the eval issue, not the PR, so it voids neither the test run nor the review.
 
 - **The head is behind `epic/E`.** Another slice merged first (or `sync` brought `main` in), and nobody has tested
   this branch with it. Rebase:
@@ -418,7 +463,10 @@ leaves the PR ready: `state N` and `slice-status N` then say `merge PR` is due, 
 the current head; Codex's approval of the current head, recorded against the issue's current
 approved brief; the head not behind `main` (rebase onto `origin/main`, push with
 `--force-with-lease`, then `test-record` and a new Codex round: a rebase voids both); a
-mergeable PR; and a diff that stays inside the quick rules. It squash-merges into `main`, makes
+mergeable PR; a diff that stays inside the quick rules; and a passing `codex-eval` for the head's review
+logic on the current `codex` (the eval gate, `SDLC.md`). A change to a fingerprint input, or a `codex`
+upgrade, needs a pass before `merge`, and there is **no deferral**: if the eval can't run, the change
+waits, or a person moves it to the full lane (`escalate-to-full N`). It squash-merges into `main`, makes
 sure the issue is closed as completed, moves it to `sdlc:done`, and posts a record on the issue
 (the PR, the head, the test and review records). `merge` and `claim` do those label moves; you
 never touch a label. File what you leave behind as in §9, with the quick issue's number, and by
@@ -532,7 +580,10 @@ cd <PRIMARY> && uv run python tools/sdlc.py merge PR
 The debt gate refuses unless the base is `main` and the head is not behind it; the PR closes only
 open tickets of one claimed group of the open pass (every active member, each a sub-issue of the
 epic) and GitHub will close the same ones; a passing run and Codex's approval are recorded on the
-exact head; and it is mergeable. It then squash-merges, deletes the branch on GitHub and here,
+exact head; it is mergeable; and the head's review logic has a passing `codex-eval` on the current
+`codex` (the eval gate, `SDLC.md`), with **no deferral**: after a change to a fingerprint input or a
+`codex` upgrade, run `codex-eval` before `merge`, and if it can't run, the group waits. It then
+squash-merges, deletes the branch on GitHub and here,
 removes the group's worktree, closes the tickets as completed and posts a record on each ticket
 and on the debt epic. If that was the pass's last work it also ends the pass (the next pass, or the
 epic closed). A separate `cleanup` is only needed when `merge` says a cleanup was left over. If a

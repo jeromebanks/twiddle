@@ -168,6 +168,8 @@ def stub_merge(monkeypatch, labels, pr_comments):
                                                                             "trusted": [OWNER]})
     monkeypatch.setattr(sdlc, "epic_progress", lambda n, cfg, trusted: progress(ms("M1", 1, 3)))
     monkeypatch.setattr(sdlc, "with_next", lambda st, cfg, offline=False, trusted=None: {**st, "next": "x", "progress": None})
+    # the review logic at the head has a passing eval (the eval gate's own tests are in test_sdlc_eval.py)
+    monkeypatch.setattr(sdlc, "merge_eval_errors", lambda *a, **k: ([], None))
 
 
 TESTED = [agent("tests", None, 1, sha=HEAD, result="pass", passed="9")]
@@ -476,10 +478,10 @@ def test_codex_gets_the_repos_settings_and_a_config_without_them_is_refused(tmp_
     assert c.run() == 1 and c.calls() == []
     assert "no `codex` section" in capsys.readouterr().err
     assert codex_review.codex_settings(CONFIG)["sandbox"] == "read-only"    # the repo's own section is valid
-    assert codex_review.codex_settings({"codex": {**SETTINGS, "flags": ["--color", "never", "--ephemeral"]}})
+    assert codex_review.codex_settings({"codex": {**SETTINGS, "flags": ["--color", "never", "--ignore-rules"]}})
     for bad in ({"sandbox": "workspace-write"}, {"flags": ["-m", "other"]}, {"flags": ["-c", "x=1"]}, {"flags": ["-mo3"]},
                 {"flags": ["--dangerously-bypass-approvals-and-sandbox"]}, {"flags": ["--json"]}, {"flags": ["-o", "f"]},
-                {"flags": ["--color"]}, {"flags": ["--enable", "x"]}, {"timeout_seconds": 0}, {"model": ""}):
+                {"flags": ["--color"]}, {"flags": ["--enable", "x"]}, {"flags": ["--ephemeral"]}, {"timeout_seconds": 0}, {"model": ""}):
         with pytest.raises(sdlc.SdlcError):
             codex_review.codex_settings({"codex": {**SETTINGS, **bad}})
     with pytest.raises(sdlc.SdlcError, match="lacks timeout_seconds"):
@@ -595,7 +597,7 @@ def test_the_config_strings_are_toml_whatever_they_hold(tmp_path):
     odd = {**SETTINGS, "model": 'a "quoted" \\ model', "reasoning_effort": "high"}
     assert tomllib.loads(codex_review.config_toml(odd)) == {
         "model": 'a "quoted" \\ model', "model_reasoning_effort": "high", "sandbox_mode": "read-only",
-        "cli_auth_credentials_store": "file"}
+        "cli_auth_credentials_store": "file", "skills": {"include_instructions": False}}
 
 
 def test_no_sign_in_is_refused_before_codex_runs(tmp_path, monkeypatch, capsys):
@@ -765,6 +767,30 @@ def test_a_refresh_cut_short_never_reaches_the_users_file(tmp_path, monkeypatch,
     assert not (c.out / "codex-home" / "auth.json").exists()
 
 
+def on_head(c, verdict, ts):
+    return agent("pr-review", None, ts, "**Review**", sha=c.head, verdict=verdict, round=str(ts))
+
+
+def test_a_pr_round_that_could_not_be_recorded_or_would_change_nothing_never_starts_codex(tmp_path, monkeypatch, capsys):
+    c = Codex(tmp_path, monkeypatch)
+    spent = [recorded(i, "changes") for i in range(1, CONFIG["max_pr_rounds"] + 1)]
+    for extra in ((), ("--dry-run",)):
+        assert c.run(*extra, comments=spent) == 1
+        err = capsys.readouterr().err
+        assert "escalate-slice 28" in err and f"{len(spent)}/{CONFIG['max_pr_rounds']}" in err
+    # an approval on the current head stands; on an older head it doesn't
+    for extra in ((), ("--dry-run",)):
+        assert c.run(*extra, comments=[on_head(c, "approve", 5)]) == 1
+        err = capsys.readouterr().err
+        assert "already approved" in err and "stands" in err and "merge 50" in err
+    assert c.calls() == []
+    assert c.run(comments=[recorded(1, "approve", report="VERDICT: approve")]) == 0
+    assert len(c.calls()) == 1
+    # a head whose latest review on it asked for changes is no longer approved: the usual checks apply instead
+    assert c.run(comments=[on_head(c, "approve", 5), on_head(c, "changes", 6)]) == 1
+    assert "already approved" not in capsys.readouterr().err
+
+
 # --- a quick change's PR: reviewed against its approved brief, merged into main -------------------
 
 from tests import test_sdlc_quick as q   # noqa: E402
@@ -864,6 +890,32 @@ def test_pr_review_refuses_a_brief_reapproved_since_the_review(tmp_path, monkeyp
     new_id = sdlc.approved_brief_id(sdlc.derive_state(c.issue, later, TRUSTED, CONFIG))
     code, _, err = c.record(capsys, comments=later)
     assert code == 1 and f"against brief {c.brief_id}" in err and f"approved brief is now {new_id}" in err
+
+
+def test_an_approval_against_an_earlier_brief_does_not_stand_on_an_unchanged_head(tmp_path, monkeypatch, capsys):
+    # what `merge`'s quick gate accepts: an approval of this head against the brief approved *now*
+    c = QuickCodex(tmp_path, monkeypatch)
+    a = c.brief_id
+    c.comments = c.comments + [q.quick_brief(ts=40, rev=2, body=q.GATE_BRIEF), q.agent("approval", 2, 41, by=q.POSTER)]
+    b = sdlc.approved_brief_id(sdlc.derive_state(c.issue, c.comments, TRUSTED, CONFIG))
+    assert a and b and a != b
+
+    def approval(brief):
+        return [agent("pr-review", None, 5, "**Review**", sha=c.head, verdict="approve", round="1", brief=brief)]
+
+    # bound to brief A, with B approved since: the re-review runs, against B
+    assert c.run("--dry-run", comments=approval(a)) == 0 and c.calls() == []
+    assert f"Brief: {b}" in capsys.readouterr().out
+    assert c.run(comments=approval(a)) == 0 and len(c.calls()) == 1
+    assert c.report().read_text().splitlines()[1] == f"Brief: {b}"
+    capsys.readouterr()
+    # bound to the brief approved now: that approval stands, and Codex never runs
+    c.log.unlink()
+    for extra in ((), ("--dry-run",)):
+        assert c.run(*extra, comments=approval(b)) == 1
+        err = capsys.readouterr().err
+        assert "already approved" in err and "stands" in err and "merge 50" in err
+    assert c.calls() == []
 
 
 def test_a_slice_report_naming_a_brief_is_refused(tmp_path, capsys):
