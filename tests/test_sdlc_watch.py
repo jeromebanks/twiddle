@@ -76,6 +76,12 @@ def test_watch_config_defaults_and_overrides():
     assert w.watch_config({"watch": {"interval_s": 120, "max_failures": 3}})["interval_s"] == 120
 
 
+def test_the_repos_config_has_the_watch_section_and_no_budget():
+    config = json.loads((Path(__file__).resolve().parents[1] / ".sdlc" / "config.json").read_text())
+    assert config["watch"] == w.DEFAULT_WATCH                    # the section, exactly the defaults the code holds
+    assert w.watch_config(config) == w.DEFAULT_WATCH
+
+
 def test_load_watch_config_reads_the_running_checkouts_section(repo):
     (repo / ".sdlc" / "config.json").write_text(json.dumps({"schema": 1, "watch": {"codex_backoff_s": 900}}))
     assert w.load_watch_config(repo)["codex_backoff_s"] == 900

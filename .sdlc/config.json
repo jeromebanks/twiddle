@@ -36,6 +36,8 @@
                              "src/twiddle/scene/app.py", "src/twiddle/dial/output.py", "src/twiddle/dial/bluetooth.py",
                              "src/twiddle/dial/app.py", "src/twiddle/dial/gauge.py", "src/twiddle/viz/screen.py"]},
   "debt": {"pass_size": 8, "max_generation": 2, "max_per_pr": 4},
+  "watch": {"interval_s": 60, "hang_timeout_s": 14400, "kill_grace_s": 30, "max_failures": 2,
+            "limit_backoff_s": 3600, "codex_backoff_s": 3600, "tools_file": ".sdlc/watch-tools.json"},
   "codex": {"model": "gpt-6.1-sol", "reasoning_effort": "high", "sandbox": "read-only", "timeout_seconds": 900,
             "flags": ["--skip-git-repo-check", "--color", "never"], "skills": "suppressed"},
   "codex_eval_issue": 100,
