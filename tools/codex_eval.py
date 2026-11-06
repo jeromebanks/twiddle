@@ -447,10 +447,12 @@ class _Slots(NamedTuple):
     names: set[int]                    # where a token starts that fills a slot on its own
     code: set[int]                     # where a token starts inside a code span of several: code, not a name
     empty: list[int]                   # where an empty slot is
+    dests: set[int]                    # where a link's destination starts
 
 
 def _slots(text: str) -> _Slots:
-    names, code, empty, delimiters = {m.end() for m in LINK_TARGET.finditer(text)}, set(), [], set()
+    dests = {m.end() for m in LINK_TARGET.finditer(text)}
+    names, code, empty, delimiters = set(dests), set(), [], set()
     for m in CODE_SPAN.finditer(text):
         delimiters |= {m.start(), m.end(2)}
         inner = list(TOKEN_RE.finditer(text, m.start(2), m.end(2)))
@@ -458,10 +460,13 @@ def _slots(text: str) -> _Slots:
             empty.append(m.start())
         elif len(inner) == 1 and inner[0].group() == m.group(2).strip():
             names.add(inner[0].start())
+        elif (t := TOKEN_RE.match(text, m.start(2) + len(m.group(2)) - len(m.group(2).lstrip()))) \
+                and (loc := TIGHT.match(text, t.end())) and not text[loc.end():m.end(2)].strip():
+            names.add(t.start())       # a file with its line, `f.py:12` or `f.py#L12`: a name, not code
         else:
             code |= {t.start() for t in inner}
     empty += [m.start() for m in EMPTY_CODE.finditer(text) if m.start() not in delimiters]
-    return _Slots(names, code, sorted(empty))
+    return _Slots(names, code, sorted(empty), dests)
 
 
 def _could_name_a_file(text: str, tok: tuple[str, int, int], slots: _Slots) -> bool:
@@ -481,7 +486,8 @@ def _wrapped(text: str, tok: tuple[str, int, int]) -> bool:
 def _taker(text: str, toks: list[tuple[str, int, int]], slots: _Slots, after: int, before: tuple[str, int, int]) -> str:
     """Whose a loose line is, the line ending at `after` and written after the token `before` (no one, when a full
     stop ends that token's sentence). Of what follows it to the clause's end: an empty slot first makes it no file's;
-    written words first (`before` names no file), a thing that could name a file one word or none on takes it; any
+    written words first (`before` names no file), a thing that could name a file one word or none on takes it,
+    unless another file follows it in the clause; any
     other such thing that isn't `before` again makes the citation ambiguous, no file's (`f.py line 12 of g.py`
     too: two files, one line); and with none, it is `before`'s. A token the line's
     number runs into (`line 14 — 4probe.py`, read as lines 4-14) is the first thing after it."""
@@ -489,14 +495,17 @@ def _taker(text: str, toks: list[tuple[str, int, int]], slots: _Slots, after: in
     empty = next((e for e in slots.empty if after <= e < stop), stop)
     later = [t for t in toks if t[2] > after and t[1] < stop]
     named = [i for i, t in enumerate(later) if _could_name_a_file(text, t, slots) or _wrapped(text, t)]
+    # a link names one file twice, as its text and its destination (`[f.py](src/f.py)`): one name, not two rivals
+    rivals = [i for i in named if not (later[i][1] in slots.dests and i - 1 in named)]
     if empty < (later[named[0]][1] if named else stop):
         return ""
     if text.endswith(".", 0, before[2]):                  # it ends its sentence: the line starts a new one
         before = ("", before[1], before[2])
     if named and not _could_name_a_file(text, before, slots) and (
             named[0] == 0 or (named[0] == 1 and WORD.fullmatch(later[0][0]))):
-        return later[named[0]][0]
-    return "" if any(later[i][0] != before[0] for i in named) else before[0]     # the same name again is no rival
+        taker = later[named[0]][0]
+        return "" if any(later[i][0] != taker for i in rivals) else taker     # `of f.py or g.py`: neither's
+    return "" if any(later[i][0] != before[0] for i in rivals) else before[0]    # the same name again is no rival
 
 
 def lines_named(text: str, path: str) -> list[tuple[int, int]]:

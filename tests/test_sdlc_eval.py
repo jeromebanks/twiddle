@@ -324,14 +324,16 @@ def test_every_file_a_review_reads_is_an_input_or_excluded_on_purpose():
 
 # path-shaped tokens a prompt may name that are git's, not files: each one listed here, by hand, so no shape rule can
 # wave a real file through
-GIT_NOT_FILES = {"origin/main..HEAD": "the milestone prompt's revision range"}
+GIT_NOT_FILES = {"origin/main..HEAD": "the milestone prompt's revision range",
+                 "origin/main...HEAD": "the milestone prompt's `git diff` range"}
 
 
 def paths_named(text):
-    """Every backticked token that looks like a path, whatever its extension (#174): it holds a `/` or ends in an
-    extension (`.txt`, `.1`, `.c++`), and isn't a `<placeholder>`."""
-    return {tok for tok in re.findall(r"`([^`\s]+)`", text)
-            if "<" not in tok and ("/" in tok or re.search(r"\.[^./]+$", tok))}
+    """Every word in a code span that looks like a path, whatever its extension (#174): it holds a `/` or ends in an
+    extension (`.txt`, `.1`, `.c++`), and isn't a `<placeholder>`. A span is read as markdown reads it: a run of
+    backticks, its content, the same run again, padding and all, and every word of a longer one (`cat x.txt`)."""
+    return {word for m in re.finditer(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", text, re.S) for word in m.group(2).split()
+            if "<" not in word and ("/" in word or re.search(r"\.[^./]+$", word))}
 
 
 def uncovered(text, files):
@@ -348,6 +350,9 @@ def test_a_prompt_naming_a_file_of_any_kind_that_is_not_an_input_fails_the_cover
             " diff `origin/main..HEAD` against `<base>/x.py`, and say `VERDICT: approve`.")
     assert uncovered(text, files) == ["../extra-rules.txt", ".agents/skills/extra-rules.txt", ".agents/skills/extra/rules",
                                       ".agents/skills/rules..txt", "notes.cfg", "review.1", "rules.c++"]
+    for span in ("` .agents/skills/padded.txt `", "`` .agents/skills/padded.txt ``", "`cat .agents/skills/padded.txt`",
+                 "```\n.agents/skills/padded.txt\n```"):
+        assert uncovered(f"Read {span}.", files) == [".agents/skills/padded.txt"], span
     assert uncovered("diff `main...HEAD`", files) == ["main...HEAD"]     # only a range listed in GIT_NOT_FILES is git's
     assert {".agents/skills/review-rules.md", "CLAUDE.md"} <= paths_named(text)
 
@@ -971,6 +976,15 @@ def test_no_other_file_lends_the_planted_line_however_its_name_is_written(fx):
                    "[Makefile][1]"):
         report = f"1. **blocking** {name} line {n} of {target}: {kw}\n\nVERDICT: changes\n"
         assert not codex_eval.score(fx, report).hit, report
+    # a file with its line in a span is a name (Codex round 4 on #374), and two files after a words-first line are
+    # neither's
+    for words in (f"{name} line {n} of `other.py:{n}`", f"{name} line {n} of `other.py#L{n}`", f"line {n} of {name} or other.py",
+                  f"line {n} of `{name}` and `other.py`"):
+        report = f"1. **blocking** {words}: {kw}\n\nVERDICT: changes\n"
+        assert not codex_eval.score(fx, report).hit, report
+    for words in (f"line {n} of {name}, as {name} shows", f"{name} line {n}, see [{name}]({fx.file})"):
+        assert codex_eval.score(fx, f"1. **blocking** {words}: {kw}\n\nVERDICT: changes\n").hit, words
+    assert not codex_eval.score(fx, f"1. **blocking** line {n} of [{name}]({fx.file}) or [other.py](other.py): {kw}\n\nVERDICT: changes\n").hit
     # code of several tokens in one span is code, not a name; one identifier alone in a span could be a file's
     assert codex_eval.score(fx, f"1. **blocking** {name} line {n} calls `rooms_api.set_mute(args.room, muted)`, {kw}\n\nVERDICT: changes\n").hit
     assert not codex_eval.score(fx, f"1. **blocking** {name} line {n} calls `rooms_api.set_mute`, {kw}\n\nVERDICT: changes\n").hit
