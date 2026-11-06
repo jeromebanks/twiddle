@@ -5,7 +5,7 @@ The watcher (a launchd agent, later in M1) minds the issues a person acts on and
 each one's `next:` step headless. This module is its ground floor: what it remembers,
 where, and the commands a person uses to hold it back.
 
-    uv run python tools/sdlc_watch.py status            # read-only: the record as it stands
+    uv run python tools/sdlc_watch.py status            # read-only: the record as it stands, and the billing check
     uv run python tools/sdlc_watch.py pause [N]         # all issues, or one
     uv run python tools/sdlc_watch.py resume [N]
 
@@ -349,8 +349,9 @@ def _clock(s: str | None) -> str:
     return t.astimezone().strftime("%Y-%m-%d %H:%M") if t else "?"
 
 
-def render_status(record: dict[str, Any] | None, root: Path) -> str:
-    """The PRD's *Screens*, with what exists so far. Read-only."""
+def render_status(record: dict[str, Any] | None, root: Path, billing: Any = None) -> str:
+    """The PRD's *Screens*, with what exists so far. Read-only. `billing` is a
+    `sdlc_watch_billing.Billing`: its line goes above the usage-credits reminder."""
     if record is None:
         record, head = empty_record(), "no record yet (never started, or the record was lost: starts empty)"
     elif not record.get("started_at"):
@@ -362,8 +363,11 @@ def render_status(record: dict[str, Any] | None, root: Path) -> str:
     pauses = record["paused"]
     if pauses.get("all"):
         head += f"; PAUSED (all issues) since {_clock(pauses['all'].get('at'))}"
-    lines = [f"SDLC watcher: {head}",
-             f"  billing:  {CREDITS_REMINDER}"]
+    lines = [f"SDLC watcher: {head}"]
+    if billing is not None:
+        lines += [f"  billing:  {billing.line}", f"            {CREDITS_REMINDER}"]
+    else:
+        lines.append(f"  billing:  {CREDITS_REMINDER}")
 
     run = record["run"]
     cur, last = run.get("current"), run.get("last")
@@ -402,12 +406,28 @@ def render_status(record: dict[str, Any] | None, root: Path) -> str:
     return "\n".join(lines)
 
 
+# --- the billing check -------------------------------------------------------------------
+
+def status_billing(record: dict[str, Any] | None) -> Any:
+    """The billing check as a run would get it (T1.3), for `status`: project and local settings of the
+    pinned checkout, this one and the primary (local settings are gitignored, so may be in any),
+    and `claude auth status` in the pinned checkout (else this one), only when no route is found."""
+    try:
+        from tools import sdlc_watch_billing as billing          # imported as tools.sdlc_watch (the tests)
+    except ImportError:
+        import sdlc_watch_billing as billing                     # run as a script: tools/ is on sys.path
+    pinned = ((record or {}).get("pin") or {}).get("checkout")
+    projects = [Path(pinned)] if pinned else []
+    projects += [p for p in (checkout_root(), primary_root()) if p not in projects]
+    return billing.billing_check(projects)
+
+
 # --- command line -----------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="sdlc_watch.py", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("status", help="read-only: paused, in care, runs, waits")
+    sub.add_parser("status", help="read-only: billing, paused, in care, runs, waits")
     for name, words in (("pause", "start no new run"), ("resume", "lift a pause")):
         p = sub.add_parser(name, help=f"{words}: all issues, or one")
         p.add_argument("issue", nargs="?", type=int, help="one issue (default: all)")
@@ -424,8 +444,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "status":
             record = read_record(root)
-            log(root, "command", command="status", outcome="ok")
-            print(render_status(record, root))
+            billing = status_billing(record)
+            log(root, "command", command="status", outcome="ok", billing="ok" if billing.ok else "refused")
+            print(render_status(record, root, billing))
             return 0
         try:
             refuse_in_watch_run()

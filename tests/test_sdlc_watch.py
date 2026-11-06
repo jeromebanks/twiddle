@@ -9,9 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from tools import sdlc, sdlc_watch as w
+from tools import sdlc, sdlc_watch as w, sdlc_watch_billing as billing
 
 SOURCE = Path(w.__file__).resolve()
+BILLING = Path(billing.__file__).resolve()
 
 
 def _git(*args, cwd):
@@ -28,6 +29,7 @@ def repo(tmp_path):
         _git("config", k, v, cwd=root)
     (root / "tools").mkdir()
     shutil.copy(SOURCE, root / "tools" / "sdlc_watch.py")
+    shutil.copy(BILLING, root / "tools" / "sdlc_watch_billing.py")
     (root / ".sdlc").mkdir()
     (root / ".sdlc" / "config.json").write_text(json.dumps({"schema": 1}))
     (root / ".gitignore").write_text(".worktrees/\nlogs/\n")
@@ -38,10 +40,29 @@ def repo(tmp_path):
     return root
 
 
+FAKE_CLAUDE = f"""#!{sys.executable}
+import json
+print(json.dumps({{"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
+                  "subscriptionType": "max"}}))
+"""
+
+
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
-    """No test reaches the real checkout's logs/sdlc_watch/, and none starts inside a watcher run."""
+    """No test reaches the real checkout's logs/sdlc_watch/, and none starts inside a watcher run.
+    `status` runs the billing check: a fake `claude` comes first on PATH, under a temp HOME, so no
+    test (nor a copy run as a script, which inherits this environment) reaches a real one."""
     monkeypatch.delenv(w.WATCH_RUN_ENV, raising=False)
+    for name in billing.NEVER_ENV:
+        monkeypatch.delenv(name, raising=False)
+    fake_bin, fake_home = tmp_path / "fake-bin", tmp_path / "fake-home"
+    fake_bin.mkdir()
+    fake_home.mkdir()
+    (fake_bin / "claude").write_text(FAKE_CLAUDE)
+    (fake_bin / "claude").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr(billing, "MANAGED_SETTINGS", tmp_path / "no-managed-settings.json")
     fallback = tmp_path / "unused-repo"
     monkeypatch.setattr(w, "HERE", fallback)    # a test that forgets to pass its repo fails, rather than writing here
 
