@@ -131,7 +131,8 @@ def test_a_dirty_checkout_is_refused_and_nothing_is_written(repo, dirt):
         _git("add", "staged.txt", cwd=repo)
     with pytest.raises(w.WatchError, match="not clean"):
         w.start(repo)
-    assert not (root_of(repo) / w.RECORD_NAME).exists() and log_lines(repo) == []
+    assert not (root_of(repo) / w.RECORD_NAME).exists()
+    assert [(l["event"], l["outcome"]) for l in log_lines(repo)] == [("start", "refused")]
 
 
 def test_an_unpushed_head_is_refused(repo):

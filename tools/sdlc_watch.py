@@ -276,13 +276,17 @@ def start(where: Path | None = None, at: dt.datetime | None = None) -> dict[str,
 
     A record that has both is returned unchanged. A missing one (never made, or lost) starts
     empty: nothing in care, and only a person's action after this start time counts.
-    The pin is validated before anything is written, so a refused start writes nothing."""
+    The pin is validated before anything is written, so a refused start writes no record (only its log line)."""
     root = state_root(where)
     with locked(root):
         record = read_record(root)
         if record is not None and record.get("started_at") and record.get("pin"):
             return record
-        pin = pin_of(checkout_root(where))
+        try:
+            pin = pin_of(checkout_root(where))
+        except WatchError as exc:
+            log(root, "start", outcome="refused", detail=str(exc))
+            raise
         fresh = record is None
         record = record or empty_record()
         record["started_at"] = iso(at or now())
