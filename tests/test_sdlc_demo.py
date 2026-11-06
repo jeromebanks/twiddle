@@ -164,6 +164,111 @@ def test_changes_send_the_epic_back_to_planning():
     assert not built["demos"]["M1"]["accepted"]       # its next demo is rev 2
 
 
+# --- the poster's /changes with no demo in review (#243 criterion 18) -------------------
+
+def _recorded(c, milestone="M1"):
+    return agent("demo-changes", None, 30, milestone=milestone, found="poster", comment=str(c["id"]), by=POSTER)
+
+
+def test_the_posters_changes_with_no_demo_are_recorded_then_planned():
+    ask = comment(POSTER, "/changes show the source too", 20)
+    st = derive(["sdlc:in-progress"], [ask])
+    assert (st["turn"], st["action"]) == ("agent", "record_changes")
+    assert st["poster_changes"]["comment_id"] == ask["id"] and st["poster_changes"]["text"] == "show the source too"
+    assert sdlc.next_command(st).startswith("`uv run python tools/sdlc.py demo-changes 12 --body-file")
+    # a later agent comment (a review owed, a test run on the epic) doesn't hide it
+    later = derive(["sdlc:in-progress"], [ask, agent("review-owed", None, 21, milestone="M1", slice="T1",
+                                                     number="30", why="routine")])
+    assert later["action"] == "record_changes"
+    done = derive(["sdlc:in-progress"], [ask, _recorded(ask)])
+    assert (done["action"], done["feedback"], done["poster_changes"]) == ("plan", True, None)
+    assert sdlc.next_command(done) == "/plan-issue 12"
+    assert done["demos"] == {}                        # no demo or acceptance is touched
+    built = derive(["sdlc:in-progress"], [ask, _recorded(ask), agent("plan", 2, 31),
+                                          agent("plan-review", 2, 32, verdict="approve", round="1"),
+                                          agent("plan-created", 2, 33)])
+    assert (built["action"], built["feedback"]) == ("work_slices", False)   # it doesn't fire again
+
+
+def test_the_posters_changes_clear_a_pending_demo_request():
+    ask = comment(POSTER, "/changes louder", 21)
+    request = [agent("demo-request", None, 20, milestone="M1"), ask]
+    assert derive(["sdlc:in-progress"], request)["action"] == "record_changes"
+    planned = derive(["sdlc:in-progress"], request + [_recorded(ask), agent("plan", 2, 31),
+                                                      agent("plan-review", 2, 32, verdict="approve", round="1"),
+                                                      agent("plan-created", 2, 33)])
+    assert (planned["action"], planned["demo_request"]) == ("work_slices", None)
+
+
+def test_the_posters_changes_count_only_from_the_poster_and_only_while_building():
+    assert derive(["sdlc:in-progress"], [comment(STRANGER, "/changes make it purple", 20)])["action"] == "work_slices"
+    # a /changes from PRD review, before the plan was created, is long answered
+    early = sdlc.derive_state(issue(["sdlc:in-progress"]),
+                              [agent("prd", 1, 1), comment(POSTER, "/changes shorter", 2), agent("prd", 2, 3),
+                               agent("approval", 2, 4, by=POSTER), agent("plan", 1, 5),
+                               agent("plan-review", 1, 6, verdict="approve", round="1"), agent("plan-created", 1, 7)],
+                              TRUSTED, CONFIG)
+    assert early["action"] == "work_slices" and early["poster_changes"] is None
+    # changes already waiting to be planned: a second /changes adds nothing new
+    first = comment(POSTER, "/changes one", 20)
+    waiting = derive(["sdlc:in-progress"], [first, _recorded(first), comment(POSTER, "/changes two", 31)])
+    assert (waiting["action"], waiting["poster_changes"]) == ("plan", None)
+    # the demo-review flow is unchanged
+    in_review = derive(["sdlc:demo-review"], [DEMO, comment(POSTER, "/changes louder", 11)])
+    assert in_review["action"] == "demo_reply" and in_review["poster_changes"] is None
+    # an accepted milestone waits to ship: a /changes on it is not recorded this way
+    accepted = derive(["sdlc:in-progress"], [DEMO, comment(POSTER, "/approve", 11), agent("demo-approval", 1, 11, milestone="M1", by=POSTER),
+                                             comment(POSTER, "/changes louder", 12)])
+    assert accepted["action"] == "work_slices"
+    # once it ships, a /changes on the next milestone is
+    shipped = derive(["sdlc:in-progress"], [DEMO, comment(POSTER, "/approve", 11), agent("demo-approval", 1, 11, milestone="M1", by=POSTER),
+                                            agent("shipped", None, 12, milestone="M1", sha="c" * 40),
+                                            comment(POSTER, "/changes louder", 13)])
+    assert shipped["action"] == "record_changes"
+    # one posted between the /approve and the release waits for the release, and is not lost there
+    waited = derive(["sdlc:in-progress"], [DEMO, comment(POSTER, "/approve", 11), agent("demo-approval", 1, 11, milestone="M1", by=POSTER),
+                                           comment(POSTER, "/changes louder", 12),
+                                           agent("shipped", None, 13, milestone="M1", sha="c" * 40)])
+    assert waited["action"] == "record_changes"
+    # one the poster overtook with an /approve at the demo was the demo's answer
+    overtaken = derive(["sdlc:in-progress"], [DEMO, comment(POSTER, "/changes louder", 11), agent("note", None, 12),
+                                              comment(POSTER, "/approve", 13),
+                                              agent("demo-approval", 1, 14, milestone="M1", by=POSTER),
+                                              agent("shipped", None, 15, milestone="M1", sha="c" * 40)])
+    assert overtaken["action"] == "work_slices"
+
+
+def test_the_posters_changes_are_recorded_against_the_current_milestone(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    ask = comment(POSTER, "/changes show the source too", 20)
+    b = _bundle(tmp_path, ["sdlc:in-progress"], [ask], progress(ms("M1", 1, 3), ms("M2", 0, 2)))
+    body = tmp_path / "changes.md"
+    body.write_text("- each alarm shows where its sound comes from")
+    assert sdlc.main(["demo-changes", "12", "--body-file", str(body), "--from-file", b, "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert f"kind=demo-changes milestone=M1 found=poster comment={ask['id']} by={POSTER}" in out
+    assert "demo-review -> in-progress" not in out
+    assert sdlc.main(["demo-changes", "12", "--milestone", "M2", "--body-file", str(body), "--from-file", b,
+                      "--dry-run"]) == 1
+    assert "not M2" in capsys.readouterr().err
+    body.write_text("- the speaker at 192.168.1.20")
+    assert sdlc.main(["demo-changes", "12", "--body-file", str(body), "--from-file", b, "--dry-run"]) == 1
+    nothing = _bundle(tmp_path, ["sdlc:in-progress"], [], progress(ms("M1", 1, 3)))
+    assert sdlc.main(["demo-changes", "12", "--body-file", str(body), "--from-file", nothing, "--dry-run"]) == 1
+
+
+def test_no_demo_is_posted_while_the_posters_changes_wait(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    monkeypatch.setattr(sdlc, "git", lambda *a, **k: pytest.fail("dry run must not touch git"))
+    d = _demo_dir(tmp_path)
+    body = tmp_path / "comment.md"
+    body.write_text("You can now see every alarm.\n\n![list](list.svg)\n")
+    b = _bundle(tmp_path, ["sdlc:in-progress"], [comment(POSTER, "/changes louder", 20)], progress(ms("M1", 3, 3)))
+    args = ["demo-post", "12", "--milestone", "M1", "--dir", str(d), "--body-file", str(body), "--from-file", b, "--dry-run"]
+    assert sdlc.main(args) == 1
+    assert "record_changes" in capsys.readouterr().err
+
+
 def test_an_amended_plan_keeps_what_was_created(tmp_path, monkeypatch):
     monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("must not call gh"))
     leaf = {"key": "T1", "title": "t", "covers": [1], "outcome": "o", "scope": "s", "acceptance": ["a"],
