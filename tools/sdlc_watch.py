@@ -437,10 +437,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except WatchError as exc:
         print(f"sdlc_watch: {exc}", file=sys.stderr)
-        if args.cmd == "status":
+        refused = str(exc).startswith("refused")      # already logged, as `refused`, where it was raised
+        if not refused:
             with contextlib.suppress(OSError):
-                log(root, "command", command="status", outcome="error", detail=str(exc))
-        return 2 if str(exc).startswith("refused") else 1
+                log(root, "command", command=args.cmd, issue=issue, outcome="error", detail=str(exc))
+        return 2 if refused else 1
 
 
 if __name__ == "__main__":

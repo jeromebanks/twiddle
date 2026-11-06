@@ -180,6 +180,10 @@ def test_an_unreadable_record_is_reported_never_replaced(repo, monkeypatch, caps
     assert w.main(["pause"]) == 1
     assert "move it aside" in capsys.readouterr().err
     assert (root_of(repo) / w.RECORD_NAME).read_text() == "{not json"
+    assert (log_lines(repo)[-1]["command"], log_lines(repo)[-1]["outcome"]) == ("pause", "error")
+    assert w.main(["resume", "4"]) == 1
+    assert (log_lines(repo)[-1]["command"], log_lines(repo)[-1]["issue"], log_lines(repo)[-1]["outcome"]) == \
+        ("resume", 4, "error")
     with pytest.raises(w.WatchError):
         w.start(repo)
 
@@ -349,4 +353,6 @@ def test_a_held_lock_is_reported_after_a_bounded_wait_and_nothing_is_written(rep
         assert proc.returncode == 0
         assert w.main(["pause"]) == 1
     assert "held for over" in capsys.readouterr().err
+    last = log_lines(repo)[-1]
+    assert (last["command"], last["outcome"]) == ("pause", "error") and "held for over" in last["detail"]
     assert not (root / w.RECORD_NAME).exists()
