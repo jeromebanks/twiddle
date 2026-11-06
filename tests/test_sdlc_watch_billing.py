@@ -221,13 +221,17 @@ def test_settings_are_only_read(fake, parent, home, project, managed):
 def test_a_max_sign_in_passes_and_the_check_runs_with_exactly_the_runs_env(fake, parent, project, managed,
                                                                          monkeypatch):
     seen = {}
-    real = subprocess.run
 
-    def spy(argv, **kw):
-        seen.update(argv=argv, **kw)
-        return real(argv, **kw)
+    class Spy(subprocess.Popen):
+        def __init__(self, argv, **kw):
+            seen.update(argv=argv, **kw)
+            super().__init__(argv, **kw)
 
-    monkeypatch.setattr(b.subprocess, "run", spy)
+        def communicate(self, *a, **kw):
+            seen.setdefault("timeout", kw.get("timeout"))
+            return super().communicate(*a, **kw)
+
+    monkeypatch.setattr(b.subprocess, "Popen", Spy)
     got = check(project, {**parent, "SOMETHING_ELSE": "x"}, managed)
     assert got.ok and got.ran_claude and got.auth["subscriptionType"] == "max"
     assert seen["env"] == b.run_env(parent)
@@ -359,3 +363,18 @@ def test_status_scans_the_pinned_checkout_and_checks_auth_there(repo, fake, tmp_
     assert w.main(["status"]) == 0
     assert f"ANTHROPIC_API_KEY under env in local settings {pinned}" in capsys.readouterr().out
     assert len(fake.calls) == 1
+
+
+def test_a_run_env_with_no_home_refuses_and_runs_nothing(fake, parent, project, managed):
+    got = check(project, {k: v for k, v in parent.items() if k != "HOME"}, managed)
+    assert not got.ok and fake.calls == []
+    assert got.routes == ("HOME is not set in the run's environment: the user settings can't be located",)
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("inf"), float("nan"), b.MAX_AUTH_TIMEOUT_S + 1, True, "30"])
+def test_the_auth_timeout_is_finite_and_bounded(fake, parent, project, managed, bad):
+    with pytest.raises(ValueError):
+        check(project, parent, managed, timeout_s=bad)
+    with pytest.raises(ValueError):
+        b.check_auth(b.run_env(parent), project, timeout_s=bad)
+    assert fake.calls == []

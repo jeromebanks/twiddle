@@ -42,8 +42,11 @@ Stdlib only, no `twiddle` import, and no import of `sdlc_watch` (it imports this
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import math
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -53,6 +56,7 @@ from typing import Any, Iterable, Mapping
 
 WATCH_RUN_ENV = "TWIDDLE_SDLC_WATCH_RUN"   # = tools/sdlc.py's and tools/sdlc_watch.py's (a test holds them together)
 AUTH_TIMEOUT_S = 30                        # `claude auth status` reads a local sign-in: seconds, not minutes
+MAX_AUTH_TIMEOUT_S = 300                   # the most a caller may give it
 AUTH_ARGV = ("auth", "status", "--json")   # after the resolved `claude`; never `--bare`
 
 # Names a run may get from the watcher's environment. Nothing else is passed.
@@ -193,17 +197,30 @@ def auth_problem(stdout: str, returncode: int) -> tuple[str, dict[str, Any] | No
 
 def check_auth(env: Mapping[str, str], cwd: Path, timeout_s: float = AUTH_TIMEOUT_S) -> tuple[str, dict[str, Any] | None]:
     """Run `claude auth status --json` with exactly `env`, in `cwd`: ('' or why not, its answer)."""
+    check_timeout(timeout_s)
     exe = shutil.which("claude", path=env.get("PATH", ""))
     if not exe:
         return ("claude is not on the run's PATH", None)
     try:
-        proc = subprocess.run([exe, *AUTH_ARGV], cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        return (f"claude auth status --json gave no answer in {timeout_s:g}s", None)
+        proc = subprocess.Popen([exe, *AUTH_ARGV], cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                start_new_session=True)       # its own process group, so a timeout stops all of it
     except OSError as exc:
         return (f"claude auth status --json can't be run: {exc}", None)
-    return auth_problem(proc.stdout, proc.returncode)
+    try:
+        stdout, _ = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        return (f"claude auth status --json gave no answer in {timeout_s:g}s", None)
+    return auth_problem(stdout, proc.returncode)
+
+
+def check_timeout(timeout_s: float) -> None:
+    if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not math.isfinite(timeout_s) \
+            or not 0 < timeout_s <= MAX_AUTH_TIMEOUT_S:
+        raise ValueError(f"the auth check's timeout must be over 0 and at most {MAX_AUTH_TIMEOUT_S}s, not {timeout_s!r}")
 
 
 # --- the check --------------------------------------------------------------------------
@@ -218,9 +235,12 @@ def billing_check(projects: Iterable[Path], cwd: Path | None = None, parent: Map
     projects = [Path(p) for p in projects]
     if not projects:
         raise ValueError("billing_check needs the checkout the run starts in")
+    check_timeout(timeout_s)
     parent = os.environ if parent is None else parent
     env = run_env(parent)
     routes = find_routes(parent, settings_files(env.get("HOME"), projects, managed))
+    if not env.get("HOME"):                    # `claude` would still find the user settings, from the passwd entry
+        routes.append("HOME is not set in the run's environment: the user settings can't be located")
     if routes:
         return Billing(ok=False, routes=tuple(routes))
     problem, auth = check_auth(env, cwd or projects[0], timeout_s)
