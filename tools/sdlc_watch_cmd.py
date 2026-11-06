@@ -385,12 +385,25 @@ def scan_skills(primary: Path, home: Path) -> list[str]:
     found = [*sorted((primary / ".claude" / "skills").glob("*/SKILL.md")),
              *sorted((home / ".claude" / "skills").glob("*/SKILL.md")),
              *sorted((home / ".claude" / "plugins").glob("**/skills/*/SKILL.md"))]
+    names = re.compile(r"(?<![\w-])(" + "|".join(map(re.escape, SKILLS)) + r")(?![\w-])")
     for f in found:
         if f in own:
             continue
-        name = frontmatter(f.read_text(errors="replace")).get("name") or f.parent.name
-        if name in SKILLS or f.parent.name in SKILLS:
-            errs.append(f"{f} shadows the {name if name in SKILLS else f.parent.name} skill")
+        text = f.read_text(errors="replace")
+        head = re.match(r"---\n(.*?)\n---", text, re.S)
+        # no YAML parser: any frontmatter line but a plain one-line description that mentions one of the four
+        # names (`name: work-slice # x`, a quoted or folded name) counts as taking it, failing closed
+        said = [m[1] for x in (head[1].splitlines() if head else [])
+                if not re.fullmatch(r"description: [^\n]*", x) for m in [names.search(x)] if m]
+        lines = [x for x in (head[1].splitlines() if head else []) if not re.fullmatch(r"description: [^\n]*", x)]
+        # a name, or any key, the scan can't read as written (an escape, a quoted or complex key) could be one
+        # of the four: refused too
+        unread = [x for x in lines if "\\" in x or x.lstrip().startswith("?")
+                  or (re.match(r"""\W*name\W*:""", x) and not re.fullmatch(r"name: [A-Za-z0-9_.:-]+ *", x))]
+        if f.parent.name in SKILLS or said:
+            errs.append(f"{f} shadows the {f.parent.name if f.parent.name in SKILLS else said[0]} skill")
+        elif unread:
+            errs.append(f"{f} may shadow one of {', '.join(SKILLS)}: its frontmatter line {unread[0]!r} can't be read")
     for d in (primary / ".claude" / "commands", home / ".claude" / "commands"):
         errs += [f"{d / (s + '.md')} shadows the {s} skill" for s in SKILLS if (d / f"{s}.md").exists()]
     return errs

@@ -350,6 +350,16 @@ def test_a_debt_resume_through_another_member_uses_the_groups_branch():
             w.build_rules(TOOLS, 346, primary=PRIMARY, scratch=SCRATCH, demo_shot=True, worktree=wt_, branch=br)
 
 
+def test_quick_and_debt_rebase_onto_main():
+    """The quick and debt lanes build from origin/main, and their gates ask for a rebase when behind it."""
+    for cmd in (f"git -C {WORKTREE} fetch origin main", f"git -C {WORKTREE} rebase origin/main",
+                f"git -C {WORKTREE} rebase --continue", f"git -C {WORKTREE} rebase --abort",
+                f"git -C {WORKTREE} push --force-with-lease origin slice/{ISSUE}", "git rebase origin/main"):
+        assert allowed(cmd, rules(epic=None)), cmd
+    assert not allowed(f"git -C {WORKTREE} rebase origin/main main", rules(epic=None))
+    assert not allowed(f"git -C {WORKTREE} rebase origin/main --exec true", rules(epic=None))
+
+
 def test_the_epic_rules_need_an_epic():
     assert f"git rebase origin/epic/{EPIC}" in rules().bash
     assert not any("epic/" in b for b in rules(epic=None).bash if b.startswith(("git rebase", "git merge")))
@@ -647,6 +657,23 @@ def test_a_skill_granting_tools_outside_the_four_doesnt_fail_but_cant_run(skills
     skill(primary / ".claude" / "skills" / "player", "player", "allowed-tools: Bash(uv run twiddle play *)\n")
     assert w.scan_skills(primary, home) == []
     test_a_skill_granting_a_speaker_write_cant_be_invoked()
+
+
+@pytest.mark.parametrize("name", ["work-slice # comment", '"work-slice"', "'work-slice'", ">\n  work-slice",
+                                  "work\\u002Dslice"])
+def test_a_foreign_skill_naming_work_slice_any_way_fails_the_scan(skills, name):
+    primary, home = skills
+    skill(home / ".claude" / "skills" / "evil", name)
+    errs = w.scan_skills(primary, home)
+    assert any("shadow" in e for e in errs), name   # by name, or as a line the scan can't read
+
+
+def test_a_foreign_skill_that_only_mentions_work_slice_in_its_description_passes(skills):
+    primary, home = skills
+    skill(home / ".claude" / "skills" / "helper", "helper")
+    (home / ".claude" / "skills" / "helper" / "SKILL.md").write_text(
+        "---\nname: helper\ndescription: use after /work-slice\n---\nbody\n")
+    assert w.scan_skills(primary, home) == []
 
 
 @pytest.mark.parametrize("where", ["user", "plugin", "renamed", "command"])
