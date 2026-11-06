@@ -69,9 +69,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 try:
-    from tools import codex_review, sdlc_quick   # imported as tools.sdlc (the tests)
+    from tools import codex_eval, codex_review, sdlc_quick   # imported as tools.sdlc (the tests)
 except ModuleNotFoundError:
-    import codex_review                     # run as tools/sdlc.py
+    import codex_eval                       # run as tools/sdlc.py
+    import codex_review
     import sdlc_quick
 # how a review runs and what counts as one live there; sdlc.py reads GitHub, posts and gates
 HEAD_RE, VERDICT_RE, parse_verdict = codex_review.HEAD_RE, codex_review.VERDICT_RE, codex_review.parse_verdict
@@ -208,6 +209,9 @@ class Ledger:
     # milestone -> its slices that merged without their own Codex approval (routine, or Codex unavailable),
     # until an approving milestone review after them
     review_owed: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    # milestone -> the review evals its slices merged with deferred (`eval-owed`); cleared by a pass, which lives on
+    # `codex_eval_issue`, so `bundle_state` (not this ledger) drops the cleared ones
+    eval_owed: dict[str, list[dict[str, str]]] = field(default_factory=dict)
     doc_body: str = ""                   # the latest revision's comment, as read
     # the `lane=full` record that moved the approved quick brief to the full lane, and the `prd-merged` record
     # after it: until that one, the brief is committed to docs/prd/ (`commit-prd`) before anything is planned
@@ -371,6 +375,12 @@ def _on_review_owed(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) ->
                                                   "why": mk.get("why", "?"), "sha": mk.get("sha", "")})
 
 
+def _on_eval_owed(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    L.eval_owed.setdefault(_ms(mk), []).append({"slice": mk.get("slice", "?"), "number": mk.get("number", ""),
+                                                "pr": mk.get("pr", ""), "fp": mk.get("fp", ""),
+                                                "codex": mk.get("codex", "?"), "url": c.get("url", "")})
+
+
 def _on_epic_tests(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     L.epic_tests.append({"sha": mk.get("sha"), "result": mk.get("result"), "passed": mk.get("passed"),
                          "main": mk.get("main"), "url": c.get("url")})
@@ -383,9 +393,12 @@ MARKERS = {
     "demo": _on_demo, "demo-approval": _on_demo_approval, "demo-changes": _on_demo_changes,
     "demo-void": _on_demo_void, "demo-request": _on_demo_request,
     "shipped": _on_shipped, "ship-review": _on_ship_review, "epic-tests": _on_epic_tests,
-    "main-tests": _on_main_tests, "review-owed": _on_review_owed,
+    "main-tests": _on_main_tests, "review-owed": _on_review_owed, "eval-owed": _on_eval_owed,
     "lane": _on_lane, "prd-merged": _on_prd_merged,
 }
+# kinds that are records kept on an issue, not part of its conversation: never a reply, and never the agent's
+# last comment, so one posted while the poster's answer waits doesn't hide it
+OFF_THE_RECORD = {"codex-eval"}
 
 
 def read_ledger(ordered: list[dict[str, Any]], trusted: set[str],
@@ -405,6 +418,8 @@ def read_ledger(ordered: list[dict[str, Any]], trusted: set[str],
                 L.demo_approves[str(c.get("id"))] = (L.latest_demo["milestone"], L.latest_demo["rev"])
             continue
         marked.add(c.get("id"))
+        if mk.get("kind") in OFF_THE_RECORD:
+            continue
         last = i
         if handler := MARKERS.get(mk.get("kind", "")):
             handler(L, mk, c, i)
@@ -601,7 +616,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "plan_review": L.plan_review,
         "demos": demos, "latest_demo": latest_demo, "feedback": feedback,
         "shipped": shipped, "ship_reviews": ship_reviews, "epic_tests": epic_tests, "untested": untested,
-        "review_owed": review_owed,
+        "review_owed": review_owed, "eval_owed": L.eval_owed,
         "demo_request": request,
         "planned_milestones": planned_ms, "created_milestones": sorted(created_ms, key=natural_key),
         "uncreated_milestones": uncreated, "create_mode": latest_plan_json.get("create") or config.get("create", "milestone"),
@@ -795,7 +810,7 @@ def milestone_phases(st: dict[str, Any], progress: dict[str, Any]) -> list[dict[
             phase = "uncreated"
         elif not (m["total"] and m["done"] == m["total"]):
             phase = "building"           # even if accepted: a reopened slice (a revert) is being built again
-        elif (st.get("review_owed") or {}).get(k):
+        elif codex_review.owed_slices(st.get("review_owed"), k):
             phase = "review"
         elif d.get("accepted"):
             phase = "accepted"
@@ -840,13 +855,16 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
         nxt = f"/plan-issue {n}: plan {cur['key']} with what earlier milestones taught"
     elif cur["phase"] == "review":
         due = "review"
-        owed = (st.get("review_owed") or {}).get(cur["key"]) or []
+        owed = codex_review.owed_slices(st.get("review_owed"), cur["key"])
         nxt = (f"/milestone-demo {n}: {done_phrase(cur)}, but Codex hasn't reviewed "
                + ", ".join(f"{o['slice']} ({o['why']})" for o in owed)
                + ": the milestone's review comes before its demo, and new slices wait")
     elif cur["phase"] in ("complete", "demoed"):
         due = "demo"
         nxt = f"/milestone-demo {n}: {done_phrase(cur)}, and new slices wait for its demo"
+        if owed := (st.get("eval_owed") or {}).get(cur["key"]):
+            nxt += (f"; the review eval is owed first ({owed_eval_phrase(owed)}): `uv run python tools/sdlc.py "
+                    "codex-eval` on the epic's head, before `demo-post`")
     elif cur["phase"] == "accepted":
         due = "ship"
         later = any(m["phase"] == "uncreated" for m in phases)
@@ -1005,6 +1023,8 @@ HEADERS = {
     "retry": "retried on a stronger model",
     "review-deferred": "Codex review deferred to the milestone",
     "review-owed": "Codex review owed at the milestone",
+    "codex-eval": "Codex review eval",
+    "eval-owed": "Codex review eval owed at the milestone",
     "quick-merged": "merged to main",
     "debt-merged": "debt PR merged to main",
     "lane": "moved to the full lane",
@@ -1090,8 +1110,15 @@ def fetch_bundle(n: int, config: dict[str, Any], trusted: set[str] | None = None
     issue = norm_issue(gh_json(["issue", "view", str(n), "--repo", repo, "--json",
                                 "number,title,state,author,labels,createdAt,body"]))
     comments = [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{n}/comments")]
-    return {"issue": issue, "comments": comments,
-            "trusted": sorted(trusted if trusted is not None else fetch_trusted(config))}
+    trusted = trusted if trusted is not None else fetch_trusted(config)
+    bundle = {"issue": issue, "comments": comments, "trusted": sorted(trusted)}
+    # an epic that owes a review eval: the results that may have cleared it (only then: no fetch for the rest).
+    # When the epic is the results' own issue, its comments are already the ledger
+    ledger = config.get("codex_eval_issue")
+    if isinstance(ledger, int) and any(mk.get("kind") == "eval-owed" for mk, _ in _marked(comments, trusted)):
+        bundle["eval"] = comments if n == ledger else [
+            norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{ledger}/comments")]
+    return bundle
 
 
 WATCH_RUN_ENV = "TWIDDLE_SDLC_WATCH_RUN"   # set in a run the watcher started: no person is at the keyboard
@@ -1116,8 +1143,15 @@ def load_bundle(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, A
     return fetch_bundle(args.number, config)
 
 
-def bundle_state(bundle: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-    return derive_state(bundle["issue"], bundle["comments"], set(bundle["trusted"]), config)
+def bundle_state(bundle: dict[str, Any], config: dict[str, Any], context: tuple[str | None, str | None] = (None, None)
+                 ) -> dict[str, Any]:
+    """`derive_state` of a fetched (or saved) bundle. Its owed review evals are those no recorded pass has
+    cleared, when the bundle carries the results (`eval`); `context` (the epic head's review logic and
+    `codex --version` now, `epic_eval_context`) lets a pass for that pair clear them too (`open_eval_owed`)."""
+    st = derive_state(bundle["issue"], bundle["comments"], set(bundle["trusted"]), config)
+    if "eval" in bundle:
+        st["eval_owed"] = open_eval_owed(st["eval_owed"], eval_records(bundle["eval"], set(bundle["trusted"])), *context)
+    return st
 
 
 def post_comment(n: int, body: str, config: dict[str, Any]) -> dict[str, Any]:
@@ -1167,7 +1201,7 @@ def print_state(st: dict[str, Any]) -> None:
     print(f"  state: {st['state']}" + (f"   lane: {st['lane']}" if st.get("lane") else "")
           + f"   turn: {st['turn']}   action: {st['action']}   type: {st['type'] or '?'}")
     print(f"  latest revision: {('%s rev %s' % (doc['kind'], doc['rev'])) if doc else 'none'}"
-          f"   approved: {st['approved_rev'] or 'no'}" + (f" (comment {approved_comment(st)})" if st.get("doc_approved") else "")
+          f"   approved: {st['approved_rev'] or 'no'}" + (f" (comment {codex_review.approved_comment(st['latest_doc'])})" if st.get("doc_approved") else "")
           + f"   rounds: {st['rounds']}/{st['max_rounds']}")
     if st["replies"]:
         print("  replies since the last agent comment: " + ", ".join(f"{r['by']} ({r['url']})" for r in st["replies"]))
@@ -1210,6 +1244,8 @@ def print_state(st: dict[str, Any]) -> None:
               f"   plan rounds: {st['plan_rounds']}/{st['max_plan_rounds']}")
     for m in (st.get("progress") or {}).get("milestones", []):
         print(f"  milestone {m['title']}: {m['done']}/{m['total']} merged" + ("  (complete)" if m["done"] == m["total"] else ""))
+    for k, owed in (st.get("eval_owed") or {}).items():
+        print(f"  review eval owed for {k}, before its demo: {owed_eval_phrase(owed)}")
     if st.get("demo_request"):
         r = st["demo_request"]
         print(f"  demo steps asked of a person for {r['milestone']}: {r['url']}"
@@ -1303,7 +1339,7 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
             claim = claim_status(bundle["comments"], set(bundle["trusted"]))
             errs = quick_view_errors(bundle["issue"], st, claim, bool(claim), config)
         else:
-            errs = quick_claim_errors(st["number"], approved_brief(st) or "", False, config, offline=True)
+            errs = quick_claim_errors(st["number"], codex_review.approved_brief(st) or "", False, config, offline=True)
         if errs:
             nxt = f"/triage-issue {st['number']}: " + "; ".join(errs)
         elif bundle is not None and not offline and st["state"] == "in-progress":
@@ -1322,7 +1358,8 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
 
 def command_state(args: argparse.Namespace, config: dict[str, Any]) -> int:
     bundle = load_bundle(args, config)
-    st = bundle_state(bundle, config)
+    st = bundle_state(bundle, config, epic_eval_context(bundle["issue"].get("number"), bundle,
+                                                        bool(getattr(args, "from_file", None))))
     if st.get("plan_kind") == "slice" and not getattr(args, "from_file", None):
         return command_slice_status(argparse.Namespace(number=st["number"], json=args.json, from_file=None), config)
     st = with_next(st, config, offline=bool(getattr(args, "from_file", None)), trusted=set(bundle["trusted"]),
@@ -1507,7 +1544,7 @@ def escalated_prd_errors(n: int, st: dict[str, Any], pr: dict[str, Any], text: s
                 f"(it changes: {', '.join(paths[:5]) or 'nothing'})"]
     if not st.get("doc_approved"):
         return [f"#{n}'s latest revision is not approved: there is no approved brief to commit"]
-    want = approved_brief_id(st)
+    want = codex_review.approved_brief_id(st)
     if text is None:
         return [f"could not read {paths[0]} at the PR's head"]
     if not header_links(text, want):
@@ -1527,7 +1564,7 @@ def pr_file_text(pr: dict[str, Any], path: str, root: Path) -> str | None:
 
 
 def record_prd_merged(n: int, st: dict[str, Any], path: str, pr: int | None, config: dict[str, Any]) -> None:
-    anchor = approved_brief_id(st)
+    anchor = codex_review.approved_brief_id(st)
     body = (f"The approved brief (rev {st['approved_doc']['rev']}) is `{path}` on "
             f"`{config.get('default_branch', 'main')}`" + (f", merged in PR #{pr}" if pr else "")
             + f". Next: planning (`/plan-issue {n}`).")
@@ -1600,7 +1637,7 @@ def render_prd_file(n: int, title: str, bundle: dict[str, Any], st: dict[str, An
     """docs/prd/N-*.md for an escalated brief: a header linking the approved comment, the sign-off and the
     approval record (what `approved_requirements` and `merge-prd` look for), then the brief as approved."""
     doc = st["approved_doc"]
-    anchor = approved_brief_id(st)
+    anchor = codex_review.approved_brief_id(st)
     url = lambda c: c.get("url") or f"https://github.com/{repo}/issues/{n}#issuecomment-{c.get('id')}"  # noqa: E731
     doc_url = doc.get("url") if (doc.get("url") or "").endswith(f"#issuecomment-{anchor}") else \
         f"https://github.com/{repo}/issues/{n}#issuecomment-{anchor}"
@@ -1610,7 +1647,7 @@ def render_prd_file(n: int, title: str, bundle: dict[str, Any], st: dict[str, An
         + ([f"[approval record]({url(record)})"] if record else [])
     when = f" on {record['created_at'][:10]}" if record and record.get("created_at") else ""
     how = "" if signoff or not record else " (label)"
-    text = BOT_TITLE_RE.sub("", approved_brief(st) or "", count=1).strip()
+    text = BOT_TITLE_RE.sub("", codex_review.approved_brief(st) or "", count=1).strip()
     if (foot := FOOTERS.get(doc["kind"])) and text.endswith(f"---\n{foot}"):
         text = text[: -len(f"---\n{foot}")].rstrip()
     moved = f" It was approved as a quick brief and moved to the full lane ([record]({url(st['to_full'])}))."
@@ -1652,7 +1689,7 @@ def commit_prd(n: int, config: dict[str, Any], dry_run: bool = False, root: Path
         raise SdlcError(f"#{n} is {st['state']}" + ("" if st.get("doc_approved") else " with an unapproved revision")
                         + f", not approved: {next_command(st)}")
     repo, root = repo_of(config), root or primary_root()
-    main, branch, anchor = config.get("default_branch", "main"), prd_branch(n), approved_brief_id(st)
+    main, branch, anchor = config.get("default_branch", "main"), prd_branch(n), codex_review.approved_brief_id(st)
     if not dry_run:
         git(["fetch", "-q", "origin", main], cwd=root)
     if found := merged_prd_path(n, anchor, f"origin/{main}", root):   # merged before; only its record is missing
@@ -2347,7 +2384,7 @@ def command_plan_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
                         + (" — the Codex rounds are spent; ask the poster (`transition N needs-info --kind question`)"
                            if st["action"] == "ask_poster" else ""))
     ref = planning_ref(plan.get("issue"), config, offline=bool(getattr(args, "from_file", None)))
-    errs = plan_errors(plan, ref, st.get("latest_doc") and approved_comment(st), kept_debt_keys(bundle, st))
+    errs = plan_errors(plan, ref, st.get("latest_doc") and codex_review.approved_comment(st["latest_doc"]), kept_debt_keys(bundle, st))
     if plan.get("issue") != st["number"]:
         errs.append(f"the plan is for #{plan.get('issue')}, not #{st['number']}")
     if st["state"] in BUILD_STATES and st["latest_plan"]:
@@ -2414,7 +2451,7 @@ def command_plan_create(args: argparse.Namespace, config: dict[str, Any]) -> int
     plan_comment, plan = latest_plan_of(bundle, st)
     epic = st["number"]
     ref = planning_ref(plan.get("issue"), config, offline=bool(getattr(args, "from_file", None)))
-    cid = st.get("latest_doc") and approved_comment(st)
+    cid = st.get("latest_doc") and codex_review.approved_comment(st["latest_doc"])
     # the plan's own `debt` keys pass: plan-post already held them to the revision before it
     errs = plan_errors(plan, ref, cid, kept_debt_keys(bundle, st)) \
         + ([] if plan.get("issue") == epic else [f"the plan is for #{plan.get('issue')}"])
@@ -2902,7 +2939,7 @@ def quick_merge_gate_errors(pr: dict[str, Any], issue_state: dict[str, Any] | No
         errs += sdlc_quick.eligibility_errors(issue, issue_state)
     t, r = head_records(pr, tests, reviews)
     head = (pr.get("headRefOid") or "")[:12]
-    want = approved_brief_id(issue_state) if issue_state else None
+    want = codex_review.approved_brief_id(issue_state) if issue_state else None
     if not r:
         errs.append(f"no Codex review of the current head {head} (a quick change's review is never deferred)")
     elif r["verdict"] != "approve":
@@ -4780,26 +4817,6 @@ def pr_debt(args: argparse.Namespace, pr: dict[str, Any], issue: dict[str, Any] 
     return debt_pr_context(pr, tickets, ec, trusted, others)
 
 
-def debt_brief(ctx: dict[str, Any]) -> str:
-    """What Codex holds a debt PR to: the pass group's scope and files, the rule for findings outside them, and
-    each ticket it closes (the spec)."""
-    g = ctx["group"]
-    out = [f"Debt PR: group `{g['key']}` of pass {g['pass']} on debt epic #{ctx['debt_epic']}, closing "
-           + ", ".join(f"#{t['number']}" for t in ctx["tickets"]) + ", into main.", "",
-           "## The group's scope (from the pass plan)", "", g["scope"] or "(none given)", "",
-           "## The group's files (from the pass plan)", "", *[f"- `{f}`" for f in g["files"]], "",
-           f"Rated `{g['complexity'] or '?'}` in the pass plan.", "",
-           "## Findings inside and outside the scope", "",
-           "Each ticket below is the spec, and the group's scope and files above bound the change. A problem inside "
-           "that scope is fixed in this PR, and so is anything the diff itself changes or breaks, wherever it is. A "
-           "problem that was already there outside that scope, which the change neither causes nor touches, is not "
-           "this ticket's debt: it doesn't hold this PR, and it isn't filed as debt either. It is dropped, or filed "
-           "as an ordinary issue for triage when it matters.", ""]
-    for t in ctx["tickets"]:
-        out += [f"## Ticket #{t['number']}: {t.get('title', '')}", "", (t.get("body") or "").strip(), ""]
-    return "\n".join(out)
-
-
 def slice_bundle(n: int, config: dict[str, Any]) -> dict[str, Any]:
     trusted = fetch_trusted(config)
     issue, comments = fetch_slice(n, config)
@@ -4833,7 +4850,7 @@ def quick_view_errors(issue: dict[str, Any], st: dict[str, Any], claim: dict[str
                       config: dict[str, Any]) -> list[str]:
     """What `claim N --quick` (or `--resume`) would refuse, read from the bundle alone: its checks of the issue
     and the brief's sections, then its `## Files` check offline (`quick_claim_errors`), which needs no git."""
-    brief = approved_brief(st)
+    brief = codex_review.approved_brief(st)
     errs = sdlc_quick.quick_check_errors(issue, st, brief, claim, resume)
     return errs or quick_claim_errors(issue["number"], brief or "", resume, config, offline=True)
 
@@ -4901,7 +4918,15 @@ def quick_gate_errors(b: dict[str, Any], config: dict[str, Any]) -> list[str]:
     tests, reviews = pr_records(b["pr_comments"], set(b["trusted"]))   # deferrals are never read
     st = quick_issue_state(b, config) if b.get("issue") else None
     return quick_merge_gate_errors(b["pr"], st, tests, reviews, b.get("behind_by"), b.get("files"),
-                                   approved_brief(st) if st else None, quick, config.get("default_branch", "main"))
+                                   codex_review.approved_brief(st) if st else None, quick, config.get("default_branch", "main"))
+
+
+def quick_eval_errors(b: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    """The eval gate's refusals of a live quick-gate bundle's PR (`main_eval_errors`). None until it closes one issue:
+    the quick gate refuses that PR already."""
+    pr = b.get("pr") or {}
+    refs = closes_refs(pr.get("body", ""))
+    return main_eval_errors(pr, config, "quick", refs[0]) if len(refs) == 1 else []
 
 
 def merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: dict[str, Any]) -> list[str]:
@@ -4916,7 +4941,8 @@ def merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: d
 
 def _merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: dict[str, Any]) -> list[str]:
     if quick:
-        return quick_gate_errors(quick_gate_bundle(st["pr"], config), config)
+        qb = quick_gate_bundle(st["pr"], config)
+        return quick_gate_errors(qb, config) + quick_eval_errors(qb, config)
     if st.get("lane") == DEBT_LANE:   # its `epic` is the debt epic: no epic branch, the debt gate onto main
         return debt_pr_gate(st["pr"], config, set(b["trusted"]))
     if not st.get("epic"):
@@ -4927,7 +4953,8 @@ def _merge_due_gate(b: dict[str, Any], st: dict[str, Any], quick: bool, config: 
 def command_quick_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """May this quick PR merge into main? Prints each refusal (or `ok`); reads only, never escalates."""
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else quick_gate_bundle(args.pr, config)
-    errs = quick_gate_errors(b, config)
+    # a saved bundle (--from-file) is judged offline: it carries no commits to fingerprint, so no eval gate
+    errs = quick_gate_errors(b, config) + ([] if args.from_file else quick_eval_errors(b, config))
     for e in errs:
         print(f"refused: {e}")
     if not errs:
@@ -5152,10 +5179,10 @@ def claim_quick(args: argparse.Namespace, config: dict[str, Any], b: dict[str, A
         raise SdlcError("--retry takes over an escalated slice; a quick change is never retried on another model")
     is_slice = LEAF_LABEL in b["issue"].get("labels", [])
     st = bundle_issue_state(b, config) or {}
-    errs = sdlc_quick.quick_check_errors(b["issue"], st, approved_brief(st), claim, args.resume, is_slice)
+    errs = sdlc_quick.quick_check_errors(b["issue"], st, codex_review.approved_brief(st), claim, args.resume, is_slice)
     if errs:
         raise SdlcError("; ".join(errs))
-    if errs := quick_claim_errors(n, approved_brief(st) or "", args.resume, config, offline=bool(args.from_file)):
+    if errs := quick_claim_errors(n, codex_review.approved_brief(st) or "", args.resume, config, offline=bool(args.from_file)):
         raise SdlcError("; ".join(errs))
     if args.from_file:   # offline: the bundle's brief is all that was read (no worktree, branch or origin)
         print(f"would claim #{n}: a quick change, its brief inside the quick rules; from {args.from_file}, "
@@ -5307,10 +5334,16 @@ def review_body(head: str, summary: str, report: str, response: str) -> tuple[st
     return body, {"response": "1" if response else "0", **prov}
 
 
-def recorded_rounds(comments: list[dict[str, Any]], trusted: set[str], kind: str, **match: str) -> list[dict[str, Any]]:
-    """The recorded rounds of one kind (and milestone), oldest first, as `codex_review.latest_response` reads them."""
-    return [{"verdict": mk.get("verdict"), "body": c.get("body", ""), "response": mk.get("response")}
-            for mk, c in _marked(comments, trusted) if mk.get("kind") == kind and all(mk.get(k) == v for k, v in match.items())]
+def wasted_round(spent: int, limit: int, approved: bool, what: str, head: str, escalate: str, onward: str) -> None:
+    """Refuse a `codex-review` round that `pr-review` / `ship-review` would refuse, or that changes nothing: the
+    change rounds are spent, or Codex already approved this exact head (a quick PR's: against the brief approved now).
+    Checked before Codex starts, so no run is paid for."""
+    if spent >= limit:
+        raise SdlcError(f"Codex rounds on {what} spent ({spent}/{limit} asked for changes): a round now couldn't be "
+                        f"recorded; {escalate}")
+    if approved:
+        raise SdlcError(f"Codex already approved {what} at {head[:12]}: that approval stands, so a round now would "
+                        f"change nothing; {onward}")
 
 
 def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
@@ -5338,7 +5371,7 @@ def command_pr_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if quick and not stamped:
         raise SdlcError("the Codex report has no `Brief:` line: a quick change's review is bound to the approved brief "
                         "it read, so save it with `codex-review --pr`, which stamps it")
-    if quick and stamped != (want := approved_brief_id(quick)):
+    if quick and stamped != (want := codex_review.approved_brief_id(quick)):
         raise SdlcError(f"Codex reviewed against brief {stamped}, but #{quick['number']}'s approved brief is now {want}: "
                         "run `codex-review --pr` again on the approved brief")
     if not quick and stamped:
@@ -5452,12 +5485,323 @@ def review_scratch(args: argparse.Namespace, label: str, *inside: Path) -> Path:
     return out
 
 
+def eval_records(comments: list[dict[str, Any]], trusted: set[str]) -> list[dict[str, Any]]:
+    """The review eval's results (`codex-eval` comments on `codex_eval_issue`), oldest first."""
+    return [{"fingerprint": mk.get("fp"), "codex": mk.get("codex"), "outcome": mk.get("outcome"),
+             "model": mk.get("model"), "effort": mk.get("effort"), "url": c.get("url")}
+            for mk, c in _marked(comments, trusted) if mk.get("kind") == "codex-eval"]
+
+
+def eval_ledger(args: argparse.Namespace, config: dict[str, Any], bundle: dict[str, Any] | None = None
+                ) -> list[dict[str, Any]]:
+    """The recorded eval results: with --from-file, the bundle's `eval` comments (none when it has no `eval`),
+    else `codex_eval_issue`'s comments, fetched."""
+    if getattr(args, "from_file", None):
+        b = bundle if bundle is not None else json.loads(Path(args.from_file).read_text())
+        return eval_records(b.get("eval") or [], set(b.get("trusted") or []))
+    n = config.get("codex_eval_issue")
+    if not isinstance(n, int):
+        raise SdlcError("`.sdlc/config.json` has no `codex_eval_issue`: the issue the review eval's results are kept on")
+    return eval_records([norm_comment(c) for c in gh_pages(f"repos/{repo_of(config)}/issues/{n}/comments")],
+                        fetch_trusted(config))
+
+
+# --- the eval gate: a merge needs the review logic it lands evaluated (or the eval deferred) ----------
+#
+# A slice PR merges only when the (fingerprint at its head, `codex --version`) pair has a recorded `pass`, or a
+# `deferred` result (the eval couldn't run: owed before the milestone's demo, as `review-defer` owes a review).
+# A `fail` blocks until a pass. When `codex --version` can't be read, only the fingerprint is checked: its latest
+# completed result (pass or fail, any version) decides, else a deferral recorded as `unavailable` lets it through.
+
+EVAL_UNAVAILABLE = "unavailable"       # the `codex` a deferral was recorded under, when there was none to ask
+
+
+def real_version(version: str | None) -> str | None:
+    """`codex --version`'s answer when it is one a result can be paired with, else None (missing, or `unknown`)."""
+    return version if version and version not in (codex_eval.UNKNOWN, EVAL_UNAVAILABLE) else None
+
+
+def latest_completed(results: list[dict[str, Any]], fp: str, version: str | None = None) -> dict[str, Any] | None:
+    """The latest `pass` or `fail` for this fingerprint (results oldest first), under `version` or, with none,
+    under any version; or None. A deferral never stands in for a completed eval. A pass counts only under a real
+    version; a fail under any, `unknown` included (an eval that ran with an unreadable `codex --version`), so
+    without a version to pair it with, a fingerprint's failure still blocks its merge and its deferral."""
+    done = [r for r in results if r.get("fingerprint") == fp
+            and (r.get("outcome") == "fail" or (r.get("outcome") == "pass" and real_version(r.get("codex"))))
+            and (version is None or r.get("codex") == version)]
+    return done[-1] if done else None
+
+
+def passed(results: list[dict[str, Any]], fp: str | None, version: str | None = None) -> bool:
+    return bool(fp) and (r := latest_completed(results, fp, version)) is not None and r["outcome"] == "pass"
+
+
+def eval_status(fp: str, version: str | None, results: list[dict[str, Any]]) -> tuple[str, dict[str, Any] | None]:
+    """(`pass`, `fail`, `deferred` or `none`, the result that decided it) for the review logic `fp` under `version`.
+
+    A completed eval (pass or fail) always outranks a deferral, whatever their order: a deferral recorded after a
+    fail (a `--defer` that read the results before the fail was posted) never unblocks it. With a real version
+    the pair's latest completed result decides, else a deferral for the pair. Without one, the fingerprint's
+    latest completed result under any version decides, else an `unavailable` deferral for the fingerprint."""
+    v = real_version(version)
+    if r := latest_completed(results, fp, v):
+        return r["outcome"], r
+    deferred = [r for r in results if r.get("fingerprint") == fp and r.get("codex") == (v or EVAL_UNAVAILABLE)
+                and r.get("outcome") == "deferred"]
+    return ("deferred", deferred[-1]) if deferred else ("none", None)
+
+
+def eval_gate(head_fp: str, base_fp: str | None, version: str | None, results: list[dict[str, Any]],
+              no_deferral: str | None = None, on_fail: str | None = None) -> tuple[list[str], dict[str, str] | None]:
+    """(why the merge is refused, the eval it owes when a deferral lets it through) for a PR whose head has the
+    review logic `head_fp` (`base_fp` its base's: only for the message) under `codex --version` `version`.
+
+    `no_deferral`, for a PR straight into main (a quick change's, a debt group's): there is no milestone demo to
+    owe an eval to, so a deferral is a refusal too, and this says what to do instead of deferring. `on_fail`, with it:
+    the lane's own next step after a failed eval (its escalation), in place of the slice lane's "or escalate"."""
+    v = real_version(version)
+    pair = f"the review logic {codex_eval.short(head_fp)} on codex {v or EVAL_UNAVAILABLE}"
+    why = "; ".join(w for w in ("this PR changes the review logic" if base_fp and base_fp != head_fp else
+                                ("" if not v else f"codex is now {v}"),
+                                "" if v else "`codex --version` can't be read here") if w)
+    state, r = eval_status(head_fp, version, results)
+    if state == "pass":
+        return [], None
+    if state == "deferred" and no_deferral is None:
+        return [], {"fp": head_fp, "codex": v or EVAL_UNAVAILABLE}
+    if state == "deferred":
+        return [f"the review eval for {pair} was only deferred" + (f" ({r['url']})" if r.get("url") else "")
+                + f", and a deferral doesn't count here: {no_deferral}"], None
+    if state == "fail" and on_fail is not None:
+        return [f"the review eval FAILED for {pair}" + (f" ({r['url']})" if r.get("url") else "")
+                + f": a failed eval can't be deferred; fix the review logic and run `codex-eval` again, or {on_fail}"], None
+    if state == "fail":
+        return [f"the review eval FAILED for {pair}" + (f" ({r['url']})" if r.get("url") else "")
+                + ": fix the review logic and run `codex-eval` again, or escalate; a failed eval can't be deferred"], None
+    if no_deferral is not None:
+        return [f"no review eval for {pair} ({why}): {no_deferral}"], None
+    return [f"no review eval for {pair} ({why}): run `uv run python tools/sdlc.py codex-eval` "
+            "(or, only if it can't run, `codex-eval --defer --reason \"...\"`)"], None
+
+
+def eval_defer_errors(fp: str, version: str | None, results: list[dict[str, Any]]) -> list[str]:
+    """Why a deferral of the eval for (`fp`, `version`) is refused: one is only for an eval that couldn't run."""
+    state, r = eval_status(fp, version, results)
+    where = f" ({r['url']})" if r and r.get("url") else ""
+    if state == "fail":
+        return [f"the review eval already FAILED for {codex_eval.short(fp)}{where}: a failure is fixed and evaluated "
+                "again, or escalated, never deferred"]
+    if state == "pass":
+        return [f"the review logic {codex_eval.short(fp)} already passed{where}: nothing to defer"]
+    if state == "deferred":
+        return [f"the eval for {codex_eval.short(fp)} is already deferred{where}: nothing more to record"]
+    return []
+
+
+def open_eval_owed(owed: dict[str, list[dict[str, str]]], results: list[dict[str, Any]] | None,
+                   head_fp: str | None = None, version: str | None = None) -> dict[str, list[dict[str, str]]]:
+    """The owed evals (milestone -> entries) no pass has cleared yet. With no `results` (unread), every entry stands.
+
+    An entry owed for (F, V) is cleared by a pass for exactly (F, V); one owed for F alone (`unavailable`) by a
+    pass for F under any real version. Either is also cleared by a pass for the logic that reviews from now on:
+    `head_fp` (the epic head's; F when unknown) under `version` (`codex --version` now), when that can be read.
+    So a pass recorded for an older `codex` never clears a deferral recorded after an upgrade. When it can't be
+    read, the head's logic is judged as `merge` judges it then, by its fingerprint alone: an entry for logic the
+    head has moved past (`head_fp` known and not F) is cleared when the head's latest completed eval, under any
+    real version, is a pass. One for the head's own logic keeps its own rule above."""
+    results, now = results or [], real_version(version)
+    out = {}
+    for m, entries in (owed or {}).items():
+        left = []
+        for e in entries:
+            fp, v = e.get("fp"), real_version(e.get("codex"))
+            if passed(results, fp, v) if v else passed(results, fp):
+                continue
+            if now and passed(results, head_fp or fp, now):
+                continue
+            if not now and head_fp and head_fp != fp and passed(results, head_fp):
+                continue
+            left.append(e)
+        if left:
+            out[m] = left
+    return out
+
+
+def owed_eval_phrase(entries: list[dict[str, str]]) -> str:
+    return ", ".join(f"{codex_eval.short(e.get('fp', '?'))} on codex {e.get('codex', '?')} ({e.get('slice', '?')})"
+                     for e in entries)
+
+
+def eval_comment(result: dict[str, Any], config: dict[str, Any]) -> str:
+    """One review eval's result as a `codex-eval` comment: the full fingerprint, `codex --version`, model, effort
+    and outcome in its marker; a line per fixture (`fixtures`: [{name, outcome, detail}]) and any `reason` below."""
+    if result.get("outcome") not in codex_eval.OUTCOMES:
+        raise SdlcError(f"an eval's outcome is one of {', '.join(codex_eval.OUTCOMES)}, not {result.get('outcome')!r}")
+    if not re.fullmatch(r"[0-9a-f]{64}", result.get("fingerprint") or ""):
+        raise SdlcError("an eval result needs the review logic's full fingerprint (64 hex digits)")
+    extra = {k: str(result.get(src) or "unknown") for k, src in (("codex", "codex"), ("model", "model"), ("effort", "effort"))}
+    if result["outcome"] == "pass" and extra["codex"] == codex_eval.UNKNOWN:
+        raise SdlcError("a pass needs the `codex --version` it ran under: one recorded for an unknown version "
+                        "would count for none")
+    if result["outcome"] != "deferred" and extra["codex"] == EVAL_UNAVAILABLE:
+        raise SdlcError(f"only a deferral is recorded under codex `{EVAL_UNAVAILABLE}`: an eval that completed ran "
+                        "under a `codex` that said its version")
+    if bad := [f"{k}={v!r}" for k, v in extra.items() if not MARKER_VALUE_RE.fullmatch(v) or "--" in v]:
+        raise SdlcError("can't be kept in a marker: " + ", ".join(bad))
+    lines = [f"**Review eval: `{result['outcome']}`** for the review logic `{codex_eval.short(result['fingerprint'])}` "
+             f"on codex `{extra['codex']}` (`{extra['model']}`, effort `{extra['effort']}`)", ""]
+    lines += [f"- `{f.get('name', '?')}`: {f.get('outcome', '?')}" + (f": {f['detail']}" if f.get("detail") else "")
+              for f in result.get("fixtures") or []]
+    if result.get("reason"):
+        lines += ["", f"```\n{result['reason'].strip()}\n```"]
+    return render_comment("codex-eval", None, "\n".join(lines), config, fp=result["fingerprint"],
+                          outcome=result["outcome"], **extra)
+
+
+def record_eval(result: dict[str, Any], config: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
+    """Post one review eval's result on `codex_eval_issue` (a closed issue's comments still read the same)."""
+    comment = eval_comment(result, config)
+    n = config.get("codex_eval_issue")
+    if not isinstance(n, int):
+        raise SdlcError("`.sdlc/config.json` has no `codex_eval_issue`: the issue the review eval's results are kept on")
+    if dry_run:
+        print(comment)
+        return {}
+    return post_comment(n, comment, config)
+
+
+def command_codex_eval(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """`--status`: the review logic's fingerprint, `codex --version`, and the eval result recorded for that pair (if
+    any), read-only (it runs `codex --version` at most). `--defer`: record that the eval couldn't run
+    (`defer_codex_eval`). Otherwise run the eval (`run_codex_eval`)."""
+    if getattr(args, "defer", False):
+        return defer_codex_eval(args, config)
+    if not args.status:
+        return run_codex_eval(args, config)
+    tree, section = codex_eval.Worktree(ROOT), config.get("codex")     # the settings a round here would run with
+    fp = codex_eval.fingerprint(tree, section=section)
+    mode = (section if isinstance(section, dict) else {}).get("skills", "?")
+    version = codex_eval.current_version()
+    try:
+        state = codex_eval.describe(codex_eval.pair_result(eval_ledger(args, config), fp, version)) if version \
+            else "no `codex` to pair it with"
+    except (SdlcError, OSError, ValueError) as exc:     # the pair is still worth printing
+        state = f"couldn't read the recorded results ({exc})"
+    listed = codex_eval.inputs(tree, section=section)
+    print(f"review logic: {codex_eval.short(fp)}  ({len(listed)} inputs; skills {mode})\n"
+          f"codex:        {version or 'not found on PATH'}\n"
+          f"eval:         {state}")
+    if args.inputs:
+        for name, data in listed:
+            print(f"  {name}" + ("  (absent)" if data is None else ""))
+    return 0
+
+
+def defer_codex_eval(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Record a `deferred` eval for this checkout's review logic and `codex --version` (`unavailable` when there is
+    no `codex` to ask, or it won't say): the eval couldn't run, so a merge may go through and the eval is owed
+    before the milestone's demo. Refused when the eval already failed for it (or passed: nothing to defer)."""
+    reason = (args.reason or "").strip()
+    if not reason:
+        raise SdlcError("--reason is required: why the eval couldn't run (its error, verbatim)")
+    if args.status or args.force:
+        raise SdlcError("--defer records a deferral: it takes no --status or --force")
+    settings = codex_review.codex_settings(config)
+    fp = codex_eval.fingerprint(codex_eval.Worktree(ROOT), section=settings)
+    version = real_version(codex_eval.current_version())
+    results = eval_ledger(args, config)
+    if errs := eval_defer_errors(fp, version, results):
+        raise SdlcError("; ".join(errs))
+    result = {"fingerprint": fp, "codex": version or EVAL_UNAVAILABLE, "outcome": "deferred",
+              "model": settings["model"], "effort": settings["reasoning_effort"], "reason": reason}
+    print(f"review logic: {codex_eval.short(fp)}\ncodex:        {version or 'not found, or says no version: '
+                                                                 + EVAL_UNAVAILABLE}")
+    if args.dry_run:
+        record_eval(result, config, dry_run=True)
+        return 0
+    if getattr(args, "from_file", None):
+        raise SdlcError("--from-file reads a saved ledger and can't post a result: use --dry-run with it")
+    posted = record_eval(result, config)
+    print(f"eval deferred for {codex_eval.short(fp)} on codex {result['codex']}: a merge may go through, and the eval "
+          "is owed before the milestone's demo" + (f"\nposted: {posted['html_url']}" if posted.get("html_url") else ""))
+    return 0
+
+
+def run_codex_eval(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Run each fixture under `tests/codex_eval/` through the review runner, score them, and post one result for
+    the (fingerprint, `codex --version`) pair. A pair that already passed runs nothing (`--force` runs it).
+
+    Exit status: 0 a pass (posted, or already recorded), 1 a `fail` (posted) or a refusal, `UNAVAILABLE` Codex
+    couldn't run and no fixture was missed (nothing posted: the review is deferred, as `codex-review`'s is)."""
+    settings = codex_review.codex_settings(config)
+    tree = codex_eval.Worktree(ROOT)
+    fp = codex_eval.fingerprint(tree, section=settings)
+    fixtures = codex_eval.load_fixtures()
+    version = codex_eval.current_version()
+    try:
+        prior = codex_eval.pair_result(eval_ledger(args, config), fp, version)
+    except (SdlcError, OSError, ValueError) as exc:
+        if not args.dry_run:
+            raise SdlcError(f"couldn't read the recorded results ({exc}): an eval that couldn't be told apart "
+                            "from a repeat isn't run") from exc
+        prior = None
+        print(f"note: couldn't read the recorded results ({exc})")
+    passed = bool(prior and prior.get("outcome") == "pass")
+    print(f"review logic: {codex_eval.short(fp)}  (skills {settings['skills']})\n"
+          f"codex:        {version or 'not found on PATH'}  (model {settings['model']}, effort {settings['reasoning_effort']})\n"
+          f"eval:         {codex_eval.describe(prior) if version else 'no `codex` to pair it with'}")
+    if args.inputs:
+        for name, data in codex_eval.inputs(tree, section=settings):
+            print(f"  {name}" + ("  (absent)" if data is None else ""))
+    if args.dry_run:
+        print("this pair already passed: nothing to run (--force runs it again). The fixtures are:" if passed and not args.force
+              else f"would run {len(fixtures)} fixtures one at a time, each in a scratch git repo under its own CODEX_HOME "
+                   "(about 2-3 minutes each), then post one result" + (" (--force: the pair passed already)" if passed else "") + ":")
+        for fx in fixtures:
+            print(f"  {fx.name}: " + (f"must be found at {fx.file}:{fx.line}" if fx.kind == "bug" else "must be approved"))
+        return 0
+    if passed and not args.force:
+        print("this pair already passed: nothing to run (--force runs it again)")
+        return 0
+    if getattr(args, "from_file", None):
+        raise SdlcError("--from-file reads a saved ledger and can't post a result: use --dry-run with it")
+    if not version:
+        print(f"codex can't be started (not on the PATH): nothing was run or posted (exit {codex_review.UNAVAILABLE}); "
+              "`codex-eval --defer --reason \"...\"` records that, so a merge can go through")
+        return codex_review.UNAVAILABLE
+    out = review_scratch(args, "run", ROOT, primary_root())      # a label that says nothing of the eval: Codex sees the path
+    print(f"scratch: {out}\n", flush=True)
+    run = codex_eval.run_fixtures(fixtures, settings, out, log=lambda m: print(m, flush=True))
+    outcome, reason = codex_eval.overall(run.outcomes)
+    if outcome is None:
+        print(f"\n{reason}: nothing was posted (exit {codex_review.UNAVAILABLE}); the end of each codex.err under {out} "
+              "says why. The review logic stays unevaluated for this pair: `codex-eval --defer --reason \"<that error>\"` "
+              "records it, so a merge can go through")
+        return codex_review.UNAVAILABLE
+    if codex_eval.fingerprint(tree, section=settings) != fp:
+        raise SdlcError("the review logic changed while the eval ran: its result would be recorded against the wrong "
+                        "fingerprint, so nothing was posted. Run it again")
+    result = {"fingerprint": fp, "codex": run.version or version, "outcome": outcome, "model": settings["model"],
+              "effort": settings["reasoning_effort"], "reason": reason,
+              "fixtures": [{"name": o.name, "outcome": o.outcome, "detail": o.detail} for o in run.outcomes]}
+    posted = record_eval(result, config)
+    print(f"\neval {outcome.upper()} for {codex_eval.short(fp)} on codex {result['codex']}"
+          + (f"\n{reason}" if reason else "") + (f"\nposted: {posted['html_url']}" if posted.get("html_url") else ""))
+    return 0 if outcome == "pass" else 1
+
+
 def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, head: str, out: Path,
-                    settings: dict[str, Any], dry_run: bool, record: str, brief: str | None = None,
+                    settings: dict[str, Any], dry_run: bool, record: str, ledger=None, brief: str | None = None,
                     show_brief: bool = False) -> int:
     """Print what the round runs, then run it (or, with --dry-run, print the prompt). `brief`: a quick change's
     approved brief comment id, stamped on the report as its `Brief:` line (and shown, with the brief, in a dry run).
-    `show_brief`: a dry run shows the brief file too (a debt PR's: its tickets and its group's scope and files)."""
+    `show_brief`: a dry run shows the brief file too (a debt PR's: its tickets and its group's scope and files).
+
+    The review logic this round runs under is fingerprinted first: the files the tool reads from `ROOT`, those
+    Codex reads from `wt`, and the `settings` it runs with. Inputs that can't be fingerprinted (a symbolic link
+    among them, say) refuse the round before Codex starts: a review that can't say what it ran under is none.
+    `ledger()` gives the eval results, and a pair with no passing one (or results that can't be read) is only a
+    warning: the round runs."""
     cmd = codex_review.codex_command(settings, prompt)
     print(f"{title}\n"
           + "".join(f"  {k}: {v}\n" for k, v in files.items())
@@ -5471,7 +5815,21 @@ def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, h
         elif show_brief:
             print(f"The brief Codex reads ({files['brief']}):\n\n{files['brief'].read_text()}")
         return 0
-    status, report = codex_review.run_review(cmd, wt, head, out, settings, brief=brief)
+    try:
+        fp = codex_eval.fingerprint(codex_eval.Worktree(ROOT), codex_eval.Worktree(wt), settings)
+    except (SdlcError, OSError) as exc:
+        raise SdlcError(f"the review logic can't be fingerprinted ({exc}), so this review couldn't say what it ran "
+                        "under: nothing was run. Fix that, then run this again")
+
+    def check_eval(version: str) -> None:
+        try:
+            result = codex_eval.pair_result(ledger() if ledger else [], fp, version)
+        except (SdlcError, OSError, ValueError) as exc:
+            print(f"warning: couldn't read the review eval's results ({exc}); the review still runs", file=sys.stderr)
+            return
+        if warn := codex_eval.warning(fp, version, result):
+            print(warn, file=sys.stderr)
+    status, report = codex_review.run_review(cmd, wt, head, out, settings, on_version=check_eval, brief=brief)
     if report:
         print(f"\n{report.read_text()}\nsaved: {report}\nrecord it: uv run python tools/sdlc.py {record}")
     return status
@@ -5500,12 +5858,12 @@ def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: 
     refs = closes_refs(pr.get("body", ""))
     debt = None if quick else pr_debt(args, pr, slice_issue, config, trusted)
     if debt:   # held to its tickets and its pass group's scope and files, in the worktree its claim recorded
-        brief, brief_id, base = debt_brief(debt), None, config.get("default_branch", "main")
+        brief, brief_id, base = codex_review.debt_brief(debt), None, config.get("default_branch", "main")
         wt = debt_place(debt["claim"], config)[0]
     elif quick:   # held to its approved brief, never the poster's request, and merged into main
-        if len(refs) != 1 or not (brief_text := approved_brief(quick)):
+        if len(refs) != 1 or not (brief_text := codex_review.approved_brief(quick)):
             raise SdlcError(f"PR #{pr['number']} must close exactly one quick change with an approved brief")
-        brief, brief_id, base = (f"{slice_issue.get('title', '')}\n\n{brief_text}\n", approved_brief_id(quick),
+        brief, brief_id, base = (codex_review.quick_brief(slice_issue, brief_text), codex_review.approved_brief_id(quick),
                                  config.get("default_branch", "main"))
     elif len(refs) != 1 or not slice_issue or (epic := slice_epic(slice_issue)) is None:
         raise SdlcError(f"PR #{pr['number']} must close exactly one slice of an epic (it closes {refs or 'none'})")
@@ -5517,57 +5875,32 @@ def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: 
     out = review_scratch(args, str(pr["number"]), wt)
     if not args.from_file and (wt / ".git").exists() and git(["rev-parse", "HEAD"], cwd=wt) != pr["headRefOid"]:
         pr = wait_for_pr_head(pr["number"], git(["rev-parse", "HEAD"], cwd=wt), config)   # a push GitHub hasn't shown yet
+    _, reviews = pr_records(comments, trusted)
+    on_head = [r for r in reviews if r["sha"] == pr["headRefOid"]]
+    # an approval stands only on this head and, for a quick change, against the brief approved now: what its merge
+    # gate accepts (`quick_merge_gate_errors`), so a re-approved brief on an unchanged head gets its re-review
+    approved = (bool(on_head) and on_head[-1]["verdict"] == "approve"
+                and (not quick or on_head[-1].get("brief") == brief_id))
+    wasted_round(changes_rounds(reviews), config.get("max_pr_rounds", 5), approved,
+                 f"PR #{pr['number']}", pr["headRefOid"], f"`escalate-slice {refs[0]} --reason ...`",
+                 f"go on to `merge {pr['number']}`")
     head = codex_review.check_worktree(wt, pr["headRefOid"])
     git(["fetch", "origin", base], cwd=wt, check=False)
     if not git(["rev-parse", "--verify", "--quiet", f"origin/{base}"], cwd=wt, check=False):
         raise SdlcError(f"the worktree has no origin/{base} to diff against: `git fetch origin {base}`")
-    rounds = recorded_rounds(comments, trusted, "pr-review")
+    rounds = codex_review.recorded_rounds(_marked(comments, trusted), "pr-review")
     prompt, files = codex_review.prepare_pr_round(pr, brief, base, rounds, out, quick=bool(quick), debt=bool(debt))
     return run_codex_round(f"PR #{pr['number']} round {len(rounds) + 1} on {head[:12]}", prompt, files, wt, head, out,
                            settings, args.dry_run, f"pr-review {pr['number']} --report {out / 'codex.md'} --response <your answers>",
-                           brief=brief_id, show_brief=bool(debt))
+                           lambda: eval_ledger(args, config), brief=brief_id, show_brief=bool(debt))
 
 
-def comment_anchor(doc: dict[str, Any]) -> str:
-    """A revision's comment id, as its `#issuecomment-` anchor (and `merge-prd`'s doc) gives it."""
-    m = re.search(r"#issuecomment-(\d+)$", doc.get("url") or "")
-    return m.group(1) if m else str(doc["id"])
-
-
-def approved_comment(st: dict[str, Any]) -> str:
-    """The approved PRD or diagnosis comment's id, as its `#issuecomment-` anchor (and `merge-prd`'s doc) gives it."""
-    return comment_anchor(st["latest_doc"])
-
-
-SUPERSEDED_RE = re.compile(r"<details><summary>[^<]*\(superseded\)</summary>\n\n(.*)\n\n</details>\s*\Z", re.DOTALL)
-
-
-def approved_brief(st: dict[str, Any]) -> str | None:
-    """The approved revision's text (the latest one approved, even if a newer one is under review), without its
-    marker; a comment `render_superseded` collapsed is unwrapped. None: nothing approved. The quick lane's brief."""
-    doc = st.get("approved_doc")
-    if not doc:
-        return None
-    body = doc.get("body") or ""
-    if m := SUPERSEDED_RE.search(body):
-        body = m.group(1)
-    return "\n".join(l for l in body.splitlines() if not MARKER_RE.match(l.strip())).strip()
-
-
-def approved_brief_id(st: dict[str, Any]) -> str | None:
-    """The approved revision's comment id (see approved_brief), or None."""
-    doc = st.get("approved_doc")
-    return comment_anchor(doc) if doc else None
-
-
-def approved_requirements(n: int, comment_id: str, comment_body: str, ref: str, root: Path) -> tuple[str, str | Path]:
-    """(what was used, the requirements for the plan prompt): the merged `docs/prd/N-*.md` at `ref` whose header
-    links the approved comment, as a path relative to a checkout of `ref`; else the approved comment's text.
-    A doc of an older revision, or none merged yet, is never what the plan is held to."""
-    if path := merged_prd_path(n, comment_id, ref, root):
-        return f"{path} (its header links comment {comment_id})", Path(path)
-    body = "\n".join(l for l in comment_body.splitlines() if not MARKER_RE.match(l.strip())).strip()
-    return f"the approved comment {comment_id} (no docs/prd/{n}-*.md on {ref} links it)", body
+# what a quick round is handed (its brief and the brief's id) is review logic: tools/codex_review.py, fingerprinted.
+# These names stay bound here for callers that reach them through this module; sdlc.py's own calls go through
+# `codex_review.` (an alias is not a definition: test_sdlc_guide's guard allows it)
+comment_anchor = codex_review.comment_anchor
+approved_brief = codex_review.approved_brief
+approved_brief_id = codex_review.approved_brief_id
 
 
 def plan_round_errors(st: dict[str, Any]) -> list[str]:
@@ -5606,14 +5939,12 @@ def codex_review_plan(args: argparse.Namespace, config: dict[str, Any], settings
         git(["fetch", "-q", "origin", main], cwd=root)
     sha = git(["rev-parse", "--verify", f"origin/{main}^{{commit}}"], cwd=root)
     out = review_scratch(args, f"plan-{n}", root)
-    used, requirements = approved_requirements(n, approved_comment(st), doc.get("body", ""), sha, root)
-    rounds = []
-    if last := st.get("plan_review"):
-        c = next(c for c in bundle["comments"] if c["id"] == last["id"])
-        rounds = [{"verdict": last["verdict"], "body": c.get("body", ""), "response": last.get("response")}]
+    used, requirements = codex_review.approved_requirements(n, codex_review.approved_comment(st["latest_doc"]),
+                                                                doc.get("body", ""), sha, root)
+    last = st.get("plan_review")
+    body = next(c for c in bundle["comments"] if c["id"] == last["id"]).get("body", "") if last else ""
     k = st["plan_rounds"]
-    # `latest_response` numbers rounds by the list it's given: pad it to the rounds counted so far
-    prompt, files = codex_review.prepare_plan_round(n, plan, requirements, [{}] * (k - len(rounds)) + rounds, out)
+    prompt, files = codex_review.prepare_plan_round(n, plan, requirements, codex_review.plan_rounds(k, last, body), out)
     checkout = out / "main"
     if isinstance(requirements, Path):          # read by Codex from its checkout of main
         files["requirements"] = checkout / requirements
@@ -5630,22 +5961,11 @@ def codex_review_plan(args: argparse.Namespace, config: dict[str, Any], settings
         git(["worktree", "remove", "--force", str(checkout)], cwd=root)
     git(["worktree", "add", "-q", "--detach", str(checkout), sha], cwd=root)
     try:
-        return run_codex_round(title, prompt, files, checkout, sha, out, settings, False, record)
+        return run_codex_round(title, prompt, files, checkout, sha, out, settings, False, record,
+                               lambda: eval_ledger(args, config))
     finally:
         git(["worktree", "remove", "--force", str(checkout)], cwd=root, check=False)
         git(["worktree", "prune"], cwd=root, check=False)
-
-
-def milestone_slices(leaves: list[dict[str, Any]], title: str, config: dict[str, Any]) -> list[dict[str, Any]]:
-    """A milestone's slices (of the epic's `leaves`), each with its brief and the squash commit its PR left on epic/N."""
-    out = []
-    for l in leaves:
-        if (l.get("milestone") or "(no milestone)") != title:
-            continue
-        pr = find_slice_pr(l["number"], config) if l["state"] == "closed" else None
-        out.append({"number": l["number"], "key": l["key"], "title": l["title"], "body": l["body"],
-                    "pr": (pr or {}).get("number"), "merge_commit": ((pr or {}).get("mergeCommit") or {}).get("oid")})
-    return sorted(out, key=lambda s: natural_key(s["key"]))
 
 
 def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], settings: dict[str, Any]) -> int:
@@ -5666,21 +5986,25 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
         steps = lambda title: (gh_ms.get(title) or {}).get("description") or ""  # noqa: E731
         leaves = [r for r in fetch_plan_issues(n, config, set(bundle["trusted"])) if r["kind"] == "slice"]
         already = lambda title: milestone_on_main(title, leaves, config)  # noqa: E731
-        slices = lambda title: milestone_slices(leaves, title, config)  # noqa: E731
+        prs = {l["number"]: find_slice_pr(l["number"], config) for l in leaves if l["state"] == "closed"}
+        slices = lambda title: codex_review.milestone_slices(leaves, title, prs)  # noqa: E731
     wt = primary_root() / config.get("worktree_dir", ".worktrees") / f"epic-{n}"   # as `sync` left it: never reset here
     st = bundle_state(bundle, config)
     trusted = set(bundle["trusted"])
+    # before review_target: once Codex approved the head the milestone has moved on, and it would only say "not accepted"
+    if (cur := epic_view(st, progress)["current"]) and cur["phase"] in ("review", "complete", "demoed", "accepted"):
+        mine = [r for r in st["ship_reviews"] if r["milestone"] == cur["key"]]
+        on_head = [r for r in mine if r["sha"] == head]
+        wasted_round(sum(1 for r in mine if r["verdict"] == "changes"), config.get("max_pr_rounds", 5),
+                     bool(on_head) and on_head[-1]["verdict"] == "approve", f"{cur['key']} ({epic_branch(n)})", head,
+                     f"`transition {n} escalated --kind escalation --reason ...`", f"go on to the demo or `ship {n}`")
     if not (target := review_target(st, progress, None)):
         raise SdlcError(f"#{n}: every milestone has shipped")
     key, title = target["key"], target["title"]
     if already(title):
         raise SdlcError(f"{title} was built straight onto {config.get('default_branch', 'main')}: "
                         f"there is nothing of it to review; `ship {n}` records it as shipped")
-    rounds = recorded_rounds(bundle["comments"], trusted, "ship-review", milestone=key)
-    limit = config.get("max_pr_rounds", 5)
-    if (spent := sum(1 for r in rounds if r["verdict"] == "changes")) >= limit:
-        raise SdlcError(f"Codex rounds on {key} spent ({spent}/{limit}): "
-                        f"`transition {n} escalated --kind escalation --reason ...`")
+    rounds = codex_review.recorded_rounds(_marked(bundle["comments"], trusted), "ship-review", milestone=key)
     slices = slices(title)
     out = review_scratch(args, f"milestone-{n}", wt)
     checked = codex_review.check_worktree(wt, head, f"{epic_branch(n)}'s head", f"`sync {n}`")
@@ -5691,13 +6015,83 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
     if gone := [s["key"] for s in slices if s.get("merge_commit") and not is_ancestor(s["merge_commit"], checked, wt)]:
         raise SdlcError(f"{', '.join(gone)}'s squash commit isn't on {epic_branch(n)} at {checked[:12]}: "
                         "Codex would be pointed at a commit that isn't there (was it reverted?)")
-    owed = (st.get("review_owed") or {}).get(key) or []
+    owed = codex_review.owed_slices(st.get("review_owed"), key)
     prompt, files = codex_review.prepare_milestone_round(n, {"key": key, "title": title, "steps": steps(title)},
                                                          slices, owed, rounds, out)
     return run_codex_round(f"#{n} {key} round {len(rounds) + 1} on {epic_branch(n)} {checked[:12]}"
                            + (f"; owed: {', '.join(o.get('slice', '?') for o in owed)}" if owed else ""),
                            prompt, files, wt, checked, out, settings, args.dry_run,
-                           f"ship-review {n} --report {out / 'codex.md'} --response <your answers>")
+                           f"ship-review {n} --report {out / 'codex.md'} --response <your answers>",
+                           lambda: eval_ledger(args, config))
+
+
+FETCH_TIMEOUT = 120                    # seconds a gate's `git fetch` may take before the gate refuses
+
+
+def bounded_fetch(refspecs: list[str], cwd: Path) -> None:
+    """`git fetch origin <refspecs>` within FETCH_TIMEOUT: a gate that can't read the commits refuses."""
+    try:
+        proc = subprocess.run(["git", "fetch", "-q", "origin", *refspecs], cwd=cwd, capture_output=True, text=True,
+                              timeout=FETCH_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        raise SdlcError(f"git fetch origin {' '.join(refspecs)} took over {FETCH_TIMEOUT}s") from exc
+    if proc.returncode != 0:
+        raise SdlcError(f"git fetch origin {' '.join(refspecs)} failed: {proc.stderr.strip()}")
+
+
+def merge_eval_inputs(args: argparse.Namespace, pr: dict[str, Any], branch: str, config: dict[str, Any],
+                      bundle: dict[str, Any] | None = None) -> tuple[str, str | None, str | None, list[dict[str, Any]]]:
+    """(the review logic at the PR's head, at its base, `codex --version` here, the eval results), for the eval
+    gate. Both fingerprints come from the commits (`git ls-tree`/`cat-file`), never a checkout: live, from the
+    primary checkout after fetching the PR's head and the epic branch; with --from-file, from the repo it runs
+    in, at the bundle's `head` (default the PR's head) and `base` (a commit or ref). Anything that can't be read
+    raises: the gate refuses. Only the base's fingerprint may be missing (None): it only picks the message."""
+    if bundle is not None:
+        root = Path(git(["rev-parse", "--show-toplevel"]))
+        head, base = bundle.get("head") or pr["headRefOid"], bundle.get("base") or f"origin/{branch}"
+    else:
+        root = primary_root()
+        bounded_fetch([f"refs/pull/{pr['number']}/head", branch], root)
+        head, base = pr["headRefOid"], f"origin/{branch}"
+    if not git(["rev-parse", "--verify", "--quiet", f"{head}^{{commit}}"], cwd=root, check=False):
+        raise SdlcError(f"the PR's head {head[:12]} isn't in {root}")
+    head_fp = codex_eval.fingerprint(codex_eval.Commit(head, root))
+    try:
+        base_sha = git(["rev-parse", "--verify", f"{base}^{{commit}}"], cwd=root)
+        base_fp = codex_eval.fingerprint(codex_eval.Commit(base_sha, root))
+    except SdlcError:
+        base_fp = None
+    return head_fp, base_fp, codex_eval.current_version(), eval_ledger(args, config, bundle)
+
+
+def merge_eval_errors(args: argparse.Namespace, pr: dict[str, Any], branch: str, config: dict[str, Any],
+                      bundle: dict[str, Any] | None = None) -> tuple[list[str], dict[str, str] | None]:
+    """The eval gate's refusals and what it owes (`eval_gate`); review logic that can't be read is a refusal."""
+    try:
+        head_fp, base_fp, version, results = merge_eval_inputs(args, pr, branch, config, bundle)
+    except (SdlcError, OSError, ValueError) as exc:
+        return [f"couldn't tell whether the review logic at the head has a passing eval ({exc})"], None
+    return eval_gate(head_fp, base_fp, version, results)
+
+
+def main_eval_errors(pr: dict[str, Any], config: dict[str, Any], lane: str, n: int) -> list[str]:
+    """The eval gate for a PR straight into main (`lane` "quick" or "debt"; `n` its issue, or its group's first
+    ticket): T6's gate, read live against main (GATE_BRANCH), with no deferral. These lanes have no milestone demo
+    to owe an eval to, so a PR whose (fingerprint, `codex --version`) pair has no pass waits for one. That covers an
+    unchanged fingerprint after a `codex` upgrade too. Read-only; review logic that can't be read is a refusal."""
+    what = "a quick change" if lane == "quick" else "a debt PR"
+    then = (f"wait for it, or move the change to the full lane (`escalate-to-full {n}`)" if lane == "quick"
+            else "the group waits for it")
+    instead = (f"{what} merges straight into main, with no milestone demo to owe the eval to, so it needs a pass: run "
+               f"`uv run python tools/sdlc.py codex-eval`; if the eval can't run, {then}")
+    try:
+        head_fp, base_fp, version, results = merge_eval_inputs(argparse.Namespace(from_file=None), pr, GATE_BRANCH,
+                                                               config)
+    except (SdlcError, OSError, ValueError) as exc:
+        return [f"couldn't tell whether the review logic at the head has a passing eval ({exc}); {instead}"]
+    on_fail = (f"move the change to the full lane (`escalate-to-full {n}`)" if lane == "quick"
+               else f"hand the group to a person (`escalate-slice {n} --reason ...`); until then the group waits")
+    return eval_gate(head_fp, base_fp, version, results, no_deferral=instead, on_fail=on_fail)[0]
 
 
 def no_epic_error(pr: dict[str, Any], refs: list[int], slice_issue: dict[str, Any] | None) -> str:
@@ -5719,7 +6113,11 @@ def no_epic_error(pr: dict[str, Any], refs: list[int], slice_issue: dict[str, An
 # of the gate's code with origin/main's, byte for byte, and refuses on any difference or any doubt.
 
 GATE_CODE = {"tools/sdlc.py": Path(__file__).resolve(),           # repo path -> the file this process runs
-             "tools/sdlc_quick.py": Path(sdlc_quick.__file__).resolve()}
+             "tools/sdlc_quick.py": Path(sdlc_quick.__file__).resolve(),
+             # what a quick or debt round is handed and its brief binding (codex_review), and the eval gate's
+             # fingerprint and results (codex_eval): both decide what `merge` accepts
+             "tools/codex_review.py": Path(codex_review.__file__).resolve(),
+             "tools/codex_eval.py": Path(codex_eval.__file__).resolve()}
 GATE_FETCH_SECONDS = 60   # how long `merge` waits for `git fetch origin main` (and each `git show`) before refusing
 # literally main, never the config's default_branch: the config is the running checkout's own, so a branch could
 # otherwise name the branch its gate code is compared with
@@ -5784,20 +6182,28 @@ def gate_code_errors(config: dict[str, Any], pr: Any = "PR", command: str = "mer
 
 
 def slice_merge_errors(pr: dict[str, Any], comments: list[dict[str, Any]], slice_issue: dict[str, Any], epic: int,
-                       config: dict[str, Any], trusted: set[str]) -> tuple[list[str], str | None]:
+                       config: dict[str, Any], trusted: set[str], bundle: dict[str, Any] | None = None
+                       ) -> tuple[list[str], str | None]:
     """Every reason the slice gate refuses this PR now (read-only: GitHub's compare, the epic's milestones), and
-    why its review is owed to the milestone (owed_why), for `merge` and for `slice-status`'s merge-due line."""
+    why its review is owed to the milestone (owed_why), for `merge` and for `slice-status`'s merge-due line.
+    `bundle`: `merge --from-file`'s saved bundle, whose `behind_by`, `epic` and `progress` stand in for GitHub."""
     tests, reviews = pr_records(comments, trusted)
     deferrals = pr_deferrals(comments, trusted)
     branch = epic_branch(epic)
-    try:
-        behind = gh_json(["api", f"repos/{repo_of(config)}/compare/{branch}...{pr['headRefOid']}"]).get("behind_by")
-    except SdlcError:
-        behind = None
+    if bundle is not None:
+        behind = bundle.get("behind_by", 0)
+    else:
+        try:
+            behind = gh_json(["api", f"repos/{repo_of(config)}/compare/{branch}...{pr['headRefOid']}"]).get("behind_by")
+        except SdlcError:
+            behind = None
     mode = review_mode(complexity_of(slice_issue.get("labels", [])), config)
     errs = merge_gate_errors(pr, slice_issue, tests, reviews, branch, behind, deferrals, mode)
-    est = bundle_state(fetch_bundle(epic, config, trusted), config)
-    errs += milestone_hold_errors(est, epic_progress(epic, config, trusted), slice_issue.get("milestone"))
+    if bundle is not None:
+        est, progress = bundle_state(bundle["epic"], config), bundle.get("progress") or {}
+    else:
+        est, progress = bundle_state(fetch_bundle(epic, config, trusted), config), epic_progress(epic, config, trusted)
+    errs += milestone_hold_errors(est, progress, slice_issue.get("milestone"))
     return errs, owed_why(pr, reviews, deferrals, mode)
 
 
@@ -5810,36 +6216,61 @@ def merge_next(pr: Any, gate: list[str] | None) -> str:
 
 
 def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """The merge gate: Codex approved this head, the tests passed on it, it closes one slice. Then squash-merge."""
-    # first, for every lane and under --dry-run too: only main's gate code may judge a PR (#239)
-    if errs := gate_code_errors(config, args.pr):
+    """The merge gate: Codex approved this head, the tests passed on it, it closes one slice, and the review logic
+    it lands has a passing (or deferred) eval. Then squash-merge. --from-file judges a saved slice bundle (--dry-run)."""
+    bundle = json.loads(Path(args.from_file).read_text()) if getattr(args, "from_file", None) else None
+    if bundle is not None and not args.dry_run:
+        raise SdlcError("--from-file judges a saved bundle and can't merge anything: add --dry-run")
+    # first, for every lane and under --dry-run too: only main's gate code may judge a PR (#239). A saved bundle
+    # (--from-file) is the exception: it reads nothing from GitHub and merges nothing, so there is no PR to judge
+    if bundle is None and (errs := gate_code_errors(config, args.pr)):
         raise SdlcError("; ".join(errs))
     repo = repo_of(config)
-    pr, comments = fetch_pr(args.pr, config)
-    trusted = fetch_trusted(config)
-    refs = closes_refs(pr.get("body", ""))
-    slice_issue, issue_comments = fetch_slice(refs[0], config) if len(refs) == 1 else (None, [])
+    if bundle is not None:
+        pr, comments, trusted = bundle["pr"], bundle["pr_comments"], set(bundle["trusted"])
+        refs = closes_refs(pr.get("body", ""))
+        slice_issue, issue_comments = (bundle.get("slice"), bundle.get("comments") or []) if len(refs) == 1 else (None, [])
+    else:
+        pr, comments = fetch_pr(args.pr, config)
+        trusted = fetch_trusted(config)
+        refs = closes_refs(pr.get("body", ""))
+        slice_issue, issue_comments = fetch_slice(refs[0], config) if len(refs) == 1 else (None, [])
     # a debt PR (any ticket it closes is tech debt: a group PR closes 2 to max_per_pr) goes to the debt gate, onto main
     if 1 < len(refs) <= load_debt(config).max_per_pr or slice_issue and DEBT_LABEL in slice_issue.get("labels", []):
+        if bundle is not None:
+            raise SdlcError("--from-file judges a slice's PR only: a debt PR's gate reads GitHub")
         tickets = ([{"issue": slice_issue, "comments": issue_comments}] if slice_issue else
                    [dict(zip(("issue", "comments"), fetch_slice(r, config))) for r in refs])
         if any(DEBT_LABEL in t["issue"].get("labels", []) for t in tickets):
             return merge_debt(args, config, pr, comments, tickets, trusted)
     if slice_issue and bundle_quick({"issue": slice_issue, "comments": issue_comments, "trusted": trusted}, config):
+        if bundle is not None:
+            raise SdlcError("--from-file judges a slice's PR only: a quick change's gate reads GitHub")
         return merge_quick(args, config)   # onto main: no epic, no milestone hold, no review owed
     epic = slice_epic(slice_issue) if slice_issue else None
     if not epic:   # no slice of an epic (an escalated quick change's PR, say): no branch to compare or target
         raise SdlcError(no_epic_error(pr, refs, slice_issue))
     branch = epic_branch(epic)
-    errs, why = slice_merge_errors(pr, comments, slice_issue, epic, config, trusted)
+    errs, why = slice_merge_errors(pr, comments, slice_issue, epic, config, trusted, bundle)
+    eval_errs, eval_owed = merge_eval_errors(args, pr, branch, config, bundle)
+    errs += eval_errs
     if errs:
         raise SdlcError("; ".join(errs))
     n = refs[0]
     key = (parse_marker(slice_issue.get("body", "")) or {}).get("key", f"#{n}")
     if args.dry_run:
         print(f"would squash-merge PR #{args.pr} (closes #{n}) at {pr['headRefOid'][:12]}"
-              + (f"; its Codex review owed at the milestone ({why})" if why else ""))
+              + (f"; its Codex review owed at the milestone ({why})" if why else "")
+              + (f"; the review eval of {codex_eval.short(eval_owed['fp'])} on codex {eval_owed['codex']} owed "
+                 "before the milestone's demo (deferred)" if eval_owed else ""))
         return 0
+    if eval_owed:   # recorded before the squash, as an owed review is
+        post_comment(epic, render_comment(
+            "eval-owed", None, f"**{key}** (#{n}, PR #{args.pr}) merges into `{branch}` with the review eval of "
+            f"`{codex_eval.short(eval_owed['fp'])}` on codex `{eval_owed['codex']}` deferred: it couldn't run. "
+            "It is owed before the milestone's demo.", config,
+            milestone=milestone_key(slice_issue.get("milestone")), slice=key, number=str(n), pr=str(args.pr),
+            fp=eval_owed["fp"], codex=eval_owed["codex"]), config)
     if why:   # recorded before the squash: a failed merge leaves an extra review, never a missing one
         what = ("Codex couldn't run on it" if why == "unavailable"
                 else "it is rated routine, and routine slices are reviewed with their milestone")
@@ -5874,9 +6305,9 @@ def merge_quick(args: argparse.Namespace, config: dict[str, Any]) -> int:
     a failure after it says what is left to do by hand, since a rerun is refused (the PR is merged)."""
     repo, base = repo_of(config), config.get("default_branch", "main")
     b = quick_gate_bundle(args.pr, config)
-    if errs := quick_gate_errors(b, config):
+    if errs := quick_gate_errors(b, config) + quick_eval_errors(b, config):
         st = quick_issue_state(b, config) if b.get("issue") else None
-        brief, rules = (approved_brief(st) or "") if st else "", gate_rules(b, config)
+        brief, rules = (codex_review.approved_brief(st) or "") if st else "", gate_rules(b, config)
         if args.dry_run or not st or not is_quick(st) or not sdlc_quick.diff_rule_broken(b.get("files"), brief, rules):
             raise SdlcError("; ".join(errs))
         # the diff has outgrown the lane (a denied path, the size cap, a file outside the brief): no fix within
@@ -5893,7 +6324,7 @@ def merge_quick(args: argparse.Namespace, config: dict[str, Any]) -> int:
     record = render_comment(
         "quick-merged", None, f"Merged PR #{args.pr} into `{base}` at `{head[:12]}`: tests {t['url']}, "
         f"Codex review {r['url']}.", config, pr=str(args.pr), sha=head,
-        tests=comment_anchor({"id": "?", **t}), review=comment_anchor({"id": "?", **r}))
+        tests=codex_review.comment_anchor({"id": "?", **t}), review=codex_review.comment_anchor({"id": "?", **r}))
     if args.dry_run:
         print(f"would squash-merge quick PR #{args.pr} (closes #{n}) into {base} at {head[:12]}, then close #{n} "
               f"as completed, move it to {PREFIX}done and post:\n{record}")
@@ -6042,8 +6473,10 @@ def debt_gate_read(pr_number: int, config: dict[str, Any], trusted: set[str]) ->
 def debt_pr_gate(pr_number: int, config: dict[str, Any], trusted: set[str]) -> list[str]:
     """The debt gate's refusals of a PR, read from GitHub (read-only), for `state` and `slice-status`."""
     pr, comments = fetch_pr(pr_number, config)
-    tickets = [dict(zip(("issue", "comments"), fetch_slice(r, config))) for r in closes_refs(pr.get("body", ""))]
-    return debt_merge_gate_errors(debt_gate_bundle(pr, comments, tickets, config, trusted), GATE_BRANCH)
+    refs = closes_refs(pr.get("body", ""))
+    tickets = [dict(zip(("issue", "comments"), fetch_slice(r, config))) for r in refs]
+    return (debt_merge_gate_errors(debt_gate_bundle(pr, comments, tickets, config, trusted), GATE_BRANCH)
+            + (main_eval_errors(pr, config, "debt", refs[0]) if refs else []))
 
 
 def remove_worktree(wt: Path, branch: str, root: Path, force: bool = False) -> None:
@@ -6068,7 +6501,8 @@ def merge_debt(args: argparse.Namespace, config: dict[str, Any], pr: dict[str, A
     rerun is refused (the PR is merged); a cleanup left over is named with its exact `cleanup` command."""
     repo, base = repo_of(config), GATE_BRANCH
     b = debt_gate_bundle(pr, comments, tickets, config, trusted)
-    if errs := debt_merge_gate_errors(b, base):
+    refs = closes_refs(pr.get("body", ""))
+    if errs := debt_merge_gate_errors(b, base) + (main_eval_errors(pr, config, "debt", refs[0]) if refs else []):
         raise SdlcError("; ".join(errs))
     ctx = debt_pr_context(pr, tickets, b["epic_comments"], trusted, b["others"])
     g, claim, epic = ctx["group"], ctx["claim"], b["debt_epic"]
@@ -6092,8 +6526,8 @@ def merge_debt(args: argparse.Namespace, config: dict[str, Any], pr: dict[str, A
             "debt-merged", None, f"Merged PR #{args.pr} (debt group `{g['key']}` of pass {g['pass']}: {who}) into "
             f"`{base}` at `{head[:12]}`: tests {t['url']}, Codex review {r['url']}." + (f" {how}." if how else ""),
             config, pr=str(args.pr), sha=head, group=g["key"], **{"pass": str(g["pass"])},
-            tickets=",".join(map(str, refs)), debt_epic=str(epic), tests=comment_anchor({"id": "?", **t}),
-            review=comment_anchor({"id": "?", **r}))
+            tickets=",".join(map(str, refs)), debt_epic=str(epic), tests=codex_review.comment_anchor({"id": "?", **t}),
+            review=codex_review.comment_anchor({"id": "?", **r}))
 
     if args.dry_run:
         print(f"would squash-merge debt PR #{args.pr} (group `{g['key']}`: {who}) into {base} at {head[:12]}; delete "
@@ -6201,7 +6635,7 @@ def escalate_to_full(n: int, reason: str | None, trigger: str, config: dict[str,
         raise SdlcError("; ".join(errs))
     if not st.get("to_full") and not (reason or "").strip():   # finishing a half-done one needs no new reason
         raise SdlcError("--reason is required: why the change leaves the quick lane")
-    brief_id = approved_brief_id(st)
+    brief_id = codex_review.approved_brief_id(st)
     record = None if st.get("to_full") else render_comment(
         "lane", None, f"Moved to the full lane ({TRIGGER_WHY[trigger]}): {(reason or '').strip()}\n\n"
         f"The approved brief goes to `docs/prd/` (`commit-prd {n}`), then it is planned (`/plan-issue {n}`). "
@@ -6224,8 +6658,8 @@ def escalate_to_full(n: int, reason: str | None, trigger: str, config: dict[str,
         # read again before any label write: a human's escalation, or a brief approved meanwhile, stops it here
         issue = bundle["issue"]
         errs = sdlc_quick.escalation_errors(issue, st, False)
-        if approved_brief_id(st) != brief_id:
-            errs.append(f"the approved brief changed while the record was posted ({brief_id} -> {approved_brief_id(st)})")
+        if codex_review.approved_brief_id(st) != brief_id:
+            errs.append(f"the approved brief changed while the record was posted ({brief_id} -> {codex_review.approved_brief_id(st)})")
         if errs:
             raise SdlcError(f"posted the lane record on #{n}, then: " + "; ".join(errs)
                             + ". No label moved; a human decides")
@@ -6561,7 +6995,7 @@ def ship_gate_errors(st: dict[str, Any], key: str, head: str, synced: bool, carr
         errs.append(f"Codex's latest review of {key} on {head[:12]} asks for changes")
     if carried:
         errs.append("epic branch carries slices of milestones that aren't accepted: " + ", ".join(carried))
-    if owed := (st.get("review_owed") or {}).get(key):
+    if owed := codex_review.owed_slices(st.get("review_owed"), key):
         errs.append(f"Codex hasn't reviewed {', '.join(o['slice'] for o in owed)} of {key}: `ship-review` first")
     return errs
 
@@ -7109,10 +7543,32 @@ def demo_post_errors(body: str, folder: Path) -> list[str]:
 leaf_section = codex_review.section    # one `## <name>` section of a slice issue's body
 
 
+def epic_eval_context(n: int, bundle: dict[str, Any], offline: bool) -> tuple[str | None, str | None]:
+    """(the review logic at epic/N's head, `codex --version` here), for clearing owed evals; (None, None) when the
+    epic owes none, so nothing is fetched or run for the rest. The head's fingerprint is read from the commit:
+    live, after fetching epic/N into the primary checkout; offline, the bundle's `epic_head` in the repo this runs
+    in. None when it can't be read: then only a pass for an owed fingerprint itself clears it."""
+    if not any(mk.get("kind") == "eval-owed" for mk, _ in _marked(bundle["comments"], set(bundle["trusted"]))):
+        return None, None
+    head_fp = None
+    try:
+        if offline:
+            root, sha = Path(git(["rev-parse", "--show-toplevel"])), bundle.get("epic_head")
+        else:
+            root = primary_root()
+            bounded_fetch([epic_branch(n)], root)
+            sha = git(["rev-parse", "--verify", f"origin/{epic_branch(n)}^{{commit}}"], cwd=root)
+        head_fp = codex_eval.fingerprint(codex_eval.Commit(sha, root)) if sha else None
+    except (SdlcError, OSError):
+        pass
+    return head_fp, real_version(codex_eval.current_version())
+
+
 def demo_brief(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str, Any]:
     """Everything milestone-demo needs: each milestone's demo steps, slices, PRs and demo state."""
     repo = repo_of(config)
-    st = bundle_state(fetch_bundle(epic, config, trusted), config)
+    bundle = fetch_bundle(epic, config, trusted)
+    st = bundle_state(bundle, config, epic_eval_context(epic, bundle, offline=False))
     refuse_quick(st, "milestones to demo")
     records = fetch_plan_issues(epic, config, trusted)
     leaves = [r for r in records if r["kind"] == "slice"]
@@ -7140,7 +7596,8 @@ def demo_brief(epic: int, config: dict[str, Any], trusted: set[str]) -> dict[str
                     "steps": ghm.get("description") or "\n".join(f"- {x['key']}: {x['demo']}" for x in slices if x["demo"]),
                     "slices": slices, "before": before, "after": after, "on_main": legacy,
                     "demo": (st.get("demos") or {}).get(m["key"]), "shipped": (st.get("shipped") or {}).get(m["key"]),
-                    "review_owed": (st.get("review_owed") or {}).get(m["key"]) or []})
+                    "review_owed": codex_review.owed_slices(st.get("review_owed"), m["key"]),
+                    "eval_owed": (st.get("eval_owed") or {}).get(m["key"], [])})
     due = due_milestone(st.get("demos") or {}, progress, st.get("shipped"), st.get("review_owed"))
     return {"epic": epic, "title": st["title"], "state": st["state"], "action": st["action"],
             "due": due["key"] if due else None, "milestones": out, "progress": progress,
@@ -7168,6 +7625,9 @@ def command_demo_status(args: argparse.Namespace, config: dict[str, Any]) -> int
         if m.get("review_owed"):
             print("  Codex review owed at the milestone, before its demo: "
                   + ", ".join(f"{o['slice']} ({o['why']})" for o in m["review_owed"]))
+        if m.get("eval_owed"):
+            print("  review eval owed before its demo: " + owed_eval_phrase(m["eval_owed"])
+                  + " (`codex-eval` on the epic's head clears it)")
         if m["shipped"]:
             print(f"  shipped to main: {m['shipped'][:12]}")
     print(f"\nnext: {brief['next']}")
@@ -7205,9 +7665,10 @@ def publish_demo(src: Path, prefix: str, message: str, config: dict[str, Any], r
 def command_demo_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Publish a milestone's demo pictures and post the demo on the epic for the poster."""
     bundle = load_bundle(args, config)
-    st = bundle_state(bundle, config)
+    offline = bool(getattr(args, "from_file", None))
+    st = bundle_state(bundle, config, epic_eval_context(bundle["issue"].get("number"), bundle, offline))
     refuse_quick(st, "milestone to demo")
-    n, key, offline = st["number"], args.milestone, bool(getattr(args, "from_file", None))
+    n, key = st["number"], args.milestone
     errs = []
     if st["conflicts"] or not (epic_building(st) or st["state"] == "demo-review") or st.get("feedback"):
         errs.append(f"#{n} is {st['state']} (action {st['action']}): not the time for a demo")
@@ -7220,9 +7681,13 @@ def command_demo_post(args: argparse.Namespace, config: dict[str, Any]) -> int:
         errs.append(f"#{n} has no milestone {key} (it has {', '.join(ms) or 'none'})")
     elif m["done"] != m["total"]:
         errs.append(f"{m['title']} is not complete ({m['done']}/{m['total']} merged)")
-    if owed := (st.get("review_owed") or {}).get(key):
+    if owed := codex_review.owed_slices(st.get("review_owed"), key):
         errs.append(f"Codex hasn't reviewed {', '.join(o['slice'] for o in owed)} of {key} yet: the milestone's "
                     "review (`ship-review`) comes before its demo")
+    if owed := (st.get("eval_owed") or {}).get(key):
+        errs.append(f"the review eval is owed for {key} ({owed_eval_phrase(owed)}): run `codex-eval` on the epic's "
+                    "head before its demo"
+                    + ("" if "eval" in bundle else " (the recorded results weren't read: add them to the bundle as `eval`)"))
     folder, body = Path(args.dir), Path(args.body_file).read_text()
     errs += demo_post_errors(body, folder)
     prev = (st.get("demos") or {}).get(key)
@@ -7684,6 +8149,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--from-file")
     p.set_defaults(fn=command_codex_review)
 
+    p = sub.add_parser("codex-eval", help="run the review eval (planted bugs, scored) and post its result; "
+                                          "--status only prints the fingerprint and that pair's result")
+    p.add_argument("--status", action="store_true",
+                   help="print the fingerprint, `codex --version` and that pair's result (read-only: runs `codex --version` "
+                        "at most, never `codex exec`)")
+    p.add_argument("--force", action="store_true", help="run it although this pair already passed")
+    p.add_argument("--dry-run", action="store_true", help="list the fixtures, the fingerprint and what would run; run nothing")
+    p.add_argument("--out", help="where the fixtures' scratch repos, CODEX_HOMEs and reports go (outside any checkout); "
+                                 "default a temp dir")
+    p.add_argument("--inputs", action="store_true", help="also list every file the fingerprint covers")
+    p.add_argument("--defer", action="store_true",
+                   help="record that the eval couldn't run (needs --reason): a merge may go through, and the eval is "
+                        "owed before the milestone's demo; refused once the eval failed for this review logic")
+    p.add_argument("--reason", help="with --defer: why the eval couldn't run (its error, verbatim)")
+    p.add_argument("--from-file", help='a saved ledger instead of GitHub: {"eval": [comments], "trusted": [logins]}')
+    p.set_defaults(fn=command_codex_eval)
+
     p = sub.add_parser("debt-epic", help="open the debt epic if there is open tech debt and none is open, attach "
                                          "every open tech-debt issue to it, and, when a pass has ended, record it "
                                          "and close or escalate the epic if due (idempotent)")
@@ -7716,6 +8198,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("merge", help="the merge gate, then squash-merge a slice's PR")
     p.add_argument("pr", type=int)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--from-file", help="a saved {pr, pr_comments, trusted, slice, epic, progress, behind_by, "
+                                       "head, base, eval} bundle instead of GitHub (with --dry-run only)")
     p.set_defaults(fn=command_merge)
 
     p = sub.add_parser("escalate-slice", help="hand a slice to a human")
