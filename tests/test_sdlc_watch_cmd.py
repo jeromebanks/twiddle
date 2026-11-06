@@ -530,8 +530,20 @@ def test_parse_the_mapped_steps():
         assert (s.kind, s.argv[-2:]) == ("sdlc", ("merge", "501")), line
 
 
+def test_a_resume_is_named_as_a_command_and_runs():
+    """`next:` names a resume-only epic's move as the command (T2.1): a leading slash, so it runs, with its model."""
+    line = epic_next(ready=[], in_flight=[160])
+    assert line.startswith("/work-slice 160 (opus: judgment): resumes it; nothing new to start")
+    s = w.parse_next(line)
+    assert (s.kind, s.command, s.issue, s.model) == ("skill", "/work-slice 160", 160, "opus")
+    s = w.parse_next("/work-slice 501 --debt (sonnet: routine): resumes it; nothing new to start in pass 2: "
+                     "in progress #501")
+    assert (s.kind, s.command, s.flags, s.model) == ("skill", "/work-slice 501 --debt", ("--debt",), "sonnet")
+
+
 @pytest.mark.parametrize("line", [
-    epic_next(ready=[], in_flight=[161]),                    # 'nothing new to start: ... (`/work-slice 161` ...)'
+    "nothing new to start: in progress #161 (`/work-slice 161` resumes one)",   # the older wording, copied
+    epic_next(ready=[], in_flight=[161], units={161: {"milestone": "M2"}}),   # "..., none of them in #263 M1: ..."
     "nothing: waiting on the poster to reply on #12",
     sdlc.next_command({"number": 12, "action": "wait_for_poster", "turn": "poster", "state": "needs-info"}),
     "nothing for an agent: #12 needs a human",

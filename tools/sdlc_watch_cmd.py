@@ -73,7 +73,8 @@ class Step:
 
 def parse_next(line: str) -> Step:
     """A `next:` line -> a Step. Only a leading slash command or a leading mapped command runs; anything else
-    (`nothing new to start: ...`, a poster's move, `ship`, `verify-main`, `state`) is a skip with its text kept."""
+    (`nothing new to start: ...` with no leading command, a poster's move, `ship`, `verify-main`, `state`) is
+    a skip with its text kept. A resume (`/work-slice N (...): resumes it; ...`) leads with its command, so it runs."""
     text = line.strip()
     if text.startswith("next:"):
         text = text[len("next:"):].strip()
