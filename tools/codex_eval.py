@@ -397,17 +397,17 @@ TIGHT = re.compile(rf"[`*_]*[:#(]\s*{RANGE}", re.IGNORECASE)
 # after a token that names no file, the line goes to a file one word or none after it (`line 12 of f.py`), and to
 # nothing further off. A clause runs to `;`, `:`, `!`, `?`, a line's end or a full stop before a space; commas,
 # dashes and brackets stay inside it, and a token that ends the sentence before (`See f.py. Line 12 ...`) has no
-# claim on the line. This errs toward no credit: a valid citation followed by one identifier in a code span
-# (`` f.py line 12 calls `g.h` ``) is lost, and the finding needs its function's name, which `score` reads anywhere.
+# claim on the line. This errs toward no credit: a valid citation followed by code (`` f.py line 12 calls `g.h` ``)
+# is lost, and the finding needs its function's name, which `score` reads anywhere.
 LOOSE = re.compile(rf"[\s,(`*_:]+(?:(?:at|on)\s+)?(?:lines?\s+|(?=[`*_]*L\d))\s*{RANGE}", re.IGNORECASE)
 CLAUSE_END = re.compile(r"[;:!?\n]|\.(?=\s|\Z)")
 # what can't name a file: a plain word (`off-by-one`; an apostrophe is a separator), a number, punctuation alone (the
-# `-` and `+` of `entries[-(limit + 1):]`), any token inside a code span of several (code, not a name). Anything else
-# could: a dot, a slash, an underscore, letters and digits run together. So could a token written as a path
-# (`./Makefile`) or in a slot a name sits in, whatever it is: a link's target (`[x](y)`) or a whole code span
-# (`` `Makefile` ``); and, after the line, one set apart in quotes, emphasis or brackets (`WRAP_OPEN`). Only a plain
-# word in running prose (Makefile, or `_Makefile_`, whose underscores are read as emphasis first) never could: no
-# position says it is a name. Every fixture's file name holds a `_` or a `.`, so none is named that way.
+# `-` and `+` of `entries[-(limit + 1):]`). Anything else could: a dot, a slash, an underscore, letters and digits
+# run together. So could a token written as a path (`./Makefile`) or in a slot a name sits in, whatever it is: a
+# link's target (`[x](y)`) or any token in a code span (`` `Makefile` ``, `` `cat f.py` ``); and, after the line, one
+# set apart in quotes, emphasis or brackets (`WRAP_OPEN`). Only a plain word in running prose (Makefile, or
+# `_Makefile_`, whose underscores are read as emphasis first) never could: no position says it is a name. Every
+# fixture's file name holds a `_` or a `.`, so none is named that way.
 WORD = re.compile(r"[^\W\d_]+(?:-[^\W\d_]+)*")
 PLAIN = re.compile(rf"{WORD.pattern}|\d+|[^\w]+")
 # the slots, read as markdown reads them: a link's destination (`[x](y)`, `[x](<y>)`, `[x]( y )`), and a code span (a
@@ -445,34 +445,26 @@ def _is(token: str, path: str) -> bool:
 
 class _Slots(NamedTuple):
     names: set[int]                    # where a token starts that fills a slot on its own
-    code: set[int]                     # where a token starts inside a code span of several: code, not a name
     empty: list[int]                   # where an empty slot is
     dests: set[int]                    # where a link's destination starts
 
 
 def _slots(text: str) -> _Slots:
     dests = {m.end() for m in LINK_TARGET.finditer(text)}
-    names, code, empty, delimiters = set(dests), set(), [], set()
+    names, empty, delimiters = set(dests), [], set()
     for m in CODE_SPAN.finditer(text):
         delimiters |= {m.start(), m.end(2)}
-        inner = list(TOKEN_RE.finditer(text, m.start(2), m.end(2)))
         if not m.group(2).strip():
             empty.append(m.start())
-        elif len(inner) == 1 and inner[0].group() == m.group(2).strip():
-            names.add(inner[0].start())
-        elif (t := TOKEN_RE.match(text, m.start(2) + len(m.group(2)) - len(m.group(2).lstrip()))) \
-                and (loc := TIGHT.match(text, t.end())) and not text[loc.end():m.end(2)].strip():
-            names.add(t.start())       # a file with its line, `f.py:12` or `f.py#L12`: a name, not code
-        else:
-            code |= {t.start() for t in inner}
+        # code or a name (`g.h`, `f.py:12`, `cat f.py`), a span can't say which: each token in it could be a file's
+        names |= {t.start() for t in TOKEN_RE.finditer(text, m.start(2), m.end(2))}
     empty += [m.start() for m in EMPTY_CODE.finditer(text) if m.start() not in delimiters]
-    return _Slots(names, code, sorted(empty), dests)
+    return _Slots(names, sorted(empty), dests)
 
 
 def _could_name_a_file(text: str, tok: tuple[str, int, int], slots: _Slots) -> bool:
     token, start, _ = tok
-    return bool(token) and start not in slots.code and (
-        not PLAIN.fullmatch(token) or text.startswith("./", start) or start in slots.names)
+    return bool(token) and (not PLAIN.fullmatch(token) or text.startswith("./", start) or start in slots.names)
 
 
 def _wrapped(text: str, tok: tuple[str, int, int]) -> bool:
@@ -483,7 +475,8 @@ def _wrapped(text: str, tok: tuple[str, int, int]) -> bool:
     return not token.isdigit() and start > 0 and text[start - 1] in WRAP_OPEN and text[end:end + 1] in WRAP_CLOSE and bool(text[end:end + 1])
 
 
-def _taker(text: str, toks: list[tuple[str, int, int]], slots: _Slots, after: int, before: tuple[str, int, int]) -> str:
+def _taker(text: str, toks: list[tuple[str, int, int]], slots: _Slots, after: int, before: tuple[str, int, int],
+           path: str) -> str:
     """Whose a loose line is, the line ending at `after` and written after the token `before` (no one, when a full
     stop ends that token's sentence). Of what follows it to the clause's end: an empty slot first makes it no file's;
     written words first (`before` names no file), a thing that could name a file one word or none on takes it,
@@ -504,8 +497,14 @@ def _taker(text: str, toks: list[tuple[str, int, int]], slots: _Slots, after: in
     if named and not _could_name_a_file(text, before, slots) and (
             named[0] == 0 or (named[0] == 1 and WORD.fullmatch(later[0][0]))):
         taker = later[named[0]][0]
-        return "" if any(later[i][0] != taker for i in rivals) else taker     # `of f.py or g.py`: neither's
-    return "" if any(later[i][0] != before[0] for i in rivals) else before[0]    # the same name again is no rival
+        return "" if any(_rival(later[i][0], taker, path) for i in rivals) else taker   # `of f.py or g.py`: neither's
+    return "" if any(_rival(later[i][0], before[0], path) for i in rivals) else before[0]
+
+
+def _rival(other: str, owner: str, path: str) -> bool:
+    """`other` names another file than `owner`: not the same name again, nor both ways of writing `path`
+    (`journal_log.py`, `src/twiddle/journal_log.py`)."""
+    return other != owner and not (_is(other, path) and _is(owner, path))
 
 
 def lines_named(text: str, path: str) -> list[tuple[int, int]]:
@@ -521,7 +520,7 @@ def lines_named(text: str, path: str) -> list[tuple[int, int]]:
         if m := TIGHT.match(text, end):
             owner = token
         elif m := LOOSE.match(text, end):
-            owner = _taker(text, toks, slots, m.end(), tok)
+            owner = _taker(text, toks, slots, m.end(), tok, path)
         else:
             continue
         a = int(m.group(1))

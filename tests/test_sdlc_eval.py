@@ -331,9 +331,10 @@ GIT_NOT_FILES = {"origin/main..HEAD": "the milestone prompt's revision range",
 def paths_named(text):
     """Every word in a code span that looks like a path, whatever its extension (#174): it holds a `/` or ends in an
     extension (`.txt`, `.1`, `.c++`), and isn't a `<placeholder>`. A span is read as markdown reads it: a run of
-    backticks, its content, the same run again, padding and all, and every word of a longer one (`cat x.txt`)."""
-    return {word for m in re.finditer(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", text, re.S) for word in m.group(2).split()
-            if "<" not in word and ("/" in word or re.search(r"\.[^./]+$", word))}
+    backticks, its content, the same run again, padding and all, and every word of a longer one (`cat x.txt`); and every link's destination."""
+    words = [w for m in re.finditer(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", text, re.S) for w in m.group(2).split()]
+    words += re.findall(r"\]\(\s*<?([^)>\s]+)", text)          # and a link's destination, `[rules](x.txt)`
+    return {w for w in words if "<" not in w and ("/" in w or re.search(r"\.[^./]+$", w))}
 
 
 def uncovered(text, files):
@@ -351,7 +352,8 @@ def test_a_prompt_naming_a_file_of_any_kind_that_is_not_an_input_fails_the_cover
     assert uncovered(text, files) == ["../extra-rules.txt", ".agents/skills/extra-rules.txt", ".agents/skills/extra/rules",
                                       ".agents/skills/rules..txt", "notes.cfg", "review.1", "rules.c++"]
     for span in ("` .agents/skills/padded.txt `", "`` .agents/skills/padded.txt ``", "`cat .agents/skills/padded.txt`",
-                 "```\n.agents/skills/padded.txt\n```"):
+                 "```\n.agents/skills/padded.txt\n```", "[the rules](.agents/skills/padded.txt)",
+                 "[r](<.agents/skills/padded.txt>)"):
         assert uncovered(f"Read {span}.", files) == [".agents/skills/padded.txt"], span
     assert uncovered("diff `main...HEAD`", files) == ["main...HEAD"]     # only a range listed in GIT_NOT_FILES is git's
     assert {".agents/skills/review-rules.md", "CLAUDE.md"} <= paths_named(text)
@@ -985,9 +987,13 @@ def test_no_other_file_lends_the_planted_line_however_its_name_is_written(fx):
     for words in (f"line {n} of {name}, as {name} shows", f"{name} line {n}, see [{name}]({fx.file})"):
         assert codex_eval.score(fx, f"1. **blocking** {words}: {kw}\n\nVERDICT: changes\n").hit, words
     assert not codex_eval.score(fx, f"1. **blocking** line {n} of [{name}]({fx.file}) or [other.py](other.py): {kw}\n\nVERDICT: changes\n").hit
-    # code of several tokens in one span is code, not a name; one identifier alone in a span could be a file's
-    assert codex_eval.score(fx, f"1. **blocking** {name} line {n} calls `rooms_api.set_mute(args.room, muted)`, {kw}\n\nVERDICT: changes\n").hit
-    assert not codex_eval.score(fx, f"1. **blocking** {name} line {n} calls `rooms_api.set_mute`, {kw}\n\nVERDICT: changes\n").hit
+    # any token in a span could be a file's, a path inside a longer span too (round 4)
+    for code in ("`rooms_api.set_mute(args.room, muted)`", "`rooms_api.set_mute`", "`other.py (line 19)`", "`git diff other.py`",
+                 "`Makefile (line 19)`"):
+        report = f"1. **blocking** {name} line {n} calls {code}, {kw}\n\nVERDICT: changes\n"
+        assert not codex_eval.score(fx, report).hit, report
+    # the planted file by its full path is the same file, no rival
+    assert codex_eval.score(fx, f"1. **blocking** {name} line {n} of {fx.file}: {kw}\n\nVERDICT: changes\n").hit
     # a name written as a path, or alone in a code span, could be a file's whatever its shape
     for target in ("`./Makefile`", "./Makefile", "`Makefile`", "docs/Makefile", "[Makefile](Makefile)",
                    "[Makefile](<Makefile>)", "[Makefile]( Makefile )", "` Makefile `", "`` Makefile ``", "` ./Makefile `"):
@@ -997,8 +1003,12 @@ def test_no_other_file_lends_the_planted_line_however_its_name_is_written(fx):
     # line nor takes it
     assert codex_eval.score(fx, f"1. **blocking** Compare other.py. Line {n} of {name} has an {kw} error.\n\nVERDICT: changes\n").hit
     assert not codex_eval.score(fx, f"1. **blocking** see {name}. Line {n} has an {kw} error.\n\nVERDICT: changes\n").hit
-    # code made of plain words, numbers and punctuation names no file, so it takes nothing
-    assert codex_eval.score(fx, f"1. **blocking** `{name}` line {n} returns `entries[-(limit + 1):]`, {kw}\n\nVERDICT: changes\n").hit
+    # punctuation and plain words in prose name no file, so they take nothing; code in a span could (#179: a span can't
+    # say whether it holds code or a name), so the line is lost and the finding needs its function's name
+    assert codex_eval.score(fx, f"1. **blocking** `{name}` line {n} returns entries[-(limit + 1)], {kw}\n\nVERDICT: changes\n").hit
+    code = f"1. **blocking** `{name}` line {n} returns `entries[-(limit + 1):]`, {kw}\n\nVERDICT: changes\n"
+    assert not codex_eval.score(fx, code).hit
+    assert codex_eval.score(fx, code.replace("returns", f"in `{fx.functions[0]}` returns")).hit
     # and a file named after the clause has ended takes nothing from it
     for after in (f"; see {name}.orig", f": {kw} as in other/{name}", f". Compare {name}.bak"):
         report = f"1. **blocking** {name} line {n} {kw}{after}\n\nVERDICT: changes\n"
