@@ -952,9 +952,14 @@ def test_no_other_file_lends_the_planted_line_however_its_name_is_written(fx):
                    f"1. **blocking** `other.py` line {n} of `{name}`: {kw}\n\nVERDICT: changes\n"):
         assert not codex_eval.score(fx, report).hit, report
     # a name written as a path, or alone in a code span, could be a file's whatever its shape
-    for target in ("`./Makefile`", "./Makefile", "`Makefile`", "docs/Makefile", "[Makefile](Makefile)"):
+    for target in ("`./Makefile`", "./Makefile", "`Makefile`", "docs/Makefile", "[Makefile](Makefile)",
+                   "[Makefile](<Makefile>)", "[Makefile]( Makefile )"):
         report = f"1. **blocking** {name} line {n} of {target}: {kw}\n\nVERDICT: changes\n"
         assert not codex_eval.score(fx, report).hit, report
+    # a file in the sentence before is in no clause of the line's (Codex round 2 on #374): it neither competes for the
+    # line nor takes it
+    assert codex_eval.score(fx, f"1. **blocking** Compare other.py. Line {n} of {name} has an {kw} error.\n\nVERDICT: changes\n").hit
+    assert not codex_eval.score(fx, f"1. **blocking** see {name}. Line {n} has an {kw} error.\n\nVERDICT: changes\n").hit
     # code made of plain words, numbers and punctuation names no file, so it takes nothing
     assert codex_eval.score(fx, f"1. **blocking** `{name}` line {n} returns `entries[-(limit + 1):]`, {kw}\n\nVERDICT: changes\n").hit
     # and a file named after the clause has ended takes nothing from it

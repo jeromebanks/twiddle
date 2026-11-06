@@ -406,6 +406,8 @@ CLAUSE_END = re.compile(r"[;:!?\n]|\.(?=\s|\Z)")
 # could; every fixture's file name holds a `_` or a `.`, so none is named that way.
 WORD = re.compile(r"[^\W\d_]+(?:-[^\W\d_]+)*")
 PLAIN = re.compile(rf"{WORD.pattern}|\d+|[^\w]+")
+# where a link's destination starts: `[x](y)`, `[x](<y>)`, `[x]( y )`
+LINK_TARGET = re.compile(r"\]\(\s*<?\Z")
 # an empty code span is a slot with no name in it: a line given to it is no file's
 EMPTY_CODE = re.compile(r"``")
 WIDEST = 10                            # a wider range (`f.py:1-200`) points at no line in particular
@@ -436,13 +438,14 @@ def _is(token: str, path: str) -> bool:
 
 def _could_name_a_file(text: str, tok: tuple[str, int, int]) -> bool:
     token, start, end = tok
-    return (not PLAIN.fullmatch(token) or text.startswith("./", start) or text.endswith("](", 0, start)
-            or (text.endswith("`", 0, start) and text.startswith("`", end)))
+    return bool(token) and (not PLAIN.fullmatch(token) or text.startswith("./", start)
+                            or bool(LINK_TARGET.search(text, 0, start))
+                            or (text.endswith("`", 0, start) and text.startswith("`", end)))
 
 
 def _taker(text: str, toks: list[tuple[str, int, int]], after: int, before: tuple[str, int, int]) -> str:
-    """Whose a loose line is, the line ending at `after` and written after the token `before`: that token's when
-    nothing to the clause's end could name a file; no file's when something could and `before` could too (or an
+    """Whose a loose line is, the line ending at `after` and written after the token `before` (unless a full stop
+    ends that token's sentence, when it is no one): that token's when nothing to the clause's end could name a file; no file's when something could and `before` could too (or an
     empty slot comes first); else the first thing that could, if one word or none comes between. A token the line's
     number runs into (`line 14 — 4probe.py`, read as lines 4-14) is the first thing after it."""
     stop = c.start() if (c := CLAUSE_END.search(text, after)) else len(text)
@@ -451,6 +454,8 @@ def _taker(text: str, toks: list[tuple[str, int, int]], after: int, before: tupl
     first = next((i for i, t in enumerate(later) if _could_name_a_file(text, t)), None)
     if empty < (later[first][1] if first is not None else stop):
         return ""
+    if text.endswith(".", 0, before[2]):                  # it ends its sentence: the line starts a new one
+        before = ("", before[1], before[2])
     if first is None:
         return before[0]
     if _could_name_a_file(text, before) or first > 1 or (first == 1 and not WORD.fullmatch(later[0][0])):
