@@ -817,6 +817,9 @@ def test_debt_filed_on_a_quick_change_follows_it_to_the_full_lane(lane):
 
 def test_a_full_lane_slice_still_goes_from_its_plan_to_its_epic_branch(lane):
     gh = lane.gh
+    # the eval gate (#100) fetches the PR's head ref, which this fake origin doesn't serve: tests/test_sdlc_eval.py
+    # covers it, and this slice changes no review logic
+    lane.mp.setattr(sdlc, "merge_eval_errors", lambda *a, **k: ([], None))
     marker = lambda kind, rev=None, **kw: sdlc.marker(kind, rev, **kw) + "\ntext"   # noqa: E731
     epic = gh.new_issue("Alarm manager", "Manage alarms.", ["sdlc:planned"])
     for author, body in [(OWNER, marker("prd", 1)), (POSTER, "/approve"),

@@ -212,7 +212,35 @@ def test_artist_albums_refetches_once_the_cache_goes_stale():
     assert len(sess.calls) > calls_before
 
 
-def test_new_releases_trusts_only_day_precision_dates(monkeypatch):
+# `new_releases` measures its window from `datetime.now(timezone.utc)`, so a
+# fixture date that is "recent" today falls out of the window weeks later
+# (#353). The window tests freeze the clock `comedy` sees at this instant.
+FROZEN_NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
+
+
+class _FrozenDatetime(datetime):
+    """The real `datetime`, except `now()` is always `FROZEN_NOW`."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return FROZEN_NOW if tz is None else FROZEN_NOW.astimezone(tz)
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    monkeypatch.setattr(comedy, "datetime", _FrozenDatetime)
+    return FROZEN_NOW
+
+
+def test_frozen_clock_keeps_every_other_datetime_method(frozen_clock):
+    assert comedy.datetime.now(timezone.utc) == FROZEN_NOW
+    assert comedy.datetime.fromisoformat("2026-09-20T00:00:00+00:00") == \
+        datetime(2026, 9, 20, tzinfo=timezone.utc)
+    assert (comedy.datetime.now(timezone.utc) - timedelta(days=45)).date().isoformat() \
+        == "2026-08-17"
+
+
+def test_new_releases_trusts_only_day_precision_dates(monkeypatch, frozen_clock):
     sess = FakeSession()
     monkeypatch.setattr(comedy, "artist_albums", lambda s, aid: [
         {"id": "al1", "name": "Day-precise", "release_date": "2026-09-20",
@@ -225,7 +253,7 @@ def test_new_releases_trusts_only_day_precision_dates(monkeypatch):
     assert [a["name"] for a in out] == ["Day-precise"]
 
 
-def test_new_releases_excludes_anything_outside_the_window(monkeypatch):
+def test_new_releases_excludes_anything_outside_the_window(monkeypatch, frozen_clock):
     sess = FakeSession()
     monkeypatch.setattr(comedy, "artist_albums", lambda s, aid: [
         {"id": "old", "name": "Old", "release_date": "2020-01-01",

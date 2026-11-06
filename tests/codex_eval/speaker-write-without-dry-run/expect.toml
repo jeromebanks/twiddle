@@ -1,0 +1,8 @@
+# the planted bug: a command that writes to a speaker, with no `--dry-run`
+kind = "bug"
+file = "src/twiddle/mute_cli.py"
+line = 19
+anchor = "rooms_api.set_mute(args.room, muted)"
+also_lines = [12]          # the parser, where the flag is missing
+functions = ["run_mute", "add_parser"]
+keywords = ["dry-run", "dry_run", "dry run"]
