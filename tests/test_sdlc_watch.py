@@ -334,3 +334,18 @@ def test_the_record_write_is_atomic_and_leaves_no_temp_files(repo):
         w.write_record(root, rec)
     assert sorted(p.name for p in root.iterdir()) == [w.RECORD_NAME]
     assert len(record(repo)["paused"]["issues"]) == 5
+
+
+def test_a_held_lock_is_reported_after_a_bounded_wait_and_nothing_is_written(repo, monkeypatch, capsys):
+    import fcntl
+    root = root_of(repo)
+    root.mkdir(parents=True)
+    monkeypatch.setattr(w, "LOCK_WAIT_S", 0.2)
+    here(monkeypatch, repo)
+    with open(root / w.LOCK_NAME, "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        proc = run_copy(repo / "tools" / "sdlc_watch.py", repo, "status")    # a reader needs no lock
+        assert proc.returncode == 0
+        assert w.main(["pause"]) == 1
+    assert "held for over" in capsys.readouterr().err
+    assert not (root / w.RECORD_NAME).exists()

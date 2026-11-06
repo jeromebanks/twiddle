@@ -48,6 +48,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -60,6 +61,7 @@ LOG_NAME = "sdlc_watch.jsonl"
 LOCK_NAME = "state.lock"
 SCHEMA = 1
 GIT_TIMEOUT_S = 30
+LOCK_WAIT_S = 10                                    # the record's lock: a read-modify-write takes milliseconds
 CREDITS_REMINDER = ("usage credits can't be checked: keep them off, or their spend limit at $0 "
                     "(claude.ai/settings/usage)")
 
@@ -222,10 +224,20 @@ def write_record(root: Path, record: dict[str, Any]) -> None:
 
 @contextlib.contextmanager
 def locked(root: Path) -> Iterator[None]:
-    """One read-modify-write of the record at a time, across processes."""
+    """One read-modify-write of the record at a time, across processes. Held for milliseconds;
+    a holder that keeps it past LOCK_WAIT_S is reported, never waited on for ever."""
     root.mkdir(parents=True, exist_ok=True)
     with open(root / LOCK_NAME, "a") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        deadline = time.monotonic() + LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise WatchError(f"{root / LOCK_NAME} has been held for over {LOCK_WAIT_S}s; "
+                                     "nothing was written") from None
+                time.sleep(0.05)
         try:
             yield
         finally:
