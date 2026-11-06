@@ -701,6 +701,43 @@ def test_a_directory_in_the_checkouts_place_is_never_deleted(tmp_path, monkeypat
     assert r.run(APPROVED_555 + POSTED) == 0 and not (r.out / "main").exists()
 
 
+MERGED_555 = {"12-alarms.md": f"# PRD (#12)\n\nApproved revision 2 ([PRD]({DOC_URL.format(555)})).\n\n## Goals\n"}
+
+
+def test_a_real_round_reads_the_merged_prd_it_names_from_its_checkout_of_main(tmp_path, monkeypatch):
+    # #143: the prompt names docs/prd/12-*.md relative to Codex's working directory; that path must be there
+    r = PlanReview(tmp_path, monkeypatch, docs=MERGED_555)
+    # the primary checkout moves off origin/main to a commit without the doc: only the scratch checkout has it
+    git_("checkout", "-q", "-b", "local", cwd=r.root)
+    git_("rm", "-q", "docs/prd/12-alarms.md", cwd=r.root)
+    git_("commit", "-qm", "a local commit without the PRD", cwd=r.root)
+    assert not (r.root / "docs" / "prd" / "12-alarms.md").exists()
+    # the fake `codex`, wrapped: it finds the path the prompt names and reports, from its cwd, whether it exists
+    real, codex = tmp_path / "bin" / "codex-real", tmp_path / "bin" / "codex"
+    codex.rename(real)
+    codex.write_text(f"#!{sys.executable}\nimport os, pathlib, re, sys\n"
+                     f"if sys.argv[1:] != ['--version']:\n"
+                     f"    m = re.search(r'the approved PRD it must deliver: `([^`]+)`', sys.argv[-1])\n"
+                     f"    if not m:\n"
+                     f"        sys.stdout.write('named: NONE\\n')\n"
+                     f"    else:\n"
+                     f"        p = pathlib.Path(m.group(1))\n"
+                     f"        first = p.read_text().splitlines()[0] if p.is_file() else ''\n"
+                     f"        sys.stdout.write(f'named: {{p}} exists={{p.is_file()}} first={{first}}\\n')\n"
+                     f"    sys.stdout.flush()\n"
+                     f"os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])\n")
+    codex.chmod(0o755)
+    assert r.run(APPROVED_555 + POSTED) == 0
+    (call,) = calls(r.log)
+    saved = (r.out / "codex.md").read_text()
+    assert call["cwd"] == str((r.out / "main").resolve())
+    assert "the approved PRD it must deliver: `docs/prd/12-alarms.md`" in r.prompt()
+    assert saved.startswith(f"HEAD: {r.main}\n") and git_("rev-parse", "HEAD", cwd=r.root) != r.main
+    assert "named: docs/prd/12-alarms.md exists=True first=# PRD (#12)\n" in saved
+    assert saved.rstrip().endswith("VERDICT: approve") and not (r.out / "requirements.md").exists()
+    assert not (r.out / "main").exists() and str(r.out / "main") not in git_("worktree", "list", cwd=r.root)
+
+
 # --- an amendment to an epic being built is reviewed on epic/N (#216) -------------------------------------
 
 EPIC_ONLY = "NOTES-epic.md"
