@@ -27,7 +27,7 @@ GitHub's 5000 an hour for an authenticated client, even if the 304s did count.
 **Only when a probe says something changed** does it read, unconditionally:
 
 - the issues and the comments updated since the last poll's watermark
-  (`...?since=<watermark>&sort=updated&direction=asc&per_page=100`, at most MAX_PAGES pages each:
+  (`...?since=<watermark less 1s>&sort=updated&direction=asc&per_page=100`, at most MAX_PAGES pages each:
   a capped read keeps the old ETag and moves the watermark to the last item read, so the next poll
   carries on where it stopped);
 - who counts as a person: the repo's owner and its push collaborators (`sdlc.fetch_trusted`);
@@ -47,7 +47,9 @@ push collaborator (never merely the issue's author) posts an unmarked comment on
 among it) and anyone else's comment or issue. Care holds epics and top-level issues only: a
 person's comment on a slice or subtask (labelled `plan:slice` / `plan:subtask`, with the matching
 `sdlc:v1 kind=slice|subtask epic=N` marker) brings epic N into care and counts as a person's comment
-on it; the slice itself is never asked for a turn. An issue leaves care when `state` says `done`.
+on it; the slice itself is never asked for a turn. An issue leaves care when `state` says `done`
+(or gives a slice's, a subtask's or a debt ticket's shape, which never belongs there). A `state` that
+fails is that issue's answer for this poll ("nothing"); the others are still decided.
 
 Stdlib only, and no `twiddle` import, like the rest of the SDLC tooling.
 """
@@ -252,6 +254,13 @@ def latest(items: list[dict[str, Any]], current: str | None) -> str | None:
     return best.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if best else current
 
 
+def shifted(mark: str) -> str:
+    """A since-read's `since`: the watermark less a second, so an update in the watermark's own second,
+    after the last read, is never missed (re-reading an item is harmless: intake is idempotent)."""
+    t = parse_time(mark)
+    return (t - dt.timedelta(seconds=1)).astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if t else mark
+
+
 # --- whose move ---------------------------------------------------------------------------
 
 def run_state(checkout: Path, n: int) -> dict[str, Any]:
@@ -271,7 +280,7 @@ def run_state(checkout: Path, n: int) -> dict[str, Any]:
 
 def decide(n: int, st: dict[str, Any], paused: bool) -> dict[str, Any]:
     """What a poll would do for one issue in care, from its `state` alone."""
-    if "turn" not in st:   # a slice's `slice-status` shape: never asked for a turn
+    if "turn" not in st or st.get("plan_kind"):   # a slice's `slice-status` shape, a subtask, a debt ticket
         return {"issue": n, "leave": True, "why": "not an epic or a top-level issue"}
     if st.get("state") == "done":
         return {"issue": n, "leave": True, "why": "done"}
@@ -314,7 +323,7 @@ def poll(record: dict[str, Any], repo: str, config: dict[str, Any], checkout: Pa
     reads: dict[str, list[dict[str, Any]]] = {}
     for name in SINCE:   # both, whichever probe moved: a comment's issue is in the issues read
         since = marks.get(name) or record.get("started_at") or ""
-        reads[name], cut = read_since(repo, name, latest([], since) or since)
+        reads[name], cut = read_since(repo, name, shifted(since))
         if cut:
             out["truncated"].append(name)
         marks[name] = latest(reads[name], since)
@@ -338,7 +347,12 @@ def poll(record: dict[str, Any], repo: str, config: dict[str, Any], checkout: Pa
         if prev is None or act["at"] > prev:
             entry["last_person_at"], entry["last_person_why"] = at, act["why"]
     for key in sorted(care, key=int):
-        d = decide(int(key), state(int(key)), is_paused(int(key)))
+        try:
+            st = state(int(key))
+        except GitHubError as exc:   # one issue's state can't wedge the others, or the ETags
+            out["decisions"].append({"issue": int(key), "run": None, "why": f"state failed ({exc})"})
+            continue
+        d = decide(int(key), st, is_paused(int(key)))
         if d.get("leave"):
             out["left"][int(key)] = d["why"]
             care.pop(key)

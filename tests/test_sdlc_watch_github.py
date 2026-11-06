@@ -478,3 +478,30 @@ def test_poll_requires_dry_run(capsys):
     with pytest.raises(SystemExit):
         w.main(["poll"])
     assert "--dry-run" in capsys.readouterr().err
+
+
+def test_one_issue_s_failing_state_does_not_wedge_the_poll(repo, fakes):
+    fakes.states[13] = epic_state(13, nxt="/plan-issue 13")
+
+    def state(n):
+        if n == 14:
+            raise gw.GitHubError("sdlc.py state 14 failed: gone")
+        return fakes.state(n)
+    started(repo)
+    fakes.scene(etags=("x", "y"), comments=[comment(13), comment(14)],
+                get={f"repos/{REPO}/issues/{n}": issue(n) for n in (13, 14)})
+    out = w.poll_dry_run(where=repo, state=state)
+    assert "#14: state failed (sdlc.py state 14 failed: gone): nothing" in out
+    assert "would run `/plan-issue 13`" in out
+    rec = record(repo)
+    assert set(rec["care"]) == {"13", "14"} and rec["github"]["etags"]      # the poll still recorded what it read
+
+
+def test_a_debt_ticket_s_shape_never_stays_in_care():
+    st = {"number": 70, "state": "debt", "turn": "none", "action": "none", "plan_kind": "debt"}
+    assert gw.decide(70, st, False)["leave"] is True
+
+
+def test_the_since_read_reaches_back_a_second():
+    assert gw.shifted("2026-11-05T12:00:00Z") == "2026-11-05T11:59:59Z"
+    assert gw.shifted("2026-11-05T12:00:00+00:00") == "2026-11-05T11:59:59Z"
