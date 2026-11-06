@@ -313,16 +313,34 @@ def test_every_file_a_review_reads_is_an_input_or_excluded_on_purpose():
     assert {".agents/skills/review-rules.md", ".agents/skills/plan-issue/references/plan-schema.md",
             "tools/codex_review.py", "tools/codex_eval.py"} <= files
     # what a prompt tells Codex to read, in backticks, below its `---` line (the header is for people)
-    basenames = {f.rsplit("/", 1)[-1] for f in files}
     named = set()
     for p in sorted(prompts):
         text = (ROOT / p).read_text().split("\n---\n", 1)[1]
-        for tok in re.findall(r"`([^`\s]+)`", text):
-            if "<" not in tok and re.fullmatch(r"[\w./-]+\.(md|py|json|jsonl|toml)", tok):
-                named.add(tok)
-                assert tok in files or tok in basenames or tok in codex_eval.EXCLUDED, \
-                    f"{p} names `{tok}` for Codex to read: make it an input, or say why not in codex_eval.EXCLUDED"
+        named |= paths_named(text)
+        for tok in uncovered(text, files):
+            pytest.fail(f"{p} names `{tok}` for Codex to read: make it an input, or say why not in codex_eval.EXCLUDED")
     assert "review-rules.md" in {n.rsplit("/", 1)[-1] for n in named} and "CLAUDE.md" in named
+
+
+def paths_named(text):
+    """Every backticked token that looks like a path, whatever its extension (#174): it holds a `/` or ends in an
+    extension, and isn't a `<placeholder>`. A revision range (`origin/main..HEAD`) is git's, not a file."""
+    return {tok for tok in re.findall(r"`([^`\s]+)`", text)
+            if "<" not in tok and ".." not in tok and ("/" in tok or re.search(r"\.[A-Za-z]\w*$", tok))}
+
+
+def uncovered(text, files):
+    """What `text` names that is neither an input (by its path or its file name) nor excluded on purpose."""
+    basenames = {f.rsplit("/", 1)[-1] for f in files}
+    return sorted(t for t in paths_named(text) if t not in files and t not in basenames and t not in codex_eval.EXCLUDED)
+
+
+def test_a_prompt_naming_a_file_of_any_kind_that_is_not_an_input_fails_the_coverage_check():
+    files = set(codex_eval.FILES)
+    text = ("Read `.agents/skills/review-rules.md` and `.agents/skills/extra-rules.txt`, then `.agents/skills/extra/rules`,"
+            " `notes.cfg` and `CLAUDE.md`; diff `origin/main..HEAD` against `<base>/x.py`, and say `VERDICT: approve`.")
+    assert uncovered(text, files) == [".agents/skills/extra-rules.txt", ".agents/skills/extra/rules", "notes.cfg"]
+    assert {".agents/skills/review-rules.md", "CLAUDE.md"} <= paths_named(text)
 
 
 # --- the ledger ----------------------------------------------------------------------------------
@@ -900,7 +918,10 @@ def test_no_other_file_lends_the_planted_line_however_its_name_is_written(fx):
         for words in (f"`{name}`, line {n} of `{other}`", f"{name} line {n} in {other}", f"`{name}` (lines {n}-{n + 1} of {other})",
                       f"{name}, line {n} of [{other}]({other})", f"{name}, line **{n}** of **{other}**", f"{name} line {n} of ({other})",
                       f"{name}, line {n}, of {other}", f"{name} line {n} (in {other})", f"{name} line {n} \u2014 within {other}",
-                      f"{name} line {n} inside {other}", f"{name} line {n} from {other}"):
+                      f"{name} line {n} inside {other}", f"{name} line {n} from {other}",
+                      # no word list decides it (#179): whatever the words, a file later in the clause takes the line
+                      f"{name} line {n}, over in {other}", f"{name} line {n} near {other}", f"{name} line {n} via {other}",
+                      f"{name} line {n}, see {other}", f"{name} line {n} under {other}", f"{name} line {n} — {other}"):
             report = f"1. **blocking** {words}: {kw}\n\nVERDICT: changes\n"
             s = codex_eval.score(fx, report)
             assert not s.hit, (report, s.reason)
@@ -909,10 +930,16 @@ def test_no_other_file_lends_the_planted_line_however_its_name_is_written(fx):
     for ref in (f"{name}_:{n}", f"_{name}:{n}", f"{stem}_.{ext}:{n}", f"_{stem}_.{ext}:{n}", f"__{name}_:{n}"):
         report = f"1. **blocking** {ref} {kw}; `{name}` is otherwise fine.\n\nVERDICT: changes\n"
         assert not codex_eval.score(fx, report).hit, report
-    # words that give the line away, to no file there, keep it from the file before them
-    for words in (f"{name}, line {n} of", f"{name}, line {n} of [](x)", f"{name} line {n} in ``"):
+    # a slot where a name sits, empty or holding no file's name, keeps the line from the file before it
+    for words in (f"{name}, line {n} of [](x)", f"{name} line {n} in ``", f"{name} line {n} (see [here](x))"):
         report = f"1. **blocking** {words}: {kw}\n\nVERDICT: changes\n"
         assert not codex_eval.score(fx, report).hit, report
+    # but words alone never do (#179): with no file and no slot after it in its clause, the line is the file's before
+    assert codex_eval.score(fx, f"1. **blocking** {name}, line {n} of: {kw}\n\nVERDICT: changes\n").hit
+    # and a file named after the clause has ended takes nothing from it
+    for after in (f"; see {name}.orig", f": {kw} as in other/{name}", f". Compare {name}.bak"):
+        report = f"1. **blocking** {name} line {n} {kw}{after}\n\nVERDICT: changes\n"
+        assert codex_eval.score(fx, report).hit, report
     # a line given to nothing is no one's, and a range wide enough to hold any line points at none
     for where in (f"line {n}: see `{name}`", f"`{name}` is fine. Line {n}", f"{name}:1-200", f"`{name}` lines {n - 10}-{n + 10}"):
         report = f"1. **blocking** {where}: {kw}\n\nVERDICT: changes\n"
