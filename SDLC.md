@@ -173,12 +173,14 @@ like any other (`state` on it says so); if the change then escalates to the full
   conflict and needs a human. (`lane:quick` and `complexity:*` are not state labels.)
 - A quick change merges into `main` only through `merge`'s quick gate (the quick lane, above): a
   recorded passing suite and Codex's approval on the head, never a review deferred to a milestone,
-  and a diff that stays inside `.sdlc/config.json`'s `quick` rules.
+  a diff that stays inside `.sdlc/config.json`'s `quick` rules, and a passing review eval for the head's
+  review logic on the current `codex`, never a deferred one (the eval gate, below).
 - A debt PR merges into `main` only through `merge`'s debt gate (the debt lane, above): the base is
   `main`, it closes only open tickets of one claimed group of the open pass, and a passing suite and
-  Codex's approval are recorded on the head, never deferred. `merge`, in any lane, runs only main's gate code:
-  its `tools/sdlc.py` and `tools/sdlc_quick.py` must be identical to `origin/main`'s, which in practice means the
-  primary checkout.
+  Codex's approval are recorded on the head, never deferred, and so is a passing review eval for the head's
+  review logic on the current `codex` (the eval gate, below). `merge`, in any lane, runs only main's gate code:
+  its `tools/sdlc.py`, `tools/sdlc_quick.py`, `tools/codex_review.py` and `tools/codex_eval.py` must be identical
+  to `origin/main`'s, which in practice means the primary checkout.
 - A person's decision counts only as read from GitHub. A milestone is accepted only when a person's real
   `/approve` of that demo revision is among the issue's comments: unmarked, by a collaborator or the issue's
   author, after that demo. `demo-accept` cites it in its record (`reply=<comment id>`), and a `demo-approval`
@@ -351,8 +353,8 @@ Without Review"), and refuses an agent editing its own permissions. So no skill 
 merges a PR with a bare `gh pr merge` (a test greps for it). Every merge, in every lane, is
 `uv run python tools/sdlc.py merge PR`, run from the primary checkout on `main`: the gate's own
 review of the exact head stands behind it, and `merge` first refuses to run unless its
-`tools/sdlc.py` and `tools/sdlc_quick.py` match `origin/main`'s (after one bounded `git fetch`), so a
-PR is never judged by a gate it changed. The same goes for `cleanup N`, which removes the worktree.
+`tools/sdlc.py`, `tools/sdlc_quick.py`, `tools/codex_review.py` and `tools/codex_eval.py` match `origin/main`'s
+(after one bounded `git fetch`), so a PR is never judged by a gate it changed. The same goes for `cleanup N`, which removes the worktree.
 
 For the session that built a PR to run them itself, sub-agent or not, the poster adds this rule once
 to `.claude/settings.json` by hand. `.claude/` is a denied path and an agent cannot edit its own
@@ -533,7 +535,7 @@ warning, and the next run refuses until it's dealt with. The rest of `codex-home
 run's session log under `sessions/`.
 
 What isolation can't cover: anything Codex reads from outside `CODEX_HOME`. That includes the
-repo itself (its `AGENTS.md`, `.agents/skills/`), the environment (`OPENAI_API_KEY` and the
+repo itself (its `AGENTS.md`, and its `.agents/skills/` unless they are suppressed, below), the environment (`OPENAI_API_KEY` and the
 like), and anything it finds through `HOME`, which is left alone because git and the keychain
 need it. Nor a sign-in made elsewhere in the instant between the last check of your file and the
 rename over it: the check is made with the new file ready, just before the rename, but `rename`
@@ -545,6 +547,158 @@ The saved report's header (`HEAD:`, `Model:`, `Effort:`, `Codex:`, `Prompt-SHA25
 by the tool. `pr-review`, `plan-review` and `ship-review` copy it into the round's comment and its marker. Only the lines
 directly under `HEAD:` count, so a report can't claim a model of its own. A report saved before
 the header existed is still recorded, without it.
+
+### The review logic's fingerprint, and its eval
+
+How a review behaves is decided by its prompts, its rules, its settings, the code that fills and
+runs it, and the `codex` binary. The repo owns all of these except the binary. `tools/codex_eval.py`
+hashes the parts it owns into one **fingerprint**, and an eval result (`codex-eval`) is recorded against the pair (fingerprint, `codex --version`). A pass for one pair never
+counts for another, so a new `codex` needs a new eval even when nothing in the repo changed.
+
+The fingerprint's inputs, by name (`codex-eval --status --inputs` lists them):
+
+- the three prompts (`codex-pr-prompt.md`, `codex-milestone-prompt.md`, `codex-plan-prompt.md`),
+  `.agents/skills/review-rules.md`, and `plan-schema.md` (the plan prompt has Codex read it);
+- `.sdlc/config.json`'s `codex` section, as canonical JSON (not the rest of the file);
+- `tools/codex_review.py`, which fills and runs every round and also **chooses what a round is
+  handed**: which requirements a plan round is held to, which slices and briefs a milestone round
+  lists, which of them are owed a review, which response a round reads, and the brief a debt or
+  quick PR round is held to (`debt_brief`; `approved_brief`, `approved_brief_id` and `quick_brief`,
+  whose brief id a quick round's approval is bound to). `sdlc.py` only
+  fetches the bundle and passes it in, and a test fails if it defines a function that fills a
+  prompt or picks its inputs;
+- `tools/codex_eval.py`, and everything under `tests/codex_eval/` (the eval's fixtures and scorer);
+- every `AGENTS.md` and `AGENTS.override.md` anywhere in the repo, in any case (none exists today),
+  because Codex loads them on its own: the override wins when both are there, and on macOS a
+  lowercase `agents.md` loads too (checked, like the skills setting, with runs that have no sign-in).
+
+Not `sdlc.py` and not `CLAUDE.md`, so ordinary edits there cost no eval. The prompts point Codex at
+`review-rules.md` for the safety rules. The plan prompt names `CLAUDE.md` only for its Layout
+table, as knowledge of the code under review, and `codex_eval.EXCLUDED` says why each such file is
+left out. A test fails if a prompt names a file, or `codex_review.py` holds a path, that is neither
+an input nor excluded. The fingerprint reads the same from a commit (`git ls-tree`) as from a
+checkout of it (`git ls-files`, untracked files included), and prints as its first 12 hex digits:
+a full hash looks like an identifier to `demo-post`.
+
+**Skills are suppressed.** M1's demo showed that a real review was offered Codex's built-in skills
+and the repo's own `.agents/skills`, and its session log showed `skills.includeInstructions: true`.
+`codex.skills` is `suppressed`, its only value, so the choice is part of the fingerprint: the
+generated `config.toml` sets `[skills] include_instructions = false`. This was confirmed against
+codex-cli 0.161.0 (and holds on 0.162.0) without spending tokens: a run with no sign-in still writes
+its session log, and with the setting that log has no `<skills_instructions>` message and
+`skills.includeInstructions: false`. Without the setting it has both. So the repo's skills are
+never inputs: they are never offered.
+
+After every run the tool reads the run's session log (`codex_review.check_session`). The round
+saves no report and exits 3, with the reason at the end of `codex.err`, if:
+
+- skills were offered (a `codex` that ignores the setting can't pass for one that ran without them);
+- Codex loaded instructions that aren't the content of an instruction file in the reviewed checkout,
+  or that git ignores there (an ignored file is never in a commit, so it can't be an input), or that
+  it reached through a symbolic link (an `AGENTS.md` must be a real file);
+- or the log isn't a shape the tool knows (a new `codex` may change it).
+
+Only a run killed on its timeout before it wrote its state is retried. `codex.flags` may not pass
+`--ephemeral`, which stops the log being written. The first time this exit happens after a `codex`
+upgrade, look in `<out>/codex-home/sessions/` before deferring: the tool may need to learn the new
+shape.
+
+A second mode, offering skills and fingerprinting every `SKILL.md`, was planned in case the setting
+didn't work. It did, so that mode was dropped (#158). If a future `codex` ignores the setting, every
+review is refused and says why, and a new mode would be a new value of `codex.skills`.
+
+**Nothing under `.agents/` or `tests/codex_eval/` may hide from git.** That's where the rules,
+prompts and fixtures live, and what Codex is pointed at. The fingerprint walks those folders on
+disk, not as git lists them. A symbolic link there (file or folder, tracked, untracked or ignored),
+or a file git ignores there, refuses the round before Codex starts. Anything git doesn't list could
+reach Codex without being an input.
+
+What the fingerprint can't cover: what the binary does with the same inputs (that is the
+version's half of the pair), the model behind the API, and anything outside the repo that
+isolation doesn't already keep out (above).
+
+**Results.** Each result is a marked `codex-eval` comment on the issue `.sdlc/config.json`'s
+`codex_eval_issue` names (#100). It holds the full fingerprint, the `codex` version, the model,
+the effort, the outcome (`pass`, `fail` or `deferred`) and one line per fixture. A `codex` whose
+`--version` says nothing usable pairs with nothing, and no pass can be recorded for it. A closed issue's
+comments still read the same, so the results outlive the epic. The latest result per pair is the
+one that counts. A result comment is a record, not part of the conversation: it never counts as
+the agent's last comment, so one posted during a demo never hides the poster's answer.
+
+`codex-eval --status` prints the fingerprint, `codex --version` and that pair's result. It is
+read-only and never runs `codex exec`. Before each round, `codex-review` fingerprints the review
+logic that round actually runs under. The files the tool reads (the prompts, its code, the
+fixtures) come from the checkout the command runs from. The files Codex reads (`review-rules.md`,
+`plan-schema.md`, any `AGENTS.md`) come from the checkout
+Codex runs in: the slice's worktree, the scratch checkout of `main` for a plan, or the epic's
+worktree. The settings are the ones the round runs with, a `--config` of its own included. If an
+input can't be fingerprinted (a file where a directory of inputs belongs, anything under `.agents/`
+or `tests/codex_eval/` that git doesn't list, or a link named like an `AGENTS.md` anywhere), the
+round is refused before Codex starts (exit 1: fix it and run again, never a `review-defer`): a
+review that can't say what it ran under isn't one. It only warns when that pair has no passing
+result, or the results can't be read, and the round still runs.
+
+**Running the eval.** `uv run python tools/sdlc.py codex-eval` shows Codex the fixtures under
+`tests/codex_eval/` and scores what it says. Each fixture is a tiny base tree, a `change.patch`, a `brief.md` and an
+`expect.toml`. Four carry one planted bug each (an off-by-one bound, an unchecked error path, a speaker write without
+`--dry-run`, a test that proves nothing), and one is a clean change that must be approved. The patch is applied
+only in a scratch git repo the tool builds under `--out` (a temp dir by default; never the primary checkout or a
+worktree of it). The repo holds the real `review-rules.md` and any repo `AGENTS.md` / `AGENTS.override.md` at the same
+paths, with the base as `origin/epic/1` and the change as `slice/1`. Codex then reviews it with the PR prompt through the same
+`run_review` as a real round, one fixture at a time, each under its own scratch `CODEX_HOME`. No skills are copied in: `codex.skills`
+is `suppressed`, so a review is never offered any. A planted bug counts as found when the verdict is `changes` and **one
+numbered finding** names the file, a line within ±3 of the planted one (or of another place `expect.toml` allows) or the enclosing function, and one of the
+fixture's keywords (case-insensitive); the clean change must come back `approve`. A line counts only when it is written
+right after the file's name (`journal_log.py:19`, `` `journal_log.py` line 19 ``), and a name is the whole token, so
+`journal_log.py.orig:19` never credits `journal_log.py`. Words may give a line to a file (`line 19 of journal_log.py`), and
+a range wider than 10 lines points at none.
+
+- Every fixture runs, and a full eval takes 10-15 minutes. It prints a line per fixture as it goes, so run it in the background.
+- Any miss posts a `fail` with the misses. A fixture Codex couldn't run is `unavailable` and the rest still run. If one was
+  missed, the `fail` lists the unrun ones. If none was missed, nothing is posted and the command exits with the
+  runner's `UNAVAILABLE` status (3), so the review is deferred as `codex-review`'s is.
+- A pair that already passed runs nothing (`--force` runs it again), and `--dry-run` lists the fixtures, the
+  fingerprint and what would run, and prints no `codex` command. Exit status: 0 a pass (posted, or already recorded), 1 a `fail`
+  or a refusal, 3 Codex couldn't run.
+- It posts the fingerprint of the repo it runs from, and posts nothing if that moved while it ran.
+
+Run it after a change to the review logic (anything in the fingerprint's inputs), before the PR's `test-record` and
+`codex-review`: a later commit to the inputs voids the result. Editing the eval itself, its fixtures included, is
+such a change.
+
+**The eval gate.** `merge` refuses a slice PR unless the review logic at its head has a `pass`, or a `deferred`
+result, for the pair (that fingerprint, the `codex --version` `merge` runs with). Both the head's and the base's
+fingerprints are read from the commits (`git ls-tree`/`cat-file`), never a checkout; the base's only picks the
+message ("this PR changes the review logic", or "codex is now X"). So it bites once per change to the review logic
+or to `codex`, never per commit, and an unrelated PR after an upgrade waits for the new pair's result too. A `fail`
+blocks until a later pass for that pair. Results live on the eval issue, so posting one voids no test run or review.
+
+- **A deferral is only for an eval that couldn't run** (exit 3, or no `codex`): `codex-eval --defer --reason "..."`
+  records a `deferred` result for the pair, and is refused once the pair's latest result is a `fail`. A slice merged
+  on a deferral posts an `eval-owed` record on the epic; `state` and `demo-status` list it, and `demo-post` refuses
+  while it is owed.
+- **A quick change's and a debt group's PR into `main` take the same gate, with no deferral.** `merge` (and
+  `--dry-run`), `quick-gate`, and `state` / `slice-status` where they show the gate read the PR's head and `main`
+  the same way (the PR's `refs/pull/N/head`, fetched from the primary checkout) and refuse until the pair has a
+  `pass`. These lanes have no milestone demo to owe an eval to, so a `deferred` result is a refusal too, and the
+  refusal says so. A PR that changes no fingerprint input merges as before only while its pair has a pass: after
+  a `codex` upgrade, an ordinary quick or debt PR waits for the new pair's eval too. When the eval can't run, a
+  debt group waits; a quick change waits, or moves to the full lane (`escalate-to-full N`). `quick-gate
+  --from-file` judges a saved bundle offline, with no eval gate (`merge` refuses a quick or debt bundle anyway).
+- **When `codex --version` can't be read** (missing, not executable, or no usable answer), only the fingerprint
+  is checked: its latest completed result (`pass` or `fail`, any version, and a `fail` posted as `unknown` too) decides; failing that, a deferral recorded
+  as `unavailable` lets the merge through, owed. `--defer` there records `unavailable`, and is refused after a
+  `fail` for that fingerprint under any version, until a pass. Once a version can be read again, the pair rule applies.
+- **Clearing what's owed**: an eval owed for a pair (F, V) is cleared when the latest completed eval of exactly
+  that pair is a pass; a pass for F under an older `codex` doesn't count, so an upgrade's deferral stays owed. One
+  owed for F alone (`unavailable`) is cleared by a pass for F under any real version. Either is also cleared by a
+  pass for the logic that reviews from now on: `epic/N`'s head's fingerprint (F, when the head can't be read) under
+  the `codex --version` in use now. When that version can't be read, an eval owed for logic the head has moved
+  past is cleared, as `merge` would then judge the head, when the head's fingerprint's latest completed eval (any
+  real version) is a pass; one owed for the head's own logic keeps the rules above. Rounds already run keep their
+  recorded provenance.
+- `merge --dry-run --from-file` judges a saved bundle (`pr`, `pr_comments`, `trusted`, `slice`, `epic`, `progress`,
+  `behind_by`, `head`, `base`, `eval`) in the repo it runs in, with no GitHub; without `--dry-run` it refuses.
 
 **Round limits** (`.sdlc/config.json`): `max_pr_rounds` (default 5) is how many Codex rounds
 that ask for changes a slice PR, or a milestone, may take before it escalates.

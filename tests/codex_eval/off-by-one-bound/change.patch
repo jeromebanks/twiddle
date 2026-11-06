@@ -1,0 +1,36 @@
+diff --git a/src/twiddle/journal_log.py b/src/twiddle/journal_log.py
+index 5827fd7..8945101 100644
+--- a/src/twiddle/journal_log.py
++++ b/src/twiddle/journal_log.py
+@@ -10,3 +10,10 @@ def read_entries(path: Path) -> list[dict]:
+     if not path.exists():
+         return []
+     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
++
++
++def newest(entries: list[dict], limit: int) -> list[dict]:
++    """The newest `limit` entries, oldest first. A limit of zero or less is none."""
++    if limit <= 0:
++        return []
++    return entries[-(limit + 1):]
+diff --git a/tests/test_journal_newest.py b/tests/test_journal_newest.py
+new file mode 100644
+index 0000000..bc6c854
+--- /dev/null
++++ b/tests/test_journal_newest.py
+@@ -0,0 +1,15 @@
++from twiddle.journal_log import newest
++
++ENTRIES = [{"n": i} for i in range(10)]
++
++
++def test_newest_ends_with_the_latest_entry():
++    assert newest(ENTRIES, 3)[-1] == {"n": 9}
++
++
++def test_a_limit_of_zero_is_none():
++    assert newest(ENTRIES, 0) == []
++
++
++def test_a_short_journal_is_returned_whole():
++    assert newest(ENTRIES[:2], 5) == ENTRIES[:2]
