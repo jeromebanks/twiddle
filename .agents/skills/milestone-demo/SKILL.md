@@ -341,8 +341,8 @@ tool step; never merge or push by hand.
    ```
 
    `ship` runs only `origin/main`'s gate code, as `merge` does: before it reads or writes
-   anything it refuses unless the running `tools/sdlc.py` and `tools/sdlc_quick.py` match
-   `origin/main`'s byte for byte, which in practice means the primary checkout after the pull
+   anything it refuses unless the running gate files (`tools/sdlc.py`, `tools/sdlc_quick.py`,
+   `tools/codex_review.py`, `tools/codex_eval.py`) match `origin/main`'s byte for byte, which in practice means the primary checkout after the pull
    (never a worktree). The refusal says how to fix it. It refuses unless the milestone is accepted, `epic/N` contains `main`, a passing
    run and Codex's approval are recorded on its current head, and no slice of a
    milestone that isn't accepted is on it. Then it opens a pull request
