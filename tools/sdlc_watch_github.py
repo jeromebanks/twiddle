@@ -28,9 +28,9 @@ GitHub's 5000 an hour for an authenticated client, even if the 304s did count.
 
 - the issues and the comments updated since the last poll's watermark
   (`...?since=<watermark less 1s>&sort=updated&direction=asc&per_page=100`, at most MAX_PAGES requests
-  each, paged by time: each request starts again from the newest item read, so an edit mid-read can't
-  shift an unread item onto a page already read; a capped read keeps the old ETag and the next poll
-  carries on from its mark);
+  each, paged by time: every request is page 1 from the newest item read, so nothing shifts past it; a
+  page or more inside one window is read on in `created_at` order, each page anchored on the last item
+  taken (`read_since`); a capped read keeps the old ETag and the next poll carries on from its mark);
 - who counts as a person: the repo's owner and its push collaborators (`sdlc.fetch_trusted`'s rule,
   but a failed lookup fails the poll rather than falling back to the owner alone);
 - `sdlc.py state N --json` for each issue in care. On an epic that fans out to its slices' reads,
@@ -73,17 +73,19 @@ except ImportError:
 GH_TIMEOUT_S = 60          # one gh api request
 STATE_TIMEOUT_S = 300      # one `sdlc.py state N --json`: an epic reads all its slices
 PER_PAGE = 100
-MAX_PAGES = 10             # per since-read: 1000 issues or comments changed in one interval is a backlog, not a poll
+GITHUB_MAX_PER_PAGE = 100
+MAX_PAGES = 10             # requests per since-read
 GITHUB_HOURLY_LIMIT = 5000  # an authenticated REST client's primary rate limit
 PROBES = {   # name -> the conditional request's path, under repos/<repo>/
     "issues": "issues?state=all&sort=updated&direction=desc&per_page=1",
     "comments": "issues/comments?sort=updated&direction=desc&per_page=1",
 }
 SINCE = {    # name -> the read made only when that probe (or the other) changed
-    "issues": "issues?state=all&sort=updated&direction=asc&per_page={per_page}&since={since}&page={page}",
-    "comments": "issues/comments?sort=updated&direction=asc&per_page={per_page}&since={since}&page={page}",
+    "issues": "issues?state=all&sort={sort}&direction=asc&per_page={per_page}&since={since}&page={page}",
+    "comments": "issues/comments?sort={sort}&direction=asc&per_page={per_page}&since={since}&page={page}",
 }
 REQUESTS_PER_QUIET_POLL = len(PROBES)
+QUIET_RETRIES = 3          # quiet polls that ask a failed `state` again before waiting for a change
 STATUS_RE = re.compile(r"\AHTTP/[0-9.]+ ([0-9]{3})\b")
 MARKER_ANY_RE = re.compile(r"<!--\s*" + re.escape(sdlc.MARKER_TAG) + r"\b")
 CONTAINER_LABELS = {"plan:slice": "slice", "plan:subtask": "subtask"}
@@ -134,8 +136,8 @@ def conditional_get(path: str, etag: str | None) -> tuple[int, str | None, str]:
     return 200, headers.get("etag"), body
 
 
-def get_json(path: str) -> Any:
-    proc = run_gh(["api", path])
+def get_json(path: str, *flags: str) -> Any:
+    proc = run_gh(["api", path, *flags])
     if proc.returncode != 0:
         raise GitHubError(f"gh api {path} failed: {(proc.stderr or '').strip()}")
     try:
@@ -144,42 +146,89 @@ def get_json(path: str) -> Any:
         raise GitHubError(f"gh api {path} returned no JSON ({exc})") from None
 
 
-def read_since(repo: str, name: str, mark: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], bool]:
-    """`name` updated since `mark["at"]`, oldest first, in at most MAX_PAGES requests:
-    (items, the next mark, whether it stopped at the cap).
+def _page(repo: str, name: str, sort: str, since: str, per_page: int, page: int) -> list[dict[str, Any]]:
+    path = f"repos/{repo}/" + SINCE[name].format(sort=sort, per_page=per_page, since=since, page=page)
+    got = get_json(path)
+    if not isinstance(got, list) or not all(isinstance(it, dict) for it in got):
+        raise GitHubError(f"gh api {path}: expected a list of objects")
+    return got
 
-    It pages by time, not position: each request asks again from page 1, since the newest `updated_at`
-    read so far (less a second), so an item edited mid-read moves to the end and nothing unread shifts
-    onto a page already read. Items read twice are kept once. Only a run of a full page or more all in
-    one window, where time can't move on, is paged by position (`mark["page"]`), from page 1 of that window."""
-    at, page = mark.get("at") or "", int(mark.get("page") or 1)
+
+def _key(it: dict[str, Any]) -> Any:
+    """An item's id (an issue's or a comment's: they rise with creation), else its number."""
+    return it["id"] if it.get("id") is not None else it.get("number")
+
+
+def _overlap_size(pos: int) -> int:
+    """A page size (PER_PAGE or less if it can, GitHub's 100 at most) whose page holding position `pos`
+    holds at least one position after it too. Only a `pos + 1` that every size up to 100 divides has
+    none, which no count of issues or comments reaches."""
+    sizes = [*range(PER_PAGE, 1, -1), *range(PER_PAGE + 1, GITHUB_MAX_PER_PAGE + 1)]
+    return next((q for q in sizes if pos % q != q - 1), PER_PAGE)
+
+
+def read_since(repo: str, name: str, mark: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], bool]:
+    """`name` updated since `mark["at"]`, in at most MAX_PAGES requests: (items, the next mark, whether
+    it stopped at the cap). What it guarantees is the intake's: every issue or comment *created* after
+    the watermark's start, and still there, is read at some poll (edits are not intake, #370).
+
+    It pages by time, not position: each request asks page 1 again (`sort=updated`), since the newest
+    `updated_at` read so far (less a second). Every request is page 1, so nothing can shift past it.
+
+    When a full page sits in one window, so time can't move on, it reads the rest of that set in
+    `created_at` order (`sort=created`), anchored: each request's page is chosen to hold the position of
+    the last item taken (the mark's `cursor`, at `pos`) and at least one after it, and it is used only if
+    its first item is at or before `cursor` (or it starts at the top). One response is one snapshot, so
+    the items after `cursor` in it are the next ones created; a deletion or an old item edited into the
+    set (created before, so already read or from before the start) can't hide one. A response that
+    starts after `cursor` steps back a position. (This replaces round 3's slot check, which a deletion
+    and an insertion between two requests could cancel out.) It assumes GitHub orders equal
+    `created_at` by id, as ids rise with creation."""
+    at, by = mark.get("at") or "", mark.get("by") or "updated"
+    cursor, pos = mark.get("cursor"), int(mark.get("pos", -1))
     items: dict[Any, dict[str, Any]] = {}
     for _ in range(MAX_PAGES):
-        path = f"repos/{repo}/" + SINCE[name].format(per_page=PER_PAGE, since=shifted(at), page=page)
-        got = get_json(path)
-        if not isinstance(got, list):
-            raise GitHubError(f"gh api {path}: expected a list")
-        for it in got:
-            items[it.get("id") or it.get("number")] = it
-        newest = latest(got, at)
-        if len(got) < PER_PAGE:
+        if by == "updated":
+            got = _page(repo, name, "updated", shifted(at), PER_PAGE, 1)
+            for it in got:
+                items[_key(it)] = it
+            if len(got) < PER_PAGE:
+                return list(items.values()), {"at": latest(list(items.values()), at)}, False
+            newest = latest(got, at)
+            if newest and (parse_time(at) is None or parse_time(newest) > parse_time(at)):
+                at = newest                   # time moved on: ask again from there
+            else:
+                by, cursor, pos = "created", None, -1   # a full page in one window: the rest by creation
+            continue
+        size = PER_PAGE if cursor is None else _overlap_size(pos)
+        page = 1 if cursor is None else pos // size + 1
+        offset = (page - 1) * size
+        got = _page(repo, name, "created", shifted(at), size, page)
+        if offset > 0 and (not got or _key(got[0]) > cursor):
+            pos = offset - 1                  # the set shrank under the anchor: a position back
+            continue
+        new = [it for it in got if cursor is None or _key(it) > cursor]
+        for it in new:
+            items[_key(it)] = it
+        if len(got) < size:
             return list(items.values()), {"at": latest(list(items.values()), at)}, False
-        if newest and (parse_time(at) is None or parse_time(newest) > parse_time(at)):
-            at, page = newest, 1          # time moved on: ask again from there
-        else:
-            page += 1                     # a full page all in one window: the next page of it
-    return list(items.values()), {"at": at, **({"page": page} if page > 1 else {})}, True
+        if new:
+            cursor = max(_key(it) for it in new)
+        pos = offset + len(got) - 1
+    mark = {"at": at} if by == "updated" else {"at": at, "by": by, "cursor": cursor, "pos": pos}
+    return list(items.values()), mark, True
 
 
 def fetch_trusted(config: dict[str, Any], repo: str) -> set[str]:
-    """Who is a person here: the repo's owner and its push collaborators (`sdlc.fetch_trusted`'s rule).
-    Unlike that, a failed lookup raises: falling back to the owner alone would read past a collaborator's
-    action and move the watermark beyond it, so the poll writes nothing and the next one reads it again."""
-    try:
-        rows = sdlc.gh_pages(f"repos/{repo}/collaborators")
-    except sdlc.SdlcError as exc:
-        raise GitHubError(f"cannot list collaborators: {exc}") from None
-    return {c["login"] for c in rows if isinstance(c, dict) and (c.get("permissions") or {}).get("push")} \
+    """Who is a person here: the repo's owner and its push collaborators (`sdlc.fetch_trusted`'s rule),
+    through this module's bounded `gh`. Unlike that, a failed lookup raises: falling back to the owner
+    alone would read past a collaborator's action and move the watermark beyond it, so the poll writes
+    nothing and the next one reads it again."""
+    pages = get_json(f"repos/{repo}/collaborators", "--paginate", "--slurp")
+    rows = [c for page in (pages if isinstance(pages, list) else []) for c in (page if isinstance(page, list) else [])]
+    if not isinstance(pages, list) or not all(isinstance(c, dict) for c in rows):
+        raise GitHubError("cannot list collaborators: unexpected answer")
+    return {c.get("login") for c in rows if (c.get("permissions") or {}).get("push") and c.get("login")} \
         | {repo.split("/")[0]}
 
 
@@ -330,12 +379,13 @@ def check(record: dict[str, Any], repo: str) -> dict[str, Any]:
 def decide_all(care: dict[str, Any], keys: list[str], state: Callable[[int], dict[str, Any]],
                is_paused: Callable[[int], bool], out: dict[str, Any]) -> None:
     """Ask `state` about each of `keys` (in care) and record the answer in `out`, in place. A failed read is
-    that issue's "nothing" this poll and is marked, so the next poll asks again even if GitHub is quiet."""
+    that issue's "nothing" this poll and is counted, so a quiet poll asks again, up to QUIET_RETRIES times
+    in a row; past that only a poll that saw a change on GitHub does."""
     for key in sorted(keys, key=int):
         try:
             st = state(int(key))
         except GitHubError as exc:   # one issue's state can't wedge the others, or the ETags
-            care[key]["state_failed"] = True
+            care[key]["state_failed"] = int(care[key].get("state_failed") or 0) + 1
             out["decisions"].append({"issue": int(key), "run": None, "why": f"state failed ({exc})"})
             continue
         care[key].pop("state_failed", None)
@@ -360,7 +410,7 @@ def poll(record: dict[str, Any], repo: str, config: dict[str, Any], checkout: Pa
                            "decisions": [], "truncated": []}
     care = {k: dict(v) for k, v in (record.get("care") or {}).items()}
     if not probe["changed"]:   # nothing new on GitHub: only a state read that failed last time is asked again
-        pending = [k for k, v in care.items() if v.get("state_failed")]
+        pending = [k for k, v in care.items() if 0 < int(v.get("state_failed") or 0) <= QUIET_RETRIES]
         if pending:
             decide_all(care, pending, state, is_paused, out)
             out["care"] = care

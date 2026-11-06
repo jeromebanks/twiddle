@@ -71,7 +71,8 @@ if base in scene["get"]:
     if isinstance(got, list):   # updated at or after since, oldest first, one page of per_page
         q = dict(kv.split("=", 1) for kv in query.split("&") if "=" in kv)
         if "since" in q:
-            got = sorted((g for g in got if g["updated_at"] >= q["since"]), key=lambda g: g["updated_at"])
+            key = q.get("sort", "updated") + "_at"
+            got = sorted((g for g in got if g["updated_at"] >= q["since"]), key=lambda g: (g[key], g.get("id") or g.get("number")))
         size, page = int(q.get("per_page", 30)), int(q.get("page", 1))
         got = got[(page - 1) * size:page * size]
     print(json.dumps(got)); sys.exit(0)
@@ -216,6 +217,7 @@ def test_gh_is_bounded(monkeypatch):
     with pytest.raises(gw.GitHubError, match="timed out"):
         gw.run_gh(["api", "x"])
     assert 0 < gw.GH_TIMEOUT_S < 600 and 0 < gw.STATE_TIMEOUT_S <= 600 and 0 < gw.MAX_PAGES <= 50
+    assert 0 < gw.QUIET_RETRIES <= 10
 
 
 def test_requests_per_hour_stay_under_github_s_limit():
@@ -541,8 +543,8 @@ def test_a_failed_collaborator_lookup_writes_nothing_and_the_comment_is_read_aft
 def test_capped_reads_reach_the_last_comment_over_several_polls(repo, fakes, monkeypatch, same_second):
     """A backlog bigger than a capped read: each poll carries on, by time or, within one second, by page."""
     started(repo)
-    monkeypatch.setattr(gw, "PER_PAGE", 2)
-    monkeypatch.setattr(gw, "MAX_PAGES", 1)
+    monkeypatch.setattr(gw, "PER_PAGE", 3)
+    monkeypatch.setattr(gw, "MAX_PAGES", 3)
     at = (lambda i: AFTER) if same_second else (lambda i: f"2026-11-05T12:{10 + i:02d}:00Z")
     backlog = [comment(7, by=STRANGER, at=at(i)) for i in range(7)] + [comment(45, at=at(7))]
     fakes.states[45] = epic_state(45, nxt="/triage-issue 45")
@@ -583,7 +585,7 @@ def test_a_failed_state_is_asked_again_on_a_quiet_poll(repo, fakes):
         return fakes.state(n)
     fakes.scene(etags=("x", "y"), comments=[comment(15)], get={f"repos/{REPO}/issues/15": issue(15)})
     assert "state failed" in w.poll_dry_run(where=repo, state=state)
-    assert record(repo)["care"]["15"]["state_failed"] is True
+    assert record(repo)["care"]["15"]["state_failed"] == 1
     broken["on"] = False
     fakes.scene(etags=("x", "y"))
     out = w.poll_dry_run(where=repo, state=state)
@@ -591,3 +593,115 @@ def test_a_failed_state_is_asked_again_on_a_quiet_poll(repo, fakes):
     assert "state_failed" not in record(repo)["care"]["15"]
     fakes.asked.clear()
     assert "nothing changed: no state read" in w.poll_dry_run(where=repo, state=state) and fakes.asked == []
+
+
+def test_an_edit_while_a_one_second_backlog_is_read_skips_no_comment(repo, fakes, monkeypatch):
+    """Codex round 3: a page or more all in one second, the owner's comment last, the first comment
+    edited just before the read falls back from time to position: it is still read."""
+    started(repo)
+    monkeypatch.setattr(gw, "PER_PAGE", 3)
+    same = [comment(7, by=STRANGER, at=AFTER) for _ in range(3)] + [comment(47, at=AFTER)]
+    fakes.states[47] = epic_state(47, nxt="/triage-issue 47")
+    fakes.scene(etags=("x", "y"), comments=same, get={f"repos/{REPO}/issues/47": issue(47)},
+                edit={"after": 2, "id": same[0]["id"], "updated_at": "2026-11-05T12:30:00Z"})
+    poll(repo, fakes)
+    reads = [c[1] for c in fakes.calls() if "issues/comments?" in c[1] and "since=" in c[1]]
+    assert any("sort=created" in r for r in reads)            # the fallback was taken
+    assert "47" in record(repo)["care"]
+    assert record(repo)["github"]["since"]["comments"] == {"at": "2026-11-05T12:30:00Z"}
+
+
+def test_quiet_polls_ask_a_failing_state_again_only_a_few_times(repo, fakes):
+    started(repo)
+    asked = []
+
+    def state(n):
+        asked.append(n)
+        raise gw.GitHubError("sdlc.py state 16 failed: always")
+    fakes.scene(etags=("x", "y"), comments=[comment(16)], get={f"repos/{REPO}/issues/16": issue(16)})
+    w.poll_dry_run(where=repo, state=state)
+    for _ in range(gw.QUIET_RETRIES + 3):
+        fakes.scene(etags=("x", "y"))
+        w.poll_dry_run(where=repo, state=state)
+    assert len(asked) == 1 + gw.QUIET_RETRIES        # then it waits for a change on GitHub
+    fakes.scene(etags=("x2", "y"))                   # a change: asked again
+    w.poll_dry_run(where=repo, state=state)
+    assert len(asked) == 2 + gw.QUIET_RETRIES
+
+
+def test_a_hung_or_garbled_collaborator_list_fails_the_poll(monkeypatch):
+    monkeypatch.setattr(gw, "run_gh", lambda args: subprocess.CompletedProcess(args, 0, "not json", ""))
+    with pytest.raises(gw.GitHubError):
+        gw.fetch_trusted({}, REPO)
+    monkeypatch.setattr(gw, "run_gh", lambda args: subprocess.CompletedProcess(args, 0, '[["x"]]', ""))
+    with pytest.raises(gw.GitHubError):
+        gw.fetch_trusted({}, REPO)
+
+
+def test_a_page_that_is_not_a_list_of_objects_is_an_error(monkeypatch):
+    monkeypatch.setattr(gw, "get_json", lambda path, *f: [1, 2])
+    with pytest.raises(gw.GitHubError, match="list of objects"):
+        gw.read_since(REPO, "comments", {"at": AFTER})
+
+
+class FakeGitHub:
+    """GitHub's since-lists in process: `since` keeps items updated at or after it, `sort` orders them
+    (ties by id), pages by position. Between any two requests `churn` may add, edit, delete, or edit an
+    old item into the set, as people do while a read is under way."""
+
+    def __init__(self, rng, items, clock):
+        self.rng, self.items, self.clock, self.next_id = rng, items, clock, 10**6
+
+    def stamp(self):
+        return self.clock.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def churn(self):
+        if self.rng.random() < 0.5:
+            self.clock += dt.timedelta(seconds=self.rng.choice([0, 0, 1]))
+        op, live = self.rng.random(), [i for i in self.items if not i.get("deleted")]
+        if op < 0.3:
+            self.next_id += 1
+            self.items.append({"id": self.next_id, "created_at": self.stamp(), "updated_at": self.stamp()})
+        elif op < 0.5 and live:
+            self.rng.choice(live)["updated_at"] = self.stamp()
+        elif op < 0.65 and live:
+            self.rng.choice(live)["deleted"] = True
+
+    def get_json(self, path, *flags):
+        self.churn()
+        q = dict(kv.split("=", 1) for kv in path.partition("?")[2].split("&"))
+        key = q["sort"] + "_at"
+        rows = sorted((i for i in self.items if not i.get("deleted") and i["updated_at"] >= q["since"]),
+                      key=lambda i: (i[key], i["id"]))
+        size, page = int(q["per_page"]), int(q["page"])
+        return [dict(i) for i in rows[(page - 1) * size:page * size]]
+
+
+@pytest.mark.parametrize("seed", range(300))
+def test_since_reads_miss_no_new_item_whatever_happens_between_requests(monkeypatch, seed):
+    """The invariant behind Codex's rounds 1-3, as intake needs it: every item created after the start and
+    still there is read at some poll, whatever new items, edits, deletions, old items edited into the set
+    and one-second backlogs happen between any two requests."""
+    import random
+    rng = random.Random(seed)
+    monkeypatch.setattr(gw, "PER_PAGE", rng.choice([5, 6, 8]))
+    monkeypatch.setattr(gw, "MAX_PAGES", rng.choice([1, 2, 4]))
+    clock = dt.datetime(2026, 11, 5, 12, 0, 10, tzinfo=dt.timezone.utc)
+    start = "2026-11-05T12:00:05Z"
+    items = [{"id": i, "created_at": "2026-11-05T11:00:00Z", "updated_at": "2026-11-05T11:00:00Z"}
+             for i in range(8)]
+    burst = rng.choice(["2026-11-05T12:00:06Z", "2026-11-05T12:00:10Z"])   # a backlog in one second
+    items += [{"id": 100 + i, "created_at": burst, "updated_at": burst} for i in range(rng.randrange(0, 30))]
+    fake = FakeGitHub(rng, items, clock)
+    monkeypatch.setattr(gw, "get_json", fake.get_json)
+    seen, mark, cut = set(), {"at": start}, True
+    for poll_n in range(400):
+        if poll_n == 40:
+            fake.churn = lambda: None          # people stop: the reads must settle having read everything
+        got, mark, cut = gw.read_since(REPO, "comments", mark)
+        seen |= {i["id"] for i in got}
+        if poll_n > 40 and not cut:
+            break
+    assert not cut
+    missed = [i["id"] for i in fake.items if not i.get("deleted") and i["created_at"] > start and i["id"] not in seen]
+    assert missed == []
