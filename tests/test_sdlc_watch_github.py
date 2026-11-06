@@ -609,6 +609,47 @@ def test_a_failed_state_leaves_the_change_unacknowledged_and_is_asked_again(repo
     assert "nothing changed: no state read" in out and fakes.asked == [] and len(fakes.calls()) == 2
 
 
+def test_a_due_retry_is_asked_even_when_the_probes_are_back_at_their_cached_etags(repo, fakes, monkeypatch):
+    """Codex round 5: the ETags were already acknowledged, a change's state read failed, then the issue that
+    moved the probe was deleted, so both probes would answer 304 to the old ETags. A due retry sends no
+    If-None-Match, so it still reads state; before it is due, the probes stay conditional and quiet."""
+    clock = {"t": dt.datetime(2026, 11, 5, 12, 10, tzinfo=dt.timezone.utc)}
+    monkeypatch.setattr(gw, "now", lambda: clock["t"])
+    started(repo)
+    fakes.states[16] = epic_state(16, nxt="/plan-issue 16")
+    gets = {f"repos/{REPO}/issues/16": issue(16)}
+    broken = {"on": False}
+
+    def state(n):
+        if broken["on"]:
+            raise gw.GitHubError("sdlc.py state 16 failed: network")
+        return fakes.state(n)
+    fakes.scene(etags=("e1", "c1"), comments=[comment(16)], get=gets)
+    assert "would run `/plan-issue 16`" in w.poll_dry_run(where=repo, state=state)
+    cached = record(repo)["github"]["etags"]
+    assert cached and "state_retry" not in record(repo)["github"]          # acknowledged
+    broken["on"] = True
+    fakes.scene(etags=("e2", "c1"), issues=[issue(99, by=STRANGER, at=AFTER)], comments=[comment(16)], get=gets)
+    assert "state failed" in w.poll_dry_run(where=repo, state=state)
+    assert record(repo)["github"]["etags"] == cached                       # unacknowledged
+    broken["on"] = False
+    fakes.scene(etags=("e1", "c1"), comments=[comment(16)], get=gets)     # #99 deleted: back to the cached ETags
+    fakes.asked.clear()
+    out = w.poll_dry_run(where=repo, state=state)                         # not due yet: conditional, no state
+    assert "nothing changed: no state read" in out and fakes.asked == []
+    assert all(c[:3] == ["api", "-i", "-H"] for c in fakes.calls()[:2])
+    clock["t"] = gw.parse_time(record(repo)["github"]["state_retry"]["at"])
+    fakes.scene(etags=("e1", "c1"), comments=[comment(16)], get=gets)
+    out = w.poll_dry_run(where=repo, state=state)
+    assert "would run `/plan-issue 16`" in out and fakes.asked == [16]
+    assert [c[:2] for c in fakes.calls()[:2]] == [["api", "-i"]] * 2 and fakes.calls()[0][2] != "-H"
+    assert "state_retry" not in record(repo)["github"]
+    fakes.asked.clear()
+    fakes.scene(etags=("e1", "c1"))
+    out = w.poll_dry_run(where=repo, state=state)                         # quiet again: 304s, no state read
+    assert "nothing changed: no state read" in out and fakes.asked == [] and len(fakes.calls()) == 2
+
+
 def test_an_edit_while_a_one_second_backlog_is_read_skips_no_comment(repo, fakes, monkeypatch):
     """Codex round 3: a page or more all in one second, the owner's comment last, the first comment
     edited just before the read falls back from time to position: it is still read."""

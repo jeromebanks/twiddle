@@ -40,9 +40,10 @@ GitHub's 5000 an hour for an authenticated client, even if the 304s did count.
 The ETags, the watermark and the care set are written to the watcher's record together, and only
 when the whole poll succeeded: a failed read leaves the record as it was, so the next poll sees the
 change again. A `state` read that fails is that issue's "nothing" for the poll (the others are still
-decided), and the change is left unacknowledged: the old ETags are kept, so a later poll is a change
-poll again, and asks every issue in care once more after a backoff (RETRY_BASE_S doubling to
-RETRY_MAX_S, never giving up). A quiet poll, with nothing left unacknowledged, never reads `state`.
+decided), and the change is left unacknowledged: the old ETags are kept, and once the backoff is over
+(RETRY_BASE_S doubling to RETRY_MAX_S, never giving up) the probes are sent without `If-None-Match`,
+so that poll is a change poll even if GitHub is back at the cached ETags, and asks every issue in care
+once more. A quiet poll, with nothing left unacknowledged, never reads `state`.
 
 **Intake.** An issue comes into care when, after the watcher's start time, the repo's owner or a
 push collaborator (never merely the issue's author) posts an unmarked comment on it (`/approve` and
@@ -373,11 +374,17 @@ def decide(n: int, st: dict[str, Any], paused: bool) -> dict[str, Any]:
 # --- one poll -----------------------------------------------------------------------------
 
 def check(record: dict[str, Any], repo: str) -> dict[str, Any]:
-    """The probes alone: {"requests", "changed": [names], "etags": new etags}. Reads nothing else."""
-    old = (record.get("github") or {}).get("etags") or {}
+    """The probes alone: {"requests", "changed": [names], "etags": new etags}. Reads nothing else.
+
+    When a `state_retry` is due, the probes go without `If-None-Match`: a 200 is then certain, so the
+    retry is a change poll even if both probes are back at their cached ETags (an issue deleted, say)."""
+    github = record.get("github") or {}
+    old = github.get("etags") or {}
+    due = parse_time((github.get("state_retry") or {}).get("at"))
+    fresh = due is not None and now() >= due
     etags, changed = dict(old), []
     for name, path in PROBES.items():
-        status, etag, _ = conditional_get(f"repos/{repo}/{path}", old.get(name))
+        status, etag, _ = conditional_get(f"repos/{repo}/{path}", None if fresh else old.get(name))
         if status == 200:
             changed.append(name)
             etags[name] = etag
