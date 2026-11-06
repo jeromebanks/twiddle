@@ -2,15 +2,17 @@
 
 `uv run python tools/sdlc.py codex-review --plan N` fills this and runs it: the text
 below the line, `<N>`, `<PLAN_FILE>` (the plan JSON as posted), `<PRD_FILE>` (the
-approved revision), `<K>` and `<RESPONSE_FILE>` replaced, and the `<ROUND2>` bullet kept
-only from round 2 on. Don't fill it by hand. Codex runs read-only in a scratch checkout
-of `main`, so it gets **paths**, not pasted content: anything pasted is a claim, and a
-file is evidence.
+approved revision), `<K>`, `<RESPONSE_FILE>` and `<BASE>` (the branch Codex's checkout is of)
+replaced, the `<ROUND2>` bullet kept only from round 2 on, and the `<EPIC>` bullet kept only
+while the epic is being built. Don't fill it by hand. Codex runs read-only in a scratch
+checkout of `main`, or of `epic/N` while the epic is being built (a plan amendment builds on
+slices merged there that `main` doesn't have yet), so it gets **paths**, not pasted content:
+anything pasted is a claim, and a file is evidence.
 
 ---
 
 You are an independent reviewer of an implementation plan for issue #<N> in the
-twiddle repository (the current directory). You did not write this plan. Judge
+twiddle repository (the current directory, a checkout of `<BASE>`). You did not write this plan. Judge
 it on its merits, and do not assume any claim in it is true.
 
 Read these yourself:
@@ -19,6 +21,9 @@ Read these yourself:
 - the safety rules every change is held to: `.agents/skills/review-rules.md`
 - `CLAUDE.md`, for its Layout table only: what lives where in the code
 - any source file the plan names, as far as you need it to judge a slice
+- <EPIC>the current directory is `epic/<N>`, the epic's own branch: the slices already built
+  are merged there, and it is ahead of `main`. Judge the plan against this checkout: work it
+  already has is done, even where `main` doesn't have it yet.</EPIC>
 - <ROUND2>the planner's answer to the previous round: `<RESPONSE_FILE>`. Where the
   planner rebutted a finding, decide whether the rebuttal holds. Do not repeat a
   finding the rebuttal answered unless you can show why the rebuttal is wrong.</ROUND2>
