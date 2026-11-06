@@ -1,9 +1,28 @@
 {
   "schema": 1,
-  "_doc": "What a headless watcher run (`claude -p`) may use: read only from the pinned, pushed commit by tools/sdlc_watch_cmd.py. {PRIMARY} is the primary checkout, {SCRATCH} the run's scratch dir, {N} the issue the run's command names, {WORKTREE} {PRIMARY}/.worktrees/slice-{N}; an `edit` path is absolute once filled, and goes on the command line as `Edit(//<path>)`. A pattern's * matches any text, spaces included, so a push or a label edit is never a wildcard: they are exact, per issue. tests/test_sdlc_watch_cmd.py holds this file to that.",
-  "skills": ["triage-issue", "plan-issue", "work-slice", "milestone-demo"],
-  "tools": ["Bash", "Read", "Glob", "Grep", "Edit", "Write", "Agent", "Skill"],
-  "allow": ["Read", "Glob", "Grep", "Agent"],
+  "_doc": "What a headless watcher run (`claude -p`) may use: read only from the pinned, pushed commit by tools/sdlc_watch_cmd.py. {PRIMARY} is the primary checkout, {SCRATCH} the run's scratch dir, {N} the issue the run's command names, {E} the epic in care (its rules are dropped when there is none), {WORKTREE} {PRIMARY}/.worktrees/slice-{N}; an `edit` path is absolute once filled, and goes on the command line as `Edit(//<path>)`. A pattern's * matches any text, spaces included, so a push or a label edit is never a wildcard: they are exact, per issue. tests/test_sdlc_watch_cmd.py holds this file to that. `deny` goes to --disallowedTools and wins over every allow: the git options that run another command or write a file anywhere.",
+  "skills": [
+    "triage-issue",
+    "plan-issue",
+    "work-slice",
+    "milestone-demo"
+  ],
+  "tools": [
+    "Bash",
+    "Read",
+    "Glob",
+    "Grep",
+    "Edit",
+    "Write",
+    "Agent",
+    "Skill"
+  ],
+  "allow": [
+    "Read",
+    "Glob",
+    "Grep",
+    "Agent"
+  ],
   "bash": [
     "uv run python tools/sdlc.py *",
     "uv run python tools/codex_review.py *",
@@ -25,15 +44,12 @@
     "git show *",
     "git rev-parse *",
     "git ls-tree *",
-    "git grep *",
     "git fetch",
-    "git fetch *",
+    "git fetch origin *",
     "git add *",
     "git commit *",
-    "git rebase origin/epic/*",
     "git rebase --continue",
     "git rebase --abort",
-    "git merge origin/epic/*",
     "git worktree add *",
     "git worktree remove *",
     "git -C {PRIMARY} pull --ff-only",
@@ -53,15 +69,45 @@
     "git push --force-with-lease origin slice/{N}",
     "git push -u origin prd/{N}",
     "git push origin prd/{N}",
-    "git -C {WORKTREE} fetch *",
-    "git -C {WORKTREE} rebase origin/epic/*",
     "git -C {WORKTREE} status",
+    "git -C {WORKTREE} status *",
+    "git -C {WORKTREE} diff *",
+    "git -C {WORKTREE} log *",
+    "git -C {WORKTREE} rev-parse *",
+    "git -C {WORKTREE} add *",
+    "git -C {WORKTREE} commit *",
+    "git -C {WORKTREE} fetch origin *",
+    "git -C {WORKTREE} push -u origin slice/{N}",
+    "git -C {WORKTREE} push origin slice/{N}",
+    "git -C {WORKTREE} push --force-with-lease origin slice/{N}",
     "gh issue edit {N} --add-label bug",
     "gh issue edit {N} --add-label enhancement",
     "gh issue edit {N} --add-label complexity:routine",
     "gh issue edit {N} --add-label complexity:judgment",
     "gh issue edit {N} --add-label complexity:novel"
   ],
+  "bash_per_epic": [
+    "git rebase origin/epic/{E}",
+    "git merge origin/epic/{E}",
+    "git -C {WORKTREE} rebase origin/epic/{E}",
+    "git -C {WORKTREE} merge origin/epic/{E}"
+  ],
   "demo_shot": "uv run python {PRIMARY}/tools/demo_shot.py cli *",
-  "edit": ["{PRIMARY}/.worktrees/**", "{SCRATCH}/**"]
+  "edit": [
+    "{PRIMARY}/.worktrees/**",
+    "{SCRATCH}/**"
+  ],
+  "deny": [
+    "git * --exec*",
+    "git * -x*",
+    "git * -O*",
+    "git * --open-files-in-pager*",
+    "git * --upload-pack*",
+    "git * --receive-pack*",
+    "git * --output*",
+    "git -c *",
+    "git * -c *",
+    "git * --ext-diff*",
+    "git * --textconv*"
+  ]
 }

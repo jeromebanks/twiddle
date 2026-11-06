@@ -27,8 +27,12 @@ WORKTREE = PRIMARY / ".worktrees" / f"slice-{ISSUE}"
 DIRS = [PRIMARY, SCRATCH]
 
 
-def rules(issue: int = ISSUE, demo_shot: bool = True) -> w.Rules:
-    return w.build_rules(TOOLS, issue, primary=PRIMARY, scratch=SCRATCH, demo_shot=demo_shot)
+def rules(issue: int = ISSUE, demo_shot: bool = True, epic: int | None = EPIC) -> w.Rules:
+    return w.build_rules(TOOLS, issue, primary=PRIMARY, scratch=SCRATCH, demo_shot=demo_shot, epic=epic)
+
+
+def denied(cmd: str, r: w.Rules | None = None) -> bool:
+    return any(w.bash_rule_matches(d, cmd) for d in (r or rules()).deny)
 
 
 def allowed(cmd: str, r: w.Rules | None = None) -> bool:
@@ -114,6 +118,11 @@ def forbidden(cmd: str) -> str | None:
         if any(lab.startswith(("sdlc:", "plan:", "lane:")) for lab in labels) or "--remove-label" in cmd:
             return "a protected label edit"
     if words[0] == "git":
+        if any(x.startswith(("--exec", "-x", "-O", "--open-files-in-pager", "--upload-pack", "--receive-pack",
+                             "--ext-diff", "--textconv")) for x in words[1:]) or "-c" in words[1:]:
+            return "a git option that runs another command"
+        if any(x.startswith("--output") for x in words[1:]):
+            return "a git option that writes a file anywhere"
         i = 1
         while i < len(words) and words[i] in ("-C", "-c"):
             i += 2
@@ -138,7 +147,9 @@ def forbidden(cmd: str) -> str | None:
 FILLS = ["", "x", " main", ":main", " HEAD:epic/263", " origin main", " push origin main", " +slice/345 main",
          " --add-label sdlc:approved", " --remove-label plan:slice", " --base main", " twiddle play --room roam",
          " play --room roam", " pr merge 5", " issue comment 5 --body x", " --dangerously-skip-permissions",
-         " tui --out-dir x -- dial", " -m twiddle play"]
+         " tui --out-dir x -- dial", " -m twiddle play", " --exec 'uv run twiddle play --room roam'", " -x true",
+         " -Ovim", " --upload-pack=x", " --output=/Users/someone/dev/twiddle/.sdlc/config.json",
+         " -c core.pager=x", " --ext-diff"]
 
 
 def instances(rule: str):
@@ -151,7 +162,7 @@ def instances(rule: str):
 
 
 def test_no_rule_can_match_a_forbidden_command():
-    bad = [(r, c, why) for r in rules().bash for c in instances(r) for why in [forbidden(c)] if why]
+    bad = [(r, c, why) for r in rules().bash for c in instances(r) if not denied(c) for why in [forbidden(c)] if why]
     assert not bad, bad[:5]
 
 
@@ -239,13 +250,14 @@ COMMANDS = ("uv ", "git ", "gh ", "cd ", "mkdir ", "qlmanage ", "claude ")
 IGNORED = {
     "gh pr merge": "prose: what no skill runs",
     "uv run": "prose: the `uv run` part of the merge rule",
-    "cd <WORKTREE> && ...": "prose: how every worktree command starts",
-    "git -C <WORKTREE>": "prose: a fragment",
+    "cd <WORKTREE> && ...": "a placeholder: concrete cases in test_worktree_commands",
+    "git -C <WORKTREE>": "a placeholder: concrete cases in test_worktree_commands",
     "uv run twiddle snapshot --room R": "a person runs it: a write's demo-request body",
     "uv run twiddle restore --room R": "a person runs it: a write's demo-request body",
     "uv run twiddle snapshot --room <room>": "a person runs it: the bracket of a demo-request",
     "uv run python tools/demo_shot.py cli --out <SCRATCH>/demo/alarms.svg -- uv run twiddle alarm list":
         "a run uses the inline `<PRIMARY>/tools/demo_shot.py` form (the primary's own copy)",
+    "git grep": "the Grep tool covers it (`git grep -O<cmd>` would run another command)",
     "uv run python tools/demo_shot.py tui --out-dir <SCRATCH>/demo --step wait:8 --step escape --step wait:6 "
     "--step shot:dial -- dial": "TUI pictures are M2's: denied headless",
 }
@@ -298,6 +310,27 @@ def test_the_ignore_list_is_current_and_its_writes_stay_denied():
             k for k in IGNORED if " tui " in k)):
         assert not allowed(concrete(c)), c
     assert IGNORED_TUI
+    assert not allowed("git grep -Ovim foo")
+
+
+def test_worktree_commands():
+    """work-slice runs code commands as `git -C <WORKTREE> ...` or `cd <WORKTREE> && ...`; Claude Code
+    prompts (so dontAsk denies) a `git` after a `cd` into another directory, so git goes through `-C`."""
+    for cmd in (f"git -C {WORKTREE} commit -m x", f"git -C {WORKTREE} add tools/x.py", f"git -C {WORKTREE} status",
+                f"git -C {WORKTREE} diff origin/epic/{EPIC}...HEAD", f"git -C {WORKTREE} push -u origin slice/{ISSUE}",
+                f"git -C {WORKTREE} fetch origin epic/{EPIC}", f"git -C {WORKTREE} rebase origin/epic/{EPIC}",
+                f"cd {WORKTREE} && uv run pytest -q 2>&1", f"cd {WORKTREE} && uv run python tools/sdlc.py test-record 501"):
+        assert allowed(cmd), cmd
+    for cmd in (f"cd {WORKTREE} && git commit -m x", f"git -C {WORKTREE} rebase origin/epic/{EPIC} --exec true",
+                f"git -C {WORKTREE} rebase origin/epic/9", f"git -C {WORKTREE} push origin main",
+                f"git -C {WORKTREE} diff --output={PRIMARY}/.sdlc/config.json", f"git -C {PRIMARY} commit -m x"):
+        assert not allowed(cmd), cmd
+
+
+def test_the_epic_rules_need_an_epic():
+    assert f"git rebase origin/epic/{EPIC}" in rules().bash
+    assert not any("epic/" in b for b in rules(epic=None).bash if b.startswith(("git rebase", "git merge")))
+    assert not allowed(f"git rebase origin/epic/{EPIC}", rules(epic=None))
 
 
 def test_triage_quick_brief_path_is_allowed():
@@ -378,7 +411,8 @@ def test_the_model_comes_from_the_line_else_the_default():
 
 def test_skills_are_scoped_to_the_four_by_name():
     a = argv(STEPS[2])
-    allowed_tools = a[a.index("--allowedTools") + 1:a.index("--add-dir")]
+    allowed_tools = a[a.index("--allowedTools") + 1:a.index("--disallowedTools")]
+    assert a[a.index("--disallowedTools") + 1:a.index("--add-dir")] == [f"Bash({d})" for d in TOOLS["deny"]]
     assert sorted(x for x in allowed_tools if x.startswith("Skill")) == sorted(f"Skill({s})" for s in w.SKILLS)
     assert "Skill" not in allowed_tools and "Bash" not in allowed_tools and "Edit" not in allowed_tools
     assert {"Read", "Glob", "Grep", "Agent"} <= set(allowed_tools)

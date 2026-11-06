@@ -99,7 +99,7 @@ def resolve_model(step: Step, default: str) -> str:
 
 # --- the tool list --------------------------------------------------------------------------------------------
 
-LIST_KEYS = ("skills", "tools", "allow", "bash", "bash_per_issue", "edit")
+LIST_KEYS = ("skills", "tools", "allow", "bash", "bash_per_issue", "bash_per_epic", "edit", "deny")
 
 
 def load_tools(text: str) -> dict[str, Any]:
@@ -117,7 +117,7 @@ def load_tools(text: str) -> dict[str, Any]:
         raise WatchCmdError(f"{TOOLS_FILE}: `demo_shot` must be a string")
     if tuple(data["skills"]) != SKILLS:
         raise WatchCmdError(f"{TOOLS_FILE}: `skills` must be exactly {', '.join(SKILLS)}")
-    for rule in [*data["bash"], *data["bash_per_issue"], data["demo_shot"]]:
+    for rule in [*data["bash"], *data["bash_per_issue"], *data["bash_per_epic"], data["demo_shot"]]:
         if rule.strip() in ("*", "uv *", "uv run *") or any(a in rule for a in FORBIDDEN_ARGS):
             raise WatchCmdError(f"{TOOLS_FILE}: refused rule `{rule}`")
     if any(t in ("Bash", "Edit", "Write", "Skill") or "(" in t for t in data["allow"]):
@@ -172,6 +172,7 @@ class Rules:
     allowed: tuple[str, ...]                      # --allowedTools: what runs with no prompt
     bash: tuple[str, ...] = field(default=())     # the Bash patterns among them, unwrapped
     edit: tuple[str, ...] = field(default=())     # the Edit paths among them (`//abs/**`)
+    deny: tuple[str, ...] = field(default=())     # --disallowedTools' Bash patterns: they win over any allow
 
 
 def fill(rule: str, values: dict[str, str]) -> str:
@@ -193,11 +194,15 @@ def check_paths(primary: Path, scratch: Path) -> None:
         raise WatchCmdError(f"the scratch dir {scratch} must be outside the primary checkout {primary}")
 
 
-def build_rules(tools: dict[str, Any], issue: int, *, primary: Path, scratch: Path, demo_shot: bool) -> Rules:
+def build_rules(tools: dict[str, Any], issue: int, *, primary: Path, scratch: Path, demo_shot: bool,
+                epic: int | None = None) -> Rules:
+    """The run's rules: `issue` is the one its command names, `epic` the epic in care (None: its rules dropped)."""
     check_paths(primary, scratch)
     values = {"PRIMARY": str(primary), "SCRATCH": str(scratch), "N": str(issue),
               "WORKTREE": str(primary / ".worktrees" / f"slice-{issue}")}
     bash = [fill(r, values) for r in tools["bash"] + tools["bash_per_issue"]]
+    if epic is not None:
+        bash += [fill(r, {**values, "E": str(epic)}) for r in tools["bash_per_epic"]]
     if demo_shot:
         bash.append(fill(tools["demo_shot"], values))
     filled = [fill(r, values) for r in tools["edit"]]
@@ -206,16 +211,18 @@ def build_rules(tools: dict[str, Any], issue: int, *, primary: Path, scratch: Pa
     edit = ["/" + e for e in filled]   # `//abs`: from the filesystem root (one `/` is the settings source's)
     allowed = (*tools["allow"], *(f"Skill({s})" for s in tools["skills"]),
                *(f"Bash({b})" for b in bash), *(f"Edit({e})" for e in edit))
-    return Rules(tuple(tools["tools"]), allowed, tuple(bash), tuple(edit))
+    deny = tuple(fill(r, values) for r in tools["deny"])
+    return Rules(tuple(tools["tools"]), allowed, tuple(bash), tuple(edit), deny)
 
 
 def build_argv(step: Step, tools: dict[str, Any], *, primary: Path, scratch: Path, default_model: str,
-               demo_shot: bool) -> list[str]:
+               demo_shot: bool, epic: int | None = None) -> list[str]:
     """The `claude -p` command line of a skill step, from an already-loaded tool list (`read_pinned_tools`;
-    `demo_shot`: `demo_shot_matches_main`, else that one entry is dropped). Runs nothing."""
+    `demo_shot`: `demo_shot_matches_main`, else that one entry is dropped; `epic`: the epic in care). Runs
+    nothing."""
     if step.kind != "skill" or step.issue is None:
         raise WatchCmdError(f"only a skill step runs as `claude -p` (this is {step.kind}: {step.text})")
-    rules = build_rules(tools, step.issue, primary=primary, scratch=scratch, demo_shot=demo_shot)
+    rules = build_rules(tools, step.issue, primary=primary, scratch=scratch, demo_shot=demo_shot, epic=epic)
     argv = ["claude", "-p", step.command,
             "--model", resolve_model(step, default_model),
             "--permission-mode", PERMISSION_MODE,
@@ -225,16 +232,18 @@ def build_argv(step: Step, tools: dict[str, Any], *, primary: Path, scratch: Pat
             "--strict-mcp-config",
             "--tools", ",".join(rules.tools),
             "--allowedTools", *rules.allowed,
+            "--disallowedTools", *(f"Bash({d})" for d in rules.deny),
             "--add-dir", str(scratch)]
     if bad := [a for a in argv[3:] if any(f in a for f in FORBIDDEN_ARGS)]:
         raise WatchCmdError(f"refused: the command line would carry {bad[0]}")
     return argv
 
 
-def build_pinned_argv(step: Step, *, primary: Path, pin: str, scratch: Path, default_model: str) -> list[str]:
+def build_pinned_argv(step: Step, *, primary: Path, pin: str, scratch: Path, default_model: str,
+                      epic: int | None = None) -> list[str]:
     """`build_argv` over the tool list at the pin: what a watcher run uses."""
     return build_argv(step, read_pinned_tools(primary, pin), primary=primary, scratch=scratch,
-                      default_model=default_model, demo_shot=demo_shot_matches_main(primary))
+                      default_model=default_model, demo_shot=demo_shot_matches_main(primary), epic=epic)
 
 
 # --- how Claude Code matches the rules (documented semantics, for tests and status) ---------------------------
@@ -257,6 +266,8 @@ def split_compound(command: str) -> list[str]:
             quote, cur, i = c, cur + c, i + 1
             continue
         sep = next((s for s in SEPARATORS if command.startswith(s, i)), None)
+        if sep == "&" and (command[i - 1:i] == ">" or command[i + 1:i + 2] == ">"):
+            sep = None                            # a redirect (`2>&1`, `&>`), not a background `&`
         if sep:
             parts.append(cur)
             cur, i = "", i + len(sep)
@@ -286,9 +297,13 @@ def edit_rule_matches(rule: str, path: Path) -> bool:
 
 
 def bash_allowed(rules: Rules, command: str, working_dirs: list[Path]) -> bool:
-    """Would the run's rules let `command` run with no prompt: every simple command allowed, a `cd` into a
-    working directory (the primary checkout and `--add-dir`) counting as read-only."""
+    """Would the run's rules let `command` run with no prompt: no simple command denied, every one allowed, a
+    `cd` into a working directory (the primary checkout and `--add-dir`) counting as read-only, and no `git`
+    after a `cd` into another directory than the primary checkout (Claude Code prompts for that)."""
+    moved = False
     for part in split_compound(command):
+        if any(bash_rule_matches(r, part) for r in rules.deny):
+            return False
         try:
             words = shlex.split(part)
         except ValueError:
@@ -296,7 +311,10 @@ def bash_allowed(rules: Rules, command: str, working_dirs: list[Path]) -> bool:
         if len(words) == 2 and words[0] == "cd":
             target = Path(words[1])
             if target.is_absolute() and any(target == d or d in target.parents for d in working_dirs):
+                moved = moved or target != working_dirs[0]
                 continue
+        if moved and words[:1] == ["git"]:
+            return False
         if not any(bash_rule_matches(r, part) for r in rules.bash):
             return False
     return True
