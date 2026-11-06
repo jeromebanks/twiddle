@@ -47,7 +47,9 @@ if kind != "none" and home.is_dir():
                    else {{"type": "world_state_v9", "payload": {{"everything": "different"}}}})
     day = home / "sessions" / "2026" / "10" / "07"
     day.mkdir(parents=True, exist_ok=True)
-    (day / f"rollout-{{n}}-{{os.getpid()}}.jsonl").write_text("".join(json.dumps(r) + "\\n" for r in records))
+    # a step's `rollout`: a fixture's events (how the run ended), after the session's own records, in the same log
+    extra = pathlib.Path(step["rollout"]).read_text() if step.get("rollout") else ""
+    (day / f"rollout-{{n}}-{{os.getpid()}}.jsonl").write_text("".join(json.dumps(r) + "\\n" for r in records) + extra)
 if step.get("user_signs_in"):             # a sign-in elsewhere while the review runs
     pathlib.Path(os.environ["HOME"], ".codex", "auth.json").write_text(step["user_signs_in"])
 if step.get("refresh"):                   # Codex's sign-in refreshed: a temp file renamed over auth.json
@@ -60,6 +62,9 @@ if step.get("edit"):
     pathlib.Path(step["edit"]).write_text("edited during the review\\n")
 if step.get("commit"):
     subprocess.run(["git", "commit", "--allow-empty", "-qm", "moved"], check=True)
+if step.get("stderr"):                    # before any sleep, as Codex echoes a tool's output while it works
+    sys.stderr.write(pathlib.Path(step["stderr"]).read_text())
+    sys.stderr.flush()
 time.sleep(step.get("sleep", 0))
 sys.stdout.write(step.get("out", ""))
 sys.stderr.write("codex progress noise\\n")

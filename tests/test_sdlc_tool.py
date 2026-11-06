@@ -212,6 +212,20 @@ def test_prd_pr_guard():
     assert sdlc.prd_pr_errors({**ok, "state": "MERGED"}, "main")
 
 
+def test_state_shows_a_plan_settled_by_a_person(capsys):
+    spent = [agent("prd", 1, 1), agent("approval", 1, 2, by=POSTER, via="comment"), agent("plan", 1, 3)]
+    spent += [agent("plan-review", 1, 4 + i, verdict="changes") for i in range(CONFIG["max_plan_rounds"])]
+    asked = spent + [agent("question", None, 10, phase="plan"), comment(POSTER, "/approve", 11),
+                     comment(STRANGER, "/approve", 12)]
+    st = derive(["sdlc:needs-info"], asked)
+    sdlc.print_state(st)
+    out = capsys.readouterr().out
+    assert f"settled: /approve by {POSTER} on plan rev 1" in out
+    assert f"plan rounds: 0/{CONFIG['max_plan_rounds']} (this cycle spent {CONFIG['max_plan_rounds']})" in out
+    assert f"ignored /approve from {STRANGER}" in out
+    assert f"decision: /approve by {POSTER} (settles the plan)" in out
+
+
 # --- a person's decision is read from GitHub, never from a file (#263 criterion 13) --------------------------
 
 def _no_github(monkeypatch):
@@ -302,3 +316,25 @@ def test_a_label_added_by_someone_else_is_not_backed(monkeypatch, capsys):
     assert sdlc.main(["reconcile", "12"]) == 1
     err = capsys.readouterr().err
     assert "applied by stranger, who is not a collaborator" in err and "--by" not in err and gh.writes == []
+
+
+def test_a_resume_only_epic_names_the_resume_as_a_runnable_command():
+    """When the only agent move is resuming claimed work, `next:` leads with the command itself (#263 T2.1)."""
+    epic = {"number": 12, "action": "work_slices", "state": "in-progress", "conflicts": []}
+    m1 = {"title": "#12 M1: x", "key": "M1", "done": 0, "total": 2}
+    units = {29: {"key": "T1.1", "milestone": "M1", "model": "opus", "complexity": "judgment"},
+             30: {"key": "T1.2", "milestone": "M1"}}
+    p = {"ready": [], "in_flight": [29, 30], "escalated": [], "open": 2, "waiting": [], "milestones": [m1],
+         "units": units}
+    nxt = sdlc.next_command(epic, p)
+    assert nxt == "/work-slice 29 (opus: judgment): resumes it; nothing new to start: in progress #29, #30"
+    assert nxt.split(":")[0].split(" (")[0] == "/work-slice 29"      # the runnable part, as an offered slice's
+    unrated = sdlc.next_command(epic, {**p, "in_flight": [30]})
+    assert unrated == "/work-slice 30: resumes it; nothing new to start: in progress #30"
+    # a slice of another milestone is never named: it couldn't land on the epic's branch while M1 is built
+    other = {**units, 30: {"key": "T2.1", "milestone": "M2"}}
+    p2 = {**p, "in_flight": [30, 29], "units": other}
+    assert sdlc.next_command(epic, p2).startswith("/work-slice 29 (opus: judgment): resumes it; "
+                                                  "nothing new to start: in progress #30, #29")
+    only_other = sdlc.next_command(epic, {**p2, "in_flight": [30]})
+    assert only_other == "nothing new to start: in progress #30, none of them in #12 M1: x, the milestone being built"

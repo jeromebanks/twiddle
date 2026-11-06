@@ -16,11 +16,15 @@ saved report names the model, effort, `codex --version` and the prompt's sha256 
 It is the only way the skills run Codex: never `codex exec review`, the Codex plugin, or `codex exec` by hand.
 
 Exit status: 0 a report was saved (either verdict), 1 a refusal (fix it and run again), `UNAVAILABLE` (3)
-Codex can't run: the skill's cue for `review-defer`.
+Codex can't run: the skill's cue for `review-defer`. When it can't run because Codex's usage limit was hit (read
+from the run's rollout, else from its stderr), it says so on a `codex-limit: reset=<ISO or none>` line and appends
+one record to the primary checkout's `logs/sdlc_watch/codex_limits.jsonl` (`usage_limit`, `record_limit`): the only
+file it writes outside its scratch dir.
 """
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import hashlib
 import json
 import os
@@ -86,6 +90,15 @@ def parse_verdict(report: str) -> str:
         raise ReviewError("the Codex report does not end in `VERDICT: approve` or `VERDICT: changes`; "
                           "treat it as a failed run and run the review again")
     return m.group(1).lower()
+
+
+def has_verdict(report: str) -> bool:
+    """Whether the report ends in a verdict `parse_verdict` accepts."""
+    try:
+        parse_verdict(report)
+    except ReviewError:
+        return False
+    return True
 
 
 # what a round ran under, the lines right below `HEAD:` (`stamp`); only that block is read back, so a report
@@ -288,12 +301,14 @@ def prepare_pr_round(pr: dict[str, Any], brief: str, base: str, rounds: list[dic
 
 
 def prepare_plan_round(issue: int, plan: dict[str, Any], requirements: str | Path, rounds: list[dict[str, Any]],
-                       scratch: Path, template: str | None = None) -> tuple[str, dict[str, Path]]:
+                       scratch: Path, template: str | None = None, base: str = "main",
+                       epic: bool = False) -> tuple[str, dict[str, Path]]:
     """(the filled prompt, the files written for it) for one round on a posted plan revision.
 
     `plan` is the JSON as posted (written to `plan.json`, which `plan-review --plan` takes); `requirements` is
-    the approved revision: a path Codex can read from its checkout of main (a `docs/prd/` file), or the
-    approved comment's text, written to `requirements.md`."""
+    the approved revision: a path Codex can read from its checkout of `base` (a `docs/prd/` file), or the
+    approved comment's text, written to `requirements.md`. `base` is the branch Codex's checkout is of; `epic`:
+    it is the epic's own branch (an epic being built), and the prompt says it is ahead of main."""
     files = {"plan": scratch / "plan.json", "prompt": scratch / "prompt.md"}
     files["plan"].write_text(json.dumps(plan, indent=1, ensure_ascii=False) + "\n")
     if isinstance(requirements, Path):
@@ -305,7 +320,8 @@ def prepare_plan_round(issue: int, plan: dict[str, Any], requirements: str | Pat
     k = _write_response(rounds, "plan-review", scratch, files)
     prompt = fill_prompt(PLAN_PROMPT.read_text() if template is None else template,
                          {"N": str(issue), "PLAN_FILE": str(files["plan"]), "PRD_FILE": req, "K": str(k),
-                          "RESPONSE_FILE": str(files.get("response", ""))}, {"ROUND2": "response" in files})
+                          "RESPONSE_FILE": str(files.get("response", "")), "BASE": base},
+                         {"ROUND2": "response" in files, "EPIC": epic})
     files["prompt"].write_text(prompt)
     return prompt, files
 
@@ -748,6 +764,115 @@ def check_run(home: Path, before: set[Path], wt: Path, mode: str, cut_short: boo
         return "unknown", (f"the run left {len(new)} session logs under {home / 'sessions'}, not one: "
                            "what it was given can't be checked")
     return check_session(new[0], wt, mode, cut_short)
+# --- Codex's usage limit ------------------------------------------------------------
+
+# what codex-cli (0.166.0) says when the account's usage limit stops a run: in its rollout, a `task_complete`
+# `event_msg` whose `error.codex_error_info` is this; on stderr, the same message after `ERROR: `. Only those
+# structured places count: a limit message quoted in a tool's output (a brief, a fixture, this file) is not one
+LIMIT_INFO = "usage_limit_exceeded"
+LIMIT_LINE_RE = re.compile(r"^ERROR: (.*hit your usage limit.*)$", re.MULTILINE | re.IGNORECASE)
+# "... try again at 8:36 PM." (the household's local time): the only reset shape seen; anything else is no reset
+RESET_RE = re.compile(r"try again at (\d{1,2}):(\d{2})\s*([AP]M)\b", re.IGNORECASE)
+LIMITS_LOG = "logs/sdlc_watch/codex_limits.jsonl"   # written, never read by a review: no fingerprint input
+RUN_ID_ENV = "TWIDDLE_SDLC_WATCH_RUN_ID"
+
+
+def rollout_events(files: set[Path]) -> list[dict[str, Any]]:
+    """Every `task_complete` event's payload in these session logs (rollouts)."""
+    out = []
+    for f in sorted(files):
+        try:
+            lines = f.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            p = d.get("payload") if isinstance(d, dict) and d.get("type") == "event_msg" else None
+            if isinstance(p, dict) and p.get("type") == "task_complete":
+                out.append(p)
+    return out
+
+
+def usage_limit(home: Path, err: Path, before: set[Path] = frozenset(), offset: int = 0) -> str | None:
+    """The message of Codex's usage limit ("" for none given), if that is what stopped this attempt: a rollout
+    `task_complete` event with `error.codex_error_info` `usage_limit_exceeded`; only when the rollout holds no
+    `task_complete` at all, a stderr line starting `ERROR: `. None otherwise. `before`: the session logs there
+    before the attempt, and `offset` the size of `err` then, so only this attempt's own evidence is read."""
+    done = rollout_events(session_logs(home) - set(before))
+    for p in reversed(done):
+        e = p.get("error")
+        if isinstance(e, dict) and e.get("codex_error_info") == LIMIT_INFO:
+            return e["message"] if isinstance(e.get("message"), str) else ""
+    if done:      # the run ended some other way: a limit message on stderr is only quoted
+        return None
+    try:
+        with err.open("rb") as f:
+            f.seek(offset)
+            text = f.read().decode(errors="replace")
+    except OSError:
+        return None
+    m = LIMIT_LINE_RE.search(text)
+    return m.group(1).strip() if m else None
+
+
+def local_now(now: dt.datetime | None = None) -> dt.datetime:
+    """`now` (default: this moment) as an aware datetime; a naive one is taken as local time."""
+    now = now or dt.datetime.now()
+    return now if now.tzinfo else now.astimezone()
+
+
+def parse_reset(message: str, now: dt.datetime | None = None) -> dt.datetime | None:
+    """When the limit resets, from "try again at 8:36 PM" (local time: its next occurrence after `now`), as an
+    aware datetime; None for any other shape, or none at all.
+
+    The arithmetic is on the wall clock, and the offset is the reset's own: a naive `now` (the default, this
+    machine's local time) is resolved by `.astimezone()` at the reset, an aware one keeps its `tzinfo` (a
+    `ZoneInfo` gives each date its own offset). Never today's fixed offset, which is an hour off across a DST change."""
+    m = RESET_RE.search(message or "")
+    if not m:
+        return None
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if not (1 <= hour <= 12 and minute < 60):
+        return None
+    hour = hour % 12 + (12 if m.group(3).upper() == "PM" else 0)
+    now = now or dt.datetime.now()
+    at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if at <= now:
+        at += dt.timedelta(days=1)
+    return at if at.tzinfo else at.astimezone()
+
+
+def primary_checkout(cwd: Path) -> Path:
+    """The primary checkout of the repo `cwd` is in, also from a `.worktrees/*` checkout (or a scratch worktree of
+    it): the directory holding git's common dir."""
+    common = Path(_git(["rev-parse", "--git-common-dir"], cwd).strip())
+    return (common if common.is_absolute() else (cwd / common)).resolve().parent
+
+
+def record_limit(cwd: Path, target: str | None, message: str, log=print,
+                 now: dt.datetime | None = None) -> dict[str, Any]:
+    """Say that Codex's usage limit stopped this review (`codex-limit: reset=<ISO or none>`) and append
+    {ts, target, reset, run_id} to the primary checkout's `logs/sdlc_watch/codex_limits.jsonl`. `target` names the
+    step that needed Codex (`pr <N>`, `plan <N>`, `milestone <N> <key>`); `run_id` is the watcher run's, or null.
+    A record that can't be written is warned about; the line is printed either way."""
+    now = now or dt.datetime.now()
+    reset = parse_reset(message, now)
+    rec = {"ts": local_now(now).isoformat(timespec="seconds"), "target": target,
+           "reset": reset.isoformat(timespec="seconds") if reset else None,
+           "run_id": os.environ.get(RUN_ID_ENV) or None}
+    try:
+        path = primary_checkout(cwd) / LIMITS_LOG
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except (OSError, ReviewError) as exc:
+        log(f"warning: couldn't record Codex's usage limit ({exc})")
+    log(f"Codex's usage limit stopped the review: {message or '(no message)'}")
+    log(f"codex-limit: reset={rec['reset'] or 'none'}")
+    return rec
 
 
 # --- the run ------------------------------------------------------------------
@@ -842,7 +967,8 @@ def _unvouched(why: str, err: Path, log) -> tuple[int, None]:
 
 
 def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dict[str, Any],
-               log=print, on_version=None, brief: str | None = None) -> tuple[int, Path | None]:
+               log=print, on_version=None, brief: str | None = None,
+               target: str | None = None) -> tuple[int, Path | None]:
     """Run Codex on an isolated `CODEX_HOME`, retrying once when it times out or ends with no verdict.
     (status, the stamped report). `on_version(version)` is called with `codex --version` before Codex runs.
 
@@ -850,7 +976,10 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
     settings say it was given (`check_run`): a review of a commit that moved under it, or one offered skills
     `codex.skills` suppresses, is no review. `UNAVAILABLE` is the status for "Codex can't run" (the skill then
     defers the review): no `codex`, no sign-in, both found before Codex is started, or a run that can't be vouched for.
-    `brief`: the approved brief's comment id a quick change's round was given, stamped as its `Brief:` line."""
+    `brief`: the approved brief's comment id a quick change's round was given, stamped as its `Brief:` line.
+    An attempt that Codex's usage limit stopped (`usage_limit`, read before the session log is vouched for: a
+    limit is what the run says, whatever it was given) is not retried: `record_limit` records it, with `target`
+    (the step being reviewed), and the status is `UNAVAILABLE`."""
     report, err = scratch / "codex.md", scratch / "codex.err"
     report.unlink(missing_ok=True)
     err.write_text("")
@@ -872,7 +1001,7 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
         home = Path(env["CODEX_HOME"])
         for attempt in range(1, ATTEMPTS + 1):
             raw = scratch / f"codex-{attempt}.out"
-            before = session_logs(home)
+            before, offset = session_logs(home), err.stat().st_size
             try:
                 output = run_once(cmd, wt, raw, err, timeout, env)
             except CannotStart as exc:
@@ -884,6 +1013,12 @@ def run_review(cmd: list[str], wt: Path, head: str, scratch: Path, settings: dic
             if dirty := dirty_files(wt):
                 raise ReviewError("the worktree changed while Codex ran (" + ", ".join(dirty[:8])
                                   + "): it didn't review the pushed head, so no report was saved. Restore it and run again")
+            # a limit stops Codex at once, with no verdict: a timeout is never one (its stderr may quote one)
+            if output is not None and not has_verdict(output) and \
+                    (limit := usage_limit(home, err, before, offset)) is not None:
+                record_limit(wt, target, limit, log)
+                log(f"Codex can't run: its usage limit (exit {UNAVAILABLE}). The end of {err}:\n{tail(err)}")
+                return UNAVAILABLE, None
             seen, why = check_run(home, before, wt, settings["skills"], cut_short=output is None)
             if seen not in ("ok", "incomplete"):    # the next attempt would be given (or log) the same
                 return _unvouched(why, err, log)
