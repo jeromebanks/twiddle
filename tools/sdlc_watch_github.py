@@ -27,9 +27,10 @@ GitHub's 5000 an hour for an authenticated client, even if the 304s did count.
 **Only when a probe says something changed** does it read, unconditionally:
 
 - the issues and the comments updated since the last poll's watermark
-  (`...?since=<watermark less 1s>&sort=updated&direction=asc&per_page=100`, at most MAX_PAGES pages each:
-  a capped read keeps the old ETag and moves the watermark to the last item read, or, when every item
-  read is in the watermark's own second, to the next page, so the next poll carries on where it stopped);
+  (`...?since=<watermark less 1s>&sort=updated&direction=asc&per_page=100`, at most MAX_PAGES requests
+  each, paged by time: each request starts again from the newest item read, so an edit mid-read can't
+  shift an unread item onto a page already read; a capped read keeps the old ETag and the next poll
+  carries on from its mark);
 - who counts as a person: the repo's owner and its push collaborators (`sdlc.fetch_trusted`'s rule,
   but a failed lookup fails the poll rather than falling back to the owner alone);
 - `sdlc.py state N --json` for each issue in care. On an epic that fans out to its slices' reads,
@@ -143,32 +144,31 @@ def get_json(path: str) -> Any:
         raise GitHubError(f"gh api {path} returned no JSON ({exc})") from None
 
 
-def read_since(repo: str, name: str, since: str, first_page: int = 1) -> tuple[list[dict[str, Any]], int | None]:
-    """`name` updated at or after `since`, oldest first, from `first_page` for at most MAX_PAGES pages:
-    (items, None when the read reached the end, else the next page to read)."""
-    items: list[dict[str, Any]] = []
-    for page in range(first_page, first_page + MAX_PAGES):
-        path = f"repos/{repo}/" + SINCE[name].format(per_page=PER_PAGE, since=since, page=page)
+def read_since(repo: str, name: str, mark: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], bool]:
+    """`name` updated since `mark["at"]`, oldest first, in at most MAX_PAGES requests:
+    (items, the next mark, whether it stopped at the cap).
+
+    It pages by time, not position: each request asks again from page 1, since the newest `updated_at`
+    read so far (less a second), so an item edited mid-read moves to the end and nothing unread shifts
+    onto a page already read. Items read twice are kept once. Only a run of a full page or more all in
+    one window, where time can't move on, is paged by position (`mark["page"]`), from page 1 of that window."""
+    at, page = mark.get("at") or "", int(mark.get("page") or 1)
+    items: dict[Any, dict[str, Any]] = {}
+    for _ in range(MAX_PAGES):
+        path = f"repos/{repo}/" + SINCE[name].format(per_page=PER_PAGE, since=shifted(at), page=page)
         got = get_json(path)
         if not isinstance(got, list):
             raise GitHubError(f"gh api {path}: expected a list")
-        items += got
+        for it in got:
+            items[it.get("id") or it.get("number")] = it
+        newest = latest(got, at)
         if len(got) < PER_PAGE:
-            return items, None
-    return items, first_page + MAX_PAGES
-
-
-def next_mark(since: str, items: list[dict[str, Any]], more: int | None, page: int) -> dict[str, Any]:
-    """Where the next since-read starts. A complete read: from the newest item. A capped one: from the
-    newest item read if that is a later second than `since` (progress), else the same `since` from the
-    next page, so even a run of more than a page's worth of items in one second is read to its end.
-    (Paging is by position: an item before the cut updated meanwhile moves to the end, and is read there.)"""
-    newest = latest(items, since)
-    if more is None:
-        return {"at": newest}
-    if parse_time(newest) and parse_time(since) and parse_time(newest) > parse_time(since):
-        return {"at": newest}
-    return {"at": since, "page": more}
+            return list(items.values()), {"at": latest(list(items.values()), at)}, False
+        if newest and (parse_time(at) is None or parse_time(newest) > parse_time(at)):
+            at, page = newest, 1          # time moved on: ask again from there
+        else:
+            page += 1                     # a full page all in one window: the next page of it
+    return list(items.values()), {"at": at, **({"page": page} if page > 1 else {})}, True
 
 
 def fetch_trusted(config: dict[str, Any], repo: str) -> set[str]:
@@ -327,6 +327,26 @@ def check(record: dict[str, Any], repo: str) -> dict[str, Any]:
     return {"requests": len(PROBES), "changed": changed, "etags": etags}
 
 
+def decide_all(care: dict[str, Any], keys: list[str], state: Callable[[int], dict[str, Any]],
+               is_paused: Callable[[int], bool], out: dict[str, Any]) -> None:
+    """Ask `state` about each of `keys` (in care) and record the answer in `out`, in place. A failed read is
+    that issue's "nothing" this poll and is marked, so the next poll asks again even if GitHub is quiet."""
+    for key in sorted(keys, key=int):
+        try:
+            st = state(int(key))
+        except GitHubError as exc:   # one issue's state can't wedge the others, or the ETags
+            care[key]["state_failed"] = True
+            out["decisions"].append({"issue": int(key), "run": None, "why": f"state failed ({exc})"})
+            continue
+        care[key].pop("state_failed", None)
+        d = decide(int(key), st, is_paused(int(key)))
+        if d.get("leave"):
+            out["left"][int(key)] = d["why"]
+            care.pop(key)
+        else:
+            out["decisions"].append(d)
+
+
 def poll(record: dict[str, Any], repo: str, config: dict[str, Any], checkout: Path,
          is_paused: Callable[[int], bool],
          state: Callable[[int], dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -338,18 +358,22 @@ def poll(record: dict[str, Any], repo: str, config: dict[str, Any], checkout: Pa
     out: dict[str, Any] = {"requests": probe["requests"], "changed": probe["changed"],
                            "github": github, "care": record.get("care") or {}, "joined": {}, "left": {},
                            "decisions": [], "truncated": []}
-    if not probe["changed"]:
+    care = {k: dict(v) for k, v in (record.get("care") or {}).items()}
+    if not probe["changed"]:   # nothing new on GitHub: only a state read that failed last time is asked again
+        pending = [k for k, v in care.items() if v.get("state_failed")]
+        if pending:
+            decide_all(care, pending, state, is_paused, out)
+            out["care"] = care
         return out
     started = parse_time(record.get("started_at"))
     marks = dict(github.get("since") or {})
     reads: dict[str, list[dict[str, Any]]] = {}
     for name in SINCE:   # both, whichever probe moved: a comment's issue is in the issues read
         mark = marks.get(name) if isinstance(marks.get(name), dict) else {}
-        since, page = mark.get("at") or record.get("started_at") or "", int(mark.get("page") or 1)
-        reads[name], more = read_since(repo, name, shifted(since), page)
-        if more is not None:
+        mark = {**mark, "at": mark.get("at") or record.get("started_at") or ""}
+        reads[name], marks[name], cut = read_since(repo, name, mark)
+        if cut:
             out["truncated"].append(name)
-        marks[name] = next_mark(since, reads[name], more, page)
     trusted = fetch_trusted(config, repo)
     by_number = {i["number"]: i for i in reads["issues"] if isinstance(i.get("number"), int)}
 
@@ -360,7 +384,6 @@ def poll(record: dict[str, Any], repo: str, config: dict[str, Any], checkout: Pa
         return by_number[n] or None
 
     acts = person_acts(reads["issues"], reads["comments"], trusted, started, lookup)
-    care = {k: dict(v) for k, v in (record.get("care") or {}).items()}
     for n, act in acts.items():
         at = act["at"].astimezone(dt.timezone.utc).isoformat(timespec="seconds")
         entry = care.setdefault(str(n), {"since": at, "why": act["why"]})
@@ -369,18 +392,7 @@ def poll(record: dict[str, Any], repo: str, config: dict[str, Any], checkout: Pa
         prev = parse_time(entry.get("last_person_at"))
         if prev is None or act["at"] > prev:
             entry["last_person_at"], entry["last_person_why"] = at, act["why"]
-    for key in sorted(care, key=int):
-        try:
-            st = state(int(key))
-        except GitHubError as exc:   # one issue's state can't wedge the others, or the ETags
-            out["decisions"].append({"issue": int(key), "run": None, "why": f"state failed ({exc})"})
-            continue
-        d = decide(int(key), st, is_paused(int(key)))
-        if d.get("leave"):
-            out["left"][int(key)] = d["why"]
-            care.pop(key)
-        else:
-            out["decisions"].append(d)
+    decide_all(care, list(care), state, is_paused, out)
     etags = dict(probe["etags"])
     for name in out["truncated"]:   # carry on next poll: keep the old ETag so it reads again
         old = (github.get("etags") or {}).get(name)
@@ -393,22 +405,30 @@ def poll(record: dict[str, Any], repo: str, config: dict[str, Any], checkout: Pa
     return out
 
 
-def render(out: dict[str, Any], dry_run: bool = True) -> str:
-    head = "poll (dry run: starts nothing)" if dry_run else "poll"
-    if not out["changed"]:
-        return f"{head}: {out['requests']} conditional request(s), nothing changed: no state read, nothing to run"
-    lines = [f"{head}: {out['requests']} conditional request(s); changed: {', '.join(out['changed'])}"]
-    if out["truncated"]:
-        lines.append(f"  read capped at {MAX_PAGES} pages ({', '.join(out['truncated'])}): the next poll carries on")
-    for n, why in sorted(out["joined"].items()):
-        lines.append(f"  into care: #{n} ({why})")
-    for n, why in sorted(out["left"].items()):
-        lines.append(f"  left care: #{n} ({why})")
+def _decision_lines(out: dict[str, Any]) -> list[str]:
+    lines = [f"  left care: #{n} ({why})" for n, why in sorted(out["left"].items())]
     for d in out["decisions"]:
         if d.get("run") is not None:
             lines.append(f"  #{d['issue']}: {d['why']}: would run `{d['run']}`")
         else:
             lines.append(f"  #{d['issue']}: {d['why']}: nothing")
+    return lines
+
+
+def render(out: dict[str, Any], dry_run: bool = True) -> str:
+    head = "poll (dry run: starts nothing)" if dry_run else "poll"
+    if not out["changed"] and not out["decisions"] and not out["left"]:
+        return f"{head}: {out['requests']} conditional request(s), nothing changed: no state read, nothing to run"
+    if not out["changed"]:
+        lines = [f"{head}: {out['requests']} conditional request(s), nothing changed; "
+                 "asking again where a state read failed"]
+        return "\n".join(lines + _decision_lines(out))
+    lines = [f"{head}: {out['requests']} conditional request(s); changed: {', '.join(out['changed'])}"]
+    if out["truncated"]:
+        lines.append(f"  read capped at {MAX_PAGES} pages ({', '.join(out['truncated'])}): the next poll carries on")
+    for n, why in sorted(out["joined"].items()):
+        lines.append(f"  into care: #{n} ({why})")
+    lines += _decision_lines(out)
     if not out["decisions"] and not out["left"]:
         lines.append("  nothing in care")
     return "\n".join(lines)

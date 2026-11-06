@@ -56,6 +56,16 @@ if "/collaborators" in path:
         print("gh: HTTP 503", file=sys.stderr); sys.exit(1)
     print(json.dumps([[{"login": l, "permissions": {"push": True}} for l in scene["collaborators"]]])); sys.exit(0)
 base, _, query = path.partition("?")
+edit = scene.get("edit")   # a person edits a comment between two pages of one read
+if edit and base.endswith("/issues/comments") and "since=" in query:
+    count = here / "reads"
+    n = int(count.read_text()) + 1 if count.exists() else 1
+    count.write_text(str(n))
+    if n == edit["after"] + 1:
+        for c in scene["get"][base]:
+            if c["id"] == edit["id"]:
+                c["updated_at"] = edit["updated_at"]
+        (here / "scene.json").write_text(json.dumps(scene))
 if base in scene["get"]:
     got = scene["get"][base]
     if isinstance(got, list):   # updated at or after since, oldest first, one page of per_page
@@ -113,13 +123,15 @@ class Fakes:
         self.asked: list[int] = []
         self.scene(etags=("e-issues-1", "e-comments-1"))
 
-    def scene(self, etags, issues=(), comments=(), get=None, collaborators=(OWNER, COLLAB), fail_trust=False):
+    def scene(self, etags, issues=(), comments=(), get=None, collaborators=(OWNER, COLLAB), fail_trust=False,
+              edit=None):
         probes = {f"repos/{REPO}/{gw.PROBES['issues']}": {"etag": f'"{etags[0]}"', "body": list(issues)[-1:]},
                   f"repos/{REPO}/{gw.PROBES['comments']}": {"etag": f'"{etags[1]}"', "body": list(comments)[-1:]}}
         gets = {f"repos/{REPO}/issues": list(issues), f"repos/{REPO}/issues/comments": list(comments), **(get or {})}
         (self.dir / "scene.json").write_text(json.dumps({"probes": probes, "get": gets,
                                                          "collaborators": list(collaborators),
-                                                         "collaborators_fail": fail_trust}))
+                                                         "collaborators_fail": fail_trust, "edit": edit}))
+        (self.dir / "reads").unlink(missing_ok=True)
         (self.dir / "calls.jsonl").write_text("")
 
     def calls(self):
@@ -541,3 +553,41 @@ def test_capped_reads_reach_the_last_comment_over_several_polls(repo, fakes, mon
         if "45" in record(repo)["care"]:
             break
     assert "45" in record(repo)["care"] and polls <= len(backlog)   # every poll moves on
+
+
+def test_an_edit_between_two_pages_of_a_read_skips_no_comment(repo, fakes, monkeypatch):
+    """Codex round 2: paged by position, editing the first comment after page 1 moved the owner's unread
+    comment onto page 1, and page 2 missed it. Paged by time, it is read."""
+    started(repo)
+    monkeypatch.setattr(gw, "PER_PAGE", 2)
+    first = comment(7, by=STRANGER, at="2026-11-05T12:01:00Z")
+    rest = [comment(7, by=STRANGER, at="2026-11-05T12:02:00Z"), comment(46, at="2026-11-05T12:03:00Z"),
+            comment(7, by=STRANGER, at="2026-11-05T12:04:00Z"), comment(7, by=STRANGER, at="2026-11-05T12:05:00Z")]
+    fakes.states[46] = epic_state(46, nxt="/triage-issue 46")
+    fakes.scene(etags=("x", "y"), comments=[first, *rest], get={f"repos/{REPO}/issues/46": issue(46)},
+                edit={"after": 1, "id": first["id"], "updated_at": "2026-11-05T12:30:00Z"})
+    poll(repo, fakes)
+    assert "46" in record(repo)["care"]
+    assert record(repo)["github"]["since"]["comments"] == {"at": "2026-11-05T12:30:00Z"}
+
+
+def test_a_failed_state_is_asked_again_on_a_quiet_poll(repo, fakes):
+    """Codex round 2: the ETags move on, so the retry can't wait for the next change on GitHub."""
+    started(repo)
+    fakes.states[15] = epic_state(15, nxt="/plan-issue 15")
+    broken = {"on": True}
+
+    def state(n):
+        if broken["on"]:
+            raise gw.GitHubError("sdlc.py state 15 failed: network")
+        return fakes.state(n)
+    fakes.scene(etags=("x", "y"), comments=[comment(15)], get={f"repos/{REPO}/issues/15": issue(15)})
+    assert "state failed" in w.poll_dry_run(where=repo, state=state)
+    assert record(repo)["care"]["15"]["state_failed"] is True
+    broken["on"] = False
+    fakes.scene(etags=("x", "y"))
+    out = w.poll_dry_run(where=repo, state=state)
+    assert len(fakes.calls()) == 2 and fakes.asked == [15] and "would run `/plan-issue 15`" in out
+    assert "state_failed" not in record(repo)["care"]["15"]
+    fakes.asked.clear()
+    assert "nothing changed: no state read" in w.poll_dry_run(where=repo, state=state) and fakes.asked == []
