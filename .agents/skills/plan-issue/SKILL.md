@@ -46,8 +46,8 @@ Dispatch on `action`:
 | `continue_plan` | a plan revision exists without consensus: read it and its review comments, then step 5 |
 | `replan` | the poster answered your planning question: read the answer, revise (step 3), post (step 4), step 5 |
 | `ask_poster` | step 7 |
-| `create_plan_issues` | Codex approved the latest revision (or an earlier creation was cut short): step 6 |
-| any of these with `feedback: true` | the poster asked for changes at a milestone demo: "After demo feedback" below |
+| `create_plan_issues` | Codex approved the latest revision (or an earlier creation was cut short), or its rounds were spent and a person settled it (`plan_settled` in the JSON): step 6 |
+| any of these with `feedback: true` | the poster asked for changes (at a milestone demo, or with none in review): "After demo feedback" below |
 | `plan_next_milestone` | the latest created milestone was accepted and the plan has more: "The next milestone" below |
 | `continue_plan` / `create_plan_issues` while `sdlc:in-progress` | an amendment is under review: steps 5-6 |
 | `escalate_plan` | an amendment (feedback, the next milestone) spent its Codex rounds: `transition N escalated --kind escalation --reason "..."`. The epic is being built, so a human settles it, not a question to the poster |
@@ -134,8 +134,11 @@ It does what used to be done by hand, so don't run Codex any other way:
   comment's text, written to `<REVIEW>/requirements.md`;
 - it fills `references/codex-plan-prompt.md`; from round 2 on, it adds your response from the
   latest recorded round. It refuses if that round asked for changes and has no response;
-- it runs Codex in a scratch checkout of `origin/main` that it makes and removes (never the
-  primary checkout, which other sessions share), with the model, effort, sandbox, flags and
+- it runs Codex in a scratch checkout that it makes and removes, of `origin/main`, or of
+  `origin/epic/N` while the epic is being built (`planned` or `in-progress`: an amendment is
+  judged against the slices already merged there, and the prompt says that branch is ahead of
+  `main`; a missing or unfetchable `epic/N` refuses, never falling back to `main`), never the
+  primary checkout (which other sessions share), with the model, effort, sandbox, flags and
   timeout from `.sdlc/config.json`'s `codex` section, never your own Codex config;
 - it retries once when Codex times out or ends with no verdict, and saves the report, with what
   the round ran under, to `<REVIEW>/codex.md`.
@@ -190,7 +193,21 @@ issue as a sub-issue, adds the `blocked_by` links, reads them all back, posts a
 key → issue table on the epic, creates the epic's branch `epic/N` from `main`
 (slices land there, and each accepted milestone ships to `main`), and moves it to
 `sdlc:planned`. If it fails
-partway, run it again: it finds what exists by marker and does only the rest.
+partway, it prints what it made, what is still missing and the command to rerun: run that (after a
+minute, if the read-back is what stopped it). It finds what exists by marker and does only the rest.
+It posts its record before the branch and the label, so a run cut short after it is finished by the
+rerun alone: `state` then says `create_plan_issues` with `next:` naming `plan-create N` (and why),
+not `/plan-issue N`, and you run that command, nothing else.
+
+**A plan settled by a person.** Once a plan's Codex rounds are spent (counted across revisions, and still spent
+after your planning question until a new Codex round is recorded), the issue author or a collaborator can reply
+`/approve` after the latest plan revision (and the Codex round that spent them) instead of answering; their
+later `/changes` withdraws it. `state` then says `create_plan_issues` with
+`plan_settled` (who, which revision), in `sdlc:approved`, `sdlc:needs-info`, or on an amendment at `escalate_plan`
+or already `sdlc:escalated` (only by that escalation: `transition` marks it `phase=plan`). Run step 6 as usual: `plan-create` records `settled_by=` on its table, and moves an
+escalated epic back to `sdlc:in-progress` (an approved or needs-info one to `sdlc:planned`). Only the tool
+decides who counts: anyone else's `/approve` is listed as ignored, and an agent's comment never counts, so never
+post one yourself.
 
 ## 7. No consensus: ask the poster
 
@@ -230,14 +247,15 @@ Then revise the plan before anything more is created:
 
 ## After demo feedback
 
-When the poster answers a milestone demo with changes, or the agent's own demo run
-finds the milestone broken (`demo-changes --found`, before any demo is posted),
+When the poster answers a milestone demo with changes, asks for changes with no demo in review
+(state's action `record_changes`, recorded `demo-changes ... found=poster` against the current milestone), or
+the agent's own demo run finds the milestone broken (`demo-changes --found`, before any demo is posted),
 `milestone-demo` records them (`demo-changes`) and the epic comes back here with `feedback: true` while it
 stays `sdlc:in-progress`. Amend the plan; don't start over:
 
 - Start from the latest posted plan JSON. **Keep every key**: `plan-post` refuses
   an amendment that drops one, because those issues already exist.
-- Add slices for the changes, in the milestone that was demoed, with fresh keys
+- Add slices for the changes, in the milestone that was demoed (or the one a `found=poster` record names), with fresh keys
   (`F1`, `F2`, ... so it's clear they came from feedback). A fix for something the
   demo found broken includes an offline test that reproduces it. They may be `blocked_by`
   merged slices. Leave the text of existing slices alone: changing it won't change

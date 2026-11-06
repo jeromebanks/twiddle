@@ -212,6 +212,20 @@ def test_prd_pr_guard():
     assert sdlc.prd_pr_errors({**ok, "state": "MERGED"}, "main")
 
 
+def test_state_shows_a_plan_settled_by_a_person(capsys):
+    spent = [agent("prd", 1, 1), agent("approval", 1, 2, by=POSTER, via="comment"), agent("plan", 1, 3)]
+    spent += [agent("plan-review", 1, 4 + i, verdict="changes") for i in range(CONFIG["max_plan_rounds"])]
+    asked = spent + [agent("question", None, 10, phase="plan"), comment(POSTER, "/approve", 11),
+                     comment(STRANGER, "/approve", 12)]
+    st = derive(["sdlc:needs-info"], asked)
+    sdlc.print_state(st)
+    out = capsys.readouterr().out
+    assert f"settled: /approve by {POSTER} on plan rev 1" in out
+    assert f"plan rounds: 0/{CONFIG['max_plan_rounds']} (this cycle spent {CONFIG['max_plan_rounds']})" in out
+    assert f"ignored /approve from {STRANGER}" in out
+    assert f"decision: /approve by {POSTER} (settles the plan)" in out
+
+
 # --- a person's decision is read from GitHub, never from a file (#263 criterion 13) --------------------------
 
 def _no_github(monkeypatch):
