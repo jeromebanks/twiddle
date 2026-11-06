@@ -1884,8 +1884,8 @@ def test_state_d_names_the_model_while_every_group_is_in_progress(gh, repo, caps
     assert run(capsys, "claim", a, "--debt")[0] == 0
     st = ticket_state(capsys, epic)
     assert st["action"] == "work_debt"
-    assert st["next"] == (f"nothing new to start in pass 1: in progress `debt-1-1` (#{a}, #{b}) "
-                          f"(`/work-slice {a} --debt` (opus: judgment) resumes one)")
+    assert st["next"] == (f"/work-slice {a} --debt (opus: judgment): resumes it; "
+                          f"nothing new to start in pass 1: in progress `debt-1-1` (#{a}, #{b})")
 
 
 # --- merging a debt PR into main through its gate (T7) ------------------------------------------------------------
@@ -2143,6 +2143,15 @@ def test_while_a_merge_is_due_the_pass_s_next_group_is_still_named(gh, repo, cap
     st = ticket_state(capsys, epic)
     assert st["action"] == "merge_debt" and "gate still refuses" in st["next"]
     assert f"; meanwhile: /work-slice {c} --debt (sonnet: routine): pass 1's group `debt-1-2` (#{c})" in st["next"]
+
+
+def test_while_a_merge_is_due_a_claimed_groups_resume_is_not_named_as_work_meanwhile(gh, repo, capsys, main_gate):
+    epic, (_, _, c), _ = due_group(gh, repo, capsys)
+    assert run(capsys, "claim", c, "--debt")[0] == 0
+    gh.behind[HEAD] = 1
+    st = ticket_state(capsys, epic)
+    assert st["action"] == "merge_debt" and "gate still refuses" in st["next"]
+    assert "meanwhile" not in st["next"] and "resumes it" not in st["next"]
 
 
 def test_a_failure_on_the_second_ticket_after_the_squash_still_says_what_is_left(gh, repo, capsys, main_gate,
@@ -2731,7 +2740,8 @@ def test_a_reply_during_the_pass_never_puts_the_ticket_back_in_its_group(gh, rep
     assert run(capsys, "debt-request", a, "--body-file", ask)[0] == 0
     reply(gh, a)   # answered while pass 1 is still open: a waits for the next pass, not for group debt-1-1
     st = ticket_state(capsys, epic)
-    assert st["next"].startswith(f"nothing new to start in pass 1: in progress `debt-1-1` (#{b})")
+    assert st["next"].startswith(f"/work-slice {b} --debt") and \
+        f"nothing new to start in pass 1: in progress `debt-1-1` (#{b})" in st["next"]
     assert status(capsys, b)["group"]["open"] == [b] and status(capsys, a)["state"] == "not-in-pass"
     code, _, err = run(capsys, "claim", a, "--debt")
     assert code == 1 and "in no open pass" in err
@@ -2894,7 +2904,8 @@ def test_the_lowest_numbered_claimer_withdrawn_leaves_the_group_its_branch_and_c
     s = status(capsys, b)   # the group keeps its key, the claimed slice/a and its worktree, and finds its PR
     assert (s["key"], s["claim"]["branch"], s["pr"], s["group"]["open"]) == ("debt-1-1", f"slice/{a}", 300, [b])
     st = ticket_state(capsys, epic)
-    assert st["next"].startswith(f"nothing new to start in pass 1: in progress `debt-1-1` (#{b})")
+    assert st["next"].startswith(f"/work-slice {b} --debt") and \
+        f"nothing new to start in pass 1: in progress `debt-1-1` (#{b})" in st["next"]
     out_dir = tmp_path / "scratch"
     code, _, err = run(capsys, "codex-review", "--pr", 300, "--out", out_dir, "--dry-run")
     assert code == 1 and f"still closes #{a}" in err

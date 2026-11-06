@@ -879,8 +879,15 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
             u = units.get(offered[0]) or {}
             nxt = f"/work-slice {offered[0]}" + (f" ({u['model']}: {u['complexity']})" if u.get("model") else "")
         elif progress["in_flight"]:
-            nxt = ("nothing new to start: in progress " + ", ".join(f"#{x}" for x in progress["in_flight"])
-                   + f" (`/work-slice {progress['in_flight'][0]}` resumes one)")
+            busy = "nothing new to start: in progress " + ", ".join(f"#{i}" for i in progress["in_flight"])
+            # the only move is a resume: named as the command, so it can be run as is; only the current
+            # milestone's, since a later milestone's slice can't land on the epic's branch until that ships
+            if resumable := offered_slices({**progress, "ready": progress["in_flight"]}, cur):
+                u = units.get(resumable[0]) or {}
+                nxt = (f"/work-slice {resumable[0]}" + (f" ({u['model']}: {u['complexity']})" if u.get("model") else "")
+                       + f": resumes it; {busy}")
+            else:
+                nxt = f"{busy}, none of them in {cur['title']}, the milestone being built"
         elif progress["ready"]:
             nxt = (f"nothing ready in {cur['title']}: later milestones' slices wait until it ships "
                    f"(its open units are blocked or escalated)")
@@ -3337,6 +3344,7 @@ def debt_view(st: dict[str, Any], progress: dict[str, Any], rules: "DebtRules | 
     waiting = [t for t in judged if t.get("waiting_for") or t.get("waits_on_person")]
     due = [p for p in progress.get("prs") or [] if p.get("due")]
     ending = debt_pass_end(n, progress)
+    resume = False   # the only work is a resume of a claimed group: never named as work to do "meanwhile"
     if ending:
         turn, action = "agent", "pass_end"
         nxt = pass_end_next(n, ending)
@@ -3366,9 +3374,10 @@ def debt_view(st: dict[str, Any], progress: dict[str, Any], rules: "DebtRules | 
         else:
             g = work["claimed"][0]
             model = (models or {}).get(g["complexity"] or "")
-            nxt = (f"nothing new to start in pass {k}: in progress " + ", ".join(group_text(c) for c in work["claimed"])
-                   + f" (`/work-slice {g['open'][0]} --debt`" + (f" ({model}: {g['complexity']})" if model else "")
-                   + " resumes one)")
+            resume = True   # named as the command, so it can be run as is
+            nxt = (f"/work-slice {g['open'][0]} --debt" + (f" ({model}: {g['complexity']})" if model else "")
+                   + f": resumes it; nothing new to start in pass {k}: in progress "
+                   + ", ".join(group_text(c) for c in work["claimed"]))
         if human:
             nxt += "; needs a human: " + ", ".join(group_text(e) for e in human) + " (escalated)"
     elif open_pass:   # not reached (an open pass is built, or its end is due): never planning another over it
@@ -3397,7 +3406,7 @@ def debt_view(st: dict[str, Any], progress: dict[str, Any], rules: "DebtRules | 
     also = None
     if due:   # a group's PR has its records: merging it comes first (intake of new debt can't change the open pass);
         # what the pass has to build meanwhile stays named, since the gate may still refuse the merge
-        also = nxt if action in ("work_debt", "debt_intake") and not nxt.startswith("nothing") else None
+        also = nxt if action in ("work_debt", "debt_intake") and not resume and not nxt.startswith("nothing") else None
         turn, action = "agent", "merge_debt"
         nxt = debt_merge_next(due, None, also)
     work = pass_work(open_pass, tickets) if open_pass and not pending else {}
@@ -5792,10 +5801,12 @@ def run_codex_eval(args: argparse.Namespace, config: dict[str, Any]) -> int:
 
 def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, head: str, out: Path,
                     settings: dict[str, Any], dry_run: bool, record: str, ledger=None, brief: str | None = None,
-                    show_brief: bool = False) -> int:
+                    show_brief: bool = False, target: str | None = None) -> int:
     """Print what the round runs, then run it (or, with --dry-run, print the prompt). `brief`: a quick change's
     approved brief comment id, stamped on the report as its `Brief:` line (and shown, with the brief, in a dry run).
     `show_brief`: a dry run shows the brief file too (a debt PR's: its tickets and its group's scope and files).
+    `target`: the step being reviewed (`pr <N>`, `plan <N>`, `milestone <N> <key>`), named in the record a Codex
+    usage limit leaves in `logs/sdlc_watch/codex_limits.jsonl`.
 
     The review logic this round runs under is fingerprinted first: the files the tool reads from `ROOT`, those
     Codex reads from `wt`, and the `settings` it runs with. Inputs that can't be fingerprinted (a symbolic link
@@ -5829,7 +5840,8 @@ def run_codex_round(title: str, prompt: str, files: dict[str, Path], wt: Path, h
             return
         if warn := codex_eval.warning(fp, version, result):
             print(warn, file=sys.stderr)
-    status, report = codex_review.run_review(cmd, wt, head, out, settings, on_version=check_eval, brief=brief)
+    status, report = codex_review.run_review(cmd, wt, head, out, settings, on_version=check_eval, brief=brief,
+                                             target=target)
     if report:
         print(f"\n{report.read_text()}\nsaved: {report}\nrecord it: uv run python tools/sdlc.py {record}")
     return status
@@ -5892,7 +5904,8 @@ def codex_review_pr(args: argparse.Namespace, config: dict[str, Any], settings: 
     prompt, files = codex_review.prepare_pr_round(pr, brief, base, rounds, out, quick=bool(quick), debt=bool(debt))
     return run_codex_round(f"PR #{pr['number']} round {len(rounds) + 1} on {head[:12]}", prompt, files, wt, head, out,
                            settings, args.dry_run, f"pr-review {pr['number']} --report {out / 'codex.md'} --response <your answers>",
-                           lambda: eval_ledger(args, config), brief=brief_id, show_brief=bool(debt))
+                           lambda: eval_ledger(args, config), brief=brief_id, show_brief=bool(debt),
+                           target=f"pr {pr['number']}")
 
 
 # what a quick round is handed (its brief and the brief's id) is review logic: tools/codex_review.py, fingerprinted.
@@ -5962,7 +5975,7 @@ def codex_review_plan(args: argparse.Namespace, config: dict[str, Any], settings
     git(["worktree", "add", "-q", "--detach", str(checkout), sha], cwd=root)
     try:
         return run_codex_round(title, prompt, files, checkout, sha, out, settings, False, record,
-                               lambda: eval_ledger(args, config))
+                               lambda: eval_ledger(args, config), target=f"plan {n}")
     finally:
         git(["worktree", "remove", "--force", str(checkout)], cwd=root, check=False)
         git(["worktree", "prune"], cwd=root, check=False)
@@ -6022,7 +6035,7 @@ def codex_review_milestone(args: argparse.Namespace, config: dict[str, Any], set
                            + (f"; owed: {', '.join(o.get('slice', '?') for o in owed)}" if owed else ""),
                            prompt, files, wt, checked, out, settings, args.dry_run,
                            f"ship-review {n} --report {out / 'codex.md'} --response <your answers>",
-                           lambda: eval_ledger(args, config))
+                           lambda: eval_ledger(args, config), target=f"milestone {n} {key}")
 
 
 FETCH_TIMEOUT = 120                    # seconds a gate's `git fetch` may take before the gate refuses

@@ -277,7 +277,7 @@ def test_next_offers_only_the_current_milestones_slices():
     st = derive()
     units = {30: {"key": "T1.3", "milestone": "M1"}, 35: {"key": "T4.1", "milestone": "M2"}}
     p = {**progress(ms("M1", 2, 3), ms("M2", 0, 4), ready=(35,), in_flight=(30,)), "units": units}
-    assert sdlc.next_command(st, p).startswith("nothing new to start: in progress #30")
+    assert sdlc.next_command(st, p).startswith("/work-slice 30: resumes it; nothing new to start: in progress #30")
     stuck = {**p, "in_flight": []}
     assert sdlc.next_command(st, stuck).startswith("nothing ready in #12 M1: x: later milestones' slices wait")
     assert sdlc.next_command(st, {**p, "ready": [30, 35], "in_flight": []}) == "/work-slice 30"
