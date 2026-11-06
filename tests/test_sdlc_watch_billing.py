@@ -378,3 +378,34 @@ def test_the_auth_timeout_is_finite_and_bounded(fake, parent, project, managed, 
     with pytest.raises(ValueError):
         b.check_auth(b.run_env(parent), project, timeout_s=bad)
     assert fake.calls == []
+
+
+@pytest.mark.parametrize("content,route", [({"apiKeyHelper": "x"}, "apiKeyHelper in managed settings {p}"),
+                                           ({"env": {"ANTHROPIC_API_KEY": "k"}},
+                                            "ANTHROPIC_API_KEY under env in managed settings {p}")])
+def test_a_route_in_a_managed_drop_in_refuses(fake, parent, project, managed, content, route):
+    dropins = managed.parent / "managed-settings.d"
+    dropins.mkdir(parents=True)
+    (dropins / "10-team.json").write_text(json.dumps({"model": "opus"}))
+    path = dropins / "20-other.json"
+    path.write_text(json.dumps(content))
+    (dropins / "notes.txt").write_text("not settings")
+    got = check(project, parent, managed)
+    assert not got.ok and fake.calls == []
+    assert got.routes == (route.format(p=path),)
+
+
+def test_a_settings_file_that_is_not_utf8_refuses(fake, parent, project, managed):
+    path = project / ".claude" / "settings.json"
+    path.write_bytes(b'{"env": {"A": "\xff\xfe"}}')
+    got = check(project, parent, managed)
+    assert not got.ok and fake.calls == []
+    assert got.routes == (f"project settings {path} is not UTF-8 (invalid start byte): it can't be checked",)
+
+
+def test_status_shows_a_settings_file_that_is_not_utf8(repo, fake, capsys):
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "settings.local.json").write_bytes(b"\xff")
+    assert w.main(["status"]) == 0
+    assert "billing:  REFUSING every run: local settings" in capsys.readouterr().out
+    assert fake.calls == []

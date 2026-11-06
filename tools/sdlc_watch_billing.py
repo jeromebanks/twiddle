@@ -10,8 +10,9 @@ Two things stand between an unattended run and an API bill, and both are here:
 - `billing_check()`: before every run (and `--install`, M2), it refuses unless
   1. no API-billing route is in place (`find_routes`): none of `ROUTE_ENV` in the watcher's
      own environment, and no `apiKeyHelper` and none of `ROUTE_ENV` under `env` in any
-     Claude Code settings file `claude -p` would read here (`settings_files`: managed, user
-     from the run's `HOME`, and project and local for each checkout given). Settings are
+     Claude Code settings file `claude -p` would read here (`settings_files`: managed and its
+     `managed-settings.d/*.json` drop-ins, user from the run's `HOME`, and project and local for
+     each checkout given). Settings are
      read, never written; one that can't be read refuses, since it can't be cleared;
   2. then, and only then, `claude auth status --json`, run with exactly `run_env()` and in
      the directory the run starts in, reports `loggedIn` true, `authMethod` `claude.ai`,
@@ -127,7 +128,13 @@ def run_env(parent: Mapping[str, str] | None = None) -> dict[str, str]:
 def settings_files(home: str | None, projects: Iterable[Path], managed: Path | None = None) -> list[tuple[str, Path]]:
     """Every Claude Code settings file `claude -p` would read for a run with this `HOME`, started in
     one of `projects` (the pinned checkout, the primary, the one this runs from): (scope, path)."""
-    files = [("managed", managed or MANAGED_SETTINGS)]
+    managed = managed or MANAGED_SETTINGS
+    files = [("managed", managed)]
+    dropins = managed.parent / "managed-settings.d"      # drop-ins beside it, merged over it
+    try:
+        files += [("managed", p) for p in sorted(dropins.glob("*.json"))]
+    except OSError:                                       # an unreadable directory: refuse through its path
+        files.append(("managed", dropins))
     if home:
         files.append(("user", Path(home) / ".claude" / "settings.json"))
     seen: set[Path] = set()
@@ -144,9 +151,11 @@ def settings_files(home: str | None, projects: Iterable[Path], managed: Path | N
 def routes_in_settings(scope: str, path: Path) -> list[str]:
     """The API-billing routes in one settings file; a missing file has none. Read only."""
     try:
-        text = path.read_text()
+        text = path.read_bytes().decode("utf-8")
     except FileNotFoundError:
         return []
+    except UnicodeDecodeError as exc:
+        return [f"{scope} settings {path} is not UTF-8 ({exc.reason}): it can't be checked"]
     except OSError as exc:
         return [f"{scope} settings {path} can't be read ({exc.strerror or exc})"]
     try:
