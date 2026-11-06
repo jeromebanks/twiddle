@@ -317,3 +317,10 @@ def test_a_resume_only_epic_names_the_resume_as_a_runnable_command():
     assert nxt.split(":")[0].split(" (")[0] == "/work-slice 29"      # the runnable part, as an offered slice's
     unrated = sdlc.next_command(epic, {**p, "in_flight": [30]})
     assert unrated == "/work-slice 30: resumes it; nothing new to start: in progress #30"
+    # a slice of another milestone is never named: it couldn't land on the epic's branch while M1 is built
+    other = {**units, 30: {"key": "T2.1", "milestone": "M2"}}
+    p2 = {**p, "in_flight": [30, 29], "units": other}
+    assert sdlc.next_command(epic, p2).startswith("/work-slice 29 (opus: judgment): resumes it; "
+                                                  "nothing new to start: in progress #30, #29")
+    only_other = sdlc.next_command(epic, {**p2, "in_flight": [30]})
+    assert only_other == "nothing new to start: in progress #30, none of them in #12 M1: x, the milestone being built"

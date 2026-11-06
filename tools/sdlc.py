@@ -860,11 +860,16 @@ def epic_view(st: dict[str, Any], progress: dict[str, Any]) -> dict[str, Any]:
         if offered:
             u = units.get(offered[0]) or {}
             nxt = f"/work-slice {offered[0]}" + (f" ({u['model']}: {u['complexity']})" if u.get("model") else "")
-        elif progress["in_flight"]:   # the only move is a resume: named as the command, so it can be run as is
-            x = progress["in_flight"][0]
-            u = units.get(x) or {}
-            nxt = (f"/work-slice {x}" + (f" ({u['model']}: {u['complexity']})" if u.get("model") else "")
-                   + ": resumes it; nothing new to start: in progress " + ", ".join(f"#{i}" for i in progress["in_flight"]))
+        elif progress["in_flight"]:
+            busy = "nothing new to start: in progress " + ", ".join(f"#{i}" for i in progress["in_flight"])
+            # the only move is a resume: named as the command, so it can be run as is; only the current
+            # milestone's, since a later milestone's slice can't land on the epic's branch until that ships
+            if resumable := offered_slices({**progress, "ready": progress["in_flight"]}, cur):
+                u = units.get(resumable[0]) or {}
+                nxt = (f"/work-slice {resumable[0]}" + (f" ({u['model']}: {u['complexity']})" if u.get("model") else "")
+                       + f": resumes it; {busy}")
+            else:
+                nxt = f"{busy}, none of them in {cur['title']}, the milestone being built"
         elif progress["ready"]:
             nxt = (f"nothing ready in {cur['title']}: later milestones' slices wait until it ships "
                    f"(its open units are blocked or escalated)")
