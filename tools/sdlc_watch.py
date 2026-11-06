@@ -23,7 +23,7 @@ one all read and write the same files. `logs/` is gitignored.
 
 **The pin.** At first start the record takes the start time and the running checkout's
 HEAD. It is refused unless that checkout is clean (untracked files count) and HEAD is
-reachable from `origin/main` or an `origin/epic/*` ref, read locally with no fetch: a
+reachable from `origin/main` or an epic's `origin/epic/N`, read locally with no fetch: a
 run's permissions (T1.4's tool list) come from that pushed commit, never a working tree.
 
 **A lost record starts empty.** No care set and a fresh start time: only a person's
@@ -45,6 +45,7 @@ import fcntl
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -61,6 +62,7 @@ LOG_NAME = "sdlc_watch.jsonl"
 LOCK_NAME = "state.lock"
 SCHEMA = 1
 GIT_TIMEOUT_S = 30
+PIN_REF_RE = re.compile(r"refs/remotes/origin/(main|epic/[1-9][0-9]*)")
 LOCK_WAIT_S = 10                                    # the record's lock: a read-modify-write takes milliseconds
 CREDITS_REMINDER = ("usage credits can't be checked: keep them off, or their spend limit at $0 "
                     "(claude.ai/settings/usage)")
@@ -261,13 +263,14 @@ def pin_of(checkout: Path) -> dict[str, Any]:
         raise WatchError(f"{checkout} is not clean (commit or remove {len(dirty.splitlines())} change(s)): "
                          "the watcher runs only from a pushed commit")
     sha = git(["rev-parse", "HEAD"], checkout).stdout.strip()
-    refs = git(["for-each-ref", "--format=%(refname)", "refs/remotes/origin/main", "refs/remotes/origin/epic/"],
-               checkout).stdout.split()
+    refs = [r for r in git(["for-each-ref", "--format=%(refname)", "refs/remotes/origin/main",
+                            "refs/remotes/origin/epic/"], checkout).stdout.split()
+            if PIN_REF_RE.fullmatch(r)]                    # main or an epic's branch, never epic/scratch
     refs.sort(key=lambda r: (r != "refs/remotes/origin/main", r))
     for ref in refs:
         if git(["merge-base", "--is-ancestor", sha, ref], checkout, check=False).returncode == 0:
             return {"sha": sha, "ref": ref.removeprefix("refs/remotes/"), "checkout": str(checkout)}
-    raise WatchError(f"HEAD {sha[:12]} of {checkout} is not on origin/main or any origin/epic/* "
+    raise WatchError(f"HEAD {sha[:12]} of {checkout} is not on origin/main or any origin/epic/N "
                      "(as last fetched): push it first")
 
 

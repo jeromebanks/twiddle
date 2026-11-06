@@ -148,6 +148,15 @@ def test_an_unpushed_head_is_refused(repo):
     assert not (root_of(repo) / w.RECORD_NAME).exists()
 
 
+@pytest.mark.parametrize("branch", ["epic/scratch", "epic/263/experiment", "epic/0", "epic/263x"])
+def test_a_head_only_on_an_epic_named_branch_that_is_not_an_epic_is_refused(repo, branch):
+    _git("switch", "-q", "-c", branch, cwd=repo)
+    _git("commit", "-q", "--allow-empty", "-m", "not an epic", cwd=repo)
+    _git("push", "-q", "origin", branch, cwd=repo)
+    with pytest.raises(w.WatchError, match="not on origin/main"):
+        w.start(repo)
+
+
 def test_a_head_on_another_pushed_branch_is_refused(repo):
     _git("switch", "-q", "-c", "slice/9", cwd=repo)
     _git("commit", "-q", "--allow-empty", "-m", "slice", cwd=repo)
