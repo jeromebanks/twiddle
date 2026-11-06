@@ -217,7 +217,7 @@ def test_gh_is_bounded(monkeypatch):
     with pytest.raises(gw.GitHubError, match="timed out"):
         gw.run_gh(["api", "x"])
     assert 0 < gw.GH_TIMEOUT_S < 600 and 0 < gw.STATE_TIMEOUT_S <= 600 and 0 < gw.MAX_PAGES <= 50
-    assert 0 < gw.QUIET_RETRIES <= 10
+    assert 0 < gw.RETRY_BASE_S <= gw.RETRY_MAX_S <= 24 * 3600
 
 
 def test_requests_per_hour_stay_under_github_s_limit():
@@ -513,7 +513,8 @@ def test_one_issue_s_failing_state_does_not_wedge_the_poll(repo, fakes):
     assert "#14: state failed (sdlc.py state 14 failed: gone): nothing" in out
     assert "would run `/plan-issue 13`" in out
     rec = record(repo)
-    assert set(rec["care"]) == {"13", "14"} and rec["github"]["etags"]      # the poll still recorded what it read
+    assert set(rec["care"]) == {"13", "14"} and rec["github"]["since"]      # the poll still recorded what it read
+    assert rec["github"]["etags"] == {} and rec["github"]["state_retry"]["failures"] == 1   # unacknowledged
 
 
 def test_a_debt_ticket_s_shape_never_stays_in_care():
@@ -573,8 +574,11 @@ def test_an_edit_between_two_pages_of_a_read_skips_no_comment(repo, fakes, monke
     assert record(repo)["github"]["since"]["comments"] == {"at": "2026-11-05T12:30:00Z"}
 
 
-def test_a_failed_state_is_asked_again_on_a_quiet_poll(repo, fakes):
-    """Codex round 2: the ETags move on, so the retry can't wait for the next change on GitHub."""
+def test_a_failed_state_leaves_the_change_unacknowledged_and_is_asked_again(repo, fakes, monkeypatch):
+    """Codex rounds 2 and 4: the retry can't wait for another change on GitHub, a quiet poll never reads
+    state, and an outage longer than any count of retries strands nothing."""
+    clock = {"t": dt.datetime(2026, 11, 5, 12, 10, tzinfo=dt.timezone.utc)}
+    monkeypatch.setattr(gw, "now", lambda: clock["t"])
     started(repo)
     fakes.states[15] = epic_state(15, nxt="/plan-issue 15")
     broken = {"on": True}
@@ -585,14 +589,24 @@ def test_a_failed_state_is_asked_again_on_a_quiet_poll(repo, fakes):
         return fakes.state(n)
     fakes.scene(etags=("x", "y"), comments=[comment(15)], get={f"repos/{REPO}/issues/15": issue(15)})
     assert "state failed" in w.poll_dry_run(where=repo, state=state)
-    assert record(repo)["care"]["15"]["state_failed"] == 1
-    broken["on"] = False
-    fakes.scene(etags=("x", "y"))
+    waits = []
+    for _ in range(8):                         # a long outage: each wait doubles, up to RETRY_MAX_S
+        before = len(fakes.asked)
+        out = w.poll_dry_run(where=repo, state=state)          # before the wait ends: no state read
+        assert "state reads wait until" in out and fakes.asked[before:] == []
+        retry = record(repo)["github"]["state_retry"]
+        waits.append((gw.parse_time(retry["at"]) - clock["t"]).total_seconds())
+        clock["t"] = gw.parse_time(retry["at"])
+        assert "state failed" in w.poll_dry_run(where=repo, state=state)   # asked again, failed again
+    assert waits[:3] == [60, 120, 240] and max(waits) == gw.RETRY_MAX_S
+    clock["t"] = gw.parse_time(record(repo)["github"]["state_retry"]["at"])
+    broken["on"] = False                       # it recovers, with nothing new on GitHub
     out = w.poll_dry_run(where=repo, state=state)
-    assert len(fakes.calls()) == 2 and fakes.asked == [15] and "would run `/plan-issue 15`" in out
-    assert "state_failed" not in record(repo)["care"]["15"]
+    assert "would run `/plan-issue 15`" in out and "state_retry" not in record(repo)["github"]
     fakes.asked.clear()
-    assert "nothing changed: no state read" in w.poll_dry_run(where=repo, state=state) and fakes.asked == []
+    fakes.scene(etags=("x", "y"))
+    out = w.poll_dry_run(where=repo, state=state)            # acknowledged now: quiet, and no state read
+    assert "nothing changed: no state read" in out and fakes.asked == [] and len(fakes.calls()) == 2
 
 
 def test_an_edit_while_a_one_second_backlog_is_read_skips_no_comment(repo, fakes, monkeypatch):
@@ -609,24 +623,6 @@ def test_an_edit_while_a_one_second_backlog_is_read_skips_no_comment(repo, fakes
     assert any("sort=created" in r for r in reads)            # the fallback was taken
     assert "47" in record(repo)["care"]
     assert record(repo)["github"]["since"]["comments"] == {"at": "2026-11-05T12:30:00Z"}
-
-
-def test_quiet_polls_ask_a_failing_state_again_only_a_few_times(repo, fakes):
-    started(repo)
-    asked = []
-
-    def state(n):
-        asked.append(n)
-        raise gw.GitHubError("sdlc.py state 16 failed: always")
-    fakes.scene(etags=("x", "y"), comments=[comment(16)], get={f"repos/{REPO}/issues/16": issue(16)})
-    w.poll_dry_run(where=repo, state=state)
-    for _ in range(gw.QUIET_RETRIES + 3):
-        fakes.scene(etags=("x", "y"))
-        w.poll_dry_run(where=repo, state=state)
-    assert len(asked) == 1 + gw.QUIET_RETRIES        # then it waits for a change on GitHub
-    fakes.scene(etags=("x2", "y"))                   # a change: asked again
-    w.poll_dry_run(where=repo, state=state)
-    assert len(asked) == 2 + gw.QUIET_RETRIES
 
 
 def test_a_hung_or_garbled_collaborator_list_fails_the_poll(monkeypatch):

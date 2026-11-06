@@ -39,7 +39,10 @@ GitHub's 5000 an hour for an authenticated client, even if the 304s did count.
 
 The ETags, the watermark and the care set are written to the watcher's record together, and only
 when the whole poll succeeded: a failed read leaves the record as it was, so the next poll sees the
-change again.
+change again. A `state` read that fails is that issue's "nothing" for the poll (the others are still
+decided), and the change is left unacknowledged: the old ETags are kept, so a later poll is a change
+poll again, and asks every issue in care once more after a backoff (RETRY_BASE_S doubling to
+RETRY_MAX_S, never giving up). A quiet poll, with nothing left unacknowledged, never reads `state`.
 
 **Intake.** An issue comes into care when, after the watcher's start time, the repo's owner or a
 push collaborator (never merely the issue's author) posts an unmarked comment on it (`/approve` and
@@ -85,7 +88,8 @@ SINCE = {    # name -> the read made only when that probe (or the other) changed
     "comments": "issues/comments?sort={sort}&direction=asc&per_page={per_page}&since={since}&page={page}",
 }
 REQUESTS_PER_QUIET_POLL = len(PROBES)
-QUIET_RETRIES = 3          # quiet polls that ask a failed `state` again before waiting for a change
+RETRY_BASE_S = 60          # after a poll whose `state` reads failed: wait this long, doubling each time,
+RETRY_MAX_S = 3600         # up to this, and ask them all again (never giving up)
 STATUS_RE = re.compile(r"\AHTTP/[0-9.]+ ([0-9]{3})\b")
 MARKER_ANY_RE = re.compile(r"<!--\s*" + re.escape(sdlc.MARKER_TAG) + r"\b")
 CONTAINER_LABELS = {"plan:slice": "slice", "plan:subtask": "subtask"}
@@ -234,6 +238,10 @@ def fetch_trusted(config: dict[str, Any], repo: str) -> set[str]:
 
 # --- pure rules -------------------------------------------------------------------------
 
+def now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
 def parse_time(s: str | None) -> dt.datetime | None:
     if not s:
         return None
@@ -379,16 +387,15 @@ def check(record: dict[str, Any], repo: str) -> dict[str, Any]:
 def decide_all(care: dict[str, Any], keys: list[str], state: Callable[[int], dict[str, Any]],
                is_paused: Callable[[int], bool], out: dict[str, Any]) -> None:
     """Ask `state` about each of `keys` (in care) and record the answer in `out`, in place. A failed read is
-    that issue's "nothing" this poll and is counted, so a quiet poll asks again, up to QUIET_RETRIES times
-    in a row; past that only a poll that saw a change on GitHub does."""
+    that issue's "nothing" this poll, and counted in `out["failed"]`: the poll keeps its ETags unacknowledged,
+    so a later poll is a change poll again and asks once more (`poll`). One failure never stops the others."""
     for key in sorted(keys, key=int):
         try:
             st = state(int(key))
-        except GitHubError as exc:   # one issue's state can't wedge the others, or the ETags
-            care[key]["state_failed"] = int(care[key].get("state_failed") or 0) + 1
+        except GitHubError as exc:
+            out["failed"].append(int(key))
             out["decisions"].append({"issue": int(key), "run": None, "why": f"state failed ({exc})"})
             continue
-        care[key].pop("state_failed", None)
         d = decide(int(key), st, is_paused(int(key)))
         if d.get("leave"):
             out["left"][int(key)] = d["why"]
@@ -407,13 +414,9 @@ def poll(record: dict[str, Any], repo: str, config: dict[str, Any], checkout: Pa
     probe = check(record, repo)
     out: dict[str, Any] = {"requests": probe["requests"], "changed": probe["changed"],
                            "github": github, "care": record.get("care") or {}, "joined": {}, "left": {},
-                           "decisions": [], "truncated": []}
+                           "decisions": [], "truncated": [], "failed": [], "retry_at": None}
     care = {k: dict(v) for k, v in (record.get("care") or {}).items()}
-    if not probe["changed"]:   # nothing new on GitHub: only a state read that failed last time is asked again
-        pending = [k for k, v in care.items() if 0 < int(v.get("state_failed") or 0) <= QUIET_RETRIES]
-        if pending:
-            decide_all(care, pending, state, is_paused, out)
-            out["care"] = care
+    if not probe["changed"]:   # nothing new on GitHub, and nothing left unprocessed: no read, no state
         return out
     started = parse_time(record.get("started_at"))
     marks = dict(github.get("since") or {})
@@ -442,15 +445,32 @@ def poll(record: dict[str, Any], repo: str, config: dict[str, Any], checkout: Pa
         prev = parse_time(entry.get("last_person_at"))
         if prev is None or act["at"] > prev:
             entry["last_person_at"], entry["last_person_why"] = at, act["why"]
-    decide_all(care, list(care), state, is_paused, out)
+    retry = github.get("state_retry") or {}
+    due = parse_time(retry.get("at"))
+    if due and now() < due:   # state reads failed lately: take in what people did, ask state when it's time
+        out["retry_at"] = retry["at"]
+        out["decisions"] = [{"issue": int(k), "run": None, "why": f"state reads wait until {retry['at']}"}
+                            for k in sorted(care, key=int)]
+    else:
+        decide_all(care, list(care), state, is_paused, out)
+    if out["failed"]:
+        n = int(retry.get("failures") or 0) + 1
+        wait = min(RETRY_BASE_S * 2 ** (n - 1), RETRY_MAX_S)
+        out["retry_at"] = (now() + dt.timedelta(seconds=wait)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        retry = {"failures": n, "at": out["retry_at"]}
+    elif not out["retry_at"]:
+        retry = {}
     etags = dict(probe["etags"])
+    if retry:   # not done with this change: send the old ETags, so the next poll is a change poll again
+        etags = dict(github.get("etags") or {})
     for name in out["truncated"]:   # carry on next poll: keep the old ETag so it reads again
         old = (github.get("etags") or {}).get(name)
         if old is None:
             etags.pop(name, None)
         else:
             etags[name] = old
-    out["github"] = {**github, "etags": etags, "since": marks}
+    out["github"] = {**{k: v for k, v in github.items() if k != "state_retry"}, "etags": etags, "since": marks,
+                     **({"state_retry": retry} if retry else {})}
     out["care"] = care
     return out
 
@@ -467,18 +487,16 @@ def _decision_lines(out: dict[str, Any]) -> list[str]:
 
 def render(out: dict[str, Any], dry_run: bool = True) -> str:
     head = "poll (dry run: starts nothing)" if dry_run else "poll"
-    if not out["changed"] and not out["decisions"] and not out["left"]:
-        return f"{head}: {out['requests']} conditional request(s), nothing changed: no state read, nothing to run"
     if not out["changed"]:
-        lines = [f"{head}: {out['requests']} conditional request(s), nothing changed; "
-                 "asking again where a state read failed"]
-        return "\n".join(lines + _decision_lines(out))
+        return f"{head}: {out['requests']} conditional request(s), nothing changed: no state read, nothing to run"
     lines = [f"{head}: {out['requests']} conditional request(s); changed: {', '.join(out['changed'])}"]
     if out["truncated"]:
         lines.append(f"  read capped at {MAX_PAGES} pages ({', '.join(out['truncated'])}): the next poll carries on")
     for n, why in sorted(out["joined"].items()):
         lines.append(f"  into care: #{n} ({why})")
     lines += _decision_lines(out)
+    if out.get("retry_at"):
+        lines.append(f"  state reads failed or wait: this change stays unacknowledged; asked again from {out['retry_at']}")
     if not out["decisions"] and not out["left"]:
         lines.append("  nothing in care")
     return "\n".join(lines)
