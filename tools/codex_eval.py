@@ -397,11 +397,11 @@ TIGHT = re.compile(rf"[`*_]*[:#(]\s*{RANGE}", re.IGNORECASE)
 # commas, dashes and brackets stay inside it.
 LOOSE = re.compile(rf"[\s,(`*_:]+(?:(?:at|on)\s+)?(?:lines?\s+|(?=[`*_]*L\d))\s*{RANGE}", re.IGNORECASE)
 CLAUSE_END = re.compile(r"[;:!?\n]|\.(?=\s|\Z)")
-# what can't name a file: a plain word (`off-by-one`, `isn't`), a number, punctuation alone (the `-` and `+` of
+# what can't name a file: a plain word (`off-by-one`; an apostrophe is a separator), a number, punctuation alone (the `-` and `+` of
 # `entries[-(limit + 1):]`). Anything else could: a dot, a slash, an underscore, letters and digits run together.
 # So a file named by a plain word alone (`Makefile`) takes no line from the file before it; every fixture's file
 # name holds a `_` or a `.`, so none is named that way.
-PLAIN = re.compile(r"[^\W\d_]+(?:['\u2019-][^\W\d_]+)*|\d+|[^\w]+")
+PLAIN = re.compile(r"[^\W\d_]+(?:-[^\W\d_]+)*|\d+|[^\w]+")
 # the slots a name sits in, whatever is in them, so either one takes the line: a link's target (`[x](y)`, in
 # `_could_name_a_file`) and an empty code span, which gives it to no file
 EMPTY_CODE = re.compile(r"``")

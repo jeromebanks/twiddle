@@ -324,9 +324,10 @@ def test_every_file_a_review_reads_is_an_input_or_excluded_on_purpose():
 
 def paths_named(text):
     """Every backticked token that looks like a path, whatever its extension (#174): it holds a `/` or ends in an
-    extension, and isn't a `<placeholder>`. A revision range (`origin/main..HEAD`) is git's, not a file."""
+    extension, and isn't a `<placeholder>`. A revision range (`origin/main..HEAD`, `a...b`: dots between two names)
+    is git's, not a file; `../x.txt` is a file."""
     return {tok for tok in re.findall(r"`([^`\s]+)`", text)
-            if "<" not in tok and ".." not in tok and ("/" in tok or re.search(r"\.[A-Za-z]\w*$", tok))}
+            if "<" not in tok and not re.search(r"[^./]\.{2,3}[^./]", tok) and ("/" in tok or re.search(r"\.[A-Za-z]\w*$", tok))}
 
 
 def uncovered(text, files):
@@ -338,8 +339,10 @@ def uncovered(text, files):
 def test_a_prompt_naming_a_file_of_any_kind_that_is_not_an_input_fails_the_coverage_check():
     files = set(codex_eval.FILES)
     text = ("Read `.agents/skills/review-rules.md` and `.agents/skills/extra-rules.txt`, then `.agents/skills/extra/rules`,"
-            " `notes.cfg` and `CLAUDE.md`; diff `origin/main..HEAD` against `<base>/x.py`, and say `VERDICT: approve`.")
-    assert uncovered(text, files) == [".agents/skills/extra-rules.txt", ".agents/skills/extra/rules", "notes.cfg"]
+            " `notes.cfg`, `../extra-rules.txt` and `CLAUDE.md`; diff `origin/main..HEAD` and `main...HEAD` against"
+            " `<base>/x.py`, and say `VERDICT: approve`.")
+    assert uncovered(text, files) == ["../extra-rules.txt", ".agents/skills/extra-rules.txt", ".agents/skills/extra/rules",
+                                      "notes.cfg"]
     assert {".agents/skills/review-rules.md", "CLAUDE.md"} <= paths_named(text)
 
 
@@ -936,6 +939,8 @@ def test_no_other_file_lends_the_planted_line_however_its_name_is_written(fx):
         assert not codex_eval.score(fx, report).hit, report
     # but words alone never do (#179): with no file and no slot after it in its clause, the line is the file's before
     assert codex_eval.score(fx, f"1. **blocking** {name}, line {n} of: {kw}\n\nVERDICT: changes\n").hit
+    # code made of plain words, numbers and punctuation names no file, so it takes nothing
+    assert codex_eval.score(fx, f"1. **blocking** `{name}` line {n} returns `entries[-(limit + 1):]`, {kw}\n\nVERDICT: changes\n").hit
     # and a file named after the clause has ended takes nothing from it
     for after in (f"; see {name}.orig", f": {kw} as in other/{name}", f". Compare {name}.bak"):
         report = f"1. **blocking** {name} line {n} {kw}{after}\n\nVERDICT: changes\n"
