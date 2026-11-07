@@ -239,7 +239,7 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <td>A milestone demo is posted, with real screenshots. The poster tries it.</td>
 <td><code>record_demo_acceptance</code> or <code>demo_reply</code> → <code>/milestone-demo N</code></td></tr>
 <tr><td><span class="chip">sdlc:waiting</span></td><td class="turn done">nobody, until it ships</td>
-<td>An ordinary issue parked until another epic's milestone (or the whole epic) ships to <code>main</code>: a marked <code>kind=wait</code> comment from a collaborator records the target in the debt tickets' form (<code>waits=E:Mk</code>, or <code>E:all</code>), the reason and the state it left. <code>state N</code> says what it waits for. A reply from the poster or a collaborator is the agent's to answer (<code>transition N waiting --kind note</code>, the only <code>transition</code> a waiting issue takes); the wait stays until it is lifted.</td>
+<td>An ordinary issue parked until another epic's milestone (or the whole epic) ships to <code>main</code>: a marked <code>kind=wait</code> comment from a collaborator records the target in the debt tickets' form (<code>waits=E:Mk</code>, or <code>E:all</code>), the reason and the state it left. <code>state N</code> says what it waits for. A reply from the poster or a collaborator is the agent's to answer (<code>transition N waiting --kind note</code>, the only <code>transition</code> a waiting issue takes); the wait stays until it is lifted. Nothing builds a waiting issue: <code>claim</code> refuses it and any slice or subtask of it, and <code>next</code> shows it on one <code>waiting:</code> line instead of as agent work. When the milestone ships, <code>ship E</code> lifts the wait (<a href="#waiting">below</a>) and the issue goes back to the state it left (an untriaged one comes back as <span class="chip">triage</span>).</td>
 <td><code>none</code> while the target hasn't shipped; <code>lift_wait</code> → <code>wait N --lift</code> once it has (or when a lift was cut short before its label); <code>wait_broken</code> → a human, when the target epic closed, or its latest plan dropped the milestone, without it shipping: a person lifts the wait or closes the issue; <code>respond_to_reply</code> → <code>/triage-issue N</code></td></tr>
 <tr><td><span class="chip">sdlc:done</span></td><td class="turn done">nobody</td>
 <td>Every milestone was accepted and shipped. <code>epic/N</code> is deleted and the issue closed.</td>
@@ -247,9 +247,6 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <tr><td><span class="chip">sdlc:escalated</span></td><td class="turn human">a human</td>
 <td>The agents couldn't agree, a merge of <code>main</code> conflicted, a suite failed on the epic branch, or a plan amendment ran out of rounds (<code>escalate_plan</code>). A human resolves it and moves it back to triage; a plan amendment is settled by a <code>/approve</code> after its latest revision instead, and <code>plan-create</code> moves it back to <span class="chip">sdlc:in-progress</span>.</td>
 <td><code>human</code> (and <code>fix_conflict</code> when two labels clash); <code>create_plan_issues</code> → <code>/plan-issue N</code> once a person settles a plan amendment</td></tr>
-<tr><td><span class="chip">sdlc:waiting</span></td><td class="turn done">nobody (for now)</td>
-<td>An ordinary issue parked until another epic's milestone ships to <code>main</code> (<code>wait N --on E:Mk</code>). It has this label instead of the state it left, and nothing builds it while it waits. When the milestone ships, the wait is lifted and it goes back to the state it was in.</td>
-<td><code>none</code> while the target is unshipped</td></tr>
 <tr><td><span class="chip">sdlc:approved</span> / <span class="chip">sdlc:in-progress</span> with <span class="chip">lane:quick</span></td><td class="turn agent">agent</td>
 <td>A small, safe change whose brief was posted with <code>transition N prd-review --kind prd --lane quick</code> (only on a <span class="chip">complexity:routine</span> issue). It is built from that one approved brief, with no plan or epic. Once building starts the brief is frozen: <code>escalate-to-full N</code> is the only way to change course.</td>
 <td><code>work_quick</code> → <code>/work-slice N --quick</code> (see <a href="#quick">section 6</a>)</td></tr>
@@ -263,6 +260,34 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <p class="note">The slices themselves (<span class="chip">plan:slice</span>, <span class="chip">plan:subtask</span>) and filed
 <span class="chip">tech-debt</span> are never triaged on their own. Feature slices and subtasks follow their own feature epic; only <span class="chip">tech-debt</span> tickets follow the debt epic (<a href="#debt">section 7</a>), and <code>state T</code> on either names its epic.</p>
 
+<h3 id="waiting">Parking an issue until another epic ships</h3>
+<p>An ordinary issue that can't start until another epic's milestone is on <code>main</code> is <em>parked</em> rather than left in
+<span class="chip">triage</span> with a <code>next:</code> that is really a wait. This is done from the triage skill, with two verbs:</p>
+<pre><code>uv run python tools/sdlc.py wait 308 --on 263:M2 --reason "rewords the rule #263's bracket introduces" --dry-run
+uv run python tools/sdlc.py wait 308 --lift --reason "the poster said to do this now"</code></pre>
+<ul>
+<li><strong><code>wait N --on E:Mk --reason …</code></strong> (<code>--on E</code> waits for the whole epic and is recorded as <code>E:all</code>)
+posts one marked <code>kind=wait</code> comment on the issue and moves its label to <span class="chip">sdlc:waiting</span>. It writes to GitHub only,
+never to a speaker, and nothing is journalled to <code>logs/interventions.jsonl</code>: the comment is the record. <code>--dry-run</code> runs every check and
+prints the comment and the label move.</li>
+<li><strong>It refuses</strong>, saying why and writing nothing, for a tech-debt ticket, a slice, a subtask or the debt epic (they have their own waits);
+a closed or <span class="chip">escalated</span> issue; any state but <span class="chip">untriaged</span>, <span class="chip">triage</span>,
+<span class="chip">approved</span> or <span class="chip">planned</span> (the poster's states, <span class="chip">in-progress</span> and <span class="chip">done</span> can't wait);
+an issue that already waits (one wait at a time) or waits on itself; an epic that is not an open feature epic with a plan; a milestone that is not in the epic's latest plan;
+and a target that has already shipped. <code>--then close</code> is refused until <code>close</code> exists (#378, in #379's second milestone).</li>
+<li><strong>What <code>state N</code> says.</strong> While the target hasn't shipped, <code>turn: none</code> and <code>next:</code> says what it waits for, not a step.
+Once it has shipped and the wait is still on, the agent's move is <code>lift_wait</code> (<code>wait N --lift</code>), which also covers a lift that failed or was cut short.
+If the target epic closed, or its plan dropped the milestone, without it shipping, the move is a human's, <code>wait_broken</code>: lift the wait or close the issue.
+A reply from the poster or a collaborator is the agent's, <code>respond_to_reply</code>: the triage skill answers with <code>transition N waiting --kind note</code>, and the wait stays.
+<code>state</code> only reads: it never lifts anything.</li>
+<li><strong><code>wait N --lift</code></strong> posts a marked <code>kind=wait-lifted</code> comment and puts back the state the wait recorded, even if its target
+hasn't shipped. It is safe to rerun, takes <code>--dry-run</code>, and on an issue that isn't waiting it says so and writes nothing.</li>
+<li><strong><code>ship E</code> lifts what it released.</strong> After <code>ship</code> records a milestone's release (and, for the last one, finishes the epic) it
+also <em>writes to the waiting issues</em>: each open wait on that milestone, or on the whole epic, gets its <code>kind=wait-lifted</code> comment and label move, and
+<code>ship</code> prints each with its new <code>next:</code>. <code>ship E --dry-run</code> lists them and writes none. A lift that fails never fails or undoes the ship: it is
+printed, and <code>state N</code> on that issue then says <code>lift_wait</code>.</li>
+</ul>
+
 <h2 id="skills">4. The four skills</h2>
 <p>Each skill does one stage and ends by printing the <code>next:</code> line, so the next session (or an
 orchestrator) knows exactly what to run.</p>
@@ -271,7 +296,7 @@ orchestrator) knows exactly what to run.</p>
 <tbody>
 <tr><td><code>triage-issue</code></td><td>new, <code>triage</code>, a reply in review</td>
 <td>untriaged → <span class="chip">triage</span> / <span class="chip">needs-info</span> → <span class="chip">prd-review</span> or <span class="chip">diagnosis-review</span> → <span class="chip">approved</span></td>
-<td><code>state</code>, <code>transition</code> (<code>--lane quick</code> for a short brief), <code>reconcile</code>, <code>merge-prd</code>, <code>commit-prd</code>; for the debt epic, <code>debt-epic</code> and <code>debt-intake</code></td></tr>
+<td><code>state</code>, <code>transition</code> (<code>--lane quick</code> for a short brief), <code>wait</code> (<code>--lift</code>: park an issue until another epic ships), <code>reconcile</code>, <code>merge-prd</code>, <code>commit-prd</code>; for the debt epic, <code>debt-epic</code> and <code>debt-intake</code></td></tr>
 <tr><td><code>plan-issue</code></td><td><span class="chip">approved</span>, the next milestone, demo changes</td>
 <td><span class="chip">approved</span> → <span class="chip">planned</span>, or adds issues while <span class="chip">in-progress</span></td>
 <td><code>plan-validate</code>, <code>plan-post</code>, <code>plan-review</code>, <code>plan-create</code>, <code>plan-annotate</code>, <code>bootstrap-labels</code>; a debt pass: <code>debt-pass-validate</code>, <code>debt-pass-post</code></td></tr>
@@ -647,7 +672,7 @@ as a pull request (<code>ship-review</code>). Nothing is shown to the poster unt
 <code>epic/N</code>, with <code>main</code> as the "before". It draws real screenshots and posts the demo for the poster.</li>
 <li><strong>Ship it</strong> (<code>accepted</code>). <code>sync N</code> merges <code>main</code> into <code>epic/N</code> and runs the suite.
 Codex reviews the milestone's whole diff (<code>ship-review</code>). Then <code>ship N</code> merges <code>epic/N</code> into <code>main</code>
-through a pull request, with a merge commit.</li>
+through a pull request, with a merge commit, and lifts the waits of any ordinary issue parked on that milestone (<a href="#waiting">above</a>).</li>
 <li><strong>Catch up</strong> with <code>main</code>. When nothing's ready or in flight and <code>epic/N</code> is behind, <code>sync N</code>.</li>
 <li><strong>Build it.</strong> <code>/work-slice S</code> for the first slice on offer, named with the model its rating maps to,
 e.g. <code>(sonnet: routine)</code>.</li>
@@ -694,6 +719,9 @@ and records it, and pushes only on a pass. A conflict or a failure goes to a hum
   It rechecks <code>main</code> right before merging, and checks the merge afterwards. If <code>main</code> moved in that moment,
   the release is marked untested and the epic is escalated. Nothing more happens until <code>verify-main N</code>
   passes on <code>main</code>.</li>
+<li><strong><code>ship N</code> also writes to waiting issues.</strong> Once a release is recorded it lifts every open wait on it
+  (<code>wait N --on E:Mk</code>): a <code>kind=wait-lifted</code> comment and a label move on each. A lift that fails is printed and never
+  fails or undoes the ship; <code>state</code> on that issue then says <code>lift_wait</code>.</li>
 <li>A milestone built before epic branches existed, straight onto <code>main</code>, ships as a recorded no-op, with no sync and
 no Codex review: nothing of it is on the branch, so a review would judge a later milestone's code.</li>
 </ul>
@@ -732,6 +760,8 @@ uv run python tools/sdlc.py next            # every issue where it's the agent's
 uv run python tools/sdlc.py demo-status 12  # each milestone: its slices, before/after, demo and release
 uv run python tools/sdlc.py ready --epic 12 # the slices that can start now</code></pre>
 <p>The <code>next:</code> line is always the answer to "what now?". Every skill ends by printing it.</p>
+<p><code>next</code> leaves parked issues out of the agent's work and lists them on one line, <code>waiting: #308 on #263's M2; …</code>, unless
+the move is the agent's or a human's (<code>lift_wait</code>, <code>respond_to_reply</code>, <code>wait_broken</code>).</p>
 
 <h2 id="example">13. A worked example</h2>
 <ol class="steps">

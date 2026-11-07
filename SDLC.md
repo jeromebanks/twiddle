@@ -24,6 +24,13 @@ issue ─► sdlc:triage ─► sdlc:needs-info ◄─► (poster answers)
    any stage ─► sdlc:escalated  (a human is needed: no consensus, or the agent is stuck)
 ```
 
+An ordinary issue that can't start until another epic ships is **parked** (see "Waiting on another epic" below):
+
+```
+untriaged / triage / approved / planned ─► wait N --on E[:Mk] ─► sdlc:waiting ─► (E's Mk ships: ship E, or wait N --lift)
+                                                                      └──────────► back to the state it left (untriaged as triage)
+```
+
 A small, safe change takes a second road, the **quick lane** (see "The quick lane" below):
 
 ```
@@ -77,7 +84,8 @@ main ──●────────────────────●─
   `ship --accept-merge <sha>` after a human has looked at it. Anything else stops the ship.
   A milestone built straight onto `main`, before epic branches, ships as a recorded no-op:
   no sync, and no `ship-review`, which refuses it (`main...epic/N` would be a later milestone's diff).
-  After the last milestone, `epic/N` is deleted.
+  After the last milestone, `epic/N` is deleted. `ship` also **writes to the issues that wait on what it
+  released** (see "Waiting on another epic"): see that section for what it posts there.
 - **One milestone at a time on the branch.** Only the earliest milestone that hasn't shipped
   is built: `next:` offers only its slices, and `claim` and `merge` refuse a later milestone's,
   so nothing unseen rides along to `main`. Once it's complete, new slices wait for its demo and
@@ -110,6 +118,7 @@ ends with a `next:` line, such as `/plan-issue 12` or `/work-slice 28`. Every sk
 | `sdlc:in-progress` with `lane:debt` (the debt epic) | the agent, from its tickets: `debt-epic` (open it, attach debt, end a pass), `debt-intake`, `/plan-issue D` (a pass), `/work-slice T --debt`, or `merge PR` (state's actions `pass_end`, `debt_intake`, `plan_pass`, `work_debt`, `merge_debt`); never the poster |
 | `tech-debt` issues | never triaged on their own; they move with the debt epic, and `state T` names it |
 | `plan:slice` / `plan:subtask` issues | never triaged; a slice's state is `slice-status N` |
+| `sdlc:waiting` | nobody, until the milestone it waits for ships (state's `turn: none`, action `none`). The agent when that has happened (action `lift_wait`: `wait N --lift`) and when the poster or a collaborator replied (action `respond_to_reply`: answer with `transition N waiting --kind note`, in the `triage-issue` skill; the wait stays). A human when the target closed or dropped the milestone unshipped (action `wait_broken`: lift the wait or close the issue) |
 | `sdlc:escalated` | a human |
 
 `uv run python tools/sdlc.py next` lists issues where it is the agent's move;
@@ -170,7 +179,8 @@ like any other (`state` on it says so); if the change then escalates to the full
   from accounts that can't write to the repo are ignored. Anyone with write access can
   forge one: this is an audit trail, not a security boundary.
 - One `sdlc:*` label per issue, changed only by `tools/sdlc.py`. Two at once is a
-  conflict and needs a human. (`lane:quick` and `complexity:*` are not state labels.)
+  conflict and needs a human. (`lane:quick` and `complexity:*` are not state labels.) A waiting issue has
+  `sdlc:waiting` instead of the state it left, and `transition` refuses to move it in or out.
 - A quick change merges into `main` only through `merge`'s quick gate (the quick lane, above): a
   recorded passing suite and Codex's approval on the head, never a review deferred to a milestone,
   a diff that stays inside `.sdlc/config.json`'s `quick` rules, and a passing review eval for the head's
@@ -380,6 +390,52 @@ a real sub-agent merge. **Without the rule**, a session that is refused leaves t
 so, and `state` on the PR's issue (or on the debt epic) names `merge PR` with the gate's results;
 the orchestrating session, which the poster runs, then runs that one command. Nothing is ever merged
 around the gate.
+
+## Waiting on another epic
+
+An ordinary issue whose next step can't start until another epic ships has no business sitting in
+`sdlc:triage` with a `next:` that is really a wait. `wait` parks it, and the reason is on the issue, so
+it survives between sessions. (Tech-debt tickets have their own wait, `waits=` in their marker; this reuses its form and
+its reading of "shipped", and changes nothing about it.)
+
+```bash
+uv run python tools/sdlc.py wait N --on E:Mk --reason "builds on E's bracket" --dry-run   # then without --dry-run
+uv run python tools/sdlc.py wait N --on E --reason "..."      # the whole epic: recorded as waits=E:all
+uv run python tools/sdlc.py wait N --lift [--reason "..."]    # end it, whether or not the target shipped
+```
+
+- **`wait` writes to GitHub, never to a speaker.** It posts one marked `kind=wait` comment on N (`waits=E:Mk`,
+  `from=<the state N was in>`, and the reason on its `Reason:` line: one line, no IP, MAC, device ID or secret) and moves N's only
+  `sdlc:*` label to `sdlc:waiting`. `--dry-run` runs every check and prints the comment and the label
+  move. Nothing is journalled to `logs/interventions.jsonl`, which is for speaker writes: the comment is
+  the record. A rerun after a wait cut short between its comment and its label finishes it without a second comment.
+- **It refuses, writing nothing,** when N is a tech-debt ticket, a slice, a subtask or the debt epic; is
+  closed or `sdlc:escalated`; is in a state a wait can't take (it takes `untriaged`, `triage`, `approved` and
+  `planned`: not the poster's `needs-info`, `prd-review`, `diagnosis-review` and `demo-review`, not `in-progress`,
+  whose slices and claims would be left hanging, and not `done`); already waits (one wait at a time; it says on what);
+  or waits on itself. It refuses an E that is not an open feature epic with a plan (no plan, a quick change, the debt
+  epic, closed or `done`), an Mk that is not a milestone of E's latest plan, and a target that has already shipped.
+  `--then close` is refused until #378's `close` verb is on `main`: it arrives with #379's M2.
+- **While N waits, nothing builds it.** `claim` (every lane) refuses N and any slice or subtask of N, and `next`
+  offers none of them: it lists waiting issues on one `waiting: #308 on #263's M2; ...` line instead.
+- **`state N` shows the wait** (`state: waiting`, the target, the reason and the comment's link) and is read-only: it never
+  lifts anything. Its action is `none` (`turn: none`) while the target hasn't shipped; `lift_wait` (the agent: `wait N --lift`) once
+  it has but the wait is still on, which includes a `ship` that was cut short and a lift that failed; `wait_broken` (a human) when E closed, or its latest
+  plan dropped Mk, without Mk having shipped; and `respond_to_reply` (the agent) after a reply from the issue's author or a collaborator. A waiting issue's only
+  `transition` is a note answering that reply (`transition N waiting --kind note --body-file reply.md`, in the
+  `triage-issue` skill): the wait stays until someone lifts it, and a note puts it back to `turn: none`.
+- **`wait N --lift`** posts a marked `kind=wait-lifted` comment and puts back the state the wait recorded
+  (`untriaged` comes back as `triage`). It lifts a wait whose target hasn't shipped just as well (the poster said "do this
+  now"). Safe to rerun: a lift cut short between its comment and its label is finished, and on an issue that isn't waiting it
+  says so and writes nothing. It takes `--dry-run`.
+- **`ship E` lifts the waits it releases.** After it has recorded a release, `ship` also **writes to the waiting
+  issues**: for every open wait on what it released (`E:Mk`, and `E:all` once the epic's last ship has finished
+  it) it posts that issue's `kind=wait-lifted` comment and moves its label back, exactly as `wait N --lift` would, and prints each
+  lifted issue with its new `next:`. `ship E --dry-run` lists the lifts it would make and writes none. **A lift that fails never undoes or fails the
+  ship**: the release is already recorded, so the failure is printed, the other waits are still lifted, and
+  `state N` on the issue left waiting says `lift_wait` (`wait N --lift` finishes the job, and a rerun of `ship E` picks up the lifts a cut-short ship left).
+- A wait that `then=close`s the issue once it lifts is #379's M2; until then a lift of one whose target shipped is refused and
+  leaves it waiting.
 
 ## Planning (`plan-issue`)
 
