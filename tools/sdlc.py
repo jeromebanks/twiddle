@@ -231,6 +231,7 @@ class Ledger:
     # skipping those a `demo-changes found=poster` record names
     changes_from: int = -1
     changes_done: set[str] = field(default_factory=set)
+    closed: dict[str, Any] | None = None    # the latest `close` record: how the issue ended (reason, commit/epic/of)
 
 
 def _rev(mk: dict[str, str]) -> int | None:
@@ -388,6 +389,10 @@ def _on_shipped(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> Non
         L.untested[_ms(mk)] = mk.get("sha", "")
 
 
+def _on_closed(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    L.closed = {**{k: mk[k] for k in CLOSE_KEYS if k in mk}, "url": c.get("url")}
+
+
 def _on_main_tests(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
     if mk.get("result") == "pass":   # a passing run on a main that contains these releases
         for sha in (mk.get("covers") or "").split(","):
@@ -427,6 +432,7 @@ MARKERS = {
     "shipped": _on_shipped, "ship-review": _on_ship_review, "epic-tests": _on_epic_tests,
     "main-tests": _on_main_tests, "review-owed": _on_review_owed, "eval-owed": _on_eval_owed,
     "lane": _on_lane, "prd-merged": _on_prd_merged, "escalation": _on_escalation,
+    "closed": _on_closed,   # CLOSED_KIND, `close`'s record
 }
 # kinds that are records kept on an issue, not part of its conversation: never a reply, and never the agent's
 # last comment, so one posted while the poster's answer waits doesn't hide it
@@ -708,6 +714,13 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         turn, action = "poster", "wait_for_poster"
 
     type_label = next((t for t in ("bug", "enhancement") if t in issue.get("labels", [])), None)
+    closed_by = None
+    if issue.get("state", "open").lower() == "closed" and L.closed:
+        # how it ended, from `close`'s record; GitHub's own close reason, when it was read, must agree (one that
+        # differs was closed again by hand after a reopen, and the record no longer says how)
+        github = issue.get("state_reason")
+        closed_by = {**L.closed, **({"github": github} if github and github != RECORD_STATE_REASON.get(
+            L.closed.get("reason", "")) else {})}
     return {
         "number": issue.get("number"), "title": issue.get("title"), "state": state, "turn": turn,
         "action": action, "type": type_label, "lane": DEBT_LANE if debt_epic else L.lane, "latest_doc": latest_doc, "approved_rev": approved_rev,
@@ -725,6 +738,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "planned_milestones": planned_ms, "created_milestones": sorted(created_ms, key=natural_key),
         "uncreated_milestones": uncreated, "create_mode": latest_plan_json.get("create") or config.get("create", "milestone"),
         "plan_created": L.plan_created, "creation_recorded": creation_recorded, "issue_closed": issue.get("state", "open").lower() == "closed",
+        "closed_by": closed_by,
     }
 
 
@@ -736,6 +750,26 @@ def debt_generation(mk: dict[str, str]) -> int | None:
     old marker (no `generation=`) is generation 1; one that isn't a positive whole number is None, never a guess."""
     g = mk.get("generation", "1")
     return int(g) if g.isdigit() and int(g) > 0 else None
+
+
+RECORD_STATE_REASON = {"completed": "completed", "duplicate": "duplicate", "not-planned": "not_planned"}
+
+
+def close_end(c: dict[str, Any]) -> str:
+    """How an issue `close` closed ended, from its record (derive_state's `closed_by`): `completed by <sha>`, `completed
+    by epic #E` (`'s Mk`), `duplicate of #M`, `not planned`."""
+    r = c.get("reason")
+    if r == "completed" and c.get("epic"):
+        how = "completed by epic " + wait_target(c["epic"], c.get("milestone") or NO_MILESTONE)
+    elif r == "completed":
+        how = f"completed by {(c.get('commit') or '?')[:12]}"
+    elif r == "duplicate":
+        how = f"duplicate of #{c.get('of') or '?'}"
+    else:
+        how = "not planned" if r == "not-planned" else f"{r or '?'}"
+    if c.get("github"):
+        how = f"{c['github']} on GitHub, closed by hand after its close record ({how})"
+    return how + (f" ({c['url']})" if c.get("url") else "")
 
 
 def unshipped_milestone(src: dict[str, Any]) -> str | None:
@@ -1209,7 +1243,8 @@ def fetch_trusted(config: dict[str, Any]) -> set[str]:
 def norm_issue(raw: dict[str, Any]) -> dict[str, Any]:
     return {"number": raw["number"], "title": raw.get("title", ""), "state": raw.get("state", "open"),
             "author": (raw.get("author") or {}).get("login", ""), "createdAt": raw.get("createdAt", ""),
-            "labels": [l["name"] for l in raw.get("labels", [])], "body": raw.get("body") or ""}
+            "labels": [l["name"] for l in raw.get("labels", [])], "body": raw.get("body") or "",
+            "state_reason": (raw.get("stateReason") or "").lower() or None}
 
 
 def norm_comment(raw: dict[str, Any]) -> dict[str, Any]:
@@ -1220,7 +1255,7 @@ def norm_comment(raw: dict[str, Any]) -> dict[str, Any]:
 def fetch_bundle(n: int, config: dict[str, Any], trusted: set[str] | None = None) -> dict[str, Any]:
     repo = repo_of(config)
     issue = norm_issue(gh_json(["issue", "view", str(n), "--repo", repo, "--json",
-                                "number,title,state,author,labels,createdAt,body"]))
+                                "number,title,state,stateReason,author,labels,createdAt,body"]))
     comments = [norm_comment(c) for c in gh_pages(f"repos/{repo}/issues/{n}/comments")]
     trusted = trusted if trusted is not None else fetch_trusted(config)
     bundle = {"issue": issue, "comments": comments, "trusted": sorted(trusted)}
@@ -1326,6 +1361,8 @@ def print_state(st: dict[str, Any]) -> None:
         print(f"  ignored /{ig['action']} from {ig['by']} (not the issue author or a collaborator)")
     for c in st["conflicts"]:
         print(f"  CONFLICT: {c}")
+    if st.get("closed_by"):
+        print(f"  closed: {close_end(st['closed_by'])}")
     if (dv := st.get("debt")) is not None:
         none = [t["number"] for t in dv["tickets"] if t.get("intake") not in INTAKE_VERDICTS]
         short = [f"#{t['number']} ({t['intake']})" for t in dv["tickets"]
@@ -3990,14 +4027,16 @@ def command_debt_intake(args: argparse.Namespace, config: dict[str, Any]) -> int
     return 0
 
 
-# --- close: an ordinary issue that is already done (a commit on main) or a duplicate -----------------------------
+# --- close: an ordinary issue that is already done (a commit on main, an epic that shipped) or a duplicate ---------
 #
-# The issues another verb owns are refused, naming it (`close_owner`). The record (CLOSED_KIND, kept out of KINDS so
-# `transition` can never post one) is written first, then GitHub's close with the matching reason, then sdlc:done as
-# the only sdlc:* label, each read back. A run cut short after the record is finished by the same command; one with
-# different arguments is refused. `--reason not-planned` is parsed so the command's shape is final, and lands with M2.
+# The issues another verb owns are refused, naming it (`close_owner`). `--by-epic E[:Mk]` closes it only once E's last
+# milestone (or Mk) has a ship record (`epic_shipped`). The record (CLOSED_KIND, kept out of KINDS so `transition` can
+# never post one) is written first, then GitHub's close with the matching reason, then sdlc:done as the only sdlc:*
+# label, each read back. A run cut short after the record is finished by the same command; one with different
+# arguments is refused. `close_issue` is all of it without argparse, for #379's `then=close` lift. `--reason
+# not-planned` is parsed so the command's shape is final, and lands with M2.
 
-CLOSED_KIND = "closed"            # `kind=closed reason=... [commit=<full sha> | of=M]` (T1.2 adds epic= / milestone=)
+CLOSED_KIND = "closed"            # `kind=closed reason=... [commit=<full sha> | epic=E [milestone=Mk] | of=M]`
 CLOSE_REASONS = ("completed", "not-planned", "duplicate")
 CLOSE_STATE_REASON = {"completed": "completed", "duplicate": "duplicate"}   # --reason -> the closed issue's state_reason
 CLOSE_KEYS = ("reason", "commit", "of", "epic", "milestone")   # what makes two close records the same close
@@ -4029,25 +4068,100 @@ def reopened_since(n: int, comment_id: Any, config: dict[str, Any]) -> bool:
     return any(e.get("event") == "reopened" for e in timeline[at + 1:])
 
 
-def close_flag_errors(args: argparse.Namespace) -> list[str]:
+BY_EPIC_RE = re.compile(r"(\d+)(?::([\w.+-]+))?")   # `--by-epic E` or `E:Mk`
+
+
+def parse_by_epic(text: str) -> tuple[int, str | None] | None:
+    """`--by-epic E[:Mk]` -> (E, Mk, or None for the whole epic), or None when it is neither form. `E:all` is the
+    whole epic, as `E` is: the `waits=E:all` form a whole-epic wait is recorded in (#379), whatever E's plan."""
+    m = BY_EPIC_RE.fullmatch((text or "").strip())
+    if not m:
+        return None
+    return int(m.group(1)), (None if m.group(2) in (None, NO_MILESTONE) else m.group(2))
+
+
+def close_flag_errors(n: int, reason: str, why: str | None, *, commit: str | None = None, of: int | None = None,
+                      epic: int | None = None, milestone: str | None = None) -> list[str]:
     """What is wrong with `close`'s arguments alone: checked before anything is read from GitHub."""
-    n, r, why = args.number, args.reason, (args.why or "").strip()
+    r, why = reason, (why or "").strip()
     errs = []
+    if r not in CLOSE_REASONS:
+        errs.append(f"--reason {r!r} is none of {', '.join(CLOSE_REASONS)}")
     if not why:
         errs.append("--why says why, on the issue")
     elif hits := identifier_hits(why):
         errs.append("--why would contain " + ", ".join(hits) + ": the repo is public")
-    if (args.commit is not None) != (r == "completed"):
+    if r == "completed" and (commit is None) == (epic is None):
+        errs.append("--reason completed takes one of --commit SHA (the commit on main that fixed it) or "
+                    "--by-epic E[:Mk] (the epic, or its milestone, that shipped the fix)")
+    if commit is not None and r != "completed":
         errs.append("--commit SHA goes with --reason completed, and only with it")
-    elif args.commit is not None and not SHA_RE.fullmatch(args.commit.lower()):
-        errs.append(f"--commit {args.commit!r} isn't a commit SHA (7 to 40 hex digits)")
-    if (args.of is not None) != (r == "duplicate"):
+    elif commit is not None and not SHA_RE.fullmatch(commit.lower()):
+        errs.append(f"--commit {commit!r} isn't a commit SHA (7 to 40 hex digits)")
+    if epic is not None and r != "completed":
+        errs.append("--by-epic E[:Mk] goes with --reason completed, and only with it")
+    elif epic == n:
+        errs.append(f"#{n} can't be closed by itself: --by-epic names the epic that fixed it")
+    if milestone is not None and (epic is None or not BY_EPIC_RE.fullmatch(f"{epic}:{milestone}")):
+        errs.append(f"milestone {milestone!r} goes with an epic, as --by-epic E:Mk")
+    if (of is not None) != (r == "duplicate"):
         errs.append("--of M goes with --reason duplicate, and only with it")
-    elif args.of == n:
+    elif of == n:
         errs.append(f"#{n} can't be a duplicate of itself")
     if r == "not-planned" and not errs:
         errs.append("--reason not-planned lands with M2 of #378 (a proposal the poster approves): not yet")
     return errs
+
+
+def epic_shipped_in(st: dict[str, Any], epic: int, milestone: str | None = None) -> dict[str, Any]:
+    """Whether epic #E has shipped to main, from its state (bundle_state of its bundle) alone: with no `milestone`,
+    the last milestone of its latest plan (`all`, NO_MILESTONE, for a plan with none); else that milestone, which must
+    be in its latest plan. Read from E's ship records, as `state E` prints them. Returns {epic, milestone (as named,
+    or None), shipped (the milestone whose record counts), sha}; an SdlcError says which check failed. E is never
+    required to be open: an epic that shipped everything is `done`, and closed."""
+    kind = {"slice": "a plan:slice issue", "subtask": "a plan:subtask issue", "debt": "a tech-debt ticket"}
+    if st.get("plan_kind"):
+        raise SdlcError(f"#{epic} is {kind.get(st['plan_kind'], st['plan_kind'])}, not an epic: "
+                        "--by-epic names the epic that shipped the fix")
+    if is_debt_epic(st):
+        raise SdlcError(f"#{epic} is the debt epic: it ships no milestones (its PRs merge into main one by one, so "
+                        "name the commit with --commit)")
+    if is_quick(st):
+        raise SdlcError(f"#{epic} is a quick change, not an epic: it ships no milestones (it merged into main as one "
+                        "commit: name it with --commit)")
+    if not st.get("plan_created"):
+        raise SdlcError(f"#{epic} isn't an epic with a created plan, so nothing of it has shipped: "
+                        "--by-epic names the epic that shipped the fix")
+    planned = [m for m in st.get("planned_milestones") or [] if m]
+    if milestone is not None and milestone not in planned:
+        raise SdlcError(f"#{epic}'s latest plan has no milestone {milestone} ("
+                        + (f"its milestones: {', '.join(planned)}" if planned else "it has no named milestones: "
+                           f"--by-epic {epic}") + ")")
+    key = milestone or (planned[-1] if planned else NO_MILESTONE)
+    shipped = st.get("shipped") or {}
+    if key not in shipped:
+        last = f" (the last milestone of its latest plan)" if milestone is None and planned else ""
+        raise SdlcError(f"{wait_target(epic, key)}{last} hasn't shipped to main"
+                        + (f"; shipped so far: {', '.join(shipped)}" if shipped else ""))
+    return {"epic": epic, "milestone": milestone, "shipped": key, "sha": shipped[key]}
+
+
+def epic_shipped(epic: int, milestone: str | None, config: dict[str, Any],
+                 trusted: set[str] | None = None) -> dict[str, Any]:
+    """epic_shipped_in for epic #E as GitHub has it now (its bundle, read with `trusted`, the caller's collaborators)."""
+    try:
+        bundle = fetch_bundle(epic, config, trusted)
+    except SdlcError as exc:
+        raise SdlcError(f"#{epic} couldn't be read ({exc}): --by-epic names an epic of this repo") from None
+    return epic_shipped_in(bundle_state(bundle, config), epic, milestone)
+
+
+def shipped_text(shipped: dict[str, Any]) -> str:
+    """`#E's Mk`, `#E (its last milestone, Mk)` or `#E`: what a close by an epic names."""
+    e, key = shipped["epic"], shipped["shipped"]
+    if shipped.get("milestone") or key == NO_MILESTONE:
+        return wait_target(e, key)
+    return f"#{e} (its last milestone, {key})"
 
 
 def close_owner(issue: dict[str, Any], st: dict[str, Any], resuming: bool = False) -> str | None:
@@ -4095,30 +4209,40 @@ def recorded_why(body: str) -> str | None:
     return body.split(CLOSE_WHY, 1)[1].strip() if CLOSE_WHY in body else None
 
 
-def close_note(reason: str, why: str, sha: str | None, of: int | None) -> str:
-    return {"completed": f"Closed as **completed**: fixed on `main` by {sha}.",
-            "duplicate": f"Closed as a **duplicate** of #{of}."}[reason] + CLOSE_WHY + why
+def close_note(reason: str, why: str, sha: str | None, of: int | None,
+               shipped: dict[str, Any] | None = None) -> str:
+    if shipped:
+        head = (f"Closed as **completed**: fixed by {shipped_text(shipped)}, shipped to `main`"
+                + (f" in {shipped['sha']}" if shipped.get("sha") else "") + ".")
+    else:
+        head = {"completed": f"Closed as **completed**: fixed on `main` by {sha}.",
+                "duplicate": f"Closed as a **duplicate** of #{of}."}[reason]
+    return head + CLOSE_WHY + why
 
 
-def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    """Close an ordinary issue fixed by a commit on main, or a duplicate: the record, GitHub's close, sdlc:done, each
-    read back. Every check runs before the first write; the same command again finishes a run cut short."""
-    if errs := close_flag_errors(args):
+def close_checks(n: int, reason: str, why: str, config: dict[str, Any], *, commit: str | None = None,
+                 of: int | None = None, epic: int | None = None, milestone: str | None = None,
+                 trusted: set[str] | None = None) -> dict[str, Any]:
+    """Every check `close` makes, reading GitHub and writing nothing: what close_apply will do (`steps`), or `done`
+    when the issue is already closed and labelled as its record says. An SdlcError says why it may not close."""
+    milestone = None if milestone == NO_MILESTONE else milestone
+    if errs := close_flag_errors(n, reason, why, commit=commit, of=of, epic=epic, milestone=milestone):
         raise SdlcError("; ".join(errs))
-    n, r, why = args.number, args.reason, args.why.strip()
+    r, why = reason, why.strip()
     raw_issue(n, "`close` closes issues, not pull requests", config)
-    trusted = fetch_trusted(config)
+    trusted = fetch_trusted(config) if trusted is None else trusted
     issue, comments = fetch_slice(n, config)
     prior_record = latest_close_record(comments, trusted)
     prior = prior_record[0] if prior_record else None
-    sha = commit_on_main(args.commit.lower(), config, hint=f"`--reason completed` names the commit on "
-                         f"{config.get('default_branch', 'main')} that fixed #{n}") if args.commit is not None else None
-    if args.of is not None:
-        dup = raw_issue(args.of, f"`--of` names the issue #{n} duplicates", config)
+    sha = commit_on_main(commit.lower(), config, hint=f"`--reason completed` names the commit on "
+                         f"{config.get('default_branch', 'main')} that fixed #{n}") if commit is not None else None
+    if of is not None:
+        dup = raw_issue(of, f"`--of` names the issue #{n} duplicates", config)
         if dup.get("state") == "closed" and dup.get("state_reason") == "not_planned":
-            raise SdlcError(f"#{args.of} was closed as not planned: closing #{n} as its duplicate would drop the "
+            raise SdlcError(f"#{of} was closed as not planned: closing #{n} as its duplicate would drop the "
                             "request with nowhere left to go, which needs the poster's approval (lands with M2 of #378)")
-    extra = {"reason": r, **({"commit": sha} if sha else {}), **({"of": str(args.of)} if args.of is not None else {})}
+    extra = {"reason": r, **({"commit": sha} if sha else {}), **({"of": str(of)} if of is not None else {}),
+             **({"epic": str(epic)} if epic is not None else {}), **({"milestone": milestone} if milestone else {})}
     same = bool(prior) and all(prior.get(k) == extra.get(k) for k in CLOSE_KEYS)
     if prior and not same:
         got = " ".join(f"{k}={prior[k]}" for k in CLOSE_KEYS if k in prior)
@@ -4126,9 +4250,17 @@ def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if same and (said := recorded_why(prior_record[1].get("body", ""))) != why:
         raise SdlcError(f"#{n}'s close record says --why {said!r}: a different --why is refused "
                         "(rerun with the recorded one to finish it)")
+    # the epic's ship gated the record when it was posted: a resume finishes that close, even if E's plan has grown
+    # a milestone since (with no Mk, "its last milestone" can move)
+    shipped = epic_shipped(epic, milestone, config, trusted) if epic is not None and not same else None
+    by = (shipped_text(shipped) if shipped else wait_target(epic, milestone) if milestone else f"#{epic}"
+          ) if epic is not None else None
     want = CLOSE_STATE_REASON[r]
     staged = state_labels_on(issue, config)
     labelled = staged == [f"{PREFIX}done"]
+    plan = {"number": n, "reason": r, "why": why, "sha": sha, "of": of, "shipped": shipped, "by": by, "extra": extra,
+            "same": same, "state": issue["state"], "labels": issue["labels"], "labelled": labelled, "want": want,
+            "trusted": trusted, "done": None}
     if issue["state"] == "closed":
         if not same:
             raise SdlcError(f"#{n} is already closed ({issue.get('state_reason')}) with no close record: "
@@ -4137,8 +4269,8 @@ def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
             raise SdlcError(f"#{n} is closed as {issue.get('state_reason')}, not {want} as its record says: "
                             "a person's to settle")
         if labelled:
-            print(f"#{n}: already closed as {want} and labelled {PREFIX}done, as its record says: nothing to do")
-            return 0
+            return {**plan, "steps": [],
+                    "done": f"#{n}: already closed as {want} and labelled {PREFIX}done, as its record says: nothing to do"}
     # a reopen since the record shows in the timeline, however it was relabelled or closed again since (sdlc:done
     # on an open issue proves nothing: a close that didn't take effect before the label edit leaves the same)
     if same and reopened_since(n, prior_record[1].get("id"), config):
@@ -4147,30 +4279,36 @@ def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
     # record (not reopened since) is this close's label, so only that state is let through
     if why_not := close_owner(issue, derive_state(issue, comments, trusted, config), resuming=same and labelled):
         raise SdlcError(why_not)
-    what = f"{r}, by {sha[:12]}" if sha else f"duplicate of #{args.of}"
+    what = f"{r}, by {sha[:12]}" if sha else f"{r}, by {by}" if by else f"duplicate of #{of}"
     removed = [l for l in staged if l != f"{PREFIX}done"]
-    steps = ([] if same else [f"post the close record on #{n} ({what})"]) \
+    plan["steps"] = ([] if same else [f"post the close record on #{n} ({what})"]) \
         + ([] if issue["state"] == "closed" else
-           [f"close #{n} as completed" if r == "completed" else f"close #{n} as a duplicate of #{args.of}"]) \
+           [f"close #{n} as completed" if r == "completed" else f"close #{n} as a duplicate of #{of}"]) \
         + ([] if labelled else [f"label #{n} {PREFIX}done" + (f" (remove {', '.join(removed)})" if removed else "")])
-    if args.dry_run:
-        for s in steps:
-            print(f"would {s}")
-        return 0
+    return plan
+
+
+def close_apply(plan: dict[str, Any], config: dict[str, Any]) -> str:
+    """close_checks' writes, in order: the record, GitHub's close, sdlc:done; then each read back. A failure after
+    the record is finished by the same close again. Returns the line saying how the issue ended."""
+    n, r, sha, of, extra, want = plan["number"], plan["reason"], plan["sha"], plan["of"], plan["extra"], plan["want"]
+    if plan["done"]:
+        return plan["done"]
     repo = repo_of(config)
-    if not same:
-        post_comment(n, render_comment(CLOSED_KIND, None, close_note(r, why, sha, args.of), config, **extra), config)
+    if not plan["same"]:
+        note = close_note(r, plan["why"], sha, of, plan["shipped"])
+        post_comment(n, render_comment(CLOSED_KIND, None, note, config, **extra), config)
     try:   # the record is on the issue now: a failure from here on is finished by the same command
-        if issue["state"] != "closed":
+        if plan["state"] != "closed":
             gh(["issue", "close", str(n), "--repo", repo]
-               + (["--reason", "completed"] if r == "completed" else ["--duplicate-of", str(args.of)]))
-        if not labelled:
-            set_state_label(n, issue["labels"], "done", config)
+               + (["--reason", "completed"] if r == "completed" else ["--duplicate-of", str(of)]))
+        if not plan["labelled"]:
+            set_state_label(n, plan["labels"], "done", config)
     except SdlcError as exc:
         raise SdlcError(f"{exc}: the close record is posted; rerun the same `close {n}` to finish it") from None
     # read back: the record, the close, the label
     issue, comments = fetch_slice(n, config)
-    got, bad = latest_close(comments, trusted), []
+    got, bad = latest_close(comments, plan["trusted"]), []
     if not got or any(got.get(k) != extra.get(k) for k in CLOSE_KEYS):
         bad.append(f"its latest close record is {got!r}, not {extra}")
     if not (issue["state"] == "closed" and issue.get("state_reason") == want):
@@ -4179,8 +4317,36 @@ def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
         bad.append(f"its sdlc:* labels are {state_labels_on(issue, config)}, not [{PREFIX}done]")
     if bad:
         raise SdlcError(f"read-back of #{n}: " + "; ".join(bad) + f": rerun the same `close {n}` to finish it")
-    print(f"#{n}: closed as {want}" + (f", fixed by {sha[:12]}" if sha else f", a duplicate of #{args.of}")
-          + f"; labelled {PREFIX}done")
+    how = f", fixed by {sha[:12]}" if sha else f", fixed by {plan['by']}" if plan["by"] else f", a duplicate of #{of}"
+    return f"#{n}: closed as {want}{how}; labelled {PREFIX}done"
+
+
+def close_issue(n: int, reason: str, why: str, config: dict[str, Any], *, commit: str | None = None,
+                of: int | None = None, epic: int | None = None, milestone: str | None = None, dry_run: bool = False,
+                trusted: set[str] | None = None) -> list[str]:
+    """`close` without argparse (#379's `then=close` lift calls this): close_checks, then close_apply unless
+    `dry_run`. Returns the lines to print; raises SdlcError on a refusal, before the first write."""
+    plan = close_checks(n, reason, why, config, commit=commit, of=of, epic=epic, milestone=milestone, trusted=trusted)
+    if dry_run and not plan["done"]:
+        return [f"would {s}" for s in plan["steps"]]
+    return [close_apply(plan, config)]
+
+
+def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Close an ordinary issue fixed by a commit on main or by an epic that shipped, or a duplicate: the record,
+    GitHub's close, sdlc:done, each read back. Every check runs before the first write; the same command again
+    finishes a run cut short."""
+    epic = milestone = None
+    if args.by_epic is not None:
+        if (parsed := parse_by_epic(args.by_epic)) is None:   # with the other flags' errors (as if E were given)
+            raise SdlcError("; ".join([f"--by-epic {args.by_epic!r} isn't E or E:Mk (an epic's number, and a "
+                                       "milestone of its latest plan)"]
+                                      + close_flag_errors(args.number, args.reason, args.why, commit=args.commit,
+                                                          of=args.of, epic=0)))
+        epic, milestone = parsed
+    for line in close_issue(args.number, args.reason, args.why, config, commit=args.commit, of=args.of, epic=epic,
+                            milestone=milestone, dry_run=args.dry_run):
+        print(line)
     return 0
 
 
@@ -8688,13 +8854,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="check everything and print the writes, make none")
     p.set_defaults(fn=command_debt_intake)
 
-    p = sub.add_parser("close", help="close an ordinary issue fixed by a commit on main, or a duplicate: a marked "
-                                     "record, GitHub's close and sdlc:done, read back (rerun to finish a cut-short one)")
+    p = sub.add_parser("close", help="close an ordinary issue fixed by a commit on main or by an epic that shipped, "
+                                     "or a duplicate: a marked record, GitHub's close and sdlc:done, read back (rerun "
+                                     "to finish a cut-short one)")
     p.add_argument("number", type=int, help="the issue")
     p.add_argument("--reason", required=True, choices=CLOSE_REASONS, help="how it ended (not-planned lands with M2)")
     p.add_argument("--why", help="why, posted on the issue (required; the repo is public)")
     p.add_argument("--commit", help="with `completed`: the commit on main that fixed it")
     p.add_argument("--of", type=int, help="with `duplicate`: the issue it duplicates")
+    p.add_argument("--by-epic", metavar="E[:Mk]", help="with `completed`: the epic that shipped the fix (its last "
+                                                      "milestone), or its milestone Mk")
     p.add_argument("--dry-run", action="store_true", help="check everything and print the writes, make none")
     p.set_defaults(fn=command_close)
 

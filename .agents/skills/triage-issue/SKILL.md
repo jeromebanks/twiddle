@@ -28,7 +28,7 @@ Don't ask the user "shall I post?" and don't relay questions in the chat.
 
 The one exception is a preview run: if the user passed `--preview`
 (`/triage-issue 12 --preview`) or `.sdlc/config.json` has `"confirm_before_posting": true`,
-add `--dry-run` to each `transition`, show the output, and post only after an OK.
+add `--dry-run` to each `transition` and `close`, show the output, and post only after an OK.
 Unattended runs never preview.
 
 `/triage-issue [N]`. With no `N`, take the first line of `uv run python tools/sdlc.py next`.
@@ -76,6 +76,10 @@ type label if it has none: `gh issue edit N --add-label bug` or `enhancement`.
 Then decide the lane: a small, read-only change (a station, a venue entry, a bug fixed in a
 few files) may take the **quick lane** below, with a short brief instead of the PRD of step 4
 or the diagnosis of step 5.
+
+If what you read shows the issue is **already fixed** (by a commit on `main`, or by an epic that has
+shipped) or is a **duplicate** of another issue, don't triage it: close it with `close` ("Closing an
+issue that is already done", below), never with a bare `gh issue close`.
 
 ## 3. Is it clear?
 
@@ -217,6 +221,40 @@ verdict and give a reason in plain words (the repo is public: no IP, MAC, device
 `next` as `/triage-issue T`, and is handled by the rest of this skill. Report each verdict, and end
 with the `next:` line of `state D`.
 
+## Closing an issue that is already done
+
+An ordinary issue (not a slice, a subtask, a tech-debt ticket or the debt epic, and not an epic being
+built) that is already fixed, or a duplicate, is closed by the tool, which posts a marked record of why
+first, closes it with GitHub's matching reason, labels it `sdlc:done` and reads all three back. The poster
+is asked nothing. **Never close an issue with a bare `gh issue close`**: it leaves no record, a stale
+`sdlc:*` label, and `state N` can't say how the issue ended.
+
+```bash
+# fixed by a commit on main (read on GitHub: it must be on origin's default branch)
+uv run python tools/sdlc.py close N --reason completed --commit SHA --why "<one plain line>" --dry-run
+# fixed by an epic that shipped: its last milestone, or milestone Mk (it must have a ship record)
+uv run python tools/sdlc.py close N --reason completed --by-epic E[:Mk] --why "<one plain line>" --dry-run
+# the same as issue M (open, or closed as completed)
+uv run python tools/sdlc.py close N --reason duplicate --of M --why "<one plain line>" --dry-run
+```
+
+- Run it with `--dry-run` first: it makes every check and prints each write it would make. Then run the
+  same command without it (in a preview run, only after the user's OK).
+- `--why` is posted on a public issue: no IP, MAC, device ID or secret (the tool refuses one).
+- It refuses what another verb or a person owns, and says who: a slice or subtask (`merge`), a tech-debt
+  ticket (`debt-intake`), the debt epic (`debt-epic`), an escalated issue, an epic with a created plan,
+  and a claimed quick change. `--by-epic` refuses an epic that hasn't shipped what it names, and anything
+  that isn't an epic with a created plan; `--of` refuses a pull request and the issue itself, and a
+  duplicate of an issue closed as not planned waits for M2 of #378 (it needs the poster's approval).
+- If it stops partway (it says so), run the same command again: it finishes without a second record, and
+  refuses different arguments.
+- If a permission check refuses `close` itself (not the tool), don't work around it: report the exact command,
+  for the session that started you or the poster to run (`SDLC.md`, "The close permission").
+- An issue that only looks unwanted is not closed: `--reason not-planned` (a proposal the poster approves)
+  arrives with M2 of #378. Until then, triage it as usual.
+
+Report the close, and the `closed:` line `state N` now prints for it (how the issue ended).
+
 ## 6. A reply arrived
 
 `state` tells you what it was:
@@ -232,6 +270,8 @@ with the `next:` line of `state D`.
   `uv run python tools/sdlc.py merge-prd N PR` (it refuses unless the issue is approved and the PR
   changes nothing outside `docs/prd/`). Report that planning (`plan-issue`) is next.
 - `/changes <text>` or free-form feedback -> revise and post the next revision (step 4/5).
+- The reply shows the issue is already fixed, or a duplicate -> close it with `close` (above),
+  `--dry-run` first.
 - A question that needs an answer, not a new revision -> reply with
   `transition N <same state> --kind note --body-file reply.md`. Revisions and
   questions spend `max_rounds`; notes don't.

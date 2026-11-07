@@ -193,6 +193,48 @@ like any other (`state` on it says so); if the change then escalates to the full
   linked to its successor. After `max_rounds` (`.sdlc/config.json`) the agent escalates.
 - Reproducing a bug uses read-only commands and `--dry-run` only (see `CLAUDE.md`).
 
+## Closing an ordinary issue (`close`)
+
+An ordinary issue that is already done, fixed elsewhere or a duplicate, is closed by `tools/sdlc.py`, never by a
+bare `gh issue close` (which leaves no record and a stale `sdlc:*` label):
+
+```bash
+uv run python tools/sdlc.py close N --reason completed --commit SHA   --why "..." [--dry-run]
+uv run python tools/sdlc.py close N --reason completed --by-epic E[:Mk] --why "..." [--dry-run]
+uv run python tools/sdlc.py close N --reason duplicate --of M          --why "..." [--dry-run]
+```
+
+- **`--reason completed`** takes exactly one of `--commit SHA`, a commit on origin's default branch (read on
+  GitHub's compare, so no local fetch can be stale), or `--by-epic E[:Mk]`: epic E's last planned milestone
+  (`E`, or `E:all`), or its milestone Mk, has a ship record on E (what `state E` prints as "shipped to main").
+  `--by-epic` refuses a slice, a subtask, a tech-debt ticket, the debt epic, a quick change, an issue with no created
+  plan, an Mk that isn't in E's latest plan, and a milestone that hasn't shipped, saying which. A closed or `done` E is
+  the usual case.
+- **`--reason duplicate`** takes `--of M`: an issue of this repo (not a pull request, and not N), open or closed as
+  completed. A duplicate of an issue closed as not planned would drop the request, so it is refused until it can be
+  proposed to the poster.
+- **`--reason not-planned`** is refused for now: it will only propose the close, for the poster's `/approve`
+  (milestone M2 of #378). An agent never drops a request on its own.
+- **`--why`** is required and posted on the public issue: one with an IP, MAC, device ID or secret is refused.
+
+**Record first.** Every check runs before the first write (`--dry-run` runs them all and prints each write). Then
+`close` posts a marked `kind=closed` record naming the reason and the commit, epic (and milestone) or duplicate, with
+the `--why`; then closes the issue with GitHub's matching reason (completed, or as a duplicate of M); then makes
+`sdlc:done` its only `sdlc:*` label; and reads all three back. A run cut short after the record is finished by the same
+command, with no second record; different arguments, or a different `--why`, are refused, and so is an issue reopened
+since its record (a reopened issue is a human's). `state N` on an issue `close` closed prints how it ended, from the
+record: `closed: completed by <sha>`, `completed by epic #E` (or `#E's Mk`), `duplicate of #M`, `not planned`. One
+closed by hand, with no record, reads as closed, as before.
+
+**What it refuses**, naming who closes it: a `plan:slice` or `plan:subtask` (`merge`), a `tech-debt` ticket
+(`debt-intake`), the debt epic (`debt-epic`), an `sdlc:escalated` issue (a human's), an epic with a created plan
+(`planned`, `in-progress`, `demo-review`, or `approved` once created: a person's call, or `ship`'s), and a claimed quick
+change (`work-slice`'s). Anything else that is open may be closed: untriaged, `triage`, `needs-info`, `prd-review`,
+`diagnosis-review`, and `approved` with no plan created.
+
+`close` writes to GitHub only, never to a speaker. For a sub-agent to run it, the maintainer adds its rule to
+`.claude/settings.json` ("The close permission", below).
+
 ## The quick lane
 
 An issue whose change is small and read-only (a station or venue entry, a bug fixed in a few
@@ -380,6 +422,23 @@ a real sub-agent merge. **Without the rule**, a session that is refused leaves t
 so, and `state` on the PR's issue (or on the debt epic) names `merge PR` with the gate's results;
 the orchestrating session, which the poster runs, then runs that one command. Nothing is ever merged
 around the gate.
+
+**The close permission.** `close` (above) writes to GitHub (a record, a close, a label), and the merge rule allows
+nothing but `merge` and `cleanup`. For a session to run `close` itself, sub-agent or not, the poster adds this entry by
+hand too, to the same `permissions.allow` list (an agent never edits `.claude/`):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run python tools/sdlc.py close *)"
+    ]
+  }
+}
+```
+
+It allows `close N ...` with or without `--dry-run`, and nothing else. Without it, a refused session reports the
+`close` command it would have run, and the poster runs it.
 
 ## Planning (`plan-issue`)
 

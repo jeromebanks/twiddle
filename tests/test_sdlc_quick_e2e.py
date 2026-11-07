@@ -213,6 +213,7 @@ class FakeGitHub:
 
     def issue_graphql(self, i):
         return {"number": i["number"], "title": i["title"], "body": i["body"], "state": i["state"].upper(),
+                "stateReason": (i["state_reason"] or "").upper() or None,
                 "author": {"login": i["author"]}, "labels": [{"name": l} for l in i["labels"]],
                 "createdAt": i["created_at"], "assignees": [{"login": a} for a in i["assignees"]],
                 "milestone": {"title": i["milestone"]} if i["milestone"] else None}
