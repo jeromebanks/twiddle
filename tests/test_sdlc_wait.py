@@ -317,3 +317,186 @@ def test_transition_never_moves_an_issue_into_waiting(cfg, tmp_path, capsys, lab
     assert sdlc.main(["--config", str(cfg), "transition", str(N), "waiting", "--kind", "note", "--body-file",
                       str(body), "--from-file", str(f), "--dry-run"]) == 1
     assert "only `uv run python tools/sdlc.py wait" in capsys.readouterr().err
+
+
+# --- claim: nothing builds a waiting issue, in any lane --------------------------------------------------------
+
+SLICE = 400
+
+
+def waiting_epic_bundle(number=N, labels=("sdlc:waiting", "enhancement")):
+    return {"issue": {**issue(labels, number=number), "body": ""}, "comments": [wait_comment()],
+            "trusted": sorted(TRUSTED)}
+
+
+def slice_of(epic=N, label="plan:slice", number=SLICE):
+    kind = "slice" if label == "plan:slice" else "subtask"
+    return {"issue": {"number": number, "title": "a slice", "state": "open", "author": OWNER,
+                      "labels": [label, "complexity:judgment"],
+                      "body": f"<!-- sdlc:v1 kind={kind} epic={epic} key=T1.1 -->\nthe brief"},
+            "comments": [], "trusted": sorted(TRUSTED), "blockers": [], "pr": None, "pr_comments": []}
+
+
+class FakeClaim:
+    """`gh` for a claim that must be refused: the bundle it reads, the epic's, and nothing posted or made."""
+
+    def __init__(self, monkeypatch, bundle, epics=()):
+        self.bundle, self.epics, self.read, self.posted, self.edits = bundle, {e["issue"]["number"]: e for e in epics}, [], [], []
+        monkeypatch.setattr(sdlc, "slice_bundle", lambda n, config: self.bundle)
+        monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, config, trusted=None: self.read.append(n) or self.epics[n])
+        monkeypatch.setattr(sdlc, "post_comment", lambda n, body, config: self.posted.append(body) or {})
+        monkeypatch.setattr(sdlc, "gh", lambda args, **k: self.edits.append(args) or "")
+        monkeypatch.setattr(sdlc, "gh_json", lambda args: pytest.fail(f"a refused claim reads nothing else: {args}"))
+        monkeypatch.setattr(sdlc, "add_slice_worktree", lambda *a, **k: pytest.fail("a refused claim makes no worktree"))
+
+
+LANES = [[], ["--resume"], ["--retry", "--model", "opus"], ["--dry-run"], ["--quick"], ["--quick", "--dry-run"],
+         ["--quick", "--resume"], ["--debt"], ["--debt", "--resume"]]
+
+
+@pytest.mark.parametrize("flags", LANES)
+@pytest.mark.parametrize("label", ["plan:slice", "plan:subtask"])
+def test_claim_refuses_a_slice_of_a_waiting_epic_in_every_lane(cfg, monkeypatch, capsys, flags, label):
+    fake = FakeClaim(monkeypatch, slice_of(label=label), [waiting_epic_bundle()])
+    assert sdlc.main(["--config", str(cfg), "claim", str(SLICE), *flags]) == 1
+    err = capsys.readouterr().err
+    assert f"#{N} is waiting for #{E}'s M2 to ship to main (https://example/" in err
+    assert f"while it waits, nothing builds #{N}'s slices, #{SLICE} among them" in err and f"wait {N} --lift" in err
+    assert fake.posted == [] and fake.edits == [] and fake.read == [N]
+
+
+@pytest.mark.parametrize("flags", LANES)
+def test_claim_refuses_the_waiting_issue_itself_in_every_lane(cfg, monkeypatch, capsys, flags):
+    """A quick change parked before its claim: approved brief, then the wait (its label replaced sdlc:approved)."""
+    b = {**waiting_epic_bundle(labels=("sdlc:waiting", "complexity:routine", "enhancement")),
+         "blockers": [], "pr": None, "pr_comments": []}
+    fake = FakeClaim(monkeypatch, b)
+    assert sdlc.main(["--config", str(cfg), "claim", str(N), *flags]) == 1
+    err = capsys.readouterr().err
+    assert f"#{N} is waiting for #{E}'s M2 to ship to main" in err and f"while it waits, nothing builds #{N};" in err
+    assert fake.posted == [] and fake.edits == [] and fake.read == []   # its own label decides: no epic read
+
+
+def test_claim_quick_from_a_saved_bundle_refuses_a_waiting_issue(cfg, monkeypatch, tmp_path, capsys):
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps({**waiting_epic_bundle(labels=("sdlc:waiting", "complexity:routine")),
+                             "blockers": [], "pr": None, "pr_comments": []}))
+    assert sdlc.main(["--config", str(cfg), "claim", str(N), "--quick", "--dry-run", "--from-file", str(f)]) == 1
+    assert f"#{N} is waiting for #{E}'s M2" in capsys.readouterr().err
+
+
+def test_claim_quick_from_a_saved_slice_bundle_reads_no_epic(cfg, monkeypatch, tmp_path, capsys):
+    """Offline, a slice's epic is not read from GitHub: the lane's own refusal stands, as before."""
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda *a, **k: pytest.fail("offline: no epic read"))
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps(slice_of()))
+    assert sdlc.main(["--config", str(cfg), "claim", str(SLICE), "--quick", "--dry-run", "--from-file", str(f)]) == 1
+    assert "without --quick" in capsys.readouterr().err
+    # a saved bundle carrying the epic's state decides from it
+    est = sdlc.derive_state(waiting_epic_bundle()["issue"], [wait_comment()], TRUSTED, CONFIG)
+    f.write_text(json.dumps({**slice_of(), "epic_state": est, "epic_labels": ["sdlc:waiting"]}))
+    assert sdlc.main(["--config", str(cfg), "claim", str(SLICE), "--quick", "--dry-run", "--from-file", str(f)]) == 1
+    assert f"#{N} is waiting for #{E}'s M2" in capsys.readouterr().err
+
+
+def test_a_waiting_label_with_no_wait_recorded_is_still_refused():
+    b = {"issue": {**issue(), "body": ""}, "comments": [], "trusted": sorted(TRUSTED)}
+    (err,), _ = sdlc.wait_claim_errors(b, CONFIG)
+    assert f"#{N} is labelled sdlc:waiting (no wait recorded" in err
+
+
+def test_a_slice_of_an_epic_that_doesnt_wait_is_not_refused_and_its_epic_is_read_once(monkeypatch):
+    fake = FakeClaim(monkeypatch, slice_of(), [waiting_epic_bundle(labels=("sdlc:planned", "enhancement"))])
+    errs, est = sdlc.wait_claim_errors(fake.bundle, CONFIG)
+    assert errs == [] and est["state"] == "planned" and fake.read == [N]
+    # the state is handed on, so a fresh claim's epic checks don't read it again
+    monkeypatch.setattr(sdlc, "epic_progress", lambda *a, **k: None)
+    sdlc.epic_pause_errors(fake.bundle, CONFIG, False, est)
+    assert fake.read == [N]
+
+
+def test_a_debt_tickets_source_epic_waiting_holds_nothing_back(monkeypatch):
+    """A debt ticket's marker names the epic it came from, not one that holds it (its waits are its own)."""
+    ticket = {"issue": {"number": 77, "title": "t", "state": "open", "author": OWNER, "labels": ["tech-debt"],
+                        "body": f"<!-- sdlc:v1 kind=debt epic={N} source=review -->"},
+              "comments": [], "trusted": sorted(TRUSTED)}
+    fake = FakeClaim(monkeypatch, ticket, [waiting_epic_bundle()])
+    assert sdlc.wait_claim_errors(ticket, CONFIG) == ([], None) and fake.read == []
+
+
+# --- next: waiting issues on one `waiting:` line ---------------------------------------------------------------
+
+def retarget(b, number):
+    return {**b, "issue": {**b["issue"], "number": number}, "trusted": sorted(TRUSTED)}
+
+
+def waiter(number, waits, *more):
+    return {"issue": {**issue(number=number), "body": ""}, "comments": [wait_comment(1, waits=waits), *more],
+            "trusted": sorted(TRUSTED)}
+
+
+class FakeNext:
+    def __init__(self, monkeypatch, bundles):
+        self.bundles, self.read = {b["issue"]["number"]: b for b in bundles}, []
+        self.listed = [self.bundles[n]["issue"] for n in self.bundles if n in LISTED]
+        monkeypatch.setattr(sdlc, "repo_of", lambda config: "o/r")
+        monkeypatch.setattr(sdlc, "fetch_trusted", lambda config: set(TRUSTED))
+        monkeypatch.setattr(sdlc, "gh_json", lambda args: [{**i, "labels": [{"name": l} for l in i["labels"]]}
+                                                           for i in self.listed])
+        monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail(f"next reads nothing else: {a}"))
+        monkeypatch.setattr(sdlc, "fetch_bundle",
+                            lambda n, config, trusted=None: self.read.append(n) or self.bundles[n])
+
+
+# open and listed: the waiters, and two of the epics they wait on (one numbered after its waiter)
+LISTED = {308, 350, 400, 410, 420, 500, E}
+
+
+def next_world(monkeypatch):
+    poster_reply = comment(POSTER, "actually, do this now", 5)
+    return FakeNext(monkeypatch, [
+        retarget(target(label="sdlc:prd-review"), E),            # listed, read for itself and for both its waiters
+        waiter(308, f"{E}:M2"), waiter(350, f"{E}:all"),          # on #263, not shipped
+        waiter(400, "500:M1"), retarget(target(shipped=("M1",), label="sdlc:prd-review"), 500),   # shipped
+        waiter(410, "270:M2"), retarget(target(state="closed", label="sdlc:prd-review"), 270),    # broken
+        waiter(420, f"{E}:M2", poster_reply),                       # the poster replied
+    ])
+
+
+def test_next_prints_unshipped_waits_on_one_line_and_reads_each_epic_once(cfg, monkeypatch, capsys):
+    fake = next_world(monkeypatch)
+    assert sdlc.main(["--config", str(cfg), "next"]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[-1] == f"waiting: #308 on #{E}'s M2; #350 on #{E}"
+    work = out.splitlines()[:-1]
+    assert not any(l.startswith(("#308", "#350")) for l in work)    # not agent work
+    assert f"#400  waiting" in out and "next: `uv run python tools/sdlc.py wait 400 --lift`" in out
+    assert "#420  waiting" in out                                    # respond_to_reply: the agent's, with its next
+    assert "#410" not in out                                        # wait_broken: a human's, like any other
+    assert sorted(fake.read) == sorted([E, 270, 308, 350, 400, 410, 420, 500])   # every epic read once
+
+
+def test_next_json_lists_the_agents_waits_and_one_entry_for_the_rest(cfg, monkeypatch, capsys):
+    next_world(monkeypatch)
+    assert sdlc.main(["--config", str(cfg), "next", "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    agents = [(s["number"], s["action"]) for s in listed if s["turn"] == "agent"]
+    assert agents == [(400, "lift_wait"), (420, "respond_to_reply")]
+    (w,) = [s for s in listed if s["turn"] != "agent"]
+    assert (w["number"], w["state"], w["turn"]) == (None, "waiting", "none")
+    assert [(x["number"], x["epic"], x["milestone"], x["on"]) for x in w["waiting"]] == [
+        (308, E, "M2", f"#{E}'s M2"), (350, E, "all", f"#{E}")]
+
+
+def test_next_with_nothing_waiting_prints_no_waiting_line(cfg, monkeypatch, capsys):
+    FakeNext(monkeypatch, [retarget(target(label="sdlc:prd-review"), E)])
+    assert sdlc.main(["--config", str(cfg), "next"]) == 0
+    assert "waiting:" not in capsys.readouterr().out
+    assert sdlc.main(["--config", str(cfg), "next", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_next_with_only_a_wait_says_nothing_is_the_agents_then_the_wait(cfg, monkeypatch, capsys):
+    FakeNext(monkeypatch, [waiter(308, f"{E}:M2"), retarget(target(label="sdlc:prd-review"), E)])
+    assert sdlc.main(["--config", str(cfg), "next"]) == 0
+    assert capsys.readouterr().out == f"nothing waiting on the agent\nwaiting: #308 on #{E}'s M2\n"

@@ -1504,20 +1504,26 @@ def finish_creation(st: dict[str, Any], records: list[dict[str, Any]]) -> dict[s
 
 
 def with_wait(st: dict[str, Any], config: dict[str, Any], offline: bool, trusted: set[str] | None,
-              bundle: dict[str, Any] | None) -> dict[str, Any]:
+              bundle: dict[str, Any] | None, targets: dict[int, dict[str, Any] | None] | None = None
+              ) -> dict[str, Any]:
     """A waiting issue with nothing else due, once its target epic is read (offline: the bundle's `target`, that
     epic's bundle, as a debt ticket's `source`): `lift_wait` when the target shipped, `wait_broken` when it never
-    will. A target that can't be read leaves it waiting."""
+    will. A target that can't be read leaves it waiting. `targets` caches each epic's bundle (None: unreadable)
+    across issues, so `next` reads an epic many issues wait on once."""
     w = st["wait"]
     tb = None
     if offline:
         tb = (bundle or {}).get("target")
+    elif targets is not None and w["epic"] in targets:
+        tb = targets[w["epic"]]
     else:
         try:
             tb = fetch_bundle(w["epic"], config, trusted if trusted is not None else fetch_trusted(config))
         except SdlcError as exc:
             print(f"could not read #{w['epic']} ({exc}): `next` doesn't say whether #{st['number']}'s wait is over",
                   file=sys.stderr)
+        if targets is not None:
+            targets[w["epic"]] = tb
     src = bundle_state({"trusted": (bundle or {}).get("trusted", []), **tb}, config) if tb else None
     status = wait_status(w, src)
     st = {**st, "wait": {**w, "status": status}}
@@ -1534,9 +1540,11 @@ def with_wait(st: dict[str, Any], config: dict[str, Any], offline: bool, trusted
 
 
 def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
-              trusted: set[str] | None = None, bundle: dict[str, Any] | None = None) -> dict[str, Any]:
+              trusted: set[str] | None = None, bundle: dict[str, Any] | None = None,
+              targets: dict[int, dict[str, Any] | None] | None = None) -> dict[str, Any]:
     """`state` plus the command to run next (an epic being built looks at its slices on GitHub). With the issue's
-    `bundle`, a quick change is checked as `claim --quick` (or `--resume`, once claimed) would check it."""
+    `bundle`, a quick change is checked as `claim --quick` (or `--resume`, once claimed) would check it.
+    `targets` caches the epics waits are on (with_wait)."""
     progress = None
     records: list[dict[str, Any]] = []
     if creation_unrecorded(st):   # issues made by a plan-create cut short before its record (offline: the bundle's)
@@ -1551,7 +1559,7 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
                       "creation was cut short", file=sys.stderr)
     st = finish_creation(st, records)
     if st["state"] == WAITING and st.get("wait") and st["action"] == "none" and not st.get("issue_closed"):
-        st = with_wait(st, config, offline, trusted, bundle)
+        st = with_wait(st, config, offline, trusted, bundle, targets)
     if st["action"] in ("work_slices", "plan_next_milestone") and not offline:
         progress = epic_progress(st["number"], config, trusted if trusted is not None else fetch_trusted(config))
     if st.get("plan_kind") == "debt":   # the ticket's debt epic, if one holds it (offline: the bundle's `debt_epic`)
@@ -1655,16 +1663,26 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
     issues = gh_json(["issue", "list", "--repo", repo, "--state", "open", "--limit", str(NEXT_LIMIT), "--json",
                       "number,title,state,author,labels,createdAt"])
     trusted = fetch_trusted(config)
-    out = []
+    out: list[dict[str, Any]] = []
+    waits: list[dict[str, Any]] = []   # waiting issues whose target hasn't shipped: one `waiting:` line
+    read: dict[int, dict[str, Any] | None] = {}   # each issue's bundle, read once: a wait's target among them
 
     def consider(n: int) -> None:
-        b = fetch_bundle(n, config, trusted)
+        if read.get(n) is None:
+            read[n] = fetch_bundle(n, config, trusted)
+        b = read[n]
         st = bundle_state(b, config)
-        # a debt epic a person holds may still have a pass end due (its close): with_next says
-        if st["turn"] == "agent" or (is_debt_epic(st) and st["state"] == "escalated" and st["action"] == "human"):
-            st = with_next(st, config, trusted=trusted, bundle=b)
+        # a debt epic a person holds may still have a pass end due (its close): with_next says. A waiting issue
+        # is nobody's move until its target is read (with_wait): shipped, it's the agent's to lift
+        if (st["turn"] == "agent" or (is_debt_epic(st) and st["state"] == "escalated" and st["action"] == "human")
+                or st["state"] == WAITING):
+            st = with_next(st, config, trusted=trusted, bundle=b, targets=read)
             if st["turn"] == "agent":   # the debt epic's turn comes from its tickets, in with_next
                 out.append(st)
+            elif st["state"] == WAITING and st["turn"] == "none" and st.get("wait"):
+                w = st["wait"]
+                waits.append({"number": n, "epic": w["epic"], "milestone": w["milestone"], "url": w["url"],
+                              "on": wait_target(w["epic"], w["milestone"])})
 
     for raw in sorted(issues, key=lambda i: i["number"]):
         if any(l["name"] in ("plan:slice", "plan:subtask", DEBT_LABEL) for l in raw.get("labels", [])):
@@ -1681,14 +1699,21 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
         out.append({"number": None, "state": DEBT_LANE, "turn": "agent", "unattached": loose,
                     "title": "open tech debt in no debt epic: " + ", ".join(f"#{d}" for d in loose),
                     "next": "`uv run python tools/sdlc.py debt-epic`"})
+    line = "; ".join(f"#{w['number']} on {w['on']}" for w in waits)
     if args.json:
+        if waits:   # nobody's move: a reader acting on `turn == "agent"` entries runs nothing for them
+            out.append({"number": None, "state": WAITING, "turn": "none", "action": "none", "waiting": waits,
+                        "title": f"waiting on another epic: {line}",
+                        "next": "nothing yet: each waits for its target to ship to main"})
         print(json.dumps(out, indent=2))
-    elif not out:
+        return 0
+    if not out:
         print("nothing waiting on the agent")
-    else:
-        for st in out:
-            num = f"#{st['number']}" if st["number"] is not None else "-"
-            print(f"{num:<5} {st['state']:<17} {st['title']}\n      next: {st['next']}")
+    for st in out:
+        num = f"#{st['number']}" if st["number"] is not None else "-"
+        print(f"{num:<5} {st['state']:<17} {st['title']}\n      next: {st['next']}")
+    if waits:
+        print(f"waiting: {line}")
     return 0
 
 
@@ -5581,9 +5606,11 @@ def print_debt_status(b: dict[str, Any], config: dict[str, Any], as_json: bool, 
     return 0
 
 
-def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -> list[str]:
+def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool,
+                      epic_st: dict[str, Any] | None = None) -> list[str]:
     """Why a fresh claim of this slice must wait: its epic isn't being built (escalated, done...), main holds an
-    unverified release, a demo or release is due, or a later milestone waits."""
+    unverified release, a demo or release is due, or a later milestone waits. `epic_st` is the epic's state when
+    it was already read (wait_claim_errors)."""
     epic = (parse_marker(b["issue"].get("body", "")) or {}).get("epic", "")
     if resume or not epic.isdigit():
         return []
@@ -5591,7 +5618,7 @@ def epic_pause_errors(b: dict[str, Any], config: dict[str, Any], resume: bool) -
         st, progress = b["epic_state"], b.get("epic_progress")
     else:
         trusted = set(b["trusted"])
-        st = bundle_state(fetch_bundle(int(epic), config, trusted), config)
+        st = epic_st or bundle_state(fetch_bundle(int(epic), config, trusted), config)
         progress = epic_progress(int(epic), config, trusted) if epic_building(st) else None
     if not epic_building(st) and st["state"] != "demo-review":
         return [f"epic #{epic} is {st['state']}: no new slices until it's back in progress"]
@@ -5764,6 +5791,42 @@ def claim_quick(args: argparse.Namespace, config: dict[str, Any], b: dict[str, A
     return 0
 
 
+def waiting_refusal(n: int, st: dict[str, Any], whose: str) -> str:
+    """Why nothing builds `whose` while issue `n` (state `st`) waits: the wait in the debt tickets' wording."""
+    w = st.get("wait")
+    held = (f"#{n} is {wait_text(w)} ({w['url']})" if w else
+            f"#{n} is labelled {PREFIX}{WAITING} (no wait recorded: `state {n}` says what to fix)")
+    return (f"{held}: while it waits, nothing builds {whose}; "
+            f"`uv run python tools/sdlc.py wait {n} --lift` ends the wait")
+
+
+def wait_claim_errors(b: dict[str, Any], config: dict[str, Any], offline: bool = False
+                      ) -> tuple[list[str], dict[str, Any] | None]:
+    """(why no lane may claim this issue because it, or the epic of a slice or subtask, waits on another epic;
+    the epic's state, if it was read). Only the issue's own label decides for anything that is no slice or
+    subtask (a quick change, a debt ticket: its marker's `epic=` is where it came from, not what holds it). The
+    epic is read from the bundle's `epic_state` (and `epic_labels`), else from GitHub; `offline` (a saved bundle)
+    never reads it there."""
+    issue = b["issue"]
+    n, labels = issue["number"], issue.get("labels", [])
+    if f"{PREFIX}{WAITING}" in labels:
+        st = derive_state(issue, b["comments"], set(b["trusted"]), config)
+        return [waiting_refusal(n, st, f"#{n}")], None
+    epic = (parse_marker(issue.get("body", "")) or {}).get("epic", "")
+    if not (epic.isdigit() and (LEAF_LABEL in labels or CONTAINER_LABEL in labels)):
+        return [], None
+    if "epic_state" in b:
+        est, elabels = b["epic_state"], b.get("epic_labels", [])
+    elif offline:
+        return [], None
+    else:
+        eb = fetch_bundle(int(epic), config, set(b["trusted"]))
+        est, elabels = bundle_state(eb, config), eb["issue"].get("labels", [])
+    if est.get("state") == WAITING or f"{PREFIX}{WAITING}" in elabels:
+        return [waiting_refusal(int(epic), est, f"#{epic}'s slices, #{n} among them")], est
+    return [], est
+
+
 def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Claim a ready slice and give it its own worktree on branch slice/N, from origin/epic/E
     (`--quick`: an approved quick change, from origin/main)."""
@@ -5773,6 +5836,10 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
                         "the work resumed is in git, not the bundle), never claims")
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(n, config)
     claim = claim_status(b["comments"], set(b["trusted"]))
+    # every lane and flag: nothing builds an issue that waits on another epic, nor a slice of an epic that waits
+    waits, epic_st = wait_claim_errors(b, config, offline=bool(args.from_file))
+    if waits:
+        raise SdlcError("; ".join(waits))
     if args.debt:
         return claim_debt(args, config, b)
     if b.get("lane") == DEBT_LANE:
@@ -5787,7 +5854,8 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
         errs = retry_errors(b["issue"], b["comments"], set(b["trusted"]))
         args.resume = True    # the branch, the worktree and the PR carry on
     else:
-        errs = slice_check_errors(b["issue"], b["blockers"], claim, args.resume) + epic_pause_errors(b, config, args.resume)
+        errs = (slice_check_errors(b["issue"], b["blockers"], claim, args.resume)
+                + epic_pause_errors(b, config, args.resume, epic_st))
     if errs:
         raise SdlcError("; ".join(errs))
     root, wt, branch = primary_root(), worktree_path(n, config), slice_branch(n)
