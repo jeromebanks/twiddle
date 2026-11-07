@@ -969,3 +969,240 @@ def test_a_milestone_round_that_could_not_be_recorded_or_would_change_nothing_ne
     assert r.run(comments=accepted + [ship("approve", OLD, 40)]) == 0 and len(calls(r.log)) == 1
     assert r.run(comments=accepted + [ship("approve", r.head, 40), ship("changes", r.head, 41)]) == 1
     assert "already approved" not in capsys.readouterr().err      # the usual checks apply: it wants a response
+
+
+# --- ship lifts the waits on what it released (#379 T1.5) ------------------------------------------------------
+
+from tests.test_sdlc_wait import CONFIG as WAIT_CONFIG, comment as wcomment, wait_comment  # noqa: E402
+
+_REAL_WITH_NEXT = sdlc.with_next
+WAITING_PATH = "issues?labels=sdlc%3Awaiting&state=open"
+
+
+class Waits(GitHub):
+    """GitHub with open issues waiting on #12, kept as state: a lift's comment and label move are applied, so a
+    read after it sees them. `fail_read` / `fail_label` / `fail_list` make one read, one label move, or the listing
+    fail."""
+
+    def __init__(self, monkeypatch, root, epic_comments, waiters, pages=None):
+        super().__init__(monkeypatch, root)
+        self.epic_comments, self.epic_labels = list(epic_comments), ["sdlc:in-progress"]
+        self.issues = {n: {"labels": list(labels), "comments": list(cs)} for n, (labels, cs) in waiters.items()}
+        self.pages = pages if pages is not None else [[{"number": n} for n in waiters]]
+        self.fail_read, self.fail_label, self.fail_list, self.listed = set(), set(), False, []
+        monkeypatch.setattr(sdlc, "post_comment", self.post)
+        monkeypatch.setattr(sdlc, "set_state_label", self.set_label)
+        monkeypatch.setattr(sdlc, "fetch_bundle", self.bundle)
+        monkeypatch.setattr(sdlc, "with_next", self.next_of)
+
+    def gh_json(self, args):
+        if args[0] == "api" and WAITING_PATH in args[1]:
+            self.listed.append(args)
+            if self.fail_list:
+                raise sdlc.SdlcError("gh api repos/o/r/issues failed: HTTP 502")
+            return self.pages
+        if args[:2] == ["pr", "list"]:
+            return self.into_epic
+        return super().gh_json(args)
+
+    into_epic = []
+
+    def post(self, n, body, cfg):
+        self.posted.append((n, body))
+        c = wcomment(OWNER, body, 50 + len(self.posted))
+        (self.epic_comments if n == 12 else self.issues[n]["comments"]).append(c)
+        return {"html_url": f"https://example/{n}#posted"}
+
+    def set_label(self, n, cur, to, cfg, **k):
+        if n in self.fail_label:
+            raise sdlc.SdlcError("gh issue edit failed: HTTP 502")
+        self.labels.append((n, to))
+        holder = self.epic_labels if n == 12 else self.issues[n]["labels"]
+        holder[:] = [l for l in holder if not l.startswith("sdlc:")] + [f"sdlc:{to}"]
+
+    def bundle(self, n, cfg, trusted=None):
+        if n == 12:
+            return {**epic_bundle(self.epic_comments, labels=self.epic_labels),
+                    "issue": {**epic_bundle()["issue"], "labels": list(self.epic_labels),
+                              "state": self.issue_state.lower()}}
+        if n in self.fail_read:
+            raise sdlc.SdlcError(f"gh api repos/o/r/issues/{n}/comments failed: HTTP 502")
+        i = self.issues[n]
+        return {"issue": {"number": n, "title": "a follow-up", "state": "open", "author": POSTER,
+                          "labels": list(i["labels"]), "createdAt": "", "body": ""},
+                "comments": list(i["comments"]), "trusted": [OWNER]}
+
+    def next_of(self, st, cfg, offline=False, trusted=None, bundle=None, targets=None):
+        if st["number"] == 12:
+            return {**st, "next": "x", "progress": None}
+        return _REAL_WITH_NEXT(st, cfg, offline=offline, trusted=trusted, bundle=bundle, targets=targets)
+
+    def lifts(self):
+        return [(n, sdlc.parse_marker(b)["to"]) for n, b in self.posted if sdlc.parse_marker(b)["kind"] == "wait-lifted"]
+
+
+APPROVED_HISTORY = [wcomment(OWNER, sdlc.marker("prd", 1) + "\nPRD", 1),
+                    wcomment(OWNER, sdlc.marker("approval", 1, by=POSTER, via="comment") + "\nok", 2)]
+
+
+def waiter(on, frm="triage"):
+    history = APPROVED_HISTORY if frm == "approved" else []
+    return (("sdlc:waiting", "enhancement"), [*history, wait_comment(5, waits=on, **{"from": frm})])
+
+
+@pytest.fixture
+def wcfg(tmp_path):
+    f = tmp_path / "config.json"
+    f.write_text(json.dumps(WAIT_CONFIG))   # sdlc:waiting is a state label here; .sdlc/config.json may not have it yet
+    return str(f)
+
+
+TWO_MILESTONES = [done_leaf(28, "T1.1"), done_leaf(29, "T1.2"), {**done_leaf(31, "T3.1", "#12 M2: y"), "state": "open"}]
+
+
+def ship_m1(monkeypatch, repo, waiters, leaves=TWO_MILESTONES, pages=None):
+    stub_ship(monkeypatch, [DEMO1, *ACCEPT1], leaves)
+    monkeypatch.setattr(sdlc, "reverted_on_main", lambda cfg, root=None: set())
+    return Waits(monkeypatch, repo, [DEMO1, *ACCEPT1], waiters, pages)
+
+
+def test_ship_lifts_the_waits_on_the_milestone_it_released(repo, monkeypatch, capsys, wcfg):
+    gh = ship_m1(monkeypatch, repo, {300: waiter("12:M1"), 301: waiter("12:M1", "approved"), 302: waiter("12:M2")})
+    assert sdlc.main(["--config", wcfg, "ship", "12"]) == 0
+    out = capsys.readouterr().out
+    assert gh.kinds()[0] == (12, "shipped")
+    assert gh.lifts() == [(300, "triage"), (301, "approved")]          # each back where it was parked from
+    assert (300, "triage") in gh.labels and (301, "approved") in gh.labels and not any(n == 302 for n, _ in gh.labels)
+    assert gh.issues[302]["labels"] == ["sdlc:waiting", "enhancement"]
+    assert all("#12's M1 has shipped to main" in b for n, b in gh.posted if n != 12)   # judged after the release
+    assert "lifted: #300: waiting -> triage" in out and "next: /triage-issue 300" in out
+    assert "lifted: #301: waiting -> approved" in out and "next: /plan-issue 301" in out
+    assert "#302" not in out and gh.listed and "--paginate" in gh.listed[0]
+
+
+def test_the_last_ship_also_lifts_the_waits_on_the_whole_epic(repo, monkeypatch, capsys, wcfg):
+    gh = ship_m1(monkeypatch, repo, {300: waiter("12:all"), 301: waiter("12:M1"), 302: waiter("13:all")},
+                 leaves=[done_leaf(28, "T1.1")])
+    assert sdlc.main(["--config", wcfg, "ship", "12"]) == 0
+    assert (12, "done") in gh.labels and gh.issue_state == "CLOSED"
+    assert sorted(gh.lifts()) == [(300, "triage"), (301, "triage")]
+    assert "#12 has shipped to main" in dict(gh.posted)[300]
+    assert len(gh.listed) == 1                                           # one pass, after the epic is done
+
+
+def test_ship_dry_run_names_the_waits_and_writes_nothing(repo, monkeypatch, capsys, wcfg):
+    gh = ship_m1(monkeypatch, repo, {300: waiter("12:M1"), 301: waiter("12:all"), 302: waiter("12:M2")})
+    assert sdlc.main(["--config", wcfg, "ship", "12", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "would record M1 as shipped" in out
+    assert "would lift: #300: waiting -> triage, its wait for #12's M1 lifted" in out
+    assert "#301" not in out and "#302" not in out                     # not the last ship: `all` stays
+    assert gh.posted == [] and gh.labels == []
+
+
+def test_a_last_ship_dry_run_names_the_whole_epics_waits_too(repo, monkeypatch, capsys, wcfg):
+    gh = ship_m1(monkeypatch, repo, {300: waiter("12:all"), 301: waiter("12:M1")}, leaves=[done_leaf(28, "T1.1")])
+    assert sdlc.main(["--config", wcfg, "ship", "12", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "would lift: #300: waiting -> triage, its wait for #12 lifted" in out and "would lift: #301" in out
+    assert gh.posted == [] and gh.labels == [] and gh.issue_state == "OPEN"
+
+
+def test_a_failed_lift_is_reported_and_never_fails_the_ship(repo, monkeypatch, capsys, wcfg):
+    gh = ship_m1(monkeypatch, repo, {300: waiter("12:M1"), 301: waiter("12:M1"), 302: waiter("12:M1"),
+                                     303: waiter("12:M2")})
+    gh.fail_read, gh.fail_label = {301}, {302}
+    assert sdlc.main(["--config", wcfg, "ship", "12"]) == 0
+    io = capsys.readouterr()
+    assert gh.kinds()[0] == (12, "shipped") and (300, "triage") in gh.labels   # the release, and the other lift
+    assert "#301: could not read its wait" in io.err and "HTTP 502" in io.err
+    assert "#302: the lift is posted" in io.err and "wait 302 --lift" in io.err
+    assert gh.issues[303]["labels"] == ["sdlc:waiting", "enhancement"]
+    view = gh.bundle(12, None)                                        # the epic as it reads after the ship
+    gh.fail_read = set()
+    for n in (301, 302):                                              # each left waiting: `state` says lift it
+        b = {**gh.bundle(n, None), "target": view}
+        st = _REAL_WITH_NEXT(sdlc.bundle_state(b, WAIT_CONFIG), WAIT_CONFIG, offline=True, trusted={OWNER}, bundle=b)
+        assert (st["state"], st["action"]) == ("waiting", "lift_wait"), n
+
+
+def test_a_listing_that_fails_is_reported_and_never_fails_the_ship(repo, monkeypatch, capsys, wcfg):
+    gh = ship_m1(monkeypatch, repo, {300: waiter("12:M1")})
+    gh.fail_list = True
+    assert sdlc.main(["--config", wcfg, "ship", "12"]) == 0
+    assert "could not list the waiting issues" in capsys.readouterr().err
+    assert gh.kinds() == [(12, "shipped")] and gh.labels == []
+
+
+def test_ship_finds_waits_past_the_first_page(repo, monkeypatch, capsys, wcfg):
+    others = {n: waiter("12:M2") for n in range(400, 500)}             # a full page of waits on something else
+    pages = [[{"number": n} for n in others], [{"number": 300}, {"number": 501, "pull_request": {}}]]
+    gh = ship_m1(monkeypatch, repo, {**others, 300: waiter("12:M1")}, pages=pages)
+    assert sdlc.main(["--config", wcfg, "ship", "12"]) == 0
+    assert gh.lifts() == [(300, "triage")] and "--paginate" in gh.listed[0]
+
+
+def test_a_recovered_release_lifts_its_waits_too(repo, monkeypatch, capsys, wcfg):
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    merged = [{"title": "Ship #12 M1: x", "mergeCommit": {"oid": HEAD}}]
+    stub_ship(monkeypatch, [DEMO1, *ACCEPT1], [done_leaf(28, "T1.1")], pr_base="epic/12", merged_ships=merged)
+    monkeypatch.setattr(sdlc, "release_untested", lambda repo_, sha: False)
+    gh = Waits(monkeypatch, repo, [DEMO1, *ACCEPT1], {300: waiter("12:M1"), 301: waiter("12:all"), 302: waiter("12:M2")})
+    assert sdlc.main(["--config", wcfg, "ship", "12"]) == 0
+    assert gh.kinds()[0] == (12, "shipped") and (12, "done") in gh.labels
+    assert sorted(gh.lifts()) == [(300, "triage"), (301, "triage")]
+
+
+def test_a_release_dry_run_names_the_waits_before_any_pull_request(repo, monkeypatch, capsys, wcfg):
+    # the path an epic built on epic/12 takes: gate passed, then "would open (or reuse) a pull request"
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    head = commit_on_epic(repo, "a.py", "a = 1\n")
+    records = [DEMO1, *ACCEPT1, agent("epic-tests", None, 14, sha=head, result="pass", passed="9"),
+               agent("ship-review", None, 15, milestone="M1", sha=head, verdict="approve", round="1")]
+    stub_ship(monkeypatch, records, [done_leaf(28, "T1.1"), done_leaf(31, "T3.1", "#12 M2: y")], pr_base="epic/12")
+    monkeypatch.setattr(sdlc, "reverted_on_main", lambda cfg, root=None: set())
+    gh = Waits(monkeypatch, repo, records, {300: waiter("12:M1"), 301: waiter("12:M2"), 302: waiter("12:all")})
+    gh.into_epic = [{"number": 60, "headRefName": "slice/28", "mergeCommit": {"oid": head}}]
+    assert sdlc.main(["--config", wcfg, "ship", "12", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "would open (or reuse) a pull request" in out
+    assert "would lift: #300: waiting -> triage, its wait for #12's M1 lifted" in out
+    assert "#301" not in out and "#302" not in out
+    assert gh.posted == [] and gh.labels == [] and not any(c[0] == "pr" for c in gh.calls)
+
+
+def test_an_issue_no_longer_waiting_is_not_reported_as_lifted(repo, monkeypatch, capsys, wcfg):
+    ship_m1(monkeypatch, repo, {300: waiter("12:M1")})
+    monkeypatch.setattr(sdlc, "lift_wait", lambda n, cfg, **k: {"number": n, "ok": True, "did": "nothing",
+                                                                 "message": f"#{n} is closed: there is no wait to lift"})
+    assert sdlc.main(["--config", wcfg, "ship", "12"]) == 0
+    out = capsys.readouterr().out
+    assert "#300 is closed" in out and "lifted:" not in out and "next: /" not in out
+
+
+def test_a_recovered_release_lifts_its_waits_even_when_the_ship_then_stops(repo, monkeypatch, capsys, wcfg):
+    # M1's release merged without its record, and M2 is still being built: the record is posted, then ship stops
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    merged = [{"title": "Ship #12 M1: x", "mergeCommit": {"oid": HEAD}}]
+    stub_ship(monkeypatch, [DEMO1, *ACCEPT1], TWO_MILESTONES, pr_base="epic/12", merged_ships=merged)
+    monkeypatch.setattr(sdlc, "release_untested", lambda repo_, sha: False)
+    gh = Waits(monkeypatch, repo, [DEMO1, *ACCEPT1], {300: waiter("12:M1"), 301: waiter("12:M2")})
+    assert sdlc.main(["--config", wcfg, "ship", "12"]) == 1
+    assert gh.kinds()[0] == (12, "shipped") and gh.lifts() == [(300, "triage")]
+    assert "#12's M1 has shipped to main" in dict(gh.posted)[300]
+    assert gh.issues[301]["labels"] == ["sdlc:waiting", "enhancement"]
+
+
+def test_an_untested_recovered_release_ends_the_dry_run_where_the_real_run_stops(repo, monkeypatch, capsys, wcfg):
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    merged = [{"title": "Ship #12 M1: x", "mergeCommit": {"oid": HEAD}}]
+    stub_ship(monkeypatch, [DEMO1, *ACCEPT1], [done_leaf(28, "T1.1")], pr_base="epic/12", merged_ships=merged)
+    monkeypatch.setattr(sdlc, "release_untested", lambda repo_, sha: True)
+    gh = Waits(monkeypatch, repo, [DEMO1, *ACCEPT1], {300: waiter("12:M1"), 301: waiter("12:all")})
+    assert sdlc.main(["--config", wcfg, "ship", "12", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "would lift: #300" in out and "#301" not in out and "would escalate it" in out
+    assert "would finish" not in out and gh.posted == [] and gh.labels == []
+    # the real run: M1's waits lifted, escalated, not finished, so #12's stay
+    assert sdlc.main(["--config", wcfg, "ship", "12"]) == 1
+    assert gh.lifts() == [(300, "triage")] and (12, "escalated") in gh.labels and (12, "done") not in gh.labels
