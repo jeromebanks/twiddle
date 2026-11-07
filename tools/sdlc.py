@@ -3859,18 +3859,20 @@ def delete_json(path: str, payload: dict[str, Any]) -> Any:
         return gh_json(["api", "-X", "DELETE", path, "--input", fh.name])
 
 
-def commit_on_main(sha: str, config: dict[str, Any]) -> str:
+def commit_on_main(sha: str, config: dict[str, Any], hint: str | None = None) -> str:
     """The full SHA of `sha` when origin's default branch contains it (GitHub's compare: `behind` or `identical`),
-    else an SdlcError. Read on GitHub, so no local fetch can be stale."""
+    else an SdlcError. Read on GitHub, so no local fetch can be stale. `hint` ends either refusal in the caller's
+    terms; by default, debt-intake's (`fixed`)."""
     repo, base = repo_of(config), config.get("default_branch", "main")
     try:
         cmp = gh_json(["api", f"repos/{repo}/compare/{base}...{sha}"]) or {}
     except SdlcError as exc:
-        raise SdlcError(f"commit {sha} isn't known to GitHub ({exc}): name a commit on origin/{base}") from None
+        raise SdlcError(f"commit {sha} isn't known to GitHub ({exc}): "
+                        + (hint or f"name a commit on origin/{base}")) from None
     full = (cmp.get("merge_base_commit") or {}).get("sha") or ""
     if cmp.get("status") not in ("behind", "identical") or not full.startswith(sha):
         raise SdlcError(f"commit {sha} is not on origin/{base} (GitHub's compare says {cmp.get('status')!r}): "
-                        f"`fixed` names the commit on {base} that fixed the ticket")
+                        + (hint or f"`fixed` names the commit on {base} that fixed the ticket"))
     return full
 
 
@@ -4109,11 +4111,8 @@ def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
     issue, comments = fetch_slice(n, config)
     prior_record = latest_close_record(comments, trusted)
     prior = prior_record[0] if prior_record else None
-    try:
-        sha = commit_on_main(args.commit.lower(), config) if args.commit is not None else None
-    except SdlcError as exc:   # its text is debt-intake's (`fixed`): say it in close's terms
-        raise SdlcError(str(exc).split(": `fixed`")[0] + f": `--reason completed` names the commit on "
-                        f"{config.get('default_branch', 'main')} that fixed #{n}") from None
+    sha = commit_on_main(args.commit.lower(), config, hint=f"`--reason completed` names the commit on "
+                         f"{config.get('default_branch', 'main')} that fixed #{n}") if args.commit is not None else None
     if args.of is not None:
         dup = raw_issue(args.of, f"`--of` names the issue #{n} duplicates", config)
         if dup.get("state") == "closed" and dup.get("state_reason") == "not_planned":
