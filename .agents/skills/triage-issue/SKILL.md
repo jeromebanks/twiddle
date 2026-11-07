@@ -28,7 +28,11 @@ Don't ask the user "shall I post?" and don't relay questions in the chat.
 
 The one exception is a preview run: if the user passed `--preview`
 (`/triage-issue 12 --preview`) or `.sdlc/config.json` has `"confirm_before_posting": true`,
-add `--dry-run` to each `transition`, show the output, and post only after an OK.
+every write to GitHub this skill tells you to run waits for the user's OK. Run each of these
+with `--dry-run` first, show the output, and run it for real only after an OK: `transition`,
+`wait` (parking an issue), `wait --lift` (ending a wait), `reconcile`, `commit-prd`, `merge-prd`,
+`bootstrap-labels`, `debt-intake` and `debt-epic`. The other writes are shown and run only after
+an OK too: `gh issue edit` (a type or complexity label), and the PRD's `git push` and `gh pr create`.
 Unattended runs never preview.
 
 `/triage-issue [N]`. With no `N`, take the first line of `uv run python tools/sdlc.py next`.
@@ -41,11 +45,11 @@ uv run python tools/sdlc.py state N --json
 
 - `state` is `waiting` (label `sdlc:waiting`: the issue is parked until another epic ships, "Parking an issue" below):
   - `action` is `lift_wait` -> its target has shipped: run `uv run python tools/sdlc.py wait N --lift` (safe to
-    rerun; `--dry-run` first if unsure), then read `state N --json` again and carry on as the restored state says.
+    rerun; `--dry-run` first if unsure, and always in a preview run, where the real lift waits for an OK), then read `state N --json` again and carry on as the restored state says.
   - `action` is `wait_broken` -> `turn` is `human`: the target epic closed, or its plan dropped the milestone, without it
     shipping. Report it and stop; a person lifts the wait or closes the issue.
   - `action` is `respond_to_reply` -> read the reply. If it asks to go ahead now, lift the wait
-    (`wait N --lift --reason "<why, in plain words>"`) and read the state again. Otherwise answer on the issue with a note,
+    (`wait N --lift --reason "<why, in plain words>"`; in a preview run, `--dry-run` first and wait for an OK) and read the state again. Otherwise answer on the issue with a note,
     the only `transition` a waiting issue takes: `uv run python tools/sdlc.py transition N waiting --kind note --body-file reply.md`.
     The wait stays. Never post a question, a PRD or a diagnosis to a waiting issue: `transition` refuses.
   - `turn` is `none` (the target hasn't shipped) -> report what `next:` says it waits for and stop.
@@ -208,6 +212,7 @@ poster's review, and leaving it in `triage` makes `state N` name a next move tha
 
 ```bash
 uv run python tools/sdlc.py wait N --on E:Mk --reason "<one plain line: why it waits>" --dry-run
+# in a preview run, show that output and stop here until the user's OK
 uv run python tools/sdlc.py wait N --on E:Mk --reason "<one plain line: why it waits>"
 ```
 
@@ -215,7 +220,7 @@ uv run python tools/sdlc.py wait N --on E:Mk --reason "<one plain line: why it w
   E's latest plan and not yet shipped, and E must be an open feature epic with a plan.
 - It takes an issue in `untriaged`, `triage`, `approved` or `planned`; it refuses the poster's states, `in-progress`,
   `escalated` and `done`, a closed issue, a tech-debt ticket, a slice or subtask, and one that already waits (one wait at a
-  time). The tool says which. Run `--dry-run` first: it checks everything and writes nothing.
+  time). The tool says which. Run `--dry-run` first: it checks everything and writes nothing. In a preview run, the real `wait` waits for the user's OK.
 - It writes to GitHub only (one marked comment and the label move), never to a speaker. The reason is posted on a public
   issue: no IP, MAC, device ID or secret.
 - `--then close` is not available yet (it arrives with #378's `close` verb, in #379's M2): don't pass it.
