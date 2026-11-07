@@ -115,7 +115,8 @@ ALL_ACTIONS = {"triage", "respond_to_reply", "record_approval", "reconcile_label
                "plan", "continue_plan", "create_plan_issues", "ask_poster", "replan", "plan_next_milestone", "escalate_plan",
                "record_demo_acceptance", "demo_reply", "demo_heard", "record_changes",
                "work_slices", "work_quick", "commit_prd", "wait_for_poster", "human", "fix_conflict", "none",
-               "debt_intake", "plan_pass", "debt_waiting", "work_debt", "merge_debt", "pass_end"}
+               "debt_intake", "plan_pass", "debt_waiting", "work_debt", "merge_debt", "pass_end",
+               "lift_wait", "wait_broken"}
 NO_MILESTONE = "all"     # an epic planned without milestones has one demo, for all of it
 # from-state -> states the triage skill may move to. `escalated` is open from anywhere.
 TRANSITIONS = {
@@ -128,7 +129,10 @@ TRANSITIONS = {
                  "needs-info"},                       # planning can't reach consensus: ask the poster
     "escalated": {"triage"},                           # a human releases it
     "demo-review": {"demo-review"},                    # a note answering the poster's question
+    "waiting": {"waiting"},                            # a note answering a reply; only `wait` places or lifts one
 }
+WAITING = "waiting"      # an ordinary issue parked until another epic's milestone ships (`wait N --on E:Mk`)
+WAIT_REASON_RE = re.compile(r"^Reason: (.+)$", re.MULTILINE)   # a wait comment's reason: its `Reason: ...` line
 
 
 # one error class, so a review's refusal is reported like any other
@@ -231,6 +235,10 @@ class Ledger:
     # skipping those a `demo-changes found=poster` record names
     changes_from: int = -1
     changes_done: set[str] = field(default_factory=set)
+    # the open wait on another epic (`kind=wait`): {epic, milestone, from, then, reason, id, url, index, since};
+    # a `kind=wait-lifted` after it ends it, and keeps it as `wait_lifted` (a lift cut short before its label)
+    wait: dict[str, Any] | None = None
+    wait_lifted: dict[str, Any] | None = None
 
 
 def _rev(mk: dict[str, str]) -> int | None:
@@ -418,6 +426,29 @@ def _on_epic_tests(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> 
                          "main": mk.get("main"), "url": c.get("url")})
 
 
+def wait_reason(body: str) -> str | None:
+    """A wait comment's reason: its `Reason: ...` line (the marker, the bot's title and any other line aside)."""
+    m = WAIT_REASON_RE.search(body or "")
+    return m.group(1).strip() if m else None
+
+
+def _on_wait(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    """`waits=E:Mk` (a debt ticket's form; `E:all` for the whole epic). A target it can't read is no wait."""
+    epic, _, ms = mk.get("waits", "").partition(":")
+    if not (epic.isdigit() and ms):
+        return
+    L.wait = {"epic": int(epic), "milestone": ms, "from": mk.get("from"), "then": mk.get("then"),
+              "reason": wait_reason(c.get("body", "")), "id": c.get("id"), "url": c.get("url"), "index": i,
+              "since": (c.get("created_at") or "")[:10]}
+    L.wait_lifted = None
+
+
+def _on_wait_lifted(L: Ledger, mk: dict[str, str], c: dict[str, Any], i: int) -> None:
+    if L.wait:
+        L.wait_lifted = {**L.wait, "lifted_id": c.get("id"), "lifted_url": c.get("url")}
+    L.wait = None
+
+
 # kind -> handler. Kinds not listed (notes, escalations, claims on slices...) only end the run of replies.
 MARKERS = {
     "question": _on_question, "prd": _on_doc, "diagnosis": _on_doc, "approval": _on_approval,
@@ -427,6 +458,7 @@ MARKERS = {
     "shipped": _on_shipped, "ship-review": _on_ship_review, "epic-tests": _on_epic_tests,
     "main-tests": _on_main_tests, "review-owed": _on_review_owed, "eval-owed": _on_eval_owed,
     "lane": _on_lane, "prd-merged": _on_prd_merged, "escalation": _on_escalation,
+    "wait": _on_wait, "wait-lifted": _on_wait_lifted,
 }
 # kinds that are records kept on an issue, not part of its conversation: never a reply, and never the agent's
 # last comment, so one posted while the poster's answer waits doesn't hide it
@@ -605,6 +637,8 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         conflicts.append(f"rev {approved_rev} is approved on record but the label is {PREFIX}{state}")
     if state == "demo-review" and not latest_demo:
         conflicts.append(f"{PREFIX}demo-review but no milestone demo has been posted")
+    if state == WAITING and not L.wait and not L.wait_lifted:
+        conflicts.append(f"{PREFIX}{WAITING} but no wait is recorded (no `kind=wait` comment from a collaborator)")
     quick = is_quick({"lane": L.lane, "approved_doc": L.approved_doc})
     if state in BUILD_STATES and quick and not (state == "in-progress" and doc_approved and L.lane == QUICK):
         # a quick change is built from its approved brief alone: never let it fall through to an epic's slices
@@ -643,6 +677,13 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         # the debt epic is never triaged and never a feature epic: what is due comes from its tickets on
         # GitHub (debt_view, applied by with_next), so "none" here only until that is read
         turn, action = "agent", "none"
+    elif state == WAITING and not L.wait:
+        turn, action = "agent", "lift_wait"   # lifted on record, the label not moved yet: `wait N --lift` finishes it
+    elif state == WAITING and any(c.get("author") in allowed for c in replies):
+        turn, action = "agent", "respond_to_reply"   # the poster or a collaborator spoke: answered, the wait stays
+    elif state == WAITING:
+        # whether its target has shipped (or never will) needs that epic's state: with_next reads it
+        turn, action = "none", "none"
     elif state in LATER_STATES:
         turn, action = "later", "none"
     elif state in BUILD_STATES and quick:
@@ -725,6 +766,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "planned_milestones": planned_ms, "created_milestones": sorted(created_ms, key=natural_key),
         "uncreated_milestones": uncreated, "create_mode": latest_plan_json.get("create") or config.get("create", "milestone"),
         "plan_created": L.plan_created, "creation_recorded": creation_recorded, "issue_closed": issue.get("state", "open").lower() == "closed",
+        "wait": L.wait, "wait_lifted": L.wait_lifted,
     }
 
 
@@ -761,6 +803,32 @@ def no_milestone_building(src: dict[str, Any]) -> bool:
 def wait_target(epic: Any, milestone: str) -> str:
     """What a debt ticket waits on to ship: `#12's M1`, or `#12` itself for an epic with no named milestones."""
     return f"#{epic}" if milestone == NO_MILESTONE else f"#{epic}'s {milestone}"
+
+
+def wait_status(w: dict[str, Any], src: dict[str, Any] | None) -> str:
+    """Where an issue's wait (`waits=E:Mk`) stands, from the target epic's state: `waiting`, `shipped` (it can be
+    lifted) or `broken` (it never will ship: a person decides). `src` None (unread) is still waiting. Shipped is read
+    as for a debt ticket (debt_waiting_for: E's `shipped` records, `all` once E is no longer building); unlike a debt
+    ticket, E closing without that ship, or its latest plan dropping Mk, breaks the wait instead of ending it."""
+    if src is None:
+        return "waiting"
+    ms, shipped = w["milestone"], src.get("shipped") or {}
+    closed = bool(src.get("issue_closed"))
+    if debt_waiting_for({"debt_waits": f"{w['epic']}:{ms}"}, src) is not None:
+        if closed:   # a named milestone a closed epic never shipped (debt would keep waiting for it)
+            return "broken"
+        if ms != NO_MILESTONE and src.get("latest_plan") and src.get("planned_milestones") \
+                and ms not in src["planned_milestones"]:
+            return "broken"   # the latest plan no longer has it (an unreadable plan says nothing)
+        return "waiting"
+    if ms != NO_MILESTONE or src.get("state") in LATER_STATES or NO_MILESTONE in shipped or (closed and shipped):
+        return "shipped"
+    return "broken" if closed else "waiting"   # `all`: closed with no release, or open but not planned
+
+
+def wait_text(w: dict[str, Any]) -> str:
+    """`waiting for #263's M2 to ship to main`, the debt tickets' wording."""
+    return f"waiting for {wait_target(w['epic'], w['milestone'])} to ship to main"
 
 
 def debt_wait_source(st: dict[str, Any]) -> int | None:
@@ -839,6 +907,14 @@ def next_command(st: dict[str, Any], progress: dict[str, Any] | None = None) -> 
         return f"`uv run python tools/sdlc.py state {n}` (needs the debt epic's tickets)"
     if st.get("plan_kind"):
         return f"`uv run python tools/sdlc.py slice-status {n}`"
+    if a == "lift_wait":
+        return f"`uv run python tools/sdlc.py wait {n} --lift`"
+    if a == "wait_broken":
+        return (f"nothing for an agent: #{n} needs a human: {st.get('wait_broken_why') or 'its wait can never end'}; "
+                f"a person lifts the wait (`uv run python tools/sdlc.py wait {n} --lift`) or closes #{n}")
+    if st["state"] == WAITING and a == "none" and st.get("wait") and not st.get("issue_closed"):
+        w = st["wait"]
+        return f"nothing yet: #{n} waits for {wait_target(w['epic'], w['milestone'])} to ship to main ({w['url']})"
     if a in TRIAGE_ACTIONS:
         return f"/triage-issue {n}"
     if a in DEMO_ACTIONS:
@@ -1086,7 +1162,10 @@ def check_transition(st: dict[str, Any], to: str, kind: str, config: dict[str, A
         errs.append(f"kind {kind} moves to {want}, not {to}")
     if kind == "note" and to not in (st["state"], "triage"):
         errs.append("a note keeps the current state (or starts triage); post a question, prd or diagnosis to move on")
-    if to != "escalated" and to not in TRANSITIONS.get(st["state"], set()):
+    if (st["state"] == WAITING or to == WAITING) and not (st["state"] == to == WAITING and kind == "note"):
+        errs.append(f"only `uv run python tools/sdlc.py wait {n}` places or lifts a wait: on a waiting issue, "
+                    f"`transition` posts a note answering a reply (`transition {n} {WAITING} --kind note`)")
+    elif to != "escalated" and to not in TRANSITIONS.get(st["state"], set()):
         errs.append(f"{st['state']} -> {to} is not an allowed transition")
     if to == "approved":
         d = st["decision"]
@@ -1143,6 +1222,8 @@ HEADERS = {
     "intake": "debt intake",
     "debt-pass": "debt pass plan",
     "debt-pass-end": "debt pass ended",
+    "wait": "waiting on another epic",
+    "wait-lifted": "wait lifted",
 }
 FOOTERS = {
     "question": "Reply in a comment. Anything you leave unanswered, I will assume the stated default.",
@@ -1311,6 +1392,18 @@ def print_state(st: dict[str, Any]) -> None:
     print(f"#{st['number']} {st['title']}")
     print(f"  state: {st['state']}" + (f"   lane: {st['lane']}" if st.get("lane") else "")
           + f"   turn: {st['turn']}   action: {st['action']}   type: {st['type'] or '?'}")
+    if (w := st.get("wait")) and st["state"] == WAITING:
+        print(f"  {wait_text(w)} (since {w['since'] or '?'}, from {w['from'] or '?'})"
+              + (f": {w['reason']}" if w.get("reason") else ""))
+        if st["action"] == "lift_wait":
+            print(f"  {wait_target(w['epic'], w['milestone'])} has shipped to main, and the wait is still on ({w['url']})")
+        elif st["action"] == "wait_broken":
+            print(f"  wait broken: {st.get('wait_broken_why')} ({w['url']})")
+        elif st["action"] != "none":
+            print(f"  wait: {w['url']}")
+    elif (wl := st.get("wait_lifted")) and st["state"] == WAITING:
+        print(f"  the wait for {wait_target(wl['epic'], wl['milestone'])} was lifted ({wl['lifted_url']}), but the label "
+              f"is still {PREFIX}{WAITING}: the lift was cut short")
     print(f"  latest revision: {('%s rev %s' % (doc['kind'], doc['rev'])) if doc else 'none'}"
           f"   approved: {st['approved_rev'] or 'no'}" + (f" (comment {codex_review.approved_comment(st['latest_doc'])})" if st.get("doc_approved") else "")
           + f"   rounds: {st['rounds']}/{st['max_rounds']}")
@@ -1408,6 +1501,36 @@ def finish_creation(st: dict[str, Any], records: list[dict[str, Any]]) -> dict[s
     return st
 
 
+def with_wait(st: dict[str, Any], config: dict[str, Any], offline: bool, trusted: set[str] | None,
+              bundle: dict[str, Any] | None) -> dict[str, Any]:
+    """A waiting issue with nothing else due, once its target epic is read (offline: the bundle's `target`, that
+    epic's bundle, as a debt ticket's `source`): `lift_wait` when the target shipped, `wait_broken` when it never
+    will. A target that can't be read leaves it waiting."""
+    w = st["wait"]
+    tb = None
+    if offline:
+        tb = (bundle or {}).get("target")
+    else:
+        try:
+            tb = fetch_bundle(w["epic"], config, trusted if trusted is not None else fetch_trusted(config))
+        except SdlcError as exc:
+            print(f"could not read #{w['epic']} ({exc}): `next` doesn't say whether #{st['number']}'s wait is over",
+                  file=sys.stderr)
+    src = bundle_state({"trusted": (bundle or {}).get("trusted", []), **tb}, config) if tb else None
+    status = wait_status(w, src)
+    st = {**st, "wait": {**w, "status": status}}
+    if status == "shipped":
+        turn, action = "agent", "lift_wait"
+        return {**st, "turn": turn, "action": action}
+    if status == "broken":
+        turn, action = "human", "wait_broken"
+        why = ((f"#{w['epic']} closed without shipping" if w["milestone"] == NO_MILESTONE else
+                f"#{w['epic']} closed without {w['milestone']} shipping") if src and src.get("issue_closed") else
+               f"#{w['epic']}'s latest plan no longer has {w['milestone']}, which hasn't shipped")
+        return {**st, "turn": turn, "action": action, "wait_broken_why": why}
+    return st
+
+
 def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
               trusted: set[str] | None = None, bundle: dict[str, Any] | None = None) -> dict[str, Any]:
     """`state` plus the command to run next (an epic being built looks at its slices on GitHub). With the issue's
@@ -1425,6 +1548,8 @@ def with_next(st: dict[str, Any], config: dict[str, Any], offline: bool = False,
                 print(f"could not look for #{st['number']}'s plan issues ({exc}): `next` doesn't say whether a "
                       "creation was cut short", file=sys.stderr)
     st = finish_creation(st, records)
+    if st["state"] == WAITING and st.get("wait") and st["action"] == "none" and not st.get("issue_closed"):
+        st = with_wait(st, config, offline, trusted, bundle)
     if st["action"] in ("work_slices", "plan_next_milestone") and not offline:
         progress = epic_progress(st["number"], config, trusted if trusted is not None else fetch_trusted(config))
     if st.get("plan_kind") == "debt":   # the ticket's debt epic, if one holds it (offline: the bundle's `debt_epic`)
