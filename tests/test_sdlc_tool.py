@@ -316,3 +316,13 @@ def test_a_label_added_by_someone_else_is_not_backed(monkeypatch, capsys):
     assert sdlc.main(["reconcile", "12"]) == 1
     err = capsys.readouterr().err
     assert "applied by stranger, who is not a collaborator" in err and "--by" not in err and gh.writes == []
+
+
+# --- sdlc:waiting is a state label (#379) ----------------------------------------------------
+
+def test_waiting_is_a_state_label_and_bootstrap_lists_it(monkeypatch, capsys):
+    assert "sdlc:waiting" in sdlc.state_labels(CONFIG)
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("dry run must not call gh"))
+    assert sdlc.main(["bootstrap-labels", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "gh label create sdlc:waiting " in out and "waiting for another epic's milestone" in out
