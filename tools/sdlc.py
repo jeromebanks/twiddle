@@ -1895,6 +1895,142 @@ def require_state_label(config: dict[str, Any], state: str, offline: bool) -> No
         raise SdlcError(f"label {label} does not exist: run `bootstrap-labels` first (nothing was posted)")
 
 
+def wait_back(frm: str | None) -> str | None:
+    """The state a lifted wait gives back: the one it recorded (`untriaged` comes back as `triage`), or None for a
+    marker that recorded none a wait can take (a hand-made one)."""
+    if frm not in WAIT_FROM:
+        return None
+    return "triage" if frm == "untriaged" else frm
+
+
+def lift_comment_body(n: int, w: dict[str, Any], to: str, status: str | None, reason: str | None) -> str:
+    """`status`: the target's (wait_status), when it was read; None says nothing about whether it shipped."""
+    target = wait_target(w["epic"], w["milestone"])
+    why = {"shipped": f": {target} has shipped to main", "waiting": f", before {target} shipped to main",
+           "broken": f": {target} will not ship to main"}.get(status or "", "")
+    where = (f"It goes back to `{to}`, where it was when it was parked ({w['url']})" if w.get("from") == to else
+             f"It was `{w.get('from')}` when it was parked ({w['url']}), and goes to `{to}`")
+    return (f"#{n} no longer waits for {target}{why}. {where}, and is worked from there."
+            + (f"\n\nReason: {reason.strip()}" if reason else ""))
+
+
+def lift_wait(n: int, config: dict[str, Any], *, reason: str | None = None, dry_run: bool = False,
+              bundle: dict[str, Any] | None = None, offline: bool = False,
+              target: dict[str, Any] | None = None) -> dict[str, Any]:
+    """End issue N's wait, whether or not its target shipped: one marked `kind=wait-lifted` comment, then the state
+    the wait recorded (`untriaged` comes back as `triage`) as N's only state label. Never exits: returns
+    {number, ok, did, to, message, url}, `did` one of `lifted`, `finished` (a lift cut short between its comment
+    and its label: only the label moves), `nothing` (N isn't waiting: nothing written), `refused` (nothing
+    written) or `failed` (a GitHub call failed; `message` says what was already done, and a rerun finishes it).
+    `dry_run` reads everything and writes nothing (`message` holds the comment). `bundle` is N's, already read
+    (offline: a saved one, whose `target` is the epic it waits on); otherwise it is read from GitHub. `target` is
+    the bundle of the epic it waits on, when the caller has read it (`ship`): without it, only a `then=close` wait
+    reads that epic. Writes the comment before the label: that order is what makes a rerun able to tell a lift
+    cut short (state's ledger)."""
+    res: dict[str, Any] = {"number": n, "ok": False, "did": "refused", "to": None, "url": None}
+
+    def done(did: str, message: str, ok: bool = True, **extra: Any) -> dict[str, Any]:
+        return {**res, "ok": ok, "did": did, "message": message, **extra}
+
+    def refused(message: str) -> dict[str, Any]:
+        return done("refused", f"#{n}: {message} (nothing was changed)", ok=False)
+
+    if reason is not None and (errs := wait_reason_errors(reason)):
+        return refused("; ".join(errs))
+    try:
+        bundle = bundle if bundle is not None else fetch_bundle(n, config)
+        st = bundle_state(bundle, config)
+    except SdlcError as exc:
+        return done("failed", f"#{n}: could not read the issue ({exc}): nothing was changed", ok=False)
+    labels = list(bundle["issue"].get("labels", []))
+    waiting_label = f"{PREFIX}{WAITING}"
+    if waiting_label in labels and waiting_label not in state_labels(config):
+        return refused(f"{waiting_label} isn't a state label in the config, so a lift couldn't remove it: "
+                       "add it to `labels` first")
+    w, lifted = st.get("wait"), st.get("wait_lifted")
+
+    def finish() -> dict[str, Any]:   # a lift cut short: its comment is posted, so the decision stands
+        to = wait_back(lifted.get("from"))
+        if to is None:
+            return refused(f"the lifted wait recorded no state to go back to (from={lifted.get('from')!r}): "
+                           f"move the label from {waiting_label} by hand")
+        head = (f"#{n}: its wait for {wait_target(lifted['epic'], lifted['milestone'])} was lifted "
+                f"({lifted['lifted_url']}) but the label is still {waiting_label}: ")
+        if dry_run:
+            stray = [l for l in labels if l in state_labels(config) and l != f"{PREFIX}{to}"]
+            return done("finished", f"DRY RUN {head}would move it to {PREFIX}{to}\n"
+                        f"labels: add {[PREFIX + to]}, remove {stray}", to=to)
+        try:
+            set_state_label(n, labels, to, config)
+        except SdlcError as exc:
+            return done("failed", f"{head}moving it to {PREFIX}{to} failed ({exc}): rerun "
+                        f"`uv run python tools/sdlc.py wait {n} --lift`", ok=False, to=to)
+        return done("finished", f"{head}moved it to {PREFIX}{to}", to=to)
+
+    if st.get("issue_closed"):
+        return done("nothing", f"#{n} is closed: there is no wait to lift")
+    if waiting_label in labels and st["state"] != WAITING:
+        # another state label beside sdlc:waiting: a label edit that added the restored one and failed to remove
+        # sdlc:waiting is finished; anything else is a person's to sort out (claim refuses it on the label)
+        others = [l for l in labels if l in state_labels(config) and l != waiting_label]
+        if not w and lifted and (back := wait_back(lifted.get("from"))) and others == [f"{PREFIX}{back}"]:
+            return finish()
+        return refused("; ".join(st.get("conflicts") or [f"{waiting_label} beside " + ", ".join(others)]))
+    if st["state"] != WAITING:
+        return done("nothing", f"#{n} isn't waiting (it is {st['state']}): there is no wait to lift"
+                    + (f"; a wait on {wait_target(w['epic'], w['milestone'])} is recorded ({w['url']}) but its label "
+                       "never moved, so nothing holds it" if w else ""))
+    if not w and lifted:
+        return finish()
+    if not w:
+        return refused("; ".join(st.get("conflicts") or [f"{waiting_label} but no wait is recorded"]))
+    to = wait_back(w.get("from"))
+    if to is None:
+        return refused(f"its wait recorded no state to go back to (from={w.get('from')!r}, {w['url']}): "
+                       f"move the label from {waiting_label} by hand")
+    status = None   # the target's, when it was read: only a `then=close` wait needs it (and a saved bundle has it)
+    if w.get("then") == "close":
+        # a wait that closes the issue once its target ships: the lift must know whether it shipped
+        try:
+            tb = (target if target is not None else bundle.get("target") if offline
+                  else fetch_bundle(w["epic"], config, set(bundle["trusted"])))
+        except SdlcError as exc:
+            return refused(f"its wait closes it once {wait_target(w['epic'], w['milestone'])} ships, and "
+                           f"#{w['epic']} could not be read ({exc}), so whether it shipped isn't known")
+        if not tb:
+            return refused(f"its wait closes it once {wait_target(w['epic'], w['milestone'])} ships, and the saved "
+                           f"bundle has no `target` (#{w['epic']}'s bundle) to tell whether it did")
+        status = wait_status(w, bundle_state({"trusted": bundle["trusted"], **tb}, config))
+        if status == "shipped":
+            return refused(f"its wait (`then=close`, {w['url']}) is on {wait_target(w['epic'], w['milestone'])}, "
+                           "which has shipped: closing it on lift is #379's M2 (T2), not built yet; it stays "
+                           "waiting")
+    elif (tb := target if target is not None else bundle.get("target") if offline else None):
+        status = wait_status(w, bundle_state({"trusted": bundle["trusted"], **tb}, config))
+    comment = render_comment("wait-lifted", None, lift_comment_body(n, w, to, status, reason), config,
+                             waits=f"{w['epic']}:{w['milestone']}", to=to)
+    if len(comment) > COMMENT_LIMIT:
+        return refused("the reason is over GitHub's comment limit")
+    summary = f"{WAITING} -> {to}, its wait for {wait_target(w['epic'], w['milestone'])} lifted"
+    if dry_run:
+        return done("lifted", f"DRY RUN #{n}: {summary}\nlabels: add {[PREFIX + to]}, remove {[waiting_label]}\n"
+                    f"----- comment -----\n{comment}".rstrip(), to=to)
+    try:
+        posted = post_comment(n, comment, config)
+    except SdlcError as exc:
+        return done("failed", f"#{n}: posting the lift failed ({exc}), and the label was not moved; if the comment "
+                    f"was posted after all, rerun `uv run python tools/sdlc.py wait {n} --lift` to finish it",
+                    ok=False, to=to)
+    url = (posted or {}).get("html_url", "")
+    try:
+        set_state_label(n, labels, to, config)
+    except SdlcError as exc:
+        return done("failed", f"#{n}: the lift is posted ({url}) but moving the label to {PREFIX}{to} failed "
+                    f"({exc}): rerun `uv run python tools/sdlc.py wait {n} --lift` to finish it",
+                    ok=False, to=to, url=url)
+    return done("lifted", f"#{n}: {summary}  {url}", to=to, url=url)
+
+
 def command_wait(args: argparse.Namespace, config: dict[str, Any]) -> int:
     """Park ordinary issue N until epic E's milestone (or E as a whole) ships to main: one marked `kind=wait`
     comment (`waits=E:Mk`, `from=<state>`, the reason) and `sdlc:waiting` as its only state label. Refuses, writing
@@ -1903,7 +2039,14 @@ def command_wait(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if args.lift:
         if args.on or args.then:
             raise SdlcError("--lift ends a wait: it takes no --on or --then")
-        raise SdlcError("`wait --lift` isn't built yet (#379's T1.3): nothing was changed")
+        offline = bool(getattr(args, "from_file", None))
+        if offline and not args.dry_run:
+            raise SdlcError("`wait --lift` reads the issue from GitHub: --from-file goes with --dry-run only "
+                            "(nothing was posted)")
+        result = lift_wait(n, config, reason=args.reason, dry_run=args.dry_run,
+                           bundle=load_bundle(args, config) if offline else None, offline=offline)
+        print(result["message"], file=sys.stdout if result["ok"] else sys.stderr)
+        return 0 if result["ok"] else 1
     if not args.on:
         raise SdlcError("--on E[:Mk] is required: the epic (and milestone) the issue waits to ship")
     offline = bool(getattr(args, "from_file", None))
@@ -8712,9 +8855,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("wait", help="park an ordinary issue until another epic's milestone (or the epic) ships to main")
     p.add_argument("number", type=int)
     p.add_argument("--on", help="E or E:Mk: the epic, and the milestone of its latest plan, to wait for")
-    p.add_argument("--reason", help="why it waits, in plain words (one line, posted on the issue)")
+    p.add_argument("--reason", help="why it waits (with --lift, optional: why it is lifted), in plain words (one line, posted on the issue)")
     p.add_argument("--then", choices=["close"], help="close the issue when the wait lifts (needs #378's close verb)")
-    p.add_argument("--lift", action="store_true", help="end the wait (#379's T1.3; not built yet)")
+    p.add_argument("--lift", action="store_true", help="end the wait and put back the state it recorded (safe to rerun)")
     p.add_argument("--dry-run", action="store_true", help="run every check, print the comment and the label move")
     p.add_argument("--from-file", help="with --dry-run: a saved {issue, comments, trusted, target} bundle")
     p.set_defaults(fn=command_wait)
