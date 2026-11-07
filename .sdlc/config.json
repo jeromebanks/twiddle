@@ -19,7 +19,8 @@
     {"name": "sdlc:in-progress", "color": "FBCA04", "description": "SDLC: the epic's slices are being built (work-slice)"},
     {"name": "sdlc:demo-review", "color": "1D76DB", "description": "SDLC: milestone demo posted, waiting for the poster (reserved)"},
     {"name": "sdlc:done", "color": "0E8A16", "description": "SDLC: shipped and accepted (reserved)"},
-    {"name": "sdlc:escalated", "color": "B60205", "description": "SDLC: a human is needed (no consensus, or the agent is stuck)"}
+    {"name": "sdlc:escalated", "color": "B60205", "description": "SDLC: a human is needed (no consensus, or the agent is stuck)"},
+    {"name": "sdlc:waiting", "color": "C5DEF5", "description": "SDLC: waiting for another epic's milestone to ship to main (`wait`)"}
   ],
   "models": {"routine": "sonnet", "judgment": "opus", "novel": "opus"},
   "slice_review": {"routine": "milestone", "judgment": "slice", "novel": "slice"},
