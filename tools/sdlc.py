@@ -1756,6 +1756,179 @@ def command_transition(args: argparse.Namespace, config: dict[str, Any]) -> int:
     return 0
 
 
+# --- wait: park an ordinary issue until another epic's milestone ships ------------------------------------------
+
+WAIT_FROM = ("untriaged", "triage", "approved", "planned")   # the states a wait can take (and gives back)
+CLOSE_VERB_ISSUE = 378   # `wait --then close` closes through this issue's `close` verb, once it is on main
+
+
+def parse_wait_on(on: str) -> tuple[int, str]:
+    """`--on E` or `--on E:Mk` -> (E, Mk), `E` alone (or `E:all`) being the whole epic (`all`, as a debt ticket's)."""
+    epic, sep, ms = on.strip().partition(":")
+    ms = ms if sep else NO_MILESTONE
+    if not epic.isdigit() or int(epic) <= 0 or not ms or not MARKER_VALUE_RE.fullmatch(ms) or "--" in ms:
+        raise SdlcError(f"--on takes an epic and maybe one of its milestones, `E` or `E:Mk` (e.g. 263:M2), not {on!r}")
+    return int(epic), ms
+
+
+def wait_reason_errors(reason: str | None) -> list[str]:
+    """The reason is posted on a public issue, on one line (the `Reason: ...` line state reads back)."""
+    if not reason or not reason.strip():
+        return ["--reason is required: say in plain words why the issue waits"]
+    if "\n" in reason or "\r" in reason:
+        return ["--reason is one line (state reads it back from the comment's `Reason:` line)"]
+    if hits := identifier_hits(reason):
+        return ["the reason contains " + ", ".join(hits) + ": the issue is public"]
+    return []
+
+
+def wait_errors(st: dict[str, Any], tst: dict[str, Any] | None, epic: int, ms: str,
+                then: str | None = None) -> list[str]:
+    """Why issue N (state `st`) may not wait for epic E's milestone `ms` (`all`: the whole epic; E's state `tst`,
+    None when E is N and wasn't read). Empty list = fine. Pure: both states come from `bundle_state`."""
+    n, errs = st["number"], []
+    if then == "close":
+        errs.append(f"`--then close` needs #{CLOSE_VERB_ISSUE}'s close verb, not built yet: park #{n} without it, "
+                    f"and close it by hand once {wait_target(epic, ms)} ships")
+    if kind := st.get("plan_kind"):
+        what = {"debt": "a tech-debt ticket, whose waits are its own (`waits=` in its marker)",
+                "slice": "a slice: its epic's plan orders it", "subtask": "a subtask: its epic's plan orders it"}[kind]
+        errs.append(f"#{n} is {what}; `wait` parks an ordinary issue")
+    elif is_debt_epic(st):
+        errs.append(f"#{n} is the debt epic: its tickets wait on their own (`waits=`), never the epic")
+    elif st.get("issue_closed"):
+        errs.append(f"#{n} is closed")
+    elif st["state"] == WAITING or st.get("wait"):
+        w = st.get("wait")
+        errs.append(f"#{n} already waits for {wait_target(w['epic'], w['milestone'])} to ship to main ({w['url']}): "
+                    "one wait at a time" if w else
+                    f"#{n} is {PREFIX}{WAITING}, its last wait lifted but the label not moved: "
+                    f"`uv run python tools/sdlc.py wait {n} --lift` finishes that first")
+    elif st["state"] == "escalated":
+        errs.append(f"#{n} is escalated: a human holds it")
+    elif st.get("conflicts") and (st["state"] in WAIT_FROM or st["state"] == "conflict"):
+        errs.append("fix conflicts first: " + "; ".join(st["conflicts"]))
+    elif st["state"] not in WAIT_FROM:
+        why = ("the poster's move" if st["state"] in REVIEW_STATES | {"demo-review"} else
+               "its slices and claims stay where they are" if st["state"] == "in-progress" else
+               "nothing is left to wait for" if st["state"] in LATER_STATES else "")
+        errs.append(f"#{n} is {st['state']}" + (f" ({why})" if why else "") + ": a wait takes an issue in "
+                    + ", ".join(WAIT_FROM[:-1]) + f" or {WAIT_FROM[-1]}")
+    if epic == n:
+        errs.append(f"#{n} can't wait on itself")
+        return errs
+    if tst is None:
+        return errs + [f"#{epic} wasn't read"]
+    target = wait_target(epic, ms)
+    if tkind := tst.get("plan_kind"):
+        errs.append(f"#{epic} is a {'tech-debt ticket' if tkind == 'debt' else tkind}, not a feature epic")
+    elif is_debt_epic(tst):
+        errs.append(f"#{epic} is the debt epic, not a feature epic: nothing on it ships as a milestone")
+    elif is_quick(tst):
+        errs.append(f"#{epic} is a quick change, not a feature epic: it has no milestones to ship")
+    elif tst.get("issue_closed"):
+        errs.append(f"#{epic} is closed: nothing more of it will ship")
+    elif tst["state"] in LATER_STATES:
+        errs.append(f"#{epic} is {tst['state']}: it has shipped all it will")
+    elif not tst.get("latest_plan"):
+        errs.append(f"#{epic} has no plan yet: a wait names a milestone of an epic's plan (or the whole epic, once "
+                    "it is planned)")
+    elif ms == NO_MILESTONE:
+        planned, shipped = tst.get("planned_milestones") or [], tst.get("shipped") or {}
+        if NO_MILESTONE in shipped or (planned and all(m in shipped for m in planned)):
+            errs.append(f"{target} has already shipped to main")
+    elif ms not in (planned := tst.get("planned_milestones") or []):
+        if planned:
+            listed = "its milestones: " + ", ".join(planned)
+        elif tst.get("plan_readable"):
+            listed = f"it names none: wait on the whole epic, `--on {epic}`"
+        else:
+            listed = "its plan-json can't be read"
+        errs.append(f"{ms} is not a milestone of #{epic}'s latest plan ({listed})")
+    elif ms in (tst.get("shipped") or {}):
+        errs.append(f"{target} has already shipped to main")
+    elif not errs and (status := wait_status({"epic": epic, "milestone": ms}, tst)) != "waiting":
+        errs.append(f"a wait on {target} would be {status} at once")   # a backstop: state would not show it waiting
+    return errs
+
+
+def wait_comment_body(n: int, epic: int, ms: str, frm: str, reason: str) -> str:
+    back = "triage" if frm == "untriaged" else frm
+    return (f"#{n} is parked: it {wait_text({'epic': epic, 'milestone': ms})}, and nothing builds it until then. "
+            f"It was in `{frm}`; when the wait is lifted it goes back to `{back}`.\n\nReason: {reason.strip()}")
+
+
+def require_state_label(config: dict[str, Any], state: str, offline: bool) -> None:
+    """The label must be one of the config's states (or the issue would read as untriaged) and exist on GitHub."""
+    label = f"{PREFIX}{state}"
+    if label not in state_labels(config):
+        raise SdlcError(f"{label} isn't a state label in the config: add it to `labels` first (nothing was posted)")
+    if offline:
+        return
+    have = {l["name"] for l in gh_json(["label", "list", "--repo", repo_of(config), "--limit", "200", "--json", "name"])}
+    if label not in have:
+        raise SdlcError(f"label {label} does not exist: run `bootstrap-labels` first (nothing was posted)")
+
+
+def command_wait(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Park ordinary issue N until epic E's milestone (or E as a whole) ships to main: one marked `kind=wait`
+    comment (`waits=E:Mk`, `from=<state>`, the reason) and `sdlc:waiting` as its only state label. Refuses, writing
+    nothing, every issue or target a wait can't take (`wait_errors`). `--dry-run` runs every check and prints."""
+    n = args.number
+    if args.lift:
+        if args.on or args.then:
+            raise SdlcError("--lift ends a wait: it takes no --on or --then")
+        raise SdlcError("`wait --lift` isn't built yet (#379's T1.3): nothing was changed")
+    if not args.on:
+        raise SdlcError("--on E[:Mk] is required: the epic (and milestone) the issue waits to ship")
+    offline = bool(getattr(args, "from_file", None))
+    if offline and not args.dry_run:
+        raise SdlcError("`wait` reads the issue and its target from GitHub: --from-file goes with --dry-run only "
+                        "(nothing was posted)")
+    epic, ms = parse_wait_on(args.on)
+    if errs := wait_reason_errors(args.reason):
+        raise SdlcError("; ".join(errs))
+    bundle = load_bundle(args, config)
+    trusted = set(bundle["trusted"])
+    st = bundle_state(bundle, config)
+    tst = None
+    if epic != n:
+        tb = bundle.get("target") if offline else fetch_bundle(epic, config, trusted)
+        if not tb:
+            raise SdlcError(f"the saved bundle has no `target` (#{epic}'s bundle) to check the wait against")
+        tst = bundle_state({"trusted": bundle["trusted"], **tb}, config)
+    w = st.get("wait")
+    # a rerun after a wait cut short between its comment and its label: the same target, from the state it recorded
+    finishing = bool(w and not args.then and not st.get("plan_kind") and not st.get("issue_closed")
+                     and not st.get("conflicts") and st["state"] in WAIT_FROM and st["state"] == w.get("from")
+                     and (w["epic"], w["milestone"]) == (epic, ms))
+    if not finishing and (errs := wait_errors(st, tst, epic, ms, args.then)):
+        raise SdlcError("; ".join(errs))
+    require_state_label(config, WAITING, offline)
+    current = list(bundle["issue"]["labels"])
+    moved = [l for l in current if l in state_labels(config) and l != f"{PREFIX}{WAITING}"]
+    if finishing:   # the wait comment was posted and the label edit cut short: finish it, posting nothing new
+        print(f"#{n}: its wait for {wait_target(epic, ms)} is recorded ({st['wait']['url']}) but the label is "
+              f"{PREFIX}{st['state']}: " + ("would move" if args.dry_run else "moving") + f" it to {PREFIX}{WAITING}")
+        if not args.dry_run:
+            set_state_label(n, current, WAITING, config)
+        return 0
+    comment = render_comment("wait", None, wait_comment_body(n, epic, ms, st["state"], args.reason), config,
+                             waits=f"{epic}:{ms}", **{"from": st["state"]})
+    if len(comment) > COMMENT_LIMIT:
+        raise SdlcError("the reason is over GitHub's comment limit")
+    if args.dry_run:
+        print(f"DRY RUN #{n}: {st['state']} -> {WAITING}, {wait_text({'epic': epic, 'milestone': ms})}")
+        print(f"labels: add {[PREFIX + WAITING]}, remove {moved}")
+        print("----- comment -----")
+        print(comment)
+        return 0
+    posted = post_comment(n, comment, config)
+    set_state_label(n, current, WAITING, config)
+    print(f"#{n}: {st['state']} -> {WAITING}, {wait_text({'epic': epic, 'milestone': ms})}  {posted.get('html_url', '')}")
+    return 0
+
+
 def prd_pr_errors(pr: dict[str, Any], default_branch: str) -> list[str]:
     """Why a PRD pull request may not be merged by the SDLC (empty list = fine)."""
     errs = []
@@ -8466,6 +8639,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="print the labels and comment, change nothing")
     p.add_argument("--from-file")
     p.set_defaults(fn=command_transition)
+
+    p = sub.add_parser("wait", help="park an ordinary issue until another epic's milestone (or the epic) ships to main")
+    p.add_argument("number", type=int)
+    p.add_argument("--on", help="E or E:Mk: the epic, and the milestone of its latest plan, to wait for")
+    p.add_argument("--reason", help="why it waits, in plain words (one line, posted on the issue)")
+    p.add_argument("--then", choices=["close"], help="close the issue when the wait lifts (needs #378's close verb)")
+    p.add_argument("--lift", action="store_true", help="end the wait (#379's T1.3; not built yet)")
+    p.add_argument("--dry-run", action="store_true", help="run every check, print the comment and the label move")
+    p.add_argument("--from-file", help="with --dry-run: a saved {issue, comments, trusted, target} bundle")
+    p.set_defaults(fn=command_wait)
 
     p = sub.add_parser("reconcile", help="record an approval for a hand-applied sdlc:approved label")
     p.add_argument("number", type=int)
