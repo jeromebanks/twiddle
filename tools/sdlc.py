@@ -4236,7 +4236,6 @@ def close_checks(n: int, reason: str, why: str, config: dict[str, Any], *, commi
     prior = prior_record[0] if prior_record else None
     sha = commit_on_main(commit.lower(), config, hint=f"`--reason completed` names the commit on "
                          f"{config.get('default_branch', 'main')} that fixed #{n}") if commit is not None else None
-    shipped = epic_shipped(epic, milestone, config, trusted) if epic is not None else None
     if of is not None:
         dup = raw_issue(of, f"`--of` names the issue #{n} duplicates", config)
         if dup.get("state") == "closed" and dup.get("state_reason") == "not_planned":
@@ -4251,10 +4250,15 @@ def close_checks(n: int, reason: str, why: str, config: dict[str, Any], *, commi
     if same and (said := recorded_why(prior_record[1].get("body", ""))) != why:
         raise SdlcError(f"#{n}'s close record says --why {said!r}: a different --why is refused "
                         "(rerun with the recorded one to finish it)")
+    # the epic's ship gated the record when it was posted: a resume finishes that close, even if E's plan has grown
+    # a milestone since (with no Mk, "its last milestone" can move)
+    shipped = epic_shipped(epic, milestone, config, trusted) if epic is not None and not same else None
+    by = (shipped_text(shipped) if shipped else wait_target(epic, milestone) if milestone else f"#{epic}"
+          ) if epic is not None else None
     want = CLOSE_STATE_REASON[r]
     staged = state_labels_on(issue, config)
     labelled = staged == [f"{PREFIX}done"]
-    plan = {"number": n, "reason": r, "why": why, "sha": sha, "of": of, "shipped": shipped, "extra": extra,
+    plan = {"number": n, "reason": r, "why": why, "sha": sha, "of": of, "shipped": shipped, "by": by, "extra": extra,
             "same": same, "state": issue["state"], "labels": issue["labels"], "labelled": labelled, "want": want,
             "trusted": trusted, "done": None}
     if issue["state"] == "closed":
@@ -4275,8 +4279,7 @@ def close_checks(n: int, reason: str, why: str, config: dict[str, Any], *, commi
     # record (not reopened since) is this close's label, so only that state is let through
     if why_not := close_owner(issue, derive_state(issue, comments, trusted, config), resuming=same and labelled):
         raise SdlcError(why_not)
-    what = (f"{r}, by {sha[:12]}" if sha else f"{r}, by {shipped_text(shipped)}" if shipped
-            else f"duplicate of #{of}")
+    what = f"{r}, by {sha[:12]}" if sha else f"{r}, by {by}" if by else f"duplicate of #{of}"
     removed = [l for l in staged if l != f"{PREFIX}done"]
     plan["steps"] = ([] if same else [f"post the close record on #{n} ({what})"]) \
         + ([] if issue["state"] == "closed" else
@@ -4314,8 +4317,7 @@ def close_apply(plan: dict[str, Any], config: dict[str, Any]) -> str:
         bad.append(f"its sdlc:* labels are {state_labels_on(issue, config)}, not [{PREFIX}done]")
     if bad:
         raise SdlcError(f"read-back of #{n}: " + "; ".join(bad) + f": rerun the same `close {n}` to finish it")
-    how = (f", fixed by {sha[:12]}" if sha else f", fixed by {shipped_text(plan['shipped'])}" if plan["shipped"]
-           else f", a duplicate of #{of}")
+    how = f", fixed by {sha[:12]}" if sha else f", fixed by {plan['by']}" if plan["by"] else f", a duplicate of #{of}"
     return f"#{n}: closed as {want}{how}; labelled {PREFIX}done"
 
 

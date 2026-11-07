@@ -733,3 +733,30 @@ def test_a_close_record_by_a_stranger_is_no_end(ghe, capsys):
     ghe.comment(n, sdlc.render_comment(sdlc.CLOSED_KIND, None, "x", CONFIG, reason="duplicate", of="5"), "stranger")
     ghe.issues[n]["state"], ghe.issues[n]["state_reason"] = "closed", "duplicate"
     assert "closed:" not in state_out(capsys, n)
+
+
+def grow_plan(gh, e, milestones=("M1", "M2", "M3")):
+    """E's plan amended with a milestone not yet shipped: its last milestone is now M3."""
+    plan = {"issue": e, "summary": "s", "milestones": [{"key": m, "title": m, "demo": "d"} for m in milestones],
+            "subtasks": [{**LEAF, "key": f"T{i}", "milestone": m} for i, m in enumerate(milestones, 1)]}
+    gh.comment(e, sdlc.render_comment("plan", 2, sdlc.render_plan(plan), CONFIG))
+
+
+def test_a_resume_by_an_epic_whose_plan_grew_since_the_record_finishes(ghe, capsys):
+    """The ship gated the record when it was posted: a cut-short close is finished, and a done one says so, even
+    once E's plan has a new last milestone that hasn't shipped."""
+    e = epic(ghe, shipped=("M1", "M2"))
+    cut, done = triaged(ghe), triaged(ghe)
+    record(ghe, cut, reason="completed", epic=str(e))
+    assert close(capsys, done, "--reason", "completed", "--by-epic", e)[0] == 0
+    grow_plan(ghe, e)
+    code, _, err = close(capsys, triaged(ghe), "--reason", "completed", "--by-epic", e)
+    assert code == 1 and f"#{e}'s M3 (the last milestone of its latest plan) hasn't shipped" in err   # a fresh close
+    code, out, err = close(capsys, cut, "--reason", "completed", "--by-epic", e)
+    assert code == 0, err
+    assert len(records(ghe, cut)) == 1 and ghe.issues[cut]["state"] == "closed" and sdlc_labels(ghe, cut) == ["sdlc:done"]
+    assert f"#{cut}: closed as completed, fixed by #{e}; labelled sdlc:done" in out
+    code, out, err = close(capsys, done, "--reason", "completed", "--by-epic", e)
+    assert code == 0 and "nothing to do" in out, err
+    code, out, err = close(capsys, done, "--reason", "completed", "--by-epic", e, "--dry-run")
+    assert code == 0 and "nothing to do" in out, err
