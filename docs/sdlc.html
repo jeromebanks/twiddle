@@ -247,6 +247,9 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <tr><td><span class="chip">sdlc:escalated</span></td><td class="turn human">a human</td>
 <td>The agents couldn't agree, a merge of <code>main</code> conflicted, a suite failed on the epic branch, or a plan amendment ran out of rounds (<code>escalate_plan</code>). A human resolves it and moves it back to triage; a plan amendment is settled by a <code>/approve</code> after its latest revision instead, and <code>plan-create</code> moves it back to <span class="chip">sdlc:in-progress</span>.</td>
 <td><code>human</code> (and <code>fix_conflict</code> when two labels clash); <code>create_plan_issues</code> → <code>/plan-issue N</code> once a person settles a plan amendment</td></tr>
+<tr><td><span class="chip">sdlc:waiting</span></td><td class="turn done">nobody (for now)</td>
+<td>An ordinary issue parked until another epic's milestone ships to <code>main</code> (<code>wait N --on E:Mk</code>). It has this label instead of the state it left, and nothing builds it while it waits. When the milestone ships, the wait is lifted and it goes back to the state it was in.</td>
+<td><code>none</code> while the target is unshipped</td></tr>
 <tr><td><span class="chip">sdlc:approved</span> / <span class="chip">sdlc:in-progress</span> with <span class="chip">lane:quick</span></td><td class="turn agent">agent</td>
 <td>A small, safe change whose brief was posted with <code>transition N prd-review --kind prd --lane quick</code> (only on a <span class="chip">complexity:routine</span> issue). It is built from that one approved brief, with no plan or epic. Once building starts the brief is frozen: <code>escalate-to-full N</code> is the only way to change course.</td>
 <td><code>work_quick</code> → <code>/work-slice N --quick</code> (see <a href="#quick">section 6</a>)</td></tr>
@@ -748,7 +751,7 @@ uv run python tools/sdlc.py ready --epic 12 # the slices that can start now</cod
 <span class="chip">sdlc:triage</span> <span class="chip">sdlc:needs-info</span> <span class="chip">sdlc:prd-review</span>
 <span class="chip">sdlc:diagnosis-review</span> <span class="chip">sdlc:approved</span> <span class="chip">sdlc:planned</span>
 <span class="chip">sdlc:in-progress</span> <span class="chip">sdlc:demo-review</span> <span class="chip">sdlc:done</span>
-<span class="chip">sdlc:escalated</span>.</li>
+<span class="chip">sdlc:escalated</span> <span class="chip">sdlc:waiting</span>.</li>
 <li><strong>Markers are the record.</strong> Every agent comment starts with a hidden <code>&lt;!-- sdlc:v1 kind=… --&gt;</code> marker. The state
 is read back from those markers, so any session can pick up an issue from GitHub alone.</li>
 <li><strong>Records are bound to commits.</strong> A test run or a Codex review counts only for the exact commit it saw. A new commit voids both.</li>
