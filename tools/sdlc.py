@@ -4002,10 +4002,24 @@ CLOSE_KEYS = ("reason", "commit", "of", "epic", "milestone")   # what makes two 
 CLOSE_OPEN_STATES = {"untriaged", "triage", "needs-info", "prd-review", "diagnosis-review"}   # plus approved, unplanned
 
 
+def latest_close_record(comments: list[dict[str, Any]], trusted: set[str]
+                        ) -> tuple[dict[str, str], dict[str, Any]] | None:
+    """An issue's latest close record (by a collaborator): its marker and its comment, or None."""
+    marks = [(mk, c) for mk, c in _marked(comments, trusted) if mk.get("kind") == CLOSED_KIND]
+    return marks[-1] if marks else None
+
+
 def latest_close(comments: list[dict[str, Any]], trusted: set[str]) -> dict[str, str] | None:
     """The marker of an issue's latest close record (by a collaborator), or None."""
-    marks = [mk for mk, _ in _marked(comments, trusted) if mk.get("kind") == CLOSED_KIND]
-    return marks[-1] if marks else None
+    rec = latest_close_record(comments, trusted)
+    return rec[0] if rec else None
+
+
+def reopened_since(n: int, at: str, config: dict[str, Any]) -> bool:
+    """Whether issue #n was reopened after `at` (an ISO time), from its timeline events: a reopen whatever its
+    labels became, which a label can't show (a person may relabel it)."""
+    events = gh_pages(f"repos/{repo_of(config)}/issues/{n}/events?per_page=100")
+    return any(e.get("event") == "reopened" and (e.get("created_at") or "") >= at for e in events)
 
 
 def close_flag_errors(args: argparse.Namespace) -> list[str]:
@@ -4077,7 +4091,8 @@ def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
     raw_issue(n, "`close` closes issues, not pull requests", config)
     trusted = fetch_trusted(config)
     issue, comments = fetch_slice(n, config)
-    prior = latest_close(comments, trusted)
+    prior_record = latest_close_record(comments, trusted)
+    prior = prior_record[0] if prior_record else None
     try:
         sha = commit_on_main(args.commit.lower(), config) if args.commit is not None else None
     except SdlcError as exc:   # its text is debt-intake's (`fixed`): say it in close's terms
@@ -4107,7 +4122,8 @@ def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
             print(f"#{n}: already closed as {want} and labelled {PREFIX}done, as its record says: nothing to do")
             return 0
     else:
-        if same and labelled:   # a finished close ends with sdlc:done, so this one was reopened since
+        # a finished close ends with sdlc:done; a reopen since the record shows in the events, however relabelled
+        if same and (labelled or reopened_since(n, prior_record[1].get("created_at") or "", config)):
             raise SdlcError(f"#{n} was reopened after its close record: a reopened issue is a human's")
         st = derive_state(issue, comments, trusted, config)
         if why_not := close_owner(issue, st):

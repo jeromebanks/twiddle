@@ -1,5 +1,7 @@
 """tools/sdlc.py: `close`, an ordinary issue fixed by a commit on main or a duplicate (#378 T1.1). No network:
 the debt tests' fake `gh` answers from dicts."""
+import json
+
 import pytest
 
 from tests.test_sdlc_debt import CONFIG, REPO, FakeGitHub, run
@@ -8,9 +10,27 @@ from tools import sdlc
 SHA = "b" * 40
 
 
+class FakeTimeline(FakeGitHub):
+    """The debt tests' fake, with each issue's timeline events (`reopened`, `closed`) as GitHub lists them."""
+
+    def __init__(self):
+        super().__init__()
+        self.events = {}
+
+    def reopen(self, n):
+        self.events.setdefault(n, []).append({"event": "reopened", "created_at": self.now()})
+        self.issues[n]["state"], self.issues[n]["state_reason"] = "open", "reopened"
+
+    def api(self, rest):
+        path = rest[0]
+        if path.startswith(f"repos/{REPO}/issues/") and path.split("?")[0].endswith("/events"):
+            return json.dumps([self.events.get(int(path.split("/")[4]), [])])
+        return super().api(rest)
+
+
 @pytest.fixture
 def gh(monkeypatch):
-    fake = FakeGitHub()
+    fake = FakeTimeline()
     monkeypatch.setattr(sdlc, "gh", fake)
     monkeypatch.setattr(sdlc.time, "sleep", lambda s: None)
     fake.on_main[SHA] = "behind"
@@ -271,9 +291,21 @@ def test_an_issue_reopened_after_its_close_is_a_humans(gh, capsys):
     assert code == 1 and "reopened after its close record" in err and gh.writes == []
 
 
+def test_an_issue_reopened_and_relabelled_after_its_close_is_a_humans(gh, capsys):
+    n = triaged(gh)
+    assert close(capsys, n, "--reason", "completed", "--commit", SHA)[0] == 0
+    gh.reopen(n)
+    gh.issues[n]["labels"] = ["sdlc:triage", "bug"]   # a person put it back in triage
+    before = len(gh.writes)
+    code, _, err = close(capsys, n, "--reason", "completed", "--commit", SHA)
+    assert code == 1 and "reopened after its close record" in err and len(gh.writes) == before
+    assert gh.issues[n]["state"] == "open" and len(records(gh, n)) == 1
+
+
 def test_an_issue_reopened_before_its_record_still_resumes(gh, capsys):
     n = triaged(gh)   # closed by hand and reopened long ago: GitHub keeps state_reason `reopened` while it is open
-    gh.issues[n]["state_reason"] = "reopened"
+    gh.issues[n]["state"] = "closed"
+    gh.reopen(n)
     record(gh, n, reason="completed", commit=SHA)
     assert close(capsys, n, "--reason", "completed", "--commit", SHA)[0] == 0
     assert len(records(gh, n)) == 1 and gh.issues[n]["state"] == "closed" and sdlc_labels(gh, n) == ["sdlc:done"]
