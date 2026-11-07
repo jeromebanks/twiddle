@@ -1908,20 +1908,25 @@ def lift_comment_body(n: int, w: dict[str, Any], to: str, status: str | None, re
     target = wait_target(w["epic"], w["milestone"])
     why = {"shipped": f": {target} has shipped to main", "waiting": f", before {target} shipped to main",
            "broken": f": {target} will not ship to main"}.get(status or "", "")
-    return (f"#{n} no longer waits for {target}{why}. It goes back to `{to}`, where it was when it was parked "
-            f"({w['url']}), and is worked from there." + (f"\n\nReason: {reason.strip()}" if reason else ""))
+    where = (f"It goes back to `{to}`, where it was when it was parked ({w['url']})" if w.get("from") == to else
+             f"It was `{w.get('from')}` when it was parked ({w['url']}), and goes to `{to}`")
+    return (f"#{n} no longer waits for {target}{why}. {where}, and is worked from there."
+            + (f"\n\nReason: {reason.strip()}" if reason else ""))
 
 
 def lift_wait(n: int, config: dict[str, Any], *, reason: str | None = None, dry_run: bool = False,
-              bundle: dict[str, Any] | None = None, offline: bool = False) -> dict[str, Any]:
+              bundle: dict[str, Any] | None = None, offline: bool = False,
+              target: dict[str, Any] | None = None) -> dict[str, Any]:
     """End issue N's wait, whether or not its target shipped: one marked `kind=wait-lifted` comment, then the state
     the wait recorded (`untriaged` comes back as `triage`) as N's only state label. Never exits: returns
     {number, ok, did, to, message, url}, `did` one of `lifted`, `finished` (a lift cut short between its comment
     and its label: only the label moves), `nothing` (N isn't waiting: nothing written), `refused` (nothing
     written) or `failed` (a GitHub call failed; `message` says what was already done, and a rerun finishes it).
     `dry_run` reads everything and writes nothing (`message` holds the comment). `bundle` is N's, already read
-    (offline: a saved one, whose `target` is the epic it waits on); otherwise it is read from GitHub. Writes the
-    comment before the label: that order is what makes a rerun able to tell a lift cut short (state's ledger)."""
+    (offline: a saved one, whose `target` is the epic it waits on); otherwise it is read from GitHub. `target` is
+    the bundle of the epic it waits on, when the caller has read it (`ship`): without it, only a `then=close` wait
+    reads that epic. Writes the comment before the label: that order is what makes a rerun able to tell a lift
+    cut short (state's ledger)."""
     res: dict[str, Any] = {"number": n, "ok": False, "did": "refused", "to": None, "url": None}
 
     def done(did: str, message: str, ok: bool = True, **extra: Any) -> dict[str, Any]:
@@ -1942,15 +1947,9 @@ def lift_wait(n: int, config: dict[str, Any], *, reason: str | None = None, dry_
     if waiting_label in labels and waiting_label not in state_labels(config):
         return refused(f"{waiting_label} isn't a state label in the config, so a lift couldn't remove it: "
                        "add it to `labels` first")
-    if st.get("issue_closed"):
-        return done("nothing", f"#{n} is closed: there is no wait to lift")
-    if st["state"] != WAITING:
-        w = st.get("wait")
-        return done("nothing", f"#{n} isn't waiting (it is {st['state']}): there is no wait to lift"
-                    + (f"; a wait on {wait_target(w['epic'], w['milestone'])} is recorded ({w['url']}) but its label "
-                       "never moved, so nothing holds it" if w else ""))
     w, lifted = st.get("wait"), st.get("wait_lifted")
-    if not w and lifted:   # a lift cut short: its comment is posted, so the decision stands; only the label is left
+
+    def finish() -> dict[str, Any]:   # a lift cut short: its comment is posted, so the decision stands
         to = wait_back(lifted.get("from"))
         if to is None:
             return refused(f"the lifted wait recorded no state to go back to (from={lifted.get('from')!r}): "
@@ -1958,14 +1957,31 @@ def lift_wait(n: int, config: dict[str, Any], *, reason: str | None = None, dry_
         head = (f"#{n}: its wait for {wait_target(lifted['epic'], lifted['milestone'])} was lifted "
                 f"({lifted['lifted_url']}) but the label is still {waiting_label}: ")
         if dry_run:
+            stray = [l for l in labels if l in state_labels(config) and l != f"{PREFIX}{to}"]
             return done("finished", f"DRY RUN {head}would move it to {PREFIX}{to}\n"
-                        f"labels: add {[PREFIX + to]}, remove {[waiting_label]}", to=to)
+                        f"labels: add {[PREFIX + to]}, remove {stray}", to=to)
         try:
             set_state_label(n, labels, to, config)
         except SdlcError as exc:
             return done("failed", f"{head}moving it to {PREFIX}{to} failed ({exc}): rerun "
                         f"`uv run python tools/sdlc.py wait {n} --lift`", ok=False, to=to)
         return done("finished", f"{head}moved it to {PREFIX}{to}", to=to)
+
+    if st.get("issue_closed"):
+        return done("nothing", f"#{n} is closed: there is no wait to lift")
+    if waiting_label in labels and st["state"] != WAITING:
+        # another state label beside sdlc:waiting: a label edit that added the restored one and failed to remove
+        # sdlc:waiting is finished; anything else is a person's to sort out (claim refuses it on the label)
+        others = [l for l in labels if l in state_labels(config) and l != waiting_label]
+        if not w and lifted and (back := wait_back(lifted.get("from"))) and others == [f"{PREFIX}{back}"]:
+            return finish()
+        return refused("; ".join(st.get("conflicts") or [f"{waiting_label} beside " + ", ".join(others)]))
+    if st["state"] != WAITING:
+        return done("nothing", f"#{n} isn't waiting (it is {st['state']}): there is no wait to lift"
+                    + (f"; a wait on {wait_target(w['epic'], w['milestone'])} is recorded ({w['url']}) but its label "
+                       "never moved, so nothing holds it" if w else ""))
+    if not w and lifted:
+        return finish()
     if not w:
         return refused("; ".join(st.get("conflicts") or [f"{waiting_label} but no wait is recorded"]))
     to = wait_back(w.get("from"))
@@ -1976,7 +1992,8 @@ def lift_wait(n: int, config: dict[str, Any], *, reason: str | None = None, dry_
     if w.get("then") == "close":
         # a wait that closes the issue once its target ships: the lift must know whether it shipped
         try:
-            tb = bundle.get("target") if offline else fetch_bundle(w["epic"], config, set(bundle["trusted"]))
+            tb = (target if target is not None else bundle.get("target") if offline
+                  else fetch_bundle(w["epic"], config, set(bundle["trusted"])))
         except SdlcError as exc:
             return refused(f"its wait closes it once {wait_target(w['epic'], w['milestone'])} ships, and "
                            f"#{w['epic']} could not be read ({exc}), so whether it shipped isn't known")
@@ -1988,8 +2005,8 @@ def lift_wait(n: int, config: dict[str, Any], *, reason: str | None = None, dry_
             return refused(f"its wait (`then=close`, {w['url']}) is on {wait_target(w['epic'], w['milestone'])}, "
                            "which has shipped: closing it on lift is #379's M2 (T2), not built yet; it stays "
                            "waiting")
-    elif offline and bundle.get("target"):
-        status = wait_status(w, bundle_state({"trusted": bundle["trusted"], **bundle["target"]}, config))
+    elif (tb := target if target is not None else bundle.get("target") if offline else None):
+        status = wait_status(w, bundle_state({"trusted": bundle["trusted"], **tb}, config))
     comment = render_comment("wait-lifted", None, lift_comment_body(n, w, to, status, reason), config,
                              waits=f"{w['epic']}:{w['milestone']}", to=to)
     if len(comment) > COMMENT_LIMIT:
@@ -2001,7 +2018,9 @@ def lift_wait(n: int, config: dict[str, Any], *, reason: str | None = None, dry_
     try:
         posted = post_comment(n, comment, config)
     except SdlcError as exc:
-        return done("failed", f"#{n}: posting the lift failed ({exc}): nothing was changed", ok=False, to=to)
+        return done("failed", f"#{n}: posting the lift failed ({exc}), and the label was not moved; if the comment "
+                    f"was posted after all, rerun `uv run python tools/sdlc.py wait {n} --lift` to finish it",
+                    ok=False, to=to)
     url = (posted or {}).get("html_url", "")
     try:
         set_state_label(n, labels, to, config)

@@ -86,7 +86,11 @@ def test_a_lift_puts_back_the_recorded_state_and_its_usual_next_move(monkeypatch
     assert label_move(edits(gh)[0]) == (f"sdlc:{to}", ["sdlc:waiting"])
     mk = sdlc.parse_marker(gh.posted[0])
     assert (mk["kind"], mk["waits"], mk["to"]) == ("wait-lifted", f"{E}:M2", to)
-    assert f"goes back to `{to}`" in gh.posted[0] and f"#{N}: waiting -> {to}" in out
+    assert f"#{N}: waiting -> {to}" in out
+    if frm == "untriaged":
+        assert "It was `untriaged` when it was parked" in gh.posted[0] and "goes to `triage`" in gh.posted[0]
+    else:
+        assert f"goes back to `{to}`, where it was when it was parked" in gh.posted[0]
     # read back with the posted comment: the restored state's usual next move, as if it had never been parked
     after = parked + [comment(OWNER, gh.posted[0], 20)]
     restored_labels = (f"sdlc:{to}", "enhancement")
@@ -237,7 +241,7 @@ def test_finishing_a_lift_restores_the_state_the_wait_recorded(monkeypatch, caps
 def test_a_failed_post_changes_nothing(monkeypatch, capsys, cfg):
     gh = fake(monkeypatch, [wait_comment(1)], fail="post")
     res = sdlc.lift_wait(N, CONFIG)
-    assert (res["ok"], res["did"]) == (False, "failed") and "nothing was changed" in res["message"]
+    assert (res["ok"], res["did"]) == (False, "failed") and "the label was not moved" in res["message"]
     assert gh.writes == [] and gh.posted == []
     assert run(capsys, cfg, N, "--lift")[0] == 1
 
@@ -344,3 +348,34 @@ def test_a_config_without_the_waiting_state_refuses(monkeypatch, capsys, tmp_pat
     gh = fake(monkeypatch, [wait_comment(1)])
     code, _, err = run(capsys, real, N, "--lift")
     assert code == 1 and "isn't a state label in the config" in err and gh.writes == []
+
+
+# --- sdlc:waiting beside another state label -------------------------------------------------------------------------
+
+def test_a_label_edit_that_added_the_state_but_kept_waiting_is_finished(monkeypatch, capsys, cfg):
+    gh = fake(monkeypatch, [wait_comment(1), agent("wait-lifted", 2)], labels=("sdlc:waiting", "sdlc:triage"))
+    code, out, err = run(capsys, cfg, N, "--lift")
+    assert code == 0, err
+    assert gh.posted == [] and len(edits(gh)) == 1 and len(gh.writes) == 1
+    assert label_move(edits(gh)[0]) == ("sdlc:triage", ["sdlc:waiting"])
+
+
+@pytest.mark.parametrize("comments, labels", [
+    ([wait_comment(1)], ("sdlc:waiting", "sdlc:triage")),                              # no lift on record
+    ([wait_comment(1), agent("wait-lifted", 2)], ("sdlc:waiting", "sdlc:approved")),   # not the recorded state
+], ids=["unlifted", "other-state"])
+def test_waiting_beside_another_state_label_is_otherwise_refused(monkeypatch, capsys, cfg, comments, labels):
+    assert "multiple sdlc:* labels" in refused(monkeypatch, capsys, cfg, comments, labels=labels)
+
+
+def test_lift_wait_uses_a_target_the_caller_already_read(monkeypatch):
+    gh = fake(monkeypatch, [wait_comment(1, then="close")])
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda n, *a, **k: pytest.fail("the issue's bundle and its target "
+                                                                           "were handed over"))
+    b = {"issue": issue(labels=("sdlc:waiting",)), "comments": [wait_comment(1, then="close")],
+         "trusted": sorted(TRUSTED)}
+    res = sdlc.lift_wait(N, CONFIG, bundle=b, target=target(shipped=("M2",)))
+    assert (res["ok"], res["did"]) == (False, "refused") and "(T2)" in res["message"] and gh.writes == []
+    b["comments"] = [wait_comment(1)]
+    res = sdlc.lift_wait(N, CONFIG, bundle=b, target=target(shipped=("M2",)))
+    assert (res["ok"], res["did"]) == (True, "lifted") and f"#{E}'s M2 has shipped to main" in gh.posted[0]
