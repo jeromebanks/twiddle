@@ -218,6 +218,12 @@ def test_a_waiting_label_whose_lift_was_cut_short(monkeypatch, capsys, cfg):
     assert f"wait {N} --lift` finishes that first" in err
 
 
+def test_a_waiting_label_with_no_trusted_wait_is_a_conflict(monkeypatch, capsys, cfg):
+    err = refused(monkeypatch, capsys, cfg, *on(), n_issue=issue(labels=("sdlc:waiting",)),
+                  n_comments=[wait_comment(1, author=STRANGER)])
+    assert "fix conflicts first" in err and "no wait is recorded" in err and "--lift" not in err
+
+
 def test_an_issue_with_conflicting_labels(monkeypatch, capsys, cfg):
     err = refused(monkeypatch, capsys, cfg, *on(), n_issue=issue(labels=("sdlc:triage", "sdlc:approved")))
     assert "fix conflicts first" in err
@@ -354,7 +360,8 @@ def saved(tmp_path, tgt=True, labels=("sdlc:triage",)):
 def test_from_file_dry_run_reads_no_github(monkeypatch, capsys, cfg, tmp_path):
     monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("--from-file reads the bundle only"))
     code, out, err = run(capsys, cfg, *on(), "--dry-run", "--from-file", saved(tmp_path))
-    assert code == 0, err and f"kind=wait waits={E}:M2 from=triage" in out
+    assert code == 0, err
+    assert f"kind=wait waits={E}:M2 from=triage" in out and "labels: add ['sdlc:waiting']" in out
 
 
 def test_from_file_without_dry_run_is_refused(monkeypatch, capsys, cfg, tmp_path):

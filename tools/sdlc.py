@@ -1798,15 +1798,15 @@ def wait_errors(st: dict[str, Any], tst: dict[str, Any] | None, epic: int, ms: s
         errs.append(f"#{n} is the debt epic: its tickets wait on their own (`waits=`), never the epic")
     elif st.get("issue_closed"):
         errs.append(f"#{n} is closed")
-    elif st["state"] == WAITING or st.get("wait"):
-        w = st.get("wait")
+    elif w := st.get("wait"):
         errs.append(f"#{n} already waits for {wait_target(w['epic'], w['milestone'])} to ship to main ({w['url']}): "
-                    "one wait at a time" if w else
-                    f"#{n} is {PREFIX}{WAITING}, its last wait lifted but the label not moved: "
+                    "one wait at a time")
+    elif st["state"] == WAITING and st.get("wait_lifted"):
+        errs.append(f"#{n} is {PREFIX}{WAITING}, its last wait lifted but the label not moved: "
                     f"`uv run python tools/sdlc.py wait {n} --lift` finishes that first")
     elif st["state"] == "escalated":
         errs.append(f"#{n} is escalated: a human holds it")
-    elif st.get("conflicts") and (st["state"] in WAIT_FROM or st["state"] == "conflict"):
+    elif st.get("conflicts") and (st["state"] in WAIT_FROM or st["state"] in ("conflict", WAITING)):
         errs.append("fix conflicts first: " + "; ".join(st["conflicts"]))
     elif st["state"] not in WAIT_FROM:
         why = ("the poster's move" if st["state"] in REVIEW_STATES | {"demo-review"} else
@@ -1854,7 +1854,7 @@ def wait_errors(st: dict[str, Any], tst: dict[str, Any] | None, epic: int, ms: s
 
 def wait_comment_body(n: int, epic: int, ms: str, frm: str, reason: str) -> str:
     back = "triage" if frm == "untriaged" else frm
-    return (f"#{n} is parked: it {wait_text({'epic': epic, 'milestone': ms})}, and nothing builds it until then. "
+    return (f"#{n} is parked, {wait_text({'epic': epic, 'milestone': ms})}, and nothing builds it until then. "
             f"It was in `{frm}`; when the wait is lifted it goes back to `{back}`.\n\nReason: {reason.strip()}")
 
 
