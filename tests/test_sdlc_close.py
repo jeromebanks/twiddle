@@ -360,6 +360,17 @@ def test_an_issue_reopened_and_relabelled_after_its_close_is_a_humans(gh, capsys
     assert gh.issues[n]["state"] == "open" and len(records(gh, n)) == 1
 
 
+def test_an_issue_reopened_and_closed_again_by_a_person_is_a_humans(gh, capsys):
+    n = triaged(gh)
+    record(gh, n, reason="completed", commit=SHA)
+    gh.issues[n]["state"], gh.issues[n]["state_reason"] = "closed", "completed"   # our close; the label edit failed
+    gh.reopen(n)
+    gh.issues[n]["state"], gh.issues[n]["state_reason"] = "closed", "completed"   # a person closed it again
+    code, _, err = close(capsys, n, "--reason", "completed", "--commit", SHA)
+    assert code == 1 and "reopened after its close record" in err and gh.writes == []
+    assert sdlc_labels(gh, n) == ["sdlc:triage"]
+
+
 @pytest.mark.parametrize("same_second", [False, True])
 def test_an_issue_reopened_before_its_record_still_resumes(gh, capsys, same_second):
     gh.same_second = same_second   # timestamps can't order it: the timeline's order does

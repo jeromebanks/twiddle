@@ -4140,11 +4140,10 @@ def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
         if labelled:
             print(f"#{n}: already closed as {want} and labelled {PREFIX}done, as its record says: nothing to do")
             return 0
-    else:
-        # a reopen since the record shows in the timeline, however it was relabelled (sdlc:done on an open issue
-        # proves nothing: a close that didn't take effect before the label edit leaves the same)
-        if same and reopened_since(n, prior_record[1].get("id"), config):
-            raise SdlcError(f"#{n} was reopened after its close record: a reopened issue is a human's")
+    # a reopen since the record shows in the timeline, however it was relabelled or closed again since (sdlc:done
+    # on an open issue proves nothing: a close that didn't take effect before the label edit leaves the same)
+    if same and reopened_since(n, prior_record[1].get("id"), config):
+        raise SdlcError(f"#{n} was reopened after its close record: a reopened issue is a human's")
     # who owns it now, on a resume too (closed by our record but not yet labelled, say): sdlc:done after our own
     # record (not reopened since) is this close's label, so only that state is let through
     if why_not := close_owner(issue, derive_state(issue, comments, trusted, config), resuming=same and labelled):
