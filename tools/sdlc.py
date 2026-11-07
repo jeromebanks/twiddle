@@ -4082,9 +4082,17 @@ def raw_issue(m: int, what: str, config: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
+CLOSE_WHY = "\n\nWhy: "   # close_note's last part: the --why, to the end of the record
+
+
+def recorded_why(body: str) -> str | None:
+    """The --why a close record was posted with (close_note's last part), or None."""
+    return body.split(CLOSE_WHY, 1)[1].strip() if CLOSE_WHY in body else None
+
+
 def close_note(reason: str, why: str, sha: str | None, of: int | None) -> str:
-    return {"completed": f"Closed as **completed**: fixed on `main` by {sha}.\n\nWhy: {why}",
-            "duplicate": f"Closed as a **duplicate** of #{of}.\n\nWhy: {why}"}[reason]
+    return {"completed": f"Closed as **completed**: fixed on `main` by {sha}.",
+            "duplicate": f"Closed as a **duplicate** of #{of}."}[reason] + CLOSE_WHY + why
 
 
 def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
@@ -4113,6 +4121,9 @@ def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if prior and not same:
         got = " ".join(f"{k}={prior[k]}" for k in CLOSE_KEYS if k in prior)
         raise SdlcError(f"#{n} already has a close record ({got}): a different close is refused")
+    if same and (said := recorded_why(prior_record[1].get("body", ""))) != why:
+        raise SdlcError(f"#{n}'s close record says --why {said!r}: a different --why is refused "
+                        "(rerun with the recorded one to finish it)")
     want = CLOSE_STATE_REASON[r]
     staged = state_labels_on(issue, config)
     labelled = staged == [f"{PREFIX}done"]
@@ -4127,11 +4138,12 @@ def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
             print(f"#{n}: already closed as {want} and labelled {PREFIX}done, as its record says: nothing to do")
             return 0
     else:
-        # a finished close ends with sdlc:done; a reopen since the record shows in the events, however relabelled
-        if same and (labelled or reopened_since(n, prior_record[1].get("id"), config)):
+        # a reopen since the record shows in the timeline, however it was relabelled (sdlc:done on an open issue
+        # proves nothing: a close that didn't take effect before the label edit leaves the same)
+        if same and reopened_since(n, prior_record[1].get("id"), config):
             raise SdlcError(f"#{n} was reopened after its close record: a reopened issue is a human's")
-        st = derive_state(issue, comments, trusted, config)
-        if why_not := close_owner(issue, st):
+        # sdlc:done after our own record (not reopened since) is this close's label: only the close is left
+        if not (same and labelled) and (why_not := close_owner(issue, derive_state(issue, comments, trusted, config))):
             raise SdlcError(why_not)
     what = f"{r}, by {sha[:12]}" if sha else f"duplicate of #{args.of}"
     removed = [l for l in staged if l != f"{PREFIX}done"]

@@ -54,7 +54,10 @@ def sdlc_labels(gh, n):
     return [l for l in gh.issues[n]["labels"] if l in sdlc.state_labels(CONFIG)]
 
 
-def close(capsys, n, *argv, why="fixed by the retry change"):
+WHY = "fixed by the retry change"
+
+
+def close(capsys, n, *argv, why=WHY):
     return run(capsys, "close", n, *argv, *(["--why", why] if why is not None else []))
 
 
@@ -234,14 +237,16 @@ def test_issues_in_triage_or_approved_with_no_plan_are_accepted(gh, capsys):
 
 # --- resume (AC12) ---------------------------------------------------------------------------------------------
 
-def record(gh, n, **extra):
-    gh.comment(n, sdlc.render_comment(sdlc.CLOSED_KIND, None, "Closed.", CONFIG, **extra))
+def record(gh, n, why=WHY, **extra):
+    """A close record as `close` posts it (the run then cut short)."""
+    note = sdlc.close_note(extra["reason"], why, extra.get("commit"), extra.get("of"))
+    gh.comment(n, sdlc.render_comment(sdlc.CLOSED_KIND, None, note, CONFIG, **extra))
 
 
 def test_a_run_cut_short_after_the_record_is_finished_without_a_second_record(gh, capsys):
     n = triaged(gh)
     record(gh, n, reason="completed", commit=SHA)
-    code, _, err = close(capsys, n, "--reason", "completed", "--commit", SHA[:8], why="again")
+    code, _, err = close(capsys, n, "--reason", "completed", "--commit", SHA[:8], why=f"  {WHY} ")
     assert code == 0, err
     assert len(records(gh, n)) == 1 and not any(w[0].endswith("/comments") for w in gh.writes)
     assert gh.issues[n]["state"] == "closed" and sdlc_labels(gh, n) == ["sdlc:done"]
@@ -277,6 +282,30 @@ def test_different_arguments_from_the_record_are_refused(gh, capsys):
     assert gh.writes == []
 
 
+def test_a_different_why_from_the_record_is_refused(gh, capsys):
+    n = triaged(gh)
+    record(gh, n, reason="completed", commit=SHA)
+    code, _, err = close(capsys, n, "--reason", "completed", "--commit", SHA, why="a different explanation")
+    assert code == 1 and "a different --why is refused" in err and repr(WHY) in err
+    assert gh.writes == [] and gh.issues[n]["state"] == "open"
+
+
+def test_a_close_that_did_not_take_effect_is_finished_by_a_rerun(gh, capsys, monkeypatch):
+    n = triaged(gh)
+    real = gh.__call__
+
+    def dropped(args, *, check=True):   # GitHub answers the close but it doesn't take; the label edit lands
+        return "" if list(args[:2]) == ["issue", "close"] else real(args, check=check)
+    monkeypatch.setattr(sdlc, "gh", dropped)
+    code, _, err = close(capsys, n, "--reason", "completed", "--commit", SHA)
+    assert code == 1 and "read-back" in err and "not closed as completed" in err
+    assert gh.issues[n]["state"] == "open" and sdlc_labels(gh, n) == ["sdlc:done"]
+    monkeypatch.setattr(sdlc, "gh", gh)
+    code, _, err = close(capsys, n, "--reason", "completed", "--commit", SHA)
+    assert code == 0, err
+    assert len(records(gh, n)) == 1 and gh.issues[n]["state"] == "closed" and sdlc_labels(gh, n) == ["sdlc:done"]
+
+
 def test_a_closed_issue_with_no_record_is_refused(gh, capsys):
     n = gh.issue("closed by hand", ["sdlc:triage"], state="closed")
     gh.issues[n]["state_reason"] = "completed"
@@ -293,9 +322,9 @@ def test_a_closed_issue_whose_reason_differs_from_its_record_is_refused(gh, caps
 
 
 def test_an_issue_reopened_after_its_close_is_a_humans(gh, capsys):
-    n = gh.issue("reopened", ["sdlc:done"])
-    gh.issues[n]["state_reason"] = "reopened"
+    n = gh.issue("reopened", ["sdlc:done"], state="closed")
     record(gh, n, reason="completed", commit=SHA)
+    gh.reopen(n)
     code, _, err = close(capsys, n, "--reason", "completed", "--commit", SHA)
     assert code == 1 and "reopened after its close record" in err and gh.writes == []
 
