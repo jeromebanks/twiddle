@@ -4015,11 +4015,16 @@ def latest_close(comments: list[dict[str, Any]], trusted: set[str]) -> dict[str,
     return rec[0] if rec else None
 
 
-def reopened_since(n: int, at: str, config: dict[str, Any]) -> bool:
-    """Whether issue #n was reopened after `at` (an ISO time), from its timeline events: a reopen whatever its
-    labels became, which a label can't show (a person may relabel it)."""
-    events = gh_pages(f"repos/{repo_of(config)}/issues/{n}/events?per_page=100")
-    return any(e.get("event") == "reopened" and (e.get("created_at") or "") >= at for e in events)
+def reopened_since(n: int, comment_id: Any, config: dict[str, Any]) -> bool:
+    """Whether issue #n was reopened after comment `comment_id` (its close record), whatever its labels became since
+    (a person may relabel it). Read from the issue's timeline, which lists comments and events in GitHub's own order:
+    timestamps can't order two things in the same second. A record missing from the timeline is a refusal."""
+    timeline = gh_pages(f"repos/{repo_of(config)}/issues/{n}/timeline?per_page=100")
+    at = next((i for i, e in enumerate(timeline) if e.get("event") == "commented" and e.get("id") == comment_id), None)
+    if at is None:
+        raise SdlcError(f"#{n}'s close record (comment {comment_id}) isn't in its timeline, so `close` can't tell "
+                        "whether it was reopened since: a person's to check")
+    return any(e.get("event") == "reopened" for e in timeline[at + 1:])
 
 
 def close_flag_errors(args: argparse.Namespace) -> list[str]:
@@ -4123,7 +4128,7 @@ def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
             return 0
     else:
         # a finished close ends with sdlc:done; a reopen since the record shows in the events, however relabelled
-        if same and (labelled or reopened_since(n, prior_record[1].get("created_at") or "", config)):
+        if same and (labelled or reopened_since(n, prior_record[1].get("id"), config)):
             raise SdlcError(f"#{n} was reopened after its close record: a reopened issue is a human's")
         st = derive_state(issue, comments, trusted, config)
         if why_not := close_owner(issue, st):

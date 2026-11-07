@@ -11,20 +11,29 @@ SHA = "b" * 40
 
 
 class FakeTimeline(FakeGitHub):
-    """The debt tests' fake, with each issue's timeline events (`reopened`, `closed`) as GitHub lists them."""
+    """The debt tests' fake, with each issue's timeline: its comments and `reopened` events in the order they
+    happened, as GitHub's timeline API lists them. `same_second` gives every entry one timestamp."""
 
     def __init__(self):
         super().__init__()
-        self.events = {}
+        self.timeline, self.same_second = {}, False
+
+    def now(self):
+        return "2026-11-06T12:00:00Z" if self.same_second else super().now()
+
+    def comment(self, n, body, author="owner"):
+        super().comment(n, body, author)
+        c = self.comments[n][-1]
+        self.timeline.setdefault(n, []).append({"event": "commented", "id": c["id"], "created_at": c["created_at"]})
 
     def reopen(self, n):
-        self.events.setdefault(n, []).append({"event": "reopened", "created_at": self.now()})
+        self.timeline.setdefault(n, []).append({"event": "reopened", "created_at": self.now()})
         self.issues[n]["state"], self.issues[n]["state_reason"] = "open", "reopened"
 
     def api(self, rest):
         path = rest[0]
-        if path.startswith(f"repos/{REPO}/issues/") and path.split("?")[0].endswith("/events"):
-            return json.dumps([self.events.get(int(path.split("/")[4]), [])])
+        if path.startswith(f"repos/{REPO}/issues/") and path.split("?")[0].endswith("/timeline"):
+            return json.dumps([self.timeline.get(int(path.split("/")[4]), [])])
         return super().api(rest)
 
 
@@ -302,13 +311,32 @@ def test_an_issue_reopened_and_relabelled_after_its_close_is_a_humans(gh, capsys
     assert gh.issues[n]["state"] == "open" and len(records(gh, n)) == 1
 
 
-def test_an_issue_reopened_before_its_record_still_resumes(gh, capsys):
+@pytest.mark.parametrize("same_second", [False, True])
+def test_an_issue_reopened_before_its_record_still_resumes(gh, capsys, same_second):
+    gh.same_second = same_second   # timestamps can't order it: the timeline's order does
     n = triaged(gh)   # closed by hand and reopened long ago: GitHub keeps state_reason `reopened` while it is open
     gh.issues[n]["state"] = "closed"
     gh.reopen(n)
     record(gh, n, reason="completed", commit=SHA)
     assert close(capsys, n, "--reason", "completed", "--commit", SHA)[0] == 0
     assert len(records(gh, n)) == 1 and gh.issues[n]["state"] == "closed" and sdlc_labels(gh, n) == ["sdlc:done"]
+
+
+def test_a_reopen_in_the_same_second_as_the_record_is_still_refused(gh, capsys):
+    gh.same_second = True
+    n = triaged(gh)
+    record(gh, n, reason="completed", commit=SHA)
+    gh.reopen(n)   # after the record, in the timeline's order, with the same timestamp
+    code, _, err = close(capsys, n, "--reason", "completed", "--commit", SHA)
+    assert code == 1 and "reopened after its close record" in err and gh.writes == []
+
+
+def test_a_record_missing_from_the_timeline_is_refused(gh, capsys):
+    n = triaged(gh)
+    record(gh, n, reason="completed", commit=SHA)
+    gh.timeline[n] = []
+    code, _, err = close(capsys, n, "--reason", "completed", "--commit", SHA)
+    assert code == 1 and "isn't in its timeline" in err and gh.writes == []
 
 
 def test_a_record_by_a_stranger_does_not_count(gh, capsys):
