@@ -1191,3 +1191,18 @@ def test_a_recovered_release_lifts_its_waits_even_when_the_ship_then_stops(repo,
     assert gh.kinds()[0] == (12, "shipped") and gh.lifts() == [(300, "triage")]
     assert "#12's M1 has shipped to main" in dict(gh.posted)[300]
     assert gh.issues[301]["labels"] == ["sdlc:waiting", "enhancement"]
+
+
+def test_an_untested_recovered_release_ends_the_dry_run_where_the_real_run_stops(repo, monkeypatch, capsys, wcfg):
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    merged = [{"title": "Ship #12 M1: x", "mergeCommit": {"oid": HEAD}}]
+    stub_ship(monkeypatch, [DEMO1, *ACCEPT1], [done_leaf(28, "T1.1")], pr_base="epic/12", merged_ships=merged)
+    monkeypatch.setattr(sdlc, "release_untested", lambda repo_, sha: True)
+    gh = Waits(monkeypatch, repo, [DEMO1, *ACCEPT1], {300: waiter("12:M1"), 301: waiter("12:all")})
+    assert sdlc.main(["--config", wcfg, "ship", "12", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "would lift: #300" in out and "#301" not in out and "would escalate it" in out
+    assert "would finish" not in out and gh.posted == [] and gh.labels == []
+    # the real run: M1's waits lifted, escalated, not finished, so #12's stay
+    assert sdlc.main(["--config", wcfg, "ship", "12"]) == 1
+    assert gh.lifts() == [(300, "triage")] and (12, "escalated") in gh.labels and (12, "done") not in gh.labels

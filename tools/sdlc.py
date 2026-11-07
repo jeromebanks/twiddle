@@ -8095,6 +8095,11 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
                 # it is on main and recorded as shipped (`state` reads it so): its waits are over all the same
                 lift_released(n, [*recovered, key], config, trusted)
                 return 1
+        elif untested:   # the real run escalates and stops here: so does the preview of its lifts
+            keys = [*recovered, key]
+            lift_released(n, keys, config, trusted, dry_run=True, view=shipped_view(bundle, keys, False, config))
+            print(f"#{n}: would escalate it ({main} moved while {key} shipped) and stop there")
+            return 0
         shipped[key] = sha
         recovered.append(key)
     st = {**st, "shipped": shipped}
