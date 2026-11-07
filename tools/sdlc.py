@@ -8079,7 +8079,7 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
     leaves = [r for r in records if r["kind"] == "slice"]
     progress = summarise_progress(leaves, {})
     shipped = {**st["shipped"]}
-    recovered: list[str] = []   # releases this run records (or would): the waits on them are lifted after
+    recovered: list[str] = []   # releases recorded (or, dry, that would be) by the loop below
     # a release PR that merged but whose record never got posted (an interrupted run): record it now
     for key, sha in unrecorded_ships(find_ship_pr(n, config, "merged"), n, shipped).items():
         untested = release_untested(repo, sha)
@@ -8098,6 +8098,9 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
         shipped[key] = sha
         recovered.append(key)
     st = {**st, "shipped": shipped}
+    if recovered:   # their waits now, before a gate below can stop the command (`all`'s wait for the epic's finish)
+        lift_released(n, recovered, config, trusted, dry_run=args.dry_run,
+                      view=shipped_view(bundle, recovered, False, config) if args.dry_run else None)
 
     def dry_lifts(keys: list[str], done: bool) -> None:   # what the real run would lift, writing nothing
         keys = [*keys, NO_MILESTONE] if done else keys
@@ -8123,13 +8126,13 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
             raise SdlcError(f"#{n}: every created milestone has shipped; the rest isn't built yet")
         if args.dry_run:
             print(f"#{n}: every milestone has shipped: would finish the epic (delete {epic_branch(n)}, done)")
-            dry_lifts(recovered, True)
+            dry_lifts([], True)
         elif (st["state"] != "done" or remote_has(epic_branch(n), root)
               or bundle["issue"].get("state", "open").lower() != "closed"):
-            finish_and_lift(recovered, True)
+            finish_and_lift([], True)
         else:
             print(f"#{n}: already done")
-            lift_released(n, [*recovered, NO_MILESTONE], config, trusted)   # a rerun: waits a cut-short one left
+            lift_released(n, [NO_MILESTONE], config, trusted)   # a rerun: the waits a cut-short one left
         return 0
     key = m["key"]
 
@@ -8158,7 +8161,7 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
             raise SdlcError("; ".join(errs))
         if args.dry_run:
             print(f"would open (or reuse) a pull request {epic_branch(n)} -> {main} and merge {head[:12]} with a merge commit")
-            dry_lifts([*recovered, key], last_ship(head))
+            dry_lifts([key], last_ship(head))
             return 0
         open_prs = find_ship_pr(n, config)
         if not open_prs:
@@ -8194,7 +8197,7 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
             extra = {"untested": "1"}
     if args.dry_run:
         print(f"would record {key} as shipped at {sha[:12]}")
-        dry_lifts([*recovered, key], last_ship(sha))
+        dry_lifts([key], last_ship(sha))
         return 0
     last = last_ship(sha)
     shipped[key] = sha
@@ -8202,12 +8205,12 @@ def command_ship(args: argparse.Namespace, config: dict[str, Any]) -> int:
     print(f"#{n}: {key} shipped ({sha[:12]})")
     if extra.get("untested"):
         escalate_epic(n, f"{main} moved while {key} shipped: run the suite on {main} (`{sha[:12]}`)", config)
-        lift_released(n, [*recovered, key], config, trusted)   # recorded as shipped: as in the loop above
+        lift_released(n, [key], config, trusted)   # recorded as shipped: as in the loop above
         return 1
     if last:
-        finish_and_lift([*recovered, key], True)
+        finish_and_lift([key], True)
         return 0
-    finish_and_lift([*recovered, key], False)
+    finish_and_lift([key], False)
     st = with_next(bundle_state(fetch_bundle(n, config, trusted), config), config, trusted=trusted)
     print(f"next: {st['next']}")
     return 0

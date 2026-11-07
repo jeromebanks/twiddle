@@ -1178,3 +1178,16 @@ def test_an_issue_no_longer_waiting_is_not_reported_as_lifted(repo, monkeypatch,
     assert sdlc.main(["--config", wcfg, "ship", "12"]) == 0
     out = capsys.readouterr().out
     assert "#300 is closed" in out and "lifted:" not in out and "next: /" not in out
+
+
+def test_a_recovered_release_lifts_its_waits_even_when_the_ship_then_stops(repo, monkeypatch, capsys, wcfg):
+    # M1's release merged without its record, and M2 is still being built: the record is posted, then ship stops
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    merged = [{"title": "Ship #12 M1: x", "mergeCommit": {"oid": HEAD}}]
+    stub_ship(monkeypatch, [DEMO1, *ACCEPT1], TWO_MILESTONES, pr_base="epic/12", merged_ships=merged)
+    monkeypatch.setattr(sdlc, "release_untested", lambda repo_, sha: False)
+    gh = Waits(monkeypatch, repo, [DEMO1, *ACCEPT1], {300: waiter("12:M1"), 301: waiter("12:M2")})
+    assert sdlc.main(["--config", wcfg, "ship", "12"]) == 1
+    assert gh.kinds()[0] == (12, "shipped") and gh.lifts() == [(300, "triage")]
+    assert "#12's M1 has shipped to main" in dict(gh.posted)[300]
+    assert gh.issues[301]["labels"] == ["sdlc:waiting", "enhancement"]
