@@ -1,10 +1,10 @@
-"""tools/sdlc.py: `close`, an ordinary issue fixed by a commit on main or a duplicate (#378 T1.1). No network:
-the debt tests' fake `gh` answers from dicts."""
+"""tools/sdlc.py: `close`, an ordinary issue fixed by a commit on main or a duplicate (#378 T1.1), or by an epic that
+shipped, and what `state` says of a closed issue (T1.2). No network: the debt tests' fake `gh` answers from dicts."""
 import json
 
 import pytest
 
-from tests.test_sdlc_debt import CONFIG, REPO, FakeGitHub, run
+from tests.test_sdlc_debt import CONFIG, OWNER, REPO, FakeGitHub, run
 from tools import sdlc
 
 SHA = "b" * 40
@@ -119,7 +119,16 @@ def test_a_missing_issue_is_refused(gh, capsys):
 # --- flags, checked before anything is read (AC3, AC5) ---------------------------------------------------------
 
 @pytest.mark.parametrize("argv,named", [
-    (["--reason", "completed"], "--commit SHA goes with --reason completed"),
+    (["--reason", "completed"], "--reason completed takes one of --commit SHA"),
+    (["--reason", "completed", "--commit", SHA, "--by-epic", "243"], "--reason completed takes one of"),
+    (["--reason", "duplicate", "--of", "5", "--by-epic", "243"], "--by-epic E[:Mk] goes with --reason completed"),
+    (["--reason", "not-planned", "--by-epic", "243:M1"], "--by-epic E[:Mk] goes with --reason completed"),
+    (["--reason", "completed", "--by-epic", "7"], "can't be closed by itself"),
+    (["--reason", "completed", "--by-epic", "abc"], "isn't E or E:Mk"),
+    (["--reason", "completed", "--by-epic", "243:"], "isn't E or E:Mk"),
+    (["--reason", "completed", "--by-epic", "243:M 1"], "isn't E or E:Mk"),
+    (["--reason", "completed", "--by-epic", "243:M1/x"], "isn't E or E:Mk"),
+    (["--reason", "duplicate", "--by-epic", "x"], "--of M goes with --reason duplicate"),
     (["--reason", "duplicate", "--of", "5", "--commit", SHA], "--commit SHA goes with --reason completed"),
     (["--reason", "not-planned", "--commit", SHA], "--commit SHA goes with --reason completed"),
     (["--reason", "completed", "--commit", "main"], "isn't a commit SHA"),
@@ -459,3 +468,268 @@ def test_a_failed_close_after_the_record_says_to_rerun(gh, capsys, monkeypatch):
     monkeypatch.setattr(sdlc, "gh", gh)   # the rerun finishes it, with no second record
     assert close(capsys, n, "--reason", "completed", "--commit", SHA)[0] == 0
     assert len(records(gh, n)) == 1 and gh.issues[n]["state"] == "closed" and sdlc_labels(gh, n) == ["sdlc:done"]
+
+
+# --- completed by an epic that shipped (T1.2, AC2) --------------------------------------------------------------
+
+SHIP = {"M1": "1" * 40, "M2": "2" * 40, sdlc.NO_MILESTONE: "3" * 40}
+LEAF = {"key": "T1", "title": "t", "covers": [1], "outcome": "o", "scope": "s", "acceptance": ["a"],
+        "validation": "v", "demo": "d", "non_goals": "n", "context": "c"}
+
+
+def epic(gh, milestones=("M1", "M2"), shipped=(), label="sdlc:in-progress", state="open", created=True):
+    """A feature epic as `state E` reads it: a PRD, its approval, a plan whose JSON names `milestones` (none: a plan
+    with no named milestones), its plan-created record (`created=False`: none yet) and a ship record per `shipped`."""
+    n = gh.issue("a feature", [label, "enhancement"], state=state)
+    gh.say(n, "prd", 1)
+    gh.say(n, "approval", 1, by=OWNER, via="comment")
+    plan = {"issue": n, "summary": "s", "subtasks": [{**LEAF, "key": f"T{i}", "milestone": m}
+                                                     for i, m in enumerate(milestones or [None], 1) if m] or [LEAF]}
+    if milestones:
+        plan["milestones"] = [{"key": m, "title": m, "demo": "d"} for m in milestones]
+    gh.comment(n, sdlc.render_comment("plan", 1, sdlc.render_plan(plan), CONFIG))
+    gh.say(n, "plan-review", 1, verdict="approve", round="1")
+    if created:
+        gh.say(n, "plan-created", 1, **({"created": ",".join(milestones)} if milestones else {}))
+    for m in shipped:
+        gh.say(n, "shipped", **({} if m == sdlc.NO_MILESTONE else {"milestone": m}), sha=SHIP[m])
+    return n
+
+
+class FakeEpics(FakeTimeline):
+    """The fake, with GitHub's close reason in `gh issue view` (as `stateReason`) and a missing issue an error."""
+
+    def __call__(self, args, *, check=True):
+        args = list(args)
+        if args[:2] == ["issue", "view"]:
+            if int(args[2]) not in self.issues:
+                raise sdlc.SdlcError(f"gh issue view {args[2]} failed: Could not resolve to an issue")
+            out = json.loads(super().__call__(args, check=check))
+            return json.dumps({**out, "stateReason": (self.issues[int(args[2])]["state_reason"] or "").upper()})
+        return super().__call__(args, check=check)
+
+
+@pytest.fixture
+def ghe(monkeypatch):
+    fake = FakeEpics()
+    monkeypatch.setattr(sdlc, "gh", fake)
+    monkeypatch.setattr(sdlc.time, "sleep", lambda s: None)
+    fake.on_main[SHA] = "behind"
+    return fake
+
+
+def test_by_an_epic_whose_last_milestone_shipped_records_closes_and_labels(ghe, capsys):
+    e = epic(ghe, shipped=("M1", "M2"), label="sdlc:done", state="closed")   # done and closed: the normal case
+    n = triaged(ghe)
+    code, out, err = close(capsys, n, "--reason", "completed", "--by-epic", e)
+    assert code == 0, err
+    (rec,) = records(ghe, n)
+    assert rec == {"kind": "closed", "reason": "completed", "epic": str(e)}   # the epic named, not its last milestone
+    body = ghe.comments[n][-1]["body"]
+    assert f"#{e} (its last milestone, M2)" in body and SHIP["M2"] in body and WHY in body
+    assert (ghe.issues[n]["state"], ghe.issues[n]["state_reason"]) == ("closed", "completed")
+    assert sdlc_labels(ghe, n) == ["sdlc:done"]
+    assert ("close", ["issue", "close", str(n), "--repo", REPO, "--reason", "completed"]) in ghe.writes
+    assert f"#{n}: closed as completed, fixed by #{e} (its last milestone, M2)" in out
+
+
+def test_by_an_epic_whose_last_milestone_has_not_shipped_is_refused(ghe, capsys):
+    e = epic(ghe, shipped=("M1",))
+    n = triaged(ghe)
+    code, _, err = close(capsys, n, "--reason", "completed", "--by-epic", e)
+    assert code == 1 and f"#{e}'s M2 (the last milestone of its latest plan) hasn't shipped to main" in err
+    assert "shipped so far: M1" in err
+    assert ghe.writes == [] and ghe.issues[n]["state"] == "open"
+
+
+def test_by_a_named_milestone_that_shipped_closes_naming_it(ghe, capsys):
+    e = epic(ghe, shipped=("M1",))
+    n = triaged(ghe)
+    code, out, err = close(capsys, n, "--reason", "completed", "--by-epic", f"{e}:M1")
+    assert code == 0, err
+    (rec,) = records(ghe, n)
+    assert rec == {"kind": "closed", "reason": "completed", "epic": str(e), "milestone": "M1"}
+    assert f"#{e}'s M1, shipped to `main` in {SHIP['M1']}" in ghe.comments[n][-1]["body"]
+    assert f"fixed by #{e}'s M1" in out
+
+
+def test_by_a_named_milestone_not_shipped_or_not_in_the_plan_is_refused(ghe, capsys):
+    e = epic(ghe, shipped=("M1",))
+    n = triaged(ghe)
+    code, _, err = close(capsys, n, "--reason", "completed", "--by-epic", f"{e}:M2")
+    assert code == 1 and f"#{e}'s M2 hasn't shipped to main" in err and "last milestone" not in err
+    code, _, err = close(capsys, n, "--reason", "completed", "--by-epic", f"{e}:M3")
+    assert code == 1 and f"#{e}'s latest plan has no milestone M3 (its milestones: M1, M2)" in err
+    assert ghe.writes == []
+
+
+def test_e_all_is_the_whole_epic_whatever_its_plan(ghe, capsys):
+    """`waits=E:all` is how #379 records a whole-epic wait, even for an epic with named milestones: its lift passes
+    `all`, and it means what `--by-epic E` does, with the same record."""
+    e = epic(ghe, shipped=("M1",))
+    n = triaged(ghe)
+    code, _, err = close(capsys, n, "--reason", "completed", "--by-epic", f"{e}:all")
+    assert code == 1 and f"#{e}'s M2 (the last milestone of its latest plan) hasn't shipped" in err
+    ghe.say(e, "shipped", milestone="M2", sha=SHIP["M2"])
+    assert close(capsys, n, "--reason", "completed", "--by-epic", f"{e}:all")[0] == 0
+    assert records(ghe, n) == [{"kind": "closed", "reason": "completed", "epic": str(e)}]
+
+
+def test_an_epic_planned_without_milestones(ghe, capsys):
+    e = epic(ghe, milestones=())
+    n = triaged(ghe)
+    code, _, err = close(capsys, n, "--reason", "completed", "--by-epic", e)
+    assert code == 1 and f"#{e} hasn't shipped to main" in err
+    code, _, err = close(capsys, n, "--reason", "completed", "--by-epic", f"{e}:M1")
+    assert code == 1 and "has no milestone M1 (it has no named milestones" in err
+    ghe.say(e, "shipped", sha=SHIP[sdlc.NO_MILESTONE])   # its one release, `all`
+    code, out, err = close(capsys, n, "--reason", "completed", "--by-epic", e)
+    assert code == 0, err
+    assert records(ghe, n) == [{"kind": "closed", "reason": "completed", "epic": str(e)}]
+    assert f"fixed by #{e}, shipped to `main` in {SHIP[sdlc.NO_MILESTONE]}" in ghe.comments[n][-1]["body"]
+
+
+def test_by_epic_refuses_what_is_not_an_epic_with_a_created_plan(ghe, capsys):
+    cases = [(ghe.issue("a slice", ["plan:slice"]), "is a plan:slice issue, not an epic"),
+             (ghe.issue("a subtask", ["plan:subtask"]), "is a plan:subtask issue, not an epic"),
+             (ghe.ticket(), "is a tech-debt ticket, not an epic"),
+             (ghe.debt_epic(), "is the debt epic"),
+             (ghe.quick_change(), "is a quick change, not an epic"),
+             (epic(ghe, shipped=("M1", "M2"), created=False, label="sdlc:approved"), "isn't an epic with a created plan"),
+             (ghe.issue("an ordinary issue", ["sdlc:triage"]), "isn't an epic with a created plan"),
+             (999, "#999 couldn't be read")]
+    n = triaged(ghe)
+    for e, named in cases:
+        code, _, err = close(capsys, n, "--reason", "completed", "--by-epic", e)
+        assert code == 1 and named in err, (e, err)
+    assert ghe.writes == [] and ghe.issues[n]["state"] == "open"
+
+
+def test_a_rerun_by_a_different_epic_or_milestone_is_refused(ghe, capsys):
+    e = epic(ghe, shipped=("M1", "M2"))
+    other = epic(ghe, shipped=("M1", "M2"))
+    n = triaged(ghe)
+    record(ghe, n, reason="completed", epic=str(e))   # cut short after the record
+    for by in (f"{e}:M1", other, f"{other}:M2"):
+        code, _, err = close(capsys, n, "--reason", "completed", "--by-epic", by)
+        assert code == 1 and f"already has a close record (reason=completed epic={e})" in err, (by, err)
+    code, _, err = close(capsys, n, "--reason", "completed", "--commit", SHA)
+    assert code == 1 and "already has a close record" in err
+    assert ghe.writes == []
+    code, _, err = close(capsys, n, "--reason", "completed", "--by-epic", e)   # the same: finished, one record
+    assert code == 0, err
+    assert len(records(ghe, n)) == 1 and ghe.issues[n]["state"] == "closed" and sdlc_labels(ghe, n) == ["sdlc:done"]
+
+
+def test_a_rerun_by_a_milestone_after_a_whole_epic_record_is_refused_and_back(ghe, capsys):
+    e = epic(ghe, shipped=("M1", "M2"))
+    n = triaged(ghe)
+    record(ghe, n, reason="completed", epic=str(e), milestone="M1")
+    code, _, err = close(capsys, n, "--reason", "completed", "--by-epic", e)
+    assert code == 1 and "milestone=M1" in err and ghe.writes == []
+
+
+def test_dry_run_by_an_epic_prints_the_writes(ghe, capsys):
+    e = epic(ghe, shipped=("M1",))
+    n = triaged(ghe)
+    code, out, err = close(capsys, n, "--reason", "completed", "--by-epic", f"{e}:M1", "--dry-run")
+    assert code == 0, err
+    assert out.splitlines() == [f"would post the close record on #{n} (completed, by #{e}'s M1)",
+                                f"would close #{n} as completed", f"would label #{n} sdlc:done (remove sdlc:triage)"]
+    assert ghe.writes == []
+    code, _, err = close(capsys, n, "--reason", "completed", "--by-epic", e, "--dry-run")
+    assert code == 1 and "hasn't shipped" in err and ghe.writes == []
+
+
+def test_close_issue_and_epic_shipped_are_callable_without_argparse(ghe, capsys):
+    """What #379's `then=close` lift calls: plain arguments, lines back, an SdlcError on a refusal."""
+    e = epic(ghe, shipped=("M1",))
+    n = triaged(ghe)
+    trusted = sdlc.fetch_trusted(CONFIG)
+    assert sdlc.epic_shipped(e, "M1", CONFIG, trusted) == {"epic": e, "milestone": "M1", "shipped": "M1",
+                                                           "sha": SHIP["M1"]}
+    with pytest.raises(sdlc.SdlcError, match="M2 .the last milestone"):
+        sdlc.epic_shipped(e, None, CONFIG, trusted)
+    with pytest.raises(sdlc.SdlcError, match="hasn't shipped"):
+        sdlc.close_issue(n, "completed", WHY, CONFIG, epic=e, milestone=sdlc.NO_MILESTONE, trusted=trusted)
+    assert sdlc.close_issue(n, "completed", WHY, CONFIG, epic=e, milestone="M1", dry_run=True)[0].startswith("would post")
+    assert ghe.writes == []
+    assert sdlc.close_issue(n, "completed", WHY, CONFIG, epic=e, milestone="M1", trusted=trusted) == [
+        f"#{n}: closed as completed, fixed by #{e}'s M1; labelled sdlc:done"]
+    assert sdlc.close_issue(n, "completed", WHY, CONFIG, epic=e, milestone="M1") == [
+        f"#{n}: already closed as completed and labelled sdlc:done, as its record says: nothing to do"]
+    with pytest.raises(sdlc.SdlcError, match="goes with an epic"):
+        sdlc.close_issue(n, "completed", WHY, CONFIG, commit=SHA, milestone="M1")
+
+
+def test_epic_shipped_in_reads_a_state_alone(monkeypatch):
+    """The shipped check of a state already read (a ship's own bundle, say), with no GitHub at all."""
+    monkeypatch.setattr(sdlc, "gh", lambda *a, **k: pytest.fail("no GitHub"))
+    st = {"state": "done", "plan_created": True, "planned_milestones": ["M1", "M2"],
+          "shipped": {"M1": SHIP["M1"], "M2": SHIP["M2"]}, "issue_closed": True}
+    assert sdlc.epic_shipped_in(st, 5)["shipped"] == "M2"
+    assert sdlc.epic_shipped_in(st, 5, "M1")["sha"] == SHIP["M1"]
+    with pytest.raises(sdlc.SdlcError, match="no milestone M9"):
+        sdlc.epic_shipped_in(st, 5, "M9")
+
+
+# --- what `state` says of a closed issue (T1.2, AC14) -----------------------------------------------------------
+
+def state_out(capsys, n):
+    code, out, err = run(capsys, "state", n)
+    assert code == 0, err
+    return out
+
+
+@pytest.mark.parametrize("argv,end", [
+    (["--reason", "completed", "--commit", SHA[:9]], f"closed: completed by {SHA[:12]}"),
+    (["--reason", "completed", "--by-epic", "{e}"], "closed: completed by epic #{e}"),
+    (["--reason", "completed", "--by-epic", "{e}:M1"], "closed: completed by epic #{e}'s M1"),
+    (["--reason", "duplicate", "--of", "{d}"], "closed: duplicate of #{d}"),
+])
+def test_state_of_an_issue_close_closed_says_how_it_ended(ghe, capsys, argv, end):
+    e, d = epic(ghe, shipped=("M1", "M2")), ghe.issue("the same bug")
+    n = triaged(ghe)
+    assert close(capsys, n, *[a.format(e=e, d=d) for a in argv])[0] == 0
+    out = state_out(capsys, n)
+    (line,) = [l.strip() for l in out.splitlines() if l.strip().startswith("closed:")]
+    assert line.startswith(end.format(e=e, d=d) + " (u")   # and the record's link
+    assert f"next: nothing: #{n} is done" in out
+
+
+def test_state_of_an_issue_closed_as_not_planned_by_its_record(ghe, capsys):
+    """M2 writes this record; its reading is here, from a fixture record."""
+    n = triaged(ghe)
+    ghe.say(n, sdlc.CLOSED_KIND, reason="not-planned")
+    ghe.issues[n]["state"], ghe.issues[n]["state_reason"] = "closed", "not_planned"
+    assert "  closed: not planned (u" in state_out(capsys, n)
+
+
+def test_state_of_an_issue_closed_by_hand_is_as_before(ghe, capsys):
+    n = triaged(ghe)
+    ghe.issues[n]["state"], ghe.issues[n]["state_reason"] = "closed", "completed"
+    out = state_out(capsys, n)
+    assert "closed:" not in out and "next: nothing: the issue is closed" in out
+    assert sdlc.bundle_state(sdlc.fetch_bundle(n, CONFIG), CONFIG)["closed_by"] is None
+
+
+def test_state_of_an_open_issue_with_a_record_prints_no_end(ghe, capsys):
+    n = triaged(ghe)
+    record(ghe, n, reason="completed", commit=SHA)   # cut short: still open
+    assert "closed:" not in state_out(capsys, n)
+
+
+def test_state_of_an_issue_closed_again_by_hand_says_the_record_no_longer_matches(ghe, capsys):
+    n = triaged(ghe)
+    assert close(capsys, n, "--reason", "completed", "--commit", SHA)[0] == 0
+    ghe.reopen(n)
+    ghe.issues[n]["state"], ghe.issues[n]["state_reason"] = "closed", "not_planned"
+    assert f"closed: not_planned on GitHub, closed by hand after its close record (completed by {SHA[:12]})" \
+        in state_out(capsys, n)
+
+
+def test_a_close_record_by_a_stranger_is_no_end(ghe, capsys):
+    n = triaged(ghe)
+    ghe.comment(n, sdlc.render_comment(sdlc.CLOSED_KIND, None, "x", CONFIG, reason="duplicate", of="5"), "stranger")
+    ghe.issues[n]["state"], ghe.issues[n]["state_reason"] = "closed", "duplicate"
+    assert "closed:" not in state_out(capsys, n)
