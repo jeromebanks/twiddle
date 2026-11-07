@@ -159,6 +159,21 @@ def test_a_target_that_will_never_ship_is_a_humans(tgt):
     assert "needs a human" in st["next"] and f"wait {N} --lift" in st["next"]
 
 
+def test_a_later_plan_with_no_milestones_breaks_the_wait():
+    tgt = target()
+    tgt["comments"].append(comment(OWNER, sdlc.marker("plan", 2) + "\n" + plan_json(), 59))
+    st = resolved([wait_comment()], tgt)
+    assert (st["turn"], st["action"]) == ("human", "wait_broken")
+    assert f"latest plan no longer has M2" in st["wait_broken_why"]
+
+
+def test_a_later_plan_whose_json_cant_be_read_doesnt_break_the_wait():
+    tgt = target()
+    tgt["comments"].append(comment(OWNER, sdlc.marker("plan", 2) + "\nno plan-json here", 59))
+    st = resolved([wait_comment()], tgt)
+    assert (st["turn"], st["action"]) == ("none", "none")
+
+
 def test_a_plan_that_cant_be_read_doesnt_break_the_wait():
     st = resolved([wait_comment()], target(milestones=("M1", "M2"), plan=False))
     assert (st["turn"], st["action"]) == ("none", "none")

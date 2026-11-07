@@ -651,8 +651,10 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         conflicts.append(f"{PREFIX}{state}, but its quick brief moved to the full lane: it goes back to "
                          f"{PREFIX}approved, and its brief to docs/prd/, before it is planned "
                          f"(`escalate-to-full {issue.get('number')}` finishes it)")
+    plan_readable = False   # the latest plan revision's plan-json was read: what it lists (or doesn't) is known
     try:
         latest_plan_json = extract_plan(plan_body) if plan_body else {}
+        plan_readable = bool(plan_body)
     except SdlcError:
         latest_plan_json = {}
     planned_ms = [m.get("key") for m in latest_plan_json.get("milestones") or []]
@@ -766,7 +768,7 @@ def derive_state(issue: dict[str, Any], comments: list[dict[str, Any]],
         "planned_milestones": planned_ms, "created_milestones": sorted(created_ms, key=natural_key),
         "uncreated_milestones": uncreated, "create_mode": latest_plan_json.get("create") or config.get("create", "milestone"),
         "plan_created": L.plan_created, "creation_recorded": creation_recorded, "issue_closed": issue.get("state", "open").lower() == "closed",
-        "wait": L.wait, "wait_lifted": L.wait_lifted,
+        "wait": L.wait, "wait_lifted": L.wait_lifted, "plan_readable": plan_readable,
     }
 
 
@@ -817,9 +819,9 @@ def wait_status(w: dict[str, Any], src: dict[str, Any] | None) -> str:
     if debt_waiting_for({"debt_waits": f"{w['epic']}:{ms}"}, src) is not None:
         if closed:   # a named milestone a closed epic never shipped (debt would keep waiting for it)
             return "broken"
-        if ms != NO_MILESTONE and src.get("latest_plan") and src.get("planned_milestones") \
-                and ms not in src["planned_milestones"]:
-            return "broken"   # the latest plan no longer has it (an unreadable plan says nothing)
+        if ms != NO_MILESTONE and src.get("latest_plan") and src.get("plan_readable") \
+                and ms not in (src.get("planned_milestones") or []):
+            return "broken"   # the latest plan no longer has it, even one with no milestones (an unreadable one says nothing)
         return "waiting"
     if ms != NO_MILESTONE or src.get("state") in LATER_STATES or NO_MILESTONE in shipped or (closed and shipped):
         return "shipped"
