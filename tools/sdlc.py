@@ -4107,7 +4107,7 @@ def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
             print(f"#{n}: already closed as {want} and labelled {PREFIX}done, as its record says: nothing to do")
             return 0
     else:
-        if same and issue.get("state_reason") == "reopened":
+        if same and labelled:   # a finished close ends with sdlc:done, so this one was reopened since
             raise SdlcError(f"#{n} was reopened after its close record: a reopened issue is a human's")
         st = derive_state(issue, comments, trusted, config)
         if why_not := close_owner(issue, st):

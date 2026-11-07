@@ -117,10 +117,11 @@ def test_a_missing_or_private_why_is_refused(monkeypatch, capsys, why, named):
     assert code == 1 and named in err, err
 
 
-def test_transition_can_never_post_a_close_record():
+def test_transition_can_never_post_a_close_record(capsys):
     assert sdlc.CLOSED_KIND not in sdlc.KINDS
     with pytest.raises(SystemExit):
         sdlc.main(["transition", "7", "done", "--kind", "closed"])
+    assert "invalid choice: 'closed'" in capsys.readouterr().err
 
 
 # --- duplicate (AC4) -------------------------------------------------------------------------------------------
@@ -267,7 +268,15 @@ def test_an_issue_reopened_after_its_close_is_a_humans(gh, capsys):
     gh.issues[n]["state_reason"] = "reopened"
     record(gh, n, reason="completed", commit=SHA)
     code, _, err = close(capsys, n, "--reason", "completed", "--commit", SHA)
-    assert code == 1 and "reopened" in err and gh.writes == []
+    assert code == 1 and "reopened after its close record" in err and gh.writes == []
+
+
+def test_an_issue_reopened_before_its_record_still_resumes(gh, capsys):
+    n = triaged(gh)   # closed by hand and reopened long ago: GitHub keeps state_reason `reopened` while it is open
+    gh.issues[n]["state_reason"] = "reopened"
+    record(gh, n, reason="completed", commit=SHA)
+    assert close(capsys, n, "--reason", "completed", "--commit", SHA)[0] == 0
+    assert len(records(gh, n)) == 1 and gh.issues[n]["state"] == "closed" and sdlc_labels(gh, n) == ["sdlc:done"]
 
 
 def test_a_record_by_a_stranger_does_not_count(gh, capsys):
