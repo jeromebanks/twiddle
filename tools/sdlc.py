@@ -5622,15 +5622,17 @@ def waiting_refusal(n: int, st: dict[str, Any], whose: str) -> str:
     w = st.get("wait")
     held = (f"#{n} is {wait_text(w)} ({w['url']})" if w else
             f"#{n} is labelled {PREFIX}{WAITING} (no wait recorded: `state {n}` says what to fix)")
-    return (f"{held}: nothing builds {whose} while it waits; "
+    return (f"{held}: while it waits, nothing builds {whose}; "
             f"`uv run python tools/sdlc.py wait {n} --lift` ends the wait")
 
 
-def wait_claim_errors(b: dict[str, Any], config: dict[str, Any]) -> tuple[list[str], dict[str, Any] | None]:
+def wait_claim_errors(b: dict[str, Any], config: dict[str, Any], offline: bool = False
+                      ) -> tuple[list[str], dict[str, Any] | None]:
     """(why no lane may claim this issue because it, or the epic of a slice or subtask, waits on another epic;
     the epic's state, if it was read). Only the issue's own label decides for anything that is no slice or
     subtask (a quick change, a debt ticket: its marker's `epic=` is where it came from, not what holds it). The
-    epic is read from the offline bundle's `epic_state`, else from GitHub."""
+    epic is read from the bundle's `epic_state` (and `epic_labels`), else from GitHub; `offline` (a saved bundle)
+    never reads it there."""
     issue = b["issue"]
     n, labels = issue["number"], issue.get("labels", [])
     if f"{PREFIX}{WAITING}" in labels:
@@ -5641,6 +5643,8 @@ def wait_claim_errors(b: dict[str, Any], config: dict[str, Any]) -> tuple[list[s
         return [], None
     if "epic_state" in b:
         est, elabels = b["epic_state"], b.get("epic_labels", [])
+    elif offline:
+        return [], None
     else:
         eb = fetch_bundle(int(epic), config, set(b["trusted"]))
         est, elabels = bundle_state(eb, config), eb["issue"].get("labels", [])
@@ -5659,7 +5663,7 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
     b = json.loads(Path(args.from_file).read_text()) if args.from_file else slice_bundle(n, config)
     claim = claim_status(b["comments"], set(b["trusted"]))
     # every lane and flag: nothing builds an issue that waits on another epic, nor a slice of an epic that waits
-    waits, epic_st = wait_claim_errors(b, config)
+    waits, epic_st = wait_claim_errors(b, config, offline=bool(args.from_file))
     if waits:
         raise SdlcError("; ".join(waits))
     if args.debt:

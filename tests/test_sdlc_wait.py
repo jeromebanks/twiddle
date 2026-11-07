@@ -361,7 +361,7 @@ def test_claim_refuses_a_slice_of_a_waiting_epic_in_every_lane(cfg, monkeypatch,
     assert sdlc.main(["--config", str(cfg), "claim", str(SLICE), *flags]) == 1
     err = capsys.readouterr().err
     assert f"#{N} is waiting for #{E}'s M2 to ship to main (https://example/" in err
-    assert f"nothing builds #{N}'s slices, #{SLICE} among them" in err and f"wait {N} --lift" in err
+    assert f"while it waits, nothing builds #{N}'s slices, #{SLICE} among them" in err and f"wait {N} --lift" in err
     assert fake.posted == [] and fake.edits == [] and fake.read == [N]
 
 
@@ -373,7 +373,7 @@ def test_claim_refuses_the_waiting_issue_itself_in_every_lane(cfg, monkeypatch, 
     fake = FakeClaim(monkeypatch, b)
     assert sdlc.main(["--config", str(cfg), "claim", str(N), *flags]) == 1
     err = capsys.readouterr().err
-    assert f"#{N} is waiting for #{E}'s M2 to ship to main" in err and f"nothing builds #{N} while it waits" in err
+    assert f"#{N} is waiting for #{E}'s M2 to ship to main" in err and f"while it waits, nothing builds #{N};" in err
     assert fake.posted == [] and fake.edits == [] and fake.read == []   # its own label decides: no epic read
 
 
@@ -382,6 +382,20 @@ def test_claim_quick_from_a_saved_bundle_refuses_a_waiting_issue(cfg, monkeypatc
     f.write_text(json.dumps({**waiting_epic_bundle(labels=("sdlc:waiting", "complexity:routine")),
                              "blockers": [], "pr": None, "pr_comments": []}))
     assert sdlc.main(["--config", str(cfg), "claim", str(N), "--quick", "--dry-run", "--from-file", str(f)]) == 1
+    assert f"#{N} is waiting for #{E}'s M2" in capsys.readouterr().err
+
+
+def test_claim_quick_from_a_saved_slice_bundle_reads_no_epic(cfg, monkeypatch, tmp_path, capsys):
+    """Offline, a slice's epic is not read from GitHub: the lane's own refusal stands, as before."""
+    monkeypatch.setattr(sdlc, "fetch_bundle", lambda *a, **k: pytest.fail("offline: no epic read"))
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps(slice_of()))
+    assert sdlc.main(["--config", str(cfg), "claim", str(SLICE), "--quick", "--dry-run", "--from-file", str(f)]) == 1
+    assert "without --quick" in capsys.readouterr().err
+    # a saved bundle carrying the epic's state decides from it
+    est = sdlc.derive_state(waiting_epic_bundle()["issue"], [wait_comment()], TRUSTED, CONFIG)
+    f.write_text(json.dumps({**slice_of(), "epic_state": est, "epic_labels": ["sdlc:waiting"]}))
+    assert sdlc.main(["--config", str(cfg), "claim", str(SLICE), "--quick", "--dry-run", "--from-file", str(f)]) == 1
     assert f"#{N} is waiting for #{E}'s M2" in capsys.readouterr().err
 
 
@@ -480,3 +494,9 @@ def test_next_with_nothing_waiting_prints_no_waiting_line(cfg, monkeypatch, caps
     assert "waiting:" not in capsys.readouterr().out
     assert sdlc.main(["--config", str(cfg), "next", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == []
+
+
+def test_next_with_only_a_wait_says_nothing_is_the_agents_then_the_wait(cfg, monkeypatch, capsys):
+    FakeNext(monkeypatch, [waiter(308, f"{E}:M2"), retarget(target(label="sdlc:prd-review"), E)])
+    assert sdlc.main(["--config", str(cfg), "next"]) == 0
+    assert capsys.readouterr().out == f"nothing waiting on the agent\nwaiting: #308 on #{E}'s M2\n"
