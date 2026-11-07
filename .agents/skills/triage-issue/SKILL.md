@@ -39,6 +39,16 @@ Unattended runs never preview.
 uv run python tools/sdlc.py state N --json
 ```
 
+- `state` is `waiting` (label `sdlc:waiting`: the issue is parked until another epic ships, "Parking an issue" below):
+  - `action` is `lift_wait` -> its target has shipped: run `uv run python tools/sdlc.py wait N --lift` (safe to
+    rerun; `--dry-run` first if unsure), then read `state N --json` again and carry on as the restored state says.
+  - `action` is `wait_broken` -> `turn` is `human`: the target epic closed, or its plan dropped the milestone, without it
+    shipping. Report it and stop; a person lifts the wait or closes the issue.
+  - `action` is `respond_to_reply` -> read the reply. If it asks to go ahead now, lift the wait
+    (`wait N --lift --reason "<why, in plain words>"`) and read the state again. Otherwise answer on the issue with a note,
+    the only `transition` a waiting issue takes: `uv run python tools/sdlc.py transition N waiting --kind note --body-file reply.md`.
+    The wait stays. Never post a question, a PRD or a diagnosis to a waiting issue: `transition` refuses.
+  - `turn` is `none` (the target hasn't shipped) -> report what `next:` says it waits for and stop.
 - `turn` is `poster` -> report "waiting on the poster" and stop.
 - `turn` is `human` (`escalated`, or `conflicts`) -> report it and stop. Don't fix labels yourself.
 - `action` is `reconcile_label` -> a maintainer added `sdlc:approved` by hand (the review label may still be on it): run
@@ -189,6 +199,31 @@ uv run python tools/sdlc.py transition N prd-review --kind prd --lane quick --bo
   rerun `uv run python tools/sdlc.py commit-prd N`. A person can also run
   `escalate-to-full N --reason "..."` (it takes `--dry-run`). An open PR and the worktree are
   left as they are.
+
+## Parking an issue: wait for another epic
+
+Some issues are fine as filed but can't start until another epic ships: they reword or build on what that epic
+introduces, or they touch files it is rewriting. Triaging one now, writing a PRD for ground that is about to move, wastes the
+poster's review, and leaving it in `triage` makes `state N` name a next move that is really a wait. **Park it instead:**
+
+```bash
+uv run python tools/sdlc.py wait N --on E:Mk --reason "<one plain line: why it waits>" --dry-run
+uv run python tools/sdlc.py wait N --on E:Mk --reason "<one plain line: why it waits>"
+```
+
+- `--on E:Mk` waits for milestone Mk of epic E to ship to `main`; `--on E` for the whole epic. The milestone must be in
+  E's latest plan and not yet shipped, and E must be an open feature epic with a plan.
+- It takes an issue in `untriaged`, `triage`, `approved` or `planned`; it refuses the poster's states, `in-progress`,
+  `escalated` and `done`, a closed issue, a tech-debt ticket, a slice or subtask, and one that already waits (one wait at a
+  time). The tool says which. Run `--dry-run` first: it checks everything and writes nothing.
+- It writes to GitHub only (one marked comment and the label move), never to a speaker. The reason is posted on a public
+  issue: no IP, MAC, device ID or secret.
+- `--then close` is not available yet (it arrives with #378's `close` verb, in #379's M2): don't pass it.
+- Don't park an issue that is simply unclear (ask, step 3), or one whose blocker is a person or a date: `wait` covers only a milestone
+  or an epic shipping to `main`.
+- Afterwards `ship E` lifts the wait when it releases Mk, and the issue goes back to the state it left (`state N`'s `next:` says what follows). Report that the issue
+  is parked, what it waits for, and the comment's link, and stop: **Next:** is the `next:` line of `state N` (it says what
+  it waits for).
 
 ## Debt intake: is each ticket really debt?
 
