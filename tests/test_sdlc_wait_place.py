@@ -358,9 +358,9 @@ def test_a_config_without_the_waiting_state(monkeypatch, capsys, tmp_path, dry):
     assert "sdlc:waiting isn't a state label in the config" in err
 
 
-def test_lift_isnt_built_yet(monkeypatch, capsys, cfg):
-    assert "isn't built yet" in refused(monkeypatch, capsys, cfg, N, "--lift")
+def test_lift_takes_no_target(monkeypatch, capsys, cfg):
     assert "takes no --on" in refused(monkeypatch, capsys, cfg, N, "--lift", "--on", E)
+    assert "takes no --on" in refused(monkeypatch, capsys, cfg, N, "--lift", "--then", "close")
 
 
 def test_a_wait_by_a_stranger_is_no_wait_and_doesnt_block_one(monkeypatch, capsys, cfg):
