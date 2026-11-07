@@ -189,3 +189,71 @@ def test_no_workflow_doc_promises_the_retired_cleanup_pass(doc):
                                              r"Pays down|budgeted)\b[^.]*", text, re.I)
              if not re.search(r"retired|is gone|are gone", m.group(0))]
     assert not stale, stale
+
+
+# What tools/sdlc.py's verbs do to GitHub: these write nothing there (CLAUDE.md's tools/sdlc.py row). Every other
+# verb counts as writing, so a new verb is a writer until someone adds it here.
+GITHUB_READ_ONLY = {"state", "next", "plan-validate", "slice-status", "quick-gate", "slice-check",
+                    "debt-pass-validate", "ready", "demo-status", "cleanup", "codex-review"}
+WRITERS = set(COMMANDS) - GITHUB_READ_ONLY
+TRIAGE = (ROOT / ".agents" / "skills" / "triage-issue" / "SKILL.md").read_text()
+PREVIEW_OPENING = "The one exception is a preview run"
+
+
+def invoked_verbs(skill: str) -> set[str]:
+    """The tools/sdlc.py verbs a skill tells an agent to run: `tools/sdlc.py <verb>` anywhere, the first word of a
+    fenced line (or of a `# a bug:  transition ...` comment), and a backticked command in a table row. A verb only
+    mentioned in prose (`ship E` lifts the wait; a person can run `escalate-to-full`) is not an invocation."""
+    found = set(re.findall(r"tools/sdlc\.py ([a-z][a-z-]*)", skill))
+    for block in re.findall(r"```[a-z]*\n(.*?)```", skill, re.DOTALL):
+        found |= set(re.findall(r"^(?:#[^\n]*?:\s+)?([a-z][a-z-]*)\b", block, re.MULTILINE))
+    for row in re.findall(r"^\|.*$", skill, re.MULTILINE):
+        found |= set(re.findall(r"`([a-z][a-z-]*) ", row))
+    return found & set(COMMANDS)
+
+
+def preview_rule(skill: str) -> str:
+    """The preview paragraph: from its fixed opening to the next blank line."""
+    assert PREVIEW_OPENING in skill, "the triage-issue skill's preview rule is gone, or its opening changed"
+    return skill[skill.index(PREVIEW_OPENING):].split("\n\n", 1)[0]
+
+
+def unheld_writes(skill: str) -> list[str]:
+    """Writes the skill runs that its preview rule doesn't hold for an OK. A verb is named as `verb` (or `verb ...`
+    with anything but `--lift` after it, so `wait --lift` alone doesn't count as naming `wait`)."""
+    rule = preview_rule(skill)
+    missing = [v for v in sorted(invoked_verbs(skill) & WRITERS)
+               if not re.search(rf"`{re.escape(v)}(?:`| (?!--lift`))", rule)]
+    if re.search(r"\bwait N --lift\b", skill) and "`wait --lift`" not in rule:
+        missing.append("wait --lift")
+    return missing
+
+
+def test_the_read_only_verbs_exist():
+    assert GITHUB_READ_ONLY <= set(COMMANDS), GITHUB_READ_ONLY - set(COMMANDS)
+
+
+def test_the_triage_extractor_reads_invocations():
+    assert {"transition", "wait", "reconcile", "commit-prd", "merge-prd", "debt-intake"} <= invoked_verbs(TRIAGE)
+    assert "ship" not in invoked_verbs(TRIAGE) and "escalate-to-full" not in invoked_verbs(TRIAGE)   # prose only
+
+
+def test_a_preview_run_of_triage_holds_every_write_it_runs():
+    """#379 M1's review: `wait` and `wait --lift` ran for real under --preview / confirm_before_posting, because the
+    preview rule named only `transition`. Every GitHub write the skill runs must be named in the rule."""
+    assert unheld_writes(TRIAGE) == []
+
+
+@pytest.mark.parametrize("drop, reported", [
+    ("`wait` (parking an issue), ", "wait"),
+    ("`wait --lift` (ending a wait), ", "wait --lift"),
+    ("`reconcile`, ", "reconcile"),
+])
+def test_the_preview_check_bites(drop, reported):
+    assert drop in preview_rule(TRIAGE)
+    assert reported in unheld_writes(TRIAGE.replace(drop, "", 1))
+
+
+def test_the_preview_check_fails_without_its_paragraph():
+    with pytest.raises(AssertionError, match="preview rule is gone"):
+        unheld_writes(TRIAGE.replace(PREVIEW_OPENING, "Except in a preview run"))
