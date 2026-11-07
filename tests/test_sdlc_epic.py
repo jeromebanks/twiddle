@@ -1001,7 +1001,11 @@ class Waits(GitHub):
             if self.fail_list:
                 raise sdlc.SdlcError("gh api repos/o/r/issues failed: HTTP 502")
             return self.pages
+        if args[:2] == ["pr", "list"]:
+            return self.into_epic
         return super().gh_json(args)
+
+    into_epic = []
 
     def post(self, n, body, cfg):
         self.posted.append((n, body))
@@ -1111,7 +1115,7 @@ def test_a_failed_lift_is_reported_and_never_fails_the_ship(repo, monkeypatch, c
     assert sdlc.main(["--config", wcfg, "ship", "12"]) == 0
     io = capsys.readouterr()
     assert gh.kinds()[0] == (12, "shipped") and (300, "triage") in gh.labels   # the release, and the other lift
-    assert "#301: could not lift its wait" in io.err and "HTTP 502" in io.err
+    assert "#301: could not read its wait" in io.err and "HTTP 502" in io.err
     assert "#302: the lift is posted" in io.err and "wait 302 --lift" in io.err
     assert gh.issues[303]["labels"] == ["sdlc:waiting", "enhancement"]
     view = gh.bundle(12, None)                                        # the epic as it reads after the ship
@@ -1147,3 +1151,30 @@ def test_a_recovered_release_lifts_its_waits_too(repo, monkeypatch, capsys, wcfg
     assert sdlc.main(["--config", wcfg, "ship", "12"]) == 0
     assert gh.kinds()[0] == (12, "shipped") and (12, "done") in gh.labels
     assert sorted(gh.lifts()) == [(300, "triage"), (301, "triage")]
+
+
+def test_a_release_dry_run_names_the_waits_before_any_pull_request(repo, monkeypatch, capsys, wcfg):
+    # the path an epic built on epic/12 takes: gate passed, then "would open (or reuse) a pull request"
+    sdlc.ensure_epic_branch(12, CONFIG, repo)
+    head = commit_on_epic(repo, "a.py", "a = 1\n")
+    records = [DEMO1, *ACCEPT1, agent("epic-tests", None, 14, sha=head, result="pass", passed="9"),
+               agent("ship-review", None, 15, milestone="M1", sha=head, verdict="approve", round="1")]
+    stub_ship(monkeypatch, records, [done_leaf(28, "T1.1"), done_leaf(31, "T3.1", "#12 M2: y")], pr_base="epic/12")
+    monkeypatch.setattr(sdlc, "reverted_on_main", lambda cfg, root=None: set())
+    gh = Waits(monkeypatch, repo, records, {300: waiter("12:M1"), 301: waiter("12:M2"), 302: waiter("12:all")})
+    gh.into_epic = [{"number": 60, "headRefName": "slice/28", "mergeCommit": {"oid": head}}]
+    assert sdlc.main(["--config", wcfg, "ship", "12", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "would open (or reuse) a pull request" in out
+    assert "would lift: #300: waiting -> triage, its wait for #12's M1 lifted" in out
+    assert "#301" not in out and "#302" not in out
+    assert gh.posted == [] and gh.labels == [] and not any(c[0] == "pr" for c in gh.calls)
+
+
+def test_an_issue_no_longer_waiting_is_not_reported_as_lifted(repo, monkeypatch, capsys, wcfg):
+    ship_m1(monkeypatch, repo, {300: waiter("12:M1")})
+    monkeypatch.setattr(sdlc, "lift_wait", lambda n, cfg, **k: {"number": n, "ok": True, "did": "nothing",
+                                                                 "message": f"#{n} is closed: there is no wait to lift"})
+    assert sdlc.main(["--config", wcfg, "ship", "12"]) == 0
+    out = capsys.readouterr().out
+    assert "#300 is closed" in out and "lifted:" not in out and "next: /" not in out

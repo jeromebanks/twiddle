@@ -8022,14 +8022,27 @@ def lift_released(n: int, keys: list[str], config: dict[str, Any], trusted: set[
             if not w or w["epic"] != n or w["milestone"] not in keys:
                 continue
             found += 1
-            if view is None:
+        except Exception as exc:
+            print(f"#{num}: could not read its wait ({exc}): if it waits on {what}, it stays waiting; {hint}",
+                  file=sys.stderr)
+            continue
+        if view is None:
+            try:   # the epic as it reads after the ship, once, for every wait on it
                 view = fetch_bundle(n, config, trusted)
+            except Exception as exc:
+                print(f"#{n}: could not read it back after the ship ({exc}): no wait on {what} was lifted; {hint}",
+                      file=sys.stderr)
+                return
+        try:
             res = lift_wait(num, config, dry_run=dry_run, bundle=b, target=view)
         except Exception as exc:
             print(f"#{num}: could not lift its wait ({exc}): it stays waiting; {hint}", file=sys.stderr)
             continue
         if not res["ok"]:
             print(f"{res['message']}\n  `state {num}` says `lift_wait` while it waits", file=sys.stderr)
+            continue
+        if res["did"] not in ("lifted", "finished"):   # `nothing`: it closed or stopped waiting since the listing
+            print(res["message"])
             continue
         if dry_run:
             print(f"would lift: {res['message'].splitlines()[0].removeprefix('DRY RUN ')}")
