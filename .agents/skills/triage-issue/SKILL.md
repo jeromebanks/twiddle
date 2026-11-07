@@ -221,7 +221,7 @@ uv run python tools/sdlc.py wait N --on E:Mk --reason "<one plain line: why it w
 - `--then close` is not available yet (it arrives with #378's `close` verb, in #379's M2): don't pass it.
 - Don't park an issue that is simply unclear (ask, step 3), or one whose blocker is a person or a date: `wait` covers only a milestone
   or an epic shipping to `main`.
-- Afterwards `ship E` lifts the wait when it releases Mk, and the issue comes back to `/triage-issue N`. Report that the issue
+- Afterwards `ship E` lifts the wait when it releases Mk, and the issue goes back to the state it left (`state N`'s `next:` says what follows). Report that the issue
   is parked, what it waits for, and the comment's link, and stop: **Next:** is the `next:` line of `state N` (it says what
   it waits for).
 

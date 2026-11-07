@@ -760,8 +760,9 @@ uv run python tools/sdlc.py next            # every issue where it's the agent's
 uv run python tools/sdlc.py demo-status 12  # each milestone: its slices, before/after, demo and release
 uv run python tools/sdlc.py ready --epic 12 # the slices that can start now</code></pre>
 <p>The <code>next:</code> line is always the answer to "what now?". Every skill ends by printing it.</p>
-<p><code>next</code> leaves parked issues out of the agent's work and lists them on one line, <code>waiting: #308 on #263's M2; …</code>, unless
-the move is the agent's or a human's (<code>lift_wait</code>, <code>respond_to_reply</code>, <code>wait_broken</code>).</p>
+<p><code>next</code> leaves parked issues out of the agent's work and lists those whose target hasn't shipped on one line,
+<code>waiting: #308 on #263's M2; …</code>. A parked issue whose move is the agent's (<code>lift_wait</code>, <code>respond_to_reply</code>) is listed as work;
+one that is a human's (<code>wait_broken</code>) is not, so read it with <code>state N</code>.</p>
 
 <h2 id="example">13. A worked example</h2>
 <ol class="steps">

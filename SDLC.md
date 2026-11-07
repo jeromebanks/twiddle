@@ -85,7 +85,8 @@ main ──●────────────────────●─
   A milestone built straight onto `main`, before epic branches, ships as a recorded no-op:
   no sync, and no `ship-review`, which refuses it (`main...epic/N` would be a later milestone's diff).
   After the last milestone, `epic/N` is deleted. `ship` also **writes to the issues that wait on what it
-  released** (see "Waiting on another epic"): see that section for what it posts there.
+  released** ("Waiting on another epic"): a `wait-lifted` comment and a label move on each. A lift that fails
+  never fails or undoes the ship, and `state N` on that issue then says `lift_wait`.
 - **One milestone at a time on the branch.** Only the earliest milestone that hasn't shipped
   is built: `next:` offers only its slices, and `claim` and `merge` refuse a later milestone's,
   so nothing unseen rides along to `main`. Once it's complete, new slices wait for its demo and
@@ -417,7 +418,8 @@ uv run python tools/sdlc.py wait N --lift [--reason "..."]    # end it, whether 
   epic, closed or `done`), an Mk that is not a milestone of E's latest plan, and a target that has already shipped.
   `--then close` is refused until #378's `close` verb is on `main`: it arrives with #379's M2.
 - **While N waits, nothing builds it.** `claim` (every lane) refuses N and any slice or subtask of N, and `next`
-  offers none of them: it lists waiting issues on one `waiting: #308 on #263's M2; ...` line instead.
+  offers none of them as work: it lists the issues whose target hasn't shipped on one `waiting: #308 on #263's M2; ...`
+  line instead (`lift_wait` and `respond_to_reply` are the agent's moves and appear as work; `wait_broken` is a human's, so read it with `state N`).
 - **`state N` shows the wait** (`state: waiting`, the target, the reason and the comment's link) and is read-only: it never
   lifts anything. Its action is `none` (`turn: none`) while the target hasn't shipped; `lift_wait` (the agent: `wait N --lift`) once
   it has but the wait is still on, which includes a `ship` that was cut short and a lift that failed; `wait_broken` (a human) when E closed, or its latest
@@ -433,7 +435,7 @@ uv run python tools/sdlc.py wait N --lift [--reason "..."]    # end it, whether 
   it) it posts that issue's `kind=wait-lifted` comment and moves its label back, exactly as `wait N --lift` would, and prints each
   lifted issue with its new `next:`. `ship E --dry-run` lists the lifts it would make and writes none. **A lift that fails never undoes or fails the
   ship**: the release is already recorded, so the failure is printed, the other waits are still lifted, and
-  `state N` on the issue left waiting says `lift_wait` (`wait N --lift` finishes the job, and a rerun of `ship E` picks up the lifts a cut-short ship left).
+  `state N` on the issue left waiting says `lift_wait` (`wait N --lift` finishes the job).
 - A wait that `then=close`s the issue once it lifts is #379's M2; until then a lift of one whose target shipped is refused and
   leaves it waiting.
 
