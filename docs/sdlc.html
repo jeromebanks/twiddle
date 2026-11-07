@@ -238,6 +238,9 @@ Blue boxes are the agent's move, orange are the poster's, and red needs a human.
 <tr><td><span class="chip">sdlc:demo-review</span></td><td class="turn poster">poster</td>
 <td>A milestone demo is posted, with real screenshots. The poster tries it.</td>
 <td><code>record_demo_acceptance</code> or <code>demo_reply</code> → <code>/milestone-demo N</code></td></tr>
+<tr><td><span class="chip">sdlc:waiting</span></td><td class="turn done">nobody, until it ships</td>
+<td>An ordinary issue parked until another epic's milestone (or the whole epic) ships to <code>main</code>: a marked <code>kind=wait</code> comment from a collaborator records the target in the debt tickets' form (<code>waits=E:Mk</code>, or <code>E:all</code>), the reason and the state it left. <code>state N</code> says what it waits for. A reply from the poster or a collaborator is the agent's to answer (<code>transition N waiting --kind note</code>, the only <code>transition</code> a waiting issue takes); the wait stays until it is lifted.</td>
+<td><code>none</code> while the target hasn't shipped; <code>lift_wait</code> → <code>wait N --lift</code> once it has (or when a lift was cut short before its label); <code>wait_broken</code> → a human, when the target epic closed, or its latest plan dropped the milestone, without it shipping: a person lifts the wait or closes the issue; <code>respond_to_reply</code> → <code>/triage-issue N</code></td></tr>
 <tr><td><span class="chip">sdlc:done</span></td><td class="turn done">nobody</td>
 <td>Every milestone was accepted and shipped. <code>epic/N</code> is deleted and the issue closed.</td>
 <td><code>none</code></td></tr>
