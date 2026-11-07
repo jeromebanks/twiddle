@@ -156,6 +156,26 @@ def test_a_wait_cut_short_before_its_label_is_finished_without_a_second_comment(
     assert "moving it to sdlc:waiting" in out
 
 
+def dropped_m2():
+    tgt = target()
+    tgt["comments"].append(comment(OWNER, sdlc.marker("plan", 2) + "\n<!-- plan-json -->\n```json\n"
+                                   + json.dumps({"milestones": [{"key": "M1"}]}) + "\n```", 59))
+    return tgt
+
+
+@pytest.mark.parametrize("tgt, n_issue, why", [
+    (lambda: target(state="closed"), None, f"#{E} is closed"),
+    (lambda: target(shipped=("M2",)), None, f"#{E}'s M2 has already shipped to main"),
+    (dropped_m2, None, f"M2 is not a milestone of #{E}'s latest plan"),
+    (target, lambda: issue(labels=("lane:debt", "sdlc:triage")), f"#{N} is the debt epic"),
+], ids=["closed", "shipped", "dropped", "debt-epic"])
+def test_finishing_a_wait_cut_short_still_runs_every_other_check(monkeypatch, capsys, cfg, tgt, n_issue, why):
+    gh = fake(monkeypatch, n_issue() if n_issue else None, n_comments=[wait_comment(1)], tgt=tgt())
+    code, out, err = run(capsys, cfg, N, "--on", f"{E}:M2", "--reason", REASON)
+    assert code == 1, out
+    assert why in err and gh.writes == []
+
+
 def test_a_wait_cut_short_on_another_target_is_refused(monkeypatch, capsys, cfg):
     gh = fake(monkeypatch, n_comments=[wait_comment(1)])
     code, _, err = run(capsys, cfg, N, "--on", f"{E}:M1", "--reason", REASON)

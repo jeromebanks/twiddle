@@ -1902,7 +1902,8 @@ def command_wait(args: argparse.Namespace, config: dict[str, Any]) -> int:
     finishing = bool(w and not args.then and not st.get("plan_kind") and not st.get("issue_closed")
                      and not st.get("conflicts") and st["state"] in WAIT_FROM and st["state"] == w.get("from")
                      and (w["epic"], w["milestone"]) == (epic, ms))
-    if not finishing and (errs := wait_errors(st, tst, epic, ms, args.then)):
+    # finishing exempts only the recorded wait itself: every other check holds (the target may have moved since)
+    if errs := wait_errors({**st, "wait": None} if finishing else st, tst, epic, ms, args.then):
         raise SdlcError("; ".join(errs))
     require_state_label(config, WAITING, offline)
     current = list(bundle["issue"]["labels"])
