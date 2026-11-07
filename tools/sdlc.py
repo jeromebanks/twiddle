@@ -4048,8 +4048,9 @@ def close_flag_errors(args: argparse.Namespace) -> list[str]:
     return errs
 
 
-def close_owner(issue: dict[str, Any], st: dict[str, Any]) -> str | None:
-    """Why `close` may not close this open issue, naming who does; None when it may."""
+def close_owner(issue: dict[str, Any], st: dict[str, Any], resuming: bool = False) -> str | None:
+    """Why `close` may not close this open issue, naming who does; None when it may. `resuming`: our own close
+    record is on it and was cut short after its label edit, so sdlc:done is this close's label, not a refusal."""
     n, labels = issue["number"], issue.get("labels", [])
     if LEAF_LABEL in labels or CONTAINER_LABEL in labels:
         return f"#{n} is a plan:{'slice' if LEAF_LABEL in labels else 'subtask'} issue: `merge` closes it"
@@ -4058,6 +4059,8 @@ def close_owner(issue: dict[str, Any], st: dict[str, Any]) -> str | None:
     if DEBT_EPIC_LABEL in labels:
         return f"#{n} is the debt epic: `debt-epic` closes it once no debt is left"
     state = st.get("state")
+    if resuming and state == "done":
+        return None
     if state == "escalated":
         return f"#{n} is {PREFIX}escalated: it is a human's"
     if state == "in-progress" and is_quick(st):
@@ -4142,9 +4145,10 @@ def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
         # proves nothing: a close that didn't take effect before the label edit leaves the same)
         if same and reopened_since(n, prior_record[1].get("id"), config):
             raise SdlcError(f"#{n} was reopened after its close record: a reopened issue is a human's")
-        # sdlc:done after our own record (not reopened since) is this close's label: only the close is left
-        if not (same and labelled) and (why_not := close_owner(issue, derive_state(issue, comments, trusted, config))):
-            raise SdlcError(why_not)
+    # who owns it now, on a resume too (closed by our record but not yet labelled, say): sdlc:done after our own
+    # record (not reopened since) is this close's label, so only that state is let through
+    if why_not := close_owner(issue, derive_state(issue, comments, trusted, config), resuming=same and labelled):
+        raise SdlcError(why_not)
     what = f"{r}, by {sha[:12]}" if sha else f"duplicate of #{args.of}"
     removed = [l for l in staged if l != f"{PREFIX}done"]
     steps = ([] if same else [f"post the close record on #{n} ({what})"]) \

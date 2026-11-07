@@ -306,6 +306,26 @@ def test_a_close_that_did_not_take_effect_is_finished_by_a_rerun(gh, capsys, mon
     assert len(records(gh, n)) == 1 and gh.issues[n]["state"] == "closed" and sdlc_labels(gh, n) == ["sdlc:done"]
 
 
+@pytest.mark.parametrize("label,owner", [("plan:slice", "`merge`"), ("plan:subtask", "`merge`"),
+                                         ("tech-debt", "`debt-intake`"), ("lane:debt", "`debt-epic`")])
+def test_a_resume_past_its_label_still_refuses_an_owned_issue(gh, capsys, label, owner):
+    n = gh.issue("cut short after the label", ["sdlc:done"])   # open: the close didn't take effect
+    record(gh, n, reason="completed", commit=SHA)
+    gh.issues[n]["labels"].append(label)   # it became another verb's before the rerun
+    code, _, err = close(capsys, n, "--reason", "completed", "--commit", SHA)
+    assert code == 1 and owner in err, err
+    assert gh.writes == [] and gh.issues[n]["state"] == "open"
+
+
+def test_a_resume_of_a_closed_unlabelled_issue_still_refuses_an_owned_one(gh, capsys):
+    n = triaged(gh)
+    record(gh, n, reason="completed", commit=SHA)
+    gh.issues[n]["state"], gh.issues[n]["state_reason"] = "closed", "completed"
+    gh.issues[n]["labels"].append("plan:slice")
+    code, _, err = close(capsys, n, "--reason", "completed", "--commit", SHA)
+    assert code == 1 and "`merge`" in err and gh.writes == []
+
+
 def test_a_closed_issue_with_no_record_is_refused(gh, capsys):
     n = gh.issue("closed by hand", ["sdlc:triage"], state="closed")
     gh.issues[n]["state_reason"] = "completed"
