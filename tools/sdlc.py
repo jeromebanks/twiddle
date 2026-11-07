@@ -1141,6 +1141,7 @@ HEADERS = {
     "lane": "moved to the full lane",
     "prd-merged": "PRD merged",
     "intake": "debt intake",
+    "closed": "closed",
     "debt-pass": "debt pass plan",
     "debt-pass-end": "debt pass ended",
 }
@@ -3858,18 +3859,20 @@ def delete_json(path: str, payload: dict[str, Any]) -> Any:
         return gh_json(["api", "-X", "DELETE", path, "--input", fh.name])
 
 
-def commit_on_main(sha: str, config: dict[str, Any]) -> str:
+def commit_on_main(sha: str, config: dict[str, Any], hint: str | None = None) -> str:
     """The full SHA of `sha` when origin's default branch contains it (GitHub's compare: `behind` or `identical`),
-    else an SdlcError. Read on GitHub, so no local fetch can be stale."""
+    else an SdlcError. Read on GitHub, so no local fetch can be stale. `hint` ends either refusal in the caller's
+    terms; by default, debt-intake's (`fixed`)."""
     repo, base = repo_of(config), config.get("default_branch", "main")
     try:
         cmp = gh_json(["api", f"repos/{repo}/compare/{base}...{sha}"]) or {}
     except SdlcError as exc:
-        raise SdlcError(f"commit {sha} isn't known to GitHub ({exc}): name a commit on origin/{base}") from None
+        raise SdlcError(f"commit {sha} isn't known to GitHub ({exc}): "
+                        + (hint or f"name a commit on origin/{base}")) from None
     full = (cmp.get("merge_base_commit") or {}).get("sha") or ""
     if cmp.get("status") not in ("behind", "identical") or not full.startswith(sha):
         raise SdlcError(f"commit {sha} is not on origin/{base} (GitHub's compare says {cmp.get('status')!r}): "
-                        f"`fixed` names the commit on {base} that fixed the ticket")
+                        + (hint or f"`fixed` names the commit on {base} that fixed the ticket"))
     return full
 
 
@@ -3984,6 +3987,200 @@ def command_debt_intake(args: argparse.Namespace, config: dict[str, Any]) -> int
         "novel": f"; it left the debt epic and is in {PREFIX}triage (`/triage-issue {n}`)",
         "fixed": f"; closed as completed, fixed by {sha[:12] if sha else '?'}",
         "duplicate": f"; closed as a duplicate of #{args.of}"}[v])
+    return 0
+
+
+# --- close: an ordinary issue that is already done (a commit on main) or a duplicate -----------------------------
+#
+# The issues another verb owns are refused, naming it (`close_owner`). The record (CLOSED_KIND, kept out of KINDS so
+# `transition` can never post one) is written first, then GitHub's close with the matching reason, then sdlc:done as
+# the only sdlc:* label, each read back. A run cut short after the record is finished by the same command; one with
+# different arguments is refused. `--reason not-planned` is parsed so the command's shape is final, and lands with M2.
+
+CLOSED_KIND = "closed"            # `kind=closed reason=... [commit=<full sha> | of=M]` (T1.2 adds epic= / milestone=)
+CLOSE_REASONS = ("completed", "not-planned", "duplicate")
+CLOSE_STATE_REASON = {"completed": "completed", "duplicate": "duplicate"}   # --reason -> the closed issue's state_reason
+CLOSE_KEYS = ("reason", "commit", "of", "epic", "milestone")   # what makes two close records the same close
+CLOSE_OPEN_STATES = {"untriaged", "triage", "needs-info", "prd-review", "diagnosis-review"}   # plus approved, unplanned
+
+
+def latest_close_record(comments: list[dict[str, Any]], trusted: set[str]
+                        ) -> tuple[dict[str, str], dict[str, Any]] | None:
+    """An issue's latest close record (by a collaborator): its marker and its comment, or None."""
+    marks = [(mk, c) for mk, c in _marked(comments, trusted) if mk.get("kind") == CLOSED_KIND]
+    return marks[-1] if marks else None
+
+
+def latest_close(comments: list[dict[str, Any]], trusted: set[str]) -> dict[str, str] | None:
+    """The marker of an issue's latest close record (by a collaborator), or None."""
+    rec = latest_close_record(comments, trusted)
+    return rec[0] if rec else None
+
+
+def reopened_since(n: int, comment_id: Any, config: dict[str, Any]) -> bool:
+    """Whether issue #n was reopened after comment `comment_id` (its close record), whatever its labels became since
+    (a person may relabel it). Read from the issue's timeline, which lists comments and events in GitHub's own order:
+    timestamps can't order two things in the same second. A record missing from the timeline is a refusal."""
+    timeline = gh_pages(f"repos/{repo_of(config)}/issues/{n}/timeline?per_page=100")
+    at = next((i for i, e in enumerate(timeline) if e.get("event") == "commented" and e.get("id") == comment_id), None)
+    if at is None:
+        raise SdlcError(f"#{n}'s close record (comment {comment_id}) isn't in its timeline, so `close` can't tell "
+                        "whether it was reopened since: a person's to check")
+    return any(e.get("event") == "reopened" for e in timeline[at + 1:])
+
+
+def close_flag_errors(args: argparse.Namespace) -> list[str]:
+    """What is wrong with `close`'s arguments alone: checked before anything is read from GitHub."""
+    n, r, why = args.number, args.reason, (args.why or "").strip()
+    errs = []
+    if not why:
+        errs.append("--why says why, on the issue")
+    elif hits := identifier_hits(why):
+        errs.append("--why would contain " + ", ".join(hits) + ": the repo is public")
+    if (args.commit is not None) != (r == "completed"):
+        errs.append("--commit SHA goes with --reason completed, and only with it")
+    elif args.commit is not None and not SHA_RE.fullmatch(args.commit.lower()):
+        errs.append(f"--commit {args.commit!r} isn't a commit SHA (7 to 40 hex digits)")
+    if (args.of is not None) != (r == "duplicate"):
+        errs.append("--of M goes with --reason duplicate, and only with it")
+    elif args.of == n:
+        errs.append(f"#{n} can't be a duplicate of itself")
+    if r == "not-planned" and not errs:
+        errs.append("--reason not-planned lands with M2 of #378 (a proposal the poster approves): not yet")
+    return errs
+
+
+def close_owner(issue: dict[str, Any], st: dict[str, Any], resuming: bool = False) -> str | None:
+    """Why `close` may not close this open issue, naming who does; None when it may. `resuming`: our own close
+    record is on it and was cut short after its label edit, so sdlc:done is this close's label, not a refusal."""
+    n, labels = issue["number"], issue.get("labels", [])
+    if LEAF_LABEL in labels or CONTAINER_LABEL in labels:
+        return f"#{n} is a plan:{'slice' if LEAF_LABEL in labels else 'subtask'} issue: `merge` closes it"
+    if DEBT_LABEL in labels:
+        return f"#{n} is a `{DEBT_LABEL}` ticket: `debt-intake` closes it (--verdict fixed or duplicate)"
+    if DEBT_EPIC_LABEL in labels:
+        return f"#{n} is the debt epic: `debt-epic` closes it once no debt is left"
+    state = st.get("state")
+    if resuming and state == "done":
+        return None
+    if state == "escalated":
+        return f"#{n} is {PREFIX}escalated: it is a human's"
+    if state == "in-progress" and is_quick(st):
+        return f"#{n} is a claimed quick change: its worktree and PR are `work-slice`'s"
+    if state in BUILD_STATES or state == "demo-review":
+        return f"#{n} is an epic being built ({PREFIX}{state}): closing it is a person's call, or `ship`'s"
+    if state == "approved" and st.get("plan_created"):
+        return f"#{n} is approved and its plan was created: closing it is a person's call"
+    if state in CLOSE_OPEN_STATES or state == "approved":
+        return None
+    return f"#{n} is in state `{state}`: `close` takes an open issue in triage or approved with no plan, not this"
+
+
+def raw_issue(m: int, what: str, config: dict[str, Any]) -> dict[str, Any]:
+    """Issue #m as GitHub's REST API has it (with `pull_request` on a PR, which fetch_slice drops)."""
+    try:
+        raw = gh_json(["api", f"repos/{repo_of(config)}/issues/{m}"]) or {}
+    except SdlcError as exc:
+        raise SdlcError(f"#{m} isn't an issue here ({exc}): {what}") from None
+    if "pull_request" in raw:
+        raise SdlcError(f"#{m} is a pull request: {what}")
+    return raw
+
+
+CLOSE_WHY = "\n\nWhy: "   # close_note's last part: the --why, to the end of the record
+
+
+def recorded_why(body: str) -> str | None:
+    """The --why a close record was posted with (close_note's last part), or None."""
+    return body.split(CLOSE_WHY, 1)[1].strip() if CLOSE_WHY in body else None
+
+
+def close_note(reason: str, why: str, sha: str | None, of: int | None) -> str:
+    return {"completed": f"Closed as **completed**: fixed on `main` by {sha}.",
+            "duplicate": f"Closed as a **duplicate** of #{of}."}[reason] + CLOSE_WHY + why
+
+
+def command_close(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Close an ordinary issue fixed by a commit on main, or a duplicate: the record, GitHub's close, sdlc:done, each
+    read back. Every check runs before the first write; the same command again finishes a run cut short."""
+    if errs := close_flag_errors(args):
+        raise SdlcError("; ".join(errs))
+    n, r, why = args.number, args.reason, args.why.strip()
+    raw_issue(n, "`close` closes issues, not pull requests", config)
+    trusted = fetch_trusted(config)
+    issue, comments = fetch_slice(n, config)
+    prior_record = latest_close_record(comments, trusted)
+    prior = prior_record[0] if prior_record else None
+    sha = commit_on_main(args.commit.lower(), config, hint=f"`--reason completed` names the commit on "
+                         f"{config.get('default_branch', 'main')} that fixed #{n}") if args.commit is not None else None
+    if args.of is not None:
+        dup = raw_issue(args.of, f"`--of` names the issue #{n} duplicates", config)
+        if dup.get("state") == "closed" and dup.get("state_reason") == "not_planned":
+            raise SdlcError(f"#{args.of} was closed as not planned: closing #{n} as its duplicate would drop the "
+                            "request with nowhere left to go, which needs the poster's approval (lands with M2 of #378)")
+    extra = {"reason": r, **({"commit": sha} if sha else {}), **({"of": str(args.of)} if args.of is not None else {})}
+    same = bool(prior) and all(prior.get(k) == extra.get(k) for k in CLOSE_KEYS)
+    if prior and not same:
+        got = " ".join(f"{k}={prior[k]}" for k in CLOSE_KEYS if k in prior)
+        raise SdlcError(f"#{n} already has a close record ({got}): a different close is refused")
+    if same and (said := recorded_why(prior_record[1].get("body", ""))) != why:
+        raise SdlcError(f"#{n}'s close record says --why {said!r}: a different --why is refused "
+                        "(rerun with the recorded one to finish it)")
+    want = CLOSE_STATE_REASON[r]
+    staged = state_labels_on(issue, config)
+    labelled = staged == [f"{PREFIX}done"]
+    if issue["state"] == "closed":
+        if not same:
+            raise SdlcError(f"#{n} is already closed ({issue.get('state_reason')}) with no close record: "
+                            "`close` takes an open issue")
+        if issue.get("state_reason") != want:
+            raise SdlcError(f"#{n} is closed as {issue.get('state_reason')}, not {want} as its record says: "
+                            "a person's to settle")
+        if labelled:
+            print(f"#{n}: already closed as {want} and labelled {PREFIX}done, as its record says: nothing to do")
+            return 0
+    # a reopen since the record shows in the timeline, however it was relabelled or closed again since (sdlc:done
+    # on an open issue proves nothing: a close that didn't take effect before the label edit leaves the same)
+    if same and reopened_since(n, prior_record[1].get("id"), config):
+        raise SdlcError(f"#{n} was reopened after its close record: a reopened issue is a human's")
+    # who owns it now, on a resume too (closed by our record but not yet labelled, say): sdlc:done after our own
+    # record (not reopened since) is this close's label, so only that state is let through
+    if why_not := close_owner(issue, derive_state(issue, comments, trusted, config), resuming=same and labelled):
+        raise SdlcError(why_not)
+    what = f"{r}, by {sha[:12]}" if sha else f"duplicate of #{args.of}"
+    removed = [l for l in staged if l != f"{PREFIX}done"]
+    steps = ([] if same else [f"post the close record on #{n} ({what})"]) \
+        + ([] if issue["state"] == "closed" else
+           [f"close #{n} as completed" if r == "completed" else f"close #{n} as a duplicate of #{args.of}"]) \
+        + ([] if labelled else [f"label #{n} {PREFIX}done" + (f" (remove {', '.join(removed)})" if removed else "")])
+    if args.dry_run:
+        for s in steps:
+            print(f"would {s}")
+        return 0
+    repo = repo_of(config)
+    if not same:
+        post_comment(n, render_comment(CLOSED_KIND, None, close_note(r, why, sha, args.of), config, **extra), config)
+    try:   # the record is on the issue now: a failure from here on is finished by the same command
+        if issue["state"] != "closed":
+            gh(["issue", "close", str(n), "--repo", repo]
+               + (["--reason", "completed"] if r == "completed" else ["--duplicate-of", str(args.of)]))
+        if not labelled:
+            set_state_label(n, issue["labels"], "done", config)
+    except SdlcError as exc:
+        raise SdlcError(f"{exc}: the close record is posted; rerun the same `close {n}` to finish it") from None
+    # read back: the record, the close, the label
+    issue, comments = fetch_slice(n, config)
+    got, bad = latest_close(comments, trusted), []
+    if not got or any(got.get(k) != extra.get(k) for k in CLOSE_KEYS):
+        bad.append(f"its latest close record is {got!r}, not {extra}")
+    if not (issue["state"] == "closed" and issue.get("state_reason") == want):
+        bad.append(f"it reads back {issue['state']} ({issue.get('state_reason')}), not closed as {want}")
+    if state_labels_on(issue, config) != [f"{PREFIX}done"]:
+        bad.append(f"its sdlc:* labels are {state_labels_on(issue, config)}, not [{PREFIX}done]")
+    if bad:
+        raise SdlcError(f"read-back of #{n}: " + "; ".join(bad) + f": rerun the same `close {n}` to finish it")
+    print(f"#{n}: closed as {want}" + (f", fixed by {sha[:12]}" if sha else f", a duplicate of #{args.of}")
+          + f"; labelled {PREFIX}done")
     return 0
 
 
@@ -8490,6 +8687,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--of", type=int, help="with `duplicate`: the issue it duplicates")
     p.add_argument("--dry-run", action="store_true", help="check everything and print the writes, make none")
     p.set_defaults(fn=command_debt_intake)
+
+    p = sub.add_parser("close", help="close an ordinary issue fixed by a commit on main, or a duplicate: a marked "
+                                     "record, GitHub's close and sdlc:done, read back (rerun to finish a cut-short one)")
+    p.add_argument("number", type=int, help="the issue")
+    p.add_argument("--reason", required=True, choices=CLOSE_REASONS, help="how it ended (not-planned lands with M2)")
+    p.add_argument("--why", help="why, posted on the issue (required; the repo is public)")
+    p.add_argument("--commit", help="with `completed`: the commit on main that fixed it")
+    p.add_argument("--of", type=int, help="with `duplicate`: the issue it duplicates")
+    p.add_argument("--dry-run", action="store_true", help="check everything and print the writes, make none")
+    p.set_defaults(fn=command_close)
 
     p = sub.add_parser("debt-pass-validate", help="check a debt pass plan against the debt epic and the epics being "
                                                   "built (read-only, apart from one bounded git fetch)")
